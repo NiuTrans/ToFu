@@ -12,6 +12,7 @@
  *     [--global-name=NAME] [--footer:js=CODE]
  *     [--outfile=FILE | --outdir=DIR] [--target=T] [--log-level=L]
  *     [--loader=ts --sourcefile=NAME]   (read entry source from stdin)
+ *     [--inputs-manifest=FILE]  (JSON list of every file the build read)
  */
 
 import { builtinModules } from 'node:module';
@@ -21,6 +22,7 @@ import { basename, dirname, extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const temporaryDirectories = new Set();
+const inputFiles = new Set();
 
 function parseArgs(argv) {
   const entries = [];
@@ -79,6 +81,19 @@ async function main() {
     },
   };
 
+  // --inputs-manifest=FILE: record every file Rollup read (modules and watch
+  // files) so a caller can content-validate a cached bundle.
+  const inputRecorder = {
+    name: 'tofu-test-input-recorder',
+    buildEnd() {
+      for (const id of [...this.getModuleIds(), ...this.getWatchFiles()]) {
+        if (id.startsWith('\0')) continue;
+        const file = id.split('?', 1)[0];
+        if (file.startsWith('/')) inputFiles.add(file);
+      }
+    },
+  };
+
   const nodeExternals = platform === 'node'
     ? [...builtinModules, ...builtinModules.map((m) => `node:${m}`)]
     : [];
@@ -90,7 +105,7 @@ async function main() {
       configFile: false,
       root: process.cwd(),
       logLevel: flags['log-level'] === 'warning' ? 'warn' : (flags['log-level'] || 'warn'),
-      plugins: [absolutePathResolver],
+      plugins: [absolutePathResolver, inputRecorder],
       build: {
         target,
         minify: false,
@@ -148,7 +163,15 @@ async function main() {
   await Promise.all(workers);
 }
 
-main()
+async function mainWithInputsManifest() {
+  await main();
+  const manifest = parseArgs(process.argv.slice(2)).flags['inputs-manifest'];
+  if (manifest) {
+    writeFileSync(String(manifest), JSON.stringify([...inputFiles].sort()), 'utf8');
+  }
+}
+
+mainWithInputsManifest()
   .catch((error) => {
     process.stderr.write(`vite_test_bundle failed: ${error && error.stack || error}\n`);
     process.exitCode = 1;

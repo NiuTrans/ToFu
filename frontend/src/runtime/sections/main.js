@@ -561,18 +561,7 @@ function _applyCodeExecUI(enabled) {
     ?.classList.toggle("visible", codeExecEnabled);
 }
 function _applyBrowserUI(enabled) {
-  browserEnabled = !!enabled;
-  document
-    .getElementById("browserToggle")
-    ?.classList.toggle("active", browserEnabled);
-  const badge = document.getElementById("browserBadge");
-  if (badge) {
-    badge.classList.toggle("visible", browserEnabled);
-  }
-  /* The browser bridge now shares ONE toolbar entry with the desktop agent
-   * (#localControlToggle). Its summary badge counts both capabilities, so it
-   * is repainted here rather than toggled per-flag. */
-  if (typeof _lcUpdateBadge === "function") _lcUpdateBadge();
+  browserEnabled = true; // always on — no longer toggleable
 }
 function _applyMemoryUI(enabled) {
   memoryEnabled = !!enabled;
@@ -692,6 +681,7 @@ function captureActiveConversationSettings() {
   conv.humanGuidanceEnabled = !!humanGuidanceEnabled;
   conv.chatMode = chatMode || 'chat';
   conv.planMode = !!planMode;
+  conv.delegateMode = !!delegateMode;
   /* Tool/settings capture is not a project selection. A draft may deliberately
    * carry a different composer project across conversation navigation. */
   /* Do not overwrite autoTranslate on a conversation with an active Turn.
@@ -763,7 +753,7 @@ function restoreConversationSettingsToComposer(conv, modelEligible) {
   _applySearchModeUI(conv.searchMode || "multi");
   _applyFetchEnabledUI(true);  // always on
   _applyCodeExecUI(!!conv.codeExecEnabled);
-  _applyBrowserUI(!!conv.browserEnabled);
+  _applyBrowserUI(true);  // always on
   _applyDesktopUI(!!conv.desktopEnabled);
   _applyMemoryUI(conv.memoryEnabled !== undefined ? !!conv.memoryEnabled : true);
   _applyAgentModeUI(_restoredInteraction.agentMode);
@@ -829,7 +819,7 @@ function _resetToolsToDefaults() {
   _applySearchModeUI("multi");
   _applyFetchEnabledUI(true);
   _applyCodeExecUI(false);
-  _applyBrowserUI(false);
+  _applyBrowserUI(true);
   /* Desktop was the ONE tool flag this function never reset, so a new chat
    * silently inherited computer control from whatever conversation came
    * before — `restoreConversationSettingsToComposer` sets it per conversation,
@@ -973,12 +963,6 @@ function _startBuildWatch() {
     .getElementById("codeExecBadge")
     ?.classList.toggle("visible", codeExecEnabled);
   document
-    .getElementById("browserToggle")
-    ?.classList.toggle("active", browserEnabled);
-  document
-    .getElementById("browserBadge")
-    ?.classList.toggle("visible", browserEnabled);
-  document
     .getElementById("memoryToggle")
     ?.classList.toggle("active", memoryEnabled);
   document
@@ -1000,8 +984,10 @@ function _startBuildWatch() {
     },
     initializeFolders: () => { _initFolderDragDrop(); _initFolderTabs(); },
     sidebar: {
-      activate: loadConversation, copy: _safeClipboardWrite,
+      activate: (id, turn) => (turn ? openConversationAtTurn(id, turn) : loadConversation(id)),
+      copy: _safeClipboardWrite,
       duplicate: duplicateConversation, delete: deleteConversation,
+      exportTranscript: (id) => _downloadConversationTranscript(id),
       rename: _promptRenameConversation, reference: addConvRef, assignFolder: _showFolderPicker,
       reportFailure: reportInteractionFailure,
     },
@@ -1309,6 +1295,11 @@ function _startBuildWatch() {
     if (b) b.remove();
   }
 
+  runtimeScope.conversationCatalogAvailability = createConversationCatalogAvailability({
+    show: _showBootReconnectBanner,
+    clear: _clearBootReconnectBanner,
+  });
+
   async function _bootReconnectWithBackoff() {
     /* Idempotent: the boot promise's .then(!ok) and .catch both call this, and
      *   though a promise settles once (so a single boot can't double-fire), we
@@ -1320,7 +1311,7 @@ function _startBuildWatch() {
       return;
     }
     runtimeScope._bootReconnectStarted = true;
-    _showBootReconnectBanner();
+    runtimeScope.conversationCatalogAvailability?.retryStarted();
     const _delays = [2000, 4000, 8000, 15000, 30000];
     try {
       for (let i = 0; i < _delays.length; i++) {
@@ -1343,7 +1334,6 @@ function _startBuildWatch() {
           /* The call swallows errors + resolves, so success is the observable
            *   flag, not the absence of a throw. */
           if (typeof serverLoadOk !== 'function' || serverLoadOk()) {
-            _clearBootReconnectBanner();
             /* Converge folders immediately when the catalog reconnects instead
              *   of waiting for the folder owner's bounded retry timer. The
              *   single-flight loader shares this request with any retry/push

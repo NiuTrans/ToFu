@@ -37,16 +37,15 @@ Profile knobs (``RESPONSES_PROFILES``):
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
-import uuid
 
 from lib.llm.conversion import (
     ProtocolConversionError, checked_conversion, conversion_report, object_arguments,
     stop_sequences, tool_name_reverse, validate_request,
 )
 from lib.llm.responses_outbound._message_phase import replay_phase_messages
+from lib.llm.responses_replay import ReplayOrderError, ordered_replay
 from lib.log import get_logger
 from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 
@@ -55,7 +54,6 @@ logger = get_logger(__name__)
 __all__ = [
     'RESPONSES_PROFILES',
     'openai_body_to_responses',
-    'responses_cache_affinity_key',
 ]
 
 #: Per-upstream dialect knobs. ``instructions=None`` → omit the field.
@@ -105,25 +103,6 @@ def _is_gpt_56(model: str) -> bool:
     """
     from lib.model_info._openai_gpt56 import is_official_gpt56_model
     return is_official_gpt56_model(model)
-
-
-def responses_cache_affinity_key(body: dict) -> str:
-    """Build the stable, non-identifying cache/session key for a conversation.
-
-    The ChatGPT Codex transport uses this same lifetime for both the Responses
-    ``prompt_cache_key`` and its session-affinity headers.  Keeping the digest
-    in one helper prevents those two routing hints from silently drifting.
-    """
-    namespace = body.get('_conv_id') or body.get('_task_id') or ''
-    if not namespace:
-        return ''
-    digest = hashlib.sha256(
-        f'tofu-responses-cache:{namespace}'.encode('utf-8')
-    ).digest()[:16]
-    # Codex CLI sends one UUID-shaped value verbatim in prompt_cache_key,
-    # session-id, thread-id, and x-client-request-id.  Match that contract
-    # exactly while deriving it deterministically from Tofu's private id.
-    return str(uuid.UUID(bytes=digest, version=5))
 
 
 def _add_stable_prefix_breakpoint(items: list[dict]) -> bool:
@@ -226,7 +205,8 @@ def _safe_namespace(value: str) -> str:
 
 
 def _tool_search_surface(tools: list[dict], *, pinned_names: set[str],
-                         namespace_by_name: dict[str, str]) -> list[dict]:
+                         namespace_by_name: dict[str, str],
+                         discovery_policy_by_name: dict[str, str]) -> list[dict]:
     """Defer only the residual tool catalog behind hosted Tool Search.
 
     ``pinned_names`` is authoritative: every matching function stays at the
@@ -236,7 +216,9 @@ def _tool_search_surface(tools: list[dict], *, pinned_names: set[str],
     functions = [tool for tool in tools
                  if isinstance(tool, dict) and tool.get('type') == 'function']
     deferred = [tool for tool in functions
-                if str(tool.get('name') or '') not in pinned_names]
+                if str(tool.get('name') or '') not in pinned_names
+                and discovery_policy_by_name.get(
+                    str(tool.get('name') or ''), 'eager') != 'eager']
     if (len(functions) < _TOOL_SEARCH_MIN_FUNCTIONS
             or len(deferred) < _TOOL_SEARCH_MIN_DEFERRED):
         return tools
@@ -249,7 +231,8 @@ def _tool_search_surface(tools: list[dict], *, pinned_names: set[str],
             direct.append(tool)
             continue
         name = str(tool.get('name') or '')
-        if name in pinned_names:
+        if name in pinned_names or discovery_policy_by_name.get(
+                name, 'eager') == 'eager':
             # Defensive copy also guarantees a caller-supplied stale marker
             # can never accidentally defer a frontend-selected tool.
             selected = dict(tool)
@@ -385,11 +368,9 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
 
     if stop_sequences(body):
         raise ProtocolConversionError('stop_sequences_unrepresentable')
-    prof = RESPONSES_PROFILES.get(profile)
-    if prof is None:
-        logger.warning('[Responses] unknown profile %r — falling back to '
-                       "'default'", profile)
-        prof = RESPONSES_PROFILES['default']
+    if not isinstance(profile, str) or profile not in RESPONSES_PROFILES:
+        raise ProtocolConversionError('unsupported_responses_profile')
+    prof = RESPONSES_PROFILES[profile]
 
     model = body.get('model', '')
     is_gpt_56 = _is_gpt_56(model)
@@ -611,7 +592,8 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
     )
 
     if cache_enabled or compaction_enabled:
-        cache_key = responses_cache_affinity_key(body) if cache_enabled else ''
+        from lib.llm.cache_affinity import cache_affinity_key
+        cache_key = cache_affinity_key(body) if cache_enabled else ''
         if cache_key:
             out['prompt_cache_key'] = cache_key
 
@@ -652,6 +634,12 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
                 forced = str((choice.get('function') or {}).get('name') or '')
                 if forced:
                     pinned_names.add(_truncate_name(forced, reverse))
+            raw_policies = body.get('_tool_discovery_policy_by_name') or {}
+            discovery_policy_by_name = {}
+            if isinstance(raw_policies, dict):
+                discovery_policy_by_name = {
+                    _truncate_name(str(name), reverse): str(policy)
+                    for name, policy in raw_policies.items() if str(name or '')}
             raw_namespaces = body.get('_tool_namespace_by_name') or {}
             namespace_by_name = {}
             if isinstance(raw_namespaces, dict):
@@ -662,7 +650,8 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
                 }
             out['tools'] = _tool_search_surface(
                 out['tools'], pinned_names=pinned_names,
-                namespace_by_name=namespace_by_name)
+                namespace_by_name=namespace_by_name,
+                discovery_policy_by_name=discovery_policy_by_name)
 
     # Mark the stable input floor. ``chatgpt.com/backend-api/codex`` is not the public
     # Responses API and rejects this public per-content field on some models.
@@ -704,6 +693,33 @@ def _input_image_part(block: dict, default_image_detail: str) -> dict:
     elif default_image_detail:
         part['detail'] = default_image_detail
     return part
+
+
+def _function_call_items(msg: dict, reverse: dict) -> list[dict]:
+    """Compile current canonical calls once; native order cannot override them."""
+    calls = []
+    for tc in msg.get('tool_calls') or []:
+        if tc.get('type', 'function') != 'function':
+            continue
+        func = tc.get('function') or {}
+        function_call = {
+            'type': 'function_call',
+            'call_id': tc.get('id', ''),
+            'name': _truncate_name(func.get('name', ''), reverse),
+            'arguments': (func.get('arguments', '{}')
+                          if isinstance(func.get('arguments', '{}'), str)
+                          else json.dumps(object_arguments(func.get('arguments')))),
+        }
+        caller = tc.get('caller')
+        if isinstance(caller, dict):
+            if caller.get('type') == 'multi_agent' and caller.get('agent_name'):
+                function_call['agent'] = {'agent_name': str(caller['agent_name'])}
+            else:
+                function_call['caller'] = dict(caller)
+        elif 'caller' in tc and caller is not None:
+            function_call['caller'] = caller
+        calls.append(function_call)
+    return calls
 
 
 def _messages_to_input(messages: list, reverse: dict, *,
@@ -755,7 +771,18 @@ def _messages_to_input(messages: list, reverse: dict, *,
                 and role not in ('system', 'developer')):
             continue
 
+        function_calls = _function_call_items(msg, reverse) if role == 'assistant' else []
         if replay_response_items and role == 'assistant':
+            try:
+                native_order = ordered_replay(
+                    msg, function_calls,
+                    allowed_types=_REPLAY_RESPONSE_ITEM_TYPES | (
+                        {'compaction'} if allow_compaction else set()))
+            except ReplayOrderError as error:
+                raise ProtocolConversionError(error.code) from None
+            if native_order is not None:
+                items.extend(native_order)
+                continue
             items.extend(_response_items(
                 msg, allow_compaction=allow_compaction))
 
@@ -851,33 +878,8 @@ def _messages_to_input(messages: list, reverse: dict, *,
             items.append({'type': 'message', 'role': api_role,
                           'content': content_parts})
 
-        # Assistant tool_calls → top-level function_call items (whether or
-        # not the message carried text).
-        for tc in msg.get('tool_calls') or []:
-            if tc.get('type', 'function') != 'function':
-                continue
-            func = tc.get('function') or {}
-            function_call = {
-                'type': 'function_call',
-                'call_id': tc.get('id', ''),
-                'name': _truncate_name(func.get('name', ''), reverse),
-                'arguments': (func.get('arguments', '{}')
-                              if isinstance(func.get('arguments', '{}'), str)
-                              else json.dumps(object_arguments(func.get('arguments')))),
-            }
-            caller = tc.get('caller')
-            if isinstance(caller, dict):
-                if (caller.get('type') == 'multi_agent'
-                        and caller.get('agent_name')):
-                    function_call['agent'] = {
-                        'agent_name': str(caller['agent_name'])}
-                else:
-                    function_call['caller'] = dict(caller)
-            elif 'caller' in tc and caller is not None:
-                # Preserve invalid authority metadata instead of promoting a
-                # delegated/program call to a direct root call on replay.
-                function_call['caller'] = caller
-            items.append(function_call)
+        # Current canonical calls, never captured executable shells.
+        items.extend(function_calls)
     return items
 
 

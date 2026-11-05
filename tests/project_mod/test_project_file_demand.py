@@ -79,6 +79,43 @@ def test_binary_source_is_still_rejected_as_text(tmp_path):
     assert 'appears to be binary' in _read_absolute_file(str(path))
 
 
+def test_compressed_payloads_are_binary_and_videos_name_their_reader(tmp_path):
+    """Compressed bytes spread over 0-255, so only the shared NUL test catches
+    them on both read paths; a video container (sniffed, not named) points at
+    inspect_video instead of entering context as decoded garbage."""
+    from lib.project_mod.read_tools import _read_project_file, _read_absolute_file
+    video = tmp_path / 'download.bin'
+    video.write_bytes(b'\x00\x00\x00\x18ftypisom' + bytes(range(32, 256)) * 64)
+    payload = tmp_path / 'payload.bin'
+    payload.write_bytes(bytes(range(256)) * 64)
+    for path, names_video in ((video, True), (payload, False)):
+        absolute = _read_absolute_file(str(path))
+        rooted = _read_project_file(str(tmp_path), path.name)
+        assert 'appears to be binary' in absolute and 'Binary file:' in rooted
+        for out in (absolute, rooted):
+            assert len(out) < 1000 and ('inspect_video' in out) is names_video
+
+
+@pytest.mark.parametrize('name, head', [
+    ('episode.mp3', b'\x00garbled mp3 bytes'),
+    ('download-id3', b'ID3\x04\x00\x00\x00\x00\x00\x22TSSE'),
+    ('download-ogg', b'OggS\x00\x02\x00\x00\x00\x00\x00\x00'),
+], ids=['audio-extension', 'sniffed-id3', 'sniffed-ogg'])
+def test_audio_names_inspect_video_on_both_read_paths(tmp_path, name, head):
+    """Staged audio (named by extension or only by its magic) points at the
+    audio-capable reader instead of a dead end."""
+    from lib.project_mod.read_tools import _read_project_file, _read_absolute_file
+    audio = tmp_path / name
+    audio.write_bytes(head + bytes(range(256)) * 64)
+    absolute = _read_absolute_file(str(audio))
+    rooted = _read_project_file(str(tmp_path), audio.name)
+    assert 'appears to be binary' in absolute and 'Binary file:' in rooted
+    for out in (absolute, rooted):
+        assert len(out) < 1000
+        assert 'It is an audio file: listen to it with inspect_video' in out, out
+        assert 'It is a video' not in out
+
+
 def test_encoding_fallback_reads_past_retired_character_ceiling(tmp_path):
     from lib.file_reader import read_local_file
     path=tmp_path/'encoded.txt'

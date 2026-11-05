@@ -220,7 +220,7 @@ def build_static_prompt(*, cwd: str, is_git: bool, model: str,
         tool_names:      The set of tool names actually registered for this
                          turn. Passed to ``section_using_tools`` so the
                          "prefer the dedicated tool" bullets only name tools
-                         that exist (e.g. ``write_file`` / ``grep_search``
+                         that exist (e.g. ``write_file`` / ``search_files``
                          are project-mode-only). ``None`` ships all bullets
                          (back-compat).
         tool_search_available:

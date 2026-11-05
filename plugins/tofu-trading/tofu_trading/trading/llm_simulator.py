@@ -1,4 +1,9 @@
-"""lib/trading/llm_simulator.py — LLM-Driven Historical Simulation Engine.
+"""LLM-driven historical simulation coordinator and read facade.
+
+Entry: run_simulation. SimulationLedger owns cash/fee/close arithmetic;
+SimulationSettlement owns persistence; simulation_reporting owns presentation.
+simulation_prompt renders model context; SimulationDecisionExecution admits
+and stages model intentions through the existing fill and fee policies.
 
 Merges livetest's LLM decision pipeline with backtest's time-travel capability.
 
@@ -27,14 +32,23 @@ import json
 import math
 import re
 import time
+from copy import copy, deepcopy
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import get_logger, sanitize_value
 
+from ..performance_metrics import maximum_drawdown
 from ..run_ids import mint_run_id
 from .fee_book import FeeBook
+from .simulation_execution import SimulationDecisionExecution, SimulationExecutionPorts
+from .simulation_ledger import SimulationLedger
+from .simulation_persistence import (
+    SimulationSettlement, create_simulation_session, mark_simulation_failed,
+)
+from .simulation_prompt import SIMULATION_SYSTEM_PROMPT, build_decision_prompt
+from .simulation_reporting import project_holdings, project_step_summary
 
 logger = get_logger(__name__)
 
@@ -602,39 +616,6 @@ def _load_strategy_analytics(db, uid: int) -> dict[str, Any]:
     }
 
 
-def _record_sim_strategy_performance(db, session_id: str, strategies_used: list[dict],
-                                      trade_return_pct: float, trade_info: dict):
-    """Record which strategies contributed to a trade outcome.
-
-    Called after each sell (closed trade) to update strategy performance.
-    """
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    for s in strategies_used:
-        sid = s.get('id')
-        if not sid:
-            continue
-        try:
-            db.execute('''
-                INSERT INTO trading_strategy_performance
-                (strategy_id, period_start, period_end, return_pct,
-                 source, detail_json, created_at)
-                VALUES (?, ?, ?, ?, 'sim', ?, ?)
-            ''', (
-                sid,
-                trade_info.get('buy_date', now),
-                trade_info.get('sell_date', now),
-                trade_return_pct,
-                json.dumps({
-                    'session_id': session_id,
-                    'symbol': trade_info.get('symbol', ''),
-                    'strategy_name': s.get('name', ''),
-                }, ensure_ascii=False),
-                now,
-            ))
-        except Exception as e:
-            logger.debug('[Sim] Strategy perf record failed for sid=%s: %s', sid, e)
-
-
 class SimulatorConfig:
     """Configuration for LLM simulation."""
 
@@ -707,12 +688,7 @@ def run_simulation(
     Returns:
         Complete simulation result dict.
     """
-    from tofu_trading.trading.historical_data import (
-        _ensure_sim_tables,
-        build_market_snapshot,
-        get_price_at,
-    )
-    from tofu_trading.trading.intel_timeline import build_intel_context_at
+    from tofu_trading.trading.historical_data import _ensure_sim_tables
 
     _ensure_sim_tables(db)
 
@@ -721,7 +697,7 @@ def run_simulation(
             try:
                 on_event(event_type, data)
             except Exception as e:
-                logger.debug('[Sim] Event emission failed: %s', e)
+                logger.debug('[Sim] Event emission failed: %s', sanitize_value(e))
 
     # ── Create session ──
     # Minted via the shared helper: the old second-resolution format collided on
@@ -729,29 +705,33 @@ def run_simulation(
     # tenants), and session_id is UNIQUE — the second INSERT raised
     # IntegrityError straight out of this function with no session row.
     session_id = mint_run_id('sim', uid=uid)
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
     # Generate decision dates
     decision_dates = _generate_decision_dates(config.start_date, config.end_date,
                                                config.step_days, db)
     if not decision_dates:
         return {'error': 'No valid decision dates in range'}
 
-    db.execute('''
-        INSERT INTO trading_sim_sessions
-        (session_id, status, initial_capital, current_cash, symbols,
-         start_date, end_date, step_days, current_sim_date,
-         total_steps, completed_steps, config_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        session_id, 'running', config.initial_capital, config.initial_capital,
-        json.dumps(config.symbols), config.start_date, config.end_date,
-        config.step_days, config.start_date,
-        len(decision_dates), 0,
-        json.dumps(config.to_dict(), ensure_ascii=False),
-        now, now,
-    ))
-    db.commit()
+    try:
+        create_simulation_session(db, session_id, config, decision_dates)
+        return _run_simulation_session(db, config, session_id, decision_dates, emit, uid=uid)
+    except BaseException as execution_failure:
+        try:
+            mark_simulation_failed(db, session_id)
+        except BaseException:
+            try:
+                logger.exception('[Sim] Could not mark failed session %s', session_id)
+            except BaseException as diagnostic_failure:
+                raise execution_failure from diagnostic_failure
+        raise
+
+
+def _run_simulation_session(db, config, session_id, decision_dates, emit, *, uid):
+    """Execute decision phases; each phase settles before publishing its results."""
+    from tofu_trading.trading.historical_data import (
+        build_market_snapshot,
+        get_price_at,
+    )
+    from tofu_trading.trading.intel_timeline import build_intel_context_at
 
     emit('sim_start', {
         'session_id': session_id,
@@ -765,17 +745,15 @@ def run_simulation(
                 len(decision_dates), config.initial_capital)
 
     # ── Portfolio state ──
-    cash = config.initial_capital
+    ledger = SimulationLedger(config.initial_capital)
     positions: dict[str, dict] = {}  # {symbol: {shares, buy_price, buy_date, name}}
     daily_values: list[dict] = []
     trade_log: list[dict] = []
-    total_fees = 0.0
-    total_trades = 0
-    winning_trades = 0
 
     # ── Decision loop ──
     for step_idx, sim_date in enumerate(decision_dates):
         step_start = time.time()
+        step_trade_start = len(trade_log)
 
         emit('sim_step', {
             'session_id': session_id,
@@ -784,24 +762,18 @@ def run_simulation(
             'sim_date': sim_date,
         })
 
+        # Copy current holdings only; history rollback uses append offsets.
+        ledger_before, positions_before = copy(ledger), deepcopy(positions)
+        daily_value_start, symbols_before = len(daily_values), list(config.symbols)
+        settlement = SimulationSettlement(session_id)
         try:
             # ── 1. Update position prices to current sim_date ──
-            portfolio_value = cash
-            holdings_ctx_lines = []
             for sym, pos in list(positions.items()):
                 price_data = get_price_at(db, sym, sim_date)
                 if price_data:
                     current_nav = price_data['nav']
                     pos['current_price'] = current_nav
-                    pos_value = current_nav * pos['shares']
                     pnl_pct = (current_nav - pos['buy_price']) / pos['buy_price'] * 100
-                    portfolio_value += pos_value
-
-                    holdings_ctx_lines.append(
-                        f"- {sym} {pos.get('name', '')}: {pos['shares']:.2f}份, "
-                        f"成本¥{pos['buy_price']:.4f}, 现价¥{current_nav:.4f}, "
-                        f"市值¥{pos_value:,.2f}, 盈亏{pnl_pct:+.2f}%"
-                    )
 
                     # ── Check stop-loss / take-profit ──
                     # Stop threshold scaled to the volatility of the holding
@@ -821,21 +793,16 @@ def run_simulation(
                             logger.info('[Sim] Stop-loss on %s deferred at %s: %s',
                                         sym, sim_date, _fill_err)
                             continue
-                        pos_value = _fill * pos['shares']
-                        pnl_pct = (_fill - pos['buy_price']) / pos['buy_price'] * 100
                         current_nav = _fill
-                        _hd = _holding_days(pos['buy_date'], sim_date)
-                        fee = config.fee_book.fee_for(
-                            sym, pos_value, 'sell', holding_days=_hd)['fee_amount']
-                        proceeds = pos_value - fee
-                        cash += proceeds
-                        total_fees += fee
-                        total_trades += 1
+                        pnl_pct = ledger.sell(
+                            sym, pos, current_nav,
+                            fee_book=config.fee_book,
+                            holding_days=_holding_days(pos['buy_date'], sim_date))
                         reason = (f'⛔ 止损: {sym} 跌幅 {pnl_pct:.2f}% 超过止损线 '
                                   f'-{_stop_pct:.2f}%（{_stop_basis}，'
                                   f'{config.stop_loss_sigma:g}σ×{_bars_held}栏）')
 
-                        _record_trade(db, session_id, sim_date, 'sell', sym,
+                        settlement.record_trade(sim_date, 'sell', sym,
                                       pos['shares'], current_nav, pos['buy_price'],
                                       pnl_pct, reason)
                         trade_log.append({
@@ -846,7 +813,7 @@ def run_simulation(
                         })
 
                         # Bug 7 fix: emit SSE event for stop-loss trades
-                        emit('sim_trade', {
+                        settlement.emit_after_commit('sim_trade', {
                             'step': step_idx + 1, 'sim_date': sim_date,
                             'action': 'sell', 'symbol': sym,
                             'symbol_name': _SIM_FUND_NAMES.get(sym, sym),
@@ -855,10 +822,6 @@ def run_simulation(
                         })
 
                         del positions[sym]
-                        portfolio_value = cash + sum(
-                            p.get('current_price', p['buy_price']) * p['shares']
-                            for p in positions.values()
-                        )
                         continue
 
                     if pnl_pct >= abs(config.take_profit_pct):
@@ -868,20 +831,14 @@ def run_simulation(
                             logger.info('[Sim] Take-profit on %s deferred at %s: %s',
                                         sym, sim_date, _fill_err)
                             continue
-                        pos_value = _fill * pos['shares']
-                        pnl_pct = (_fill - pos['buy_price']) / pos['buy_price'] * 100
                         current_nav = _fill
-                        _hd = _holding_days(pos['buy_date'], sim_date)
-                        fee = config.fee_book.fee_for(
-                            sym, pos_value, 'sell', holding_days=_hd)['fee_amount']
-                        proceeds = pos_value - fee
-                        cash += proceeds
-                        total_fees += fee
-                        total_trades += 1
-                        winning_trades += 1
+                        pnl_pct = ledger.sell(
+                            sym, pos, current_nav,
+                            fee_book=config.fee_book,
+                            holding_days=_holding_days(pos['buy_date'], sim_date))
                         reason = f'✅ 止盈: {sym} 涨幅 {pnl_pct:.2f}% 达到止盈线 +{config.take_profit_pct}%'
 
-                        _record_trade(db, session_id, sim_date, 'sell', sym,
+                        settlement.record_trade(sim_date, 'sell', sym,
                                       pos['shares'], current_nav, pos['buy_price'],
                                       pnl_pct, reason)
                         trade_log.append({
@@ -890,7 +847,7 @@ def run_simulation(
                         })
 
                         # Bug 7 fix: emit SSE event for take-profit trades
-                        emit('sim_trade', {
+                        settlement.emit_after_commit('sim_trade', {
                             'step': step_idx + 1, 'sim_date': sim_date,
                             'action': 'sell', 'symbol': sym,
                             'symbol_name': _SIM_FUND_NAMES.get(sym, sym),
@@ -899,23 +856,16 @@ def run_simulation(
                         })
 
                         del positions[sym]
-                        portfolio_value = cash + sum(
-                            p.get('current_price', p['buy_price']) * p['shares']
-                            for p in positions.values()
-                        )
                         continue
 
             # Recalculate portfolio value
-            portfolio_value = cash + sum(
-                p.get('current_price', p['buy_price']) * p['shares']
-                for p in positions.values()
-            )
+            portfolio_value = ledger.value(positions)
 
             # Record daily value
             daily_values.append({
                 'date': sim_date,
                 'value': portfolio_value,
-                'cash': cash,
+                'cash': ledger.cash,
                 'positions': len(positions),
             })
 
@@ -942,21 +892,13 @@ def run_simulation(
 
             # ── 4.5 Emit analysis context for frontend ──
             _signal_highlights = _extract_signal_highlights(db, _all_tracked_symbols, sim_date)
-            _holdings_info = []
-            for _sym, _pos in positions.items():
-                _pnl = ((_pos.get('current_price', _pos['buy_price']) - _pos['buy_price'])
-                        / _pos['buy_price'] * 100) if _pos['buy_price'] > 0 else 0
-                _holdings_info.append({
-                    'symbol': _sym,
-                    'symbol_name': _SIM_FUND_NAMES.get(_sym, _sym),
-                    'pnl_pct': round(_pnl, 2),
-                })
+            holdings_ctx_lines, _holdings_info = project_holdings(positions, _SIM_FUND_NAMES)
 
             emit('sim_analyzing', {
                 'step': step_idx + 1,
                 'total': len(decision_dates),
                 'sim_date': sim_date,
-                'cash': round(cash, 2),
+                'cash': round(ledger.cash, 2),
                 'portfolio_value': round(portfolio_value, 2),
                 'return_pct': round((portfolio_value - config.initial_capital) /
                                     config.initial_capital * 100, 2),
@@ -969,7 +911,7 @@ def run_simulation(
             # ── 5. Build LLM prompt ──
             holdings_text = '\n'.join(holdings_ctx_lines) if holdings_ctx_lines else '（无持仓）'
             return_pct = (portfolio_value - config.initial_capital) / config.initial_capital * 100
-            win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+            win_rate = (ledger.winning_trades / ledger.total_trades * 100) if ledger.total_trades > 0 else 0
 
             # Historical journal context (last 5 decisions)
             journal_ctx = _get_recent_journal(db, session_id, limit=5)
@@ -977,88 +919,16 @@ def run_simulation(
             # Load strategy toolbox from DB (with live performance data)
             strategy_toolbox_prompt, strategy_list = _load_strategy_toolbox(db, uid)
 
-            prompt = f"""你正在进行历史模拟交易，可交易A股个股、ETF、基金。
-⚠️ 当前模拟日期: {sim_date}（你只能看到此日期及之前的数据）
-
-📊 **个股分析框架** — 当你考虑买入个股时，必须评估:
-- 估值安全边际: PE/PB是否在行业合理区间
-- 行业地位: 行业龙头还是跟随者，护城河强度
-- 成长性: 营收/利润增速趋势
-- 市值规模: 大盘蓝筹更稳定，中小盘波动大但潜力高
-- 股息回报: 高股息股在震荡市提供安全垫
-
-{strategy_toolbox_prompt}
-
-## 账户状态
-- 初始资金: ¥{config.initial_capital:,.2f}
-- 当前现金: ¥{cash:,.2f}
-- 持仓市值: ¥{portfolio_value - cash:,.2f}
-- 组合总值: ¥{portfolio_value:,.2f}
-- 累计收益: {return_pct:+.2f}%
-- 历史胜率: {win_rate:.1f}% ({winning_trades}/{total_trades})
-- 已完成步数: {step_idx + 1}/{len(decision_dates)}
-
-## 当前持仓
-{holdings_text}
-
-## 可交易标的
-{('**用户关注的标的（已有完整数据和信号）：**' + chr(10) + _format_tradeable_symbols(config.symbols) + chr(10) + chr(10)) if config.symbols else ''}**你可以自由交易 A 股市场的任意股票、ETF、基金。** 使用 6 位证券代码下单，系统会自动获取价格数据。
-{('- 用户关注的标的已有完整量化信号，可优先参考' + chr(10)) if config.symbols else ''}- 积极发现和交易A股个股，不要只依赖ETF和基金
-- 可以基于市场分析自主发现和交易任何标的
-- 确保使用真实存在的 6 位证券代码（如 600519 贵州茅台、510300 沪深300ETF、300750 宁德时代）
-- 股票代码: 60xxxx/68xxxx(沪)、000xxx/002xxx/300xxx(深)
-- 不要编造不存在的代码
-
-## 量化信号（截至{sim_date}）
-{signal_ctx if signal_ctx else '（数据不足）'}
-
-{market_ctx if market_ctx else ''}
-
-## 市场情报（时间锁定至{sim_date}）
-{intel_ctx[:4000] if intel_ctx else '（无情报数据）'}
-（共{intel_count}条情报）
-
-{journal_ctx}
-
-## 交易规则
-- 单笔不超过总资金的{config.max_position_pct}%
-- 最多持有{config.max_positions}个标的
-
-### 交易成本（账本实扣，与下单同一来源）
-{_describe_fees(config.fee_book, _all_tracked_symbols or config.symbols, min(portfolio_value * config.max_position_pct / 100, max(cash, 1000)))}
-- {'T+1交易（买入次日才能卖出）' if config.t_plus_1 else '无T+1限制'}
-- 信心度 < {config.min_confidence} 的决策不执行
-
-## 你的任务
-1. 分析当前市场环境和持仓状态
-2. 从策略工具箱中选择你认为当前最适合的策略组合
-3. 基于所选策略做出买卖决策
-4. 输出决策和你使用的策略
-
-## 输出格式（必须严格遵守）
-
-**重要：你必须首先输出 <decisions> 和 <strategies_used> 结构化块，然后再输出分析文本。**
-即使分析内容很长，也必须确保 <decisions> 和 <strategies_used> 块完整输出在最前面。
-
-<decisions>
-[
-  {{
-    "action": "buy|sell|hold",
-    "symbol": "标的代码",
-    "amount": 买入金额（买入时填写）,
-    "confidence": 0-100,
-    "reason": "决策理由（需引用你选用的策略逻辑）"
-  }}
-]
-</decisions>
-
-<strategies_used>
-["策略名称1", "策略名称2", ...]
-</strategies_used>
-
-然后输出你的详细分析和理由。
-
-如果决定观望，输出 <decisions>[]</decisions> 和 <strategies_used>["策略名称"]</strategies_used> 并说明理由。"""
+            prompt = build_decision_prompt(
+                config=config, ledger=ledger, sim_date=sim_date,
+                step_index=step_idx, total_steps=len(decision_dates),
+                portfolio_value=portfolio_value, return_pct=return_pct, win_rate=win_rate,
+                holdings_text=holdings_text, strategy_toolbox_prompt=strategy_toolbox_prompt,
+                signal_ctx=signal_ctx, market_ctx=market_ctx, intel_ctx=intel_ctx,
+                intel_count=intel_count, journal_ctx=journal_ctx,
+                tracked_symbols=_all_tracked_symbols, format_symbols=_format_tradeable_symbols,
+                describe_fees=_describe_fees,
+            )
 
             # ── 6. Call LLM ──
             content = ''
@@ -1066,7 +936,7 @@ def run_simulation(
                 from lib.llm_dispatch import smart_chat
                 content, usage = smart_chat(
                     messages=[
-                        {'role': 'system', 'content': '你是一位专业的投资AI，精通A股个股、ETF和基金交易。你拥有一套策略工具箱，必须从中选择策略来指导决策，并在回答中标注使用了哪些策略。\n\n个股分析要点: 估值(PE/PB)、行业竞争格局、护城河、成长性、股息率、市值规模。\n交易费用以本次模拟的「交易成本」一节为准（那是账本实扣的数字），不要凭记忆估算费率。\n积极发现和交易个股，不要只关注ETF/基金。用中文回答。基于历史数据做决策，不要引用未来数据。'},
+                        {'role': 'system', 'content': SIMULATION_SYSTEM_PROMPT},
                         {'role': 'user', 'content': prompt},
                     ],
                     max_tokens=16384,
@@ -1094,265 +964,53 @@ def run_simulation(
             strategies_used_names = [s['name'] for s in strategies_used]
 
             # Record the full reasoning (include strategies used)
-            _add_journal(db, session_id, sim_date, 'analysis', '', '', content[:10000],
+            settlement.add_journal(sim_date, 'analysis', '', '', content[:10000],
                          {'strategies_used': strategies_used_names}, 0)
 
-            for dec in decisions:
-                action = dec.get('action', 'hold')
-                symbol = dec.get('symbol', '')
-                confidence = dec.get('confidence', 0)
-                reason = dec.get('reason', '')
-
-                if action == 'hold':
-                    _add_journal(db, session_id, sim_date, 'decision', 'hold', symbol,
-                                 reason, dec, confidence)
-                    continue
-
-                if confidence < config.min_confidence:
-                    _add_journal(db, session_id, sim_date, 'skip', action, symbol,
-                                 f'信心度{confidence}<{config.min_confidence}，跳过', dec, confidence)
-                    continue
-
-                if action == 'buy' and symbol:
-                    if symbol in positions:
-                        logger.info('[Sim] Skip buy %s at %s: already holding', symbol, sim_date)
-                        _add_journal(db, session_id, sim_date, 'skip', 'buy', symbol,
-                                     '已持有该标的，跳过重复买入', dec, confidence)
-                        continue
-                    if len(positions) >= config.max_positions:
-                        logger.info('[Sim] Skip buy %s at %s: position limit (%d/%d)',
-                                    symbol, sim_date, len(positions), config.max_positions)
-                        _add_journal(db, session_id, sim_date, 'skip', 'buy', symbol,
-                                     f'持仓数已达上限({len(positions)}/{config.max_positions})', dec, confidence)
-                        continue
-
-                    amount = float(dec.get('amount', 0))
-                    if amount <= 0:
-                        logger.info('[Sim] Skip buy %s at %s: amount<=0', symbol, sim_date)
-                        _add_journal(db, session_id, sim_date, 'skip', 'buy', symbol,
-                                     '买入金额<=0', dec, confidence)
-                        continue
-                    # Position cap follows CURRENT equity, not initial capital.
-                    # Anchored to initial_capital, a portfolio down 50% kept the
-                    # same absolute cap — i.e. it silently doubled leverage per
-                    # trade exactly when it could least afford it.
-                    max_amount = portfolio_value * config.max_position_pct / 100
-                    amount = min(amount, cash * 0.95, max_amount)
-                    if amount < 100:
-                        logger.info('[Sim] Skip buy %s at %s: amount=%s < 100 after capping (cash=%.0f)',
-                                    symbol, sim_date, amount, cash)
-                        _add_journal(db, session_id, sim_date, 'skip', 'buy', symbol,
-                                     f'可用金额不足(cash={cash:.0f}，计算后amount={amount:.0f}<100)', dec, confidence)
-                        continue
-
-                    price_data = get_price_at(db, symbol, sim_date)
-                    if not price_data or price_data['nav'] <= 0:
-                        # ── Open-universe: on-demand price fetch for new symbols ──
-                        if _validate_symbol_code(symbol) and symbol not in config.symbols:
-                            logger.info('[Sim] Symbol %s not in seed list, attempting on-demand fetch', symbol)
-                            fetched_ok = _ensure_price_data(
-                                db, symbol, config.start_date, config.end_date,
-                                emit, step_idx
-                            )
-                            if fetched_ok:
-                                price_data = get_price_at(db, symbol, sim_date)
-                                # Also resolve the name
-                                _resolve_symbol_name(symbol)
-
-                        if not price_data or price_data['nav'] <= 0:
-                            _add_journal(db, session_id, sim_date, 'skip', 'buy', symbol,
-                                         '无价格数据（代码可能无效或该日期无交易）', dec, confidence)
-                            continue
-
-                    # Execution price: T+1 OPEN, never T's close (see
-                    # _next_bar_fill — deciding on T's close and filling at that
-                    # same close is a look-ahead no participant can realise).
-                    nav, _fill_err = _next_bar_fill(db, symbol, sim_date, config.end_date)
-                    if nav is None:
-                        logger.info('[Sim] Skip buy %s decided %s: %s', symbol, sim_date, _fill_err)
-                        _add_journal(db, session_id, sim_date, 'skip', 'buy', symbol,
-                                     _fill_err, dec, confidence)
-                        continue
-
-                    fee = config.fee_book.fee_for(symbol, amount, 'buy')['fee_amount']
-                    net_amount = amount - fee
-                    shares = net_amount / nav
-                    cash -= amount
-                    total_fees += fee
-
-                    # Item 4 & 6: Track dynamically-added symbols in session
-                    _sym_name = _SIM_FUND_NAMES.get(symbol, symbol)
-                    if symbol not in config.symbols:
-                        # Dynamically discovered — add to tracked symbols
-                        config.symbols.append(symbol)
-                        if _sym_name == symbol:
-                            _sym_name = _resolve_symbol_name(symbol)
-                        logger.info('[Sim] Added dynamic symbol %s (%s) to tracked list',
-                                    symbol, _sym_name)
-
-                    positions[symbol] = {
-                        'shares': shares,
-                        'buy_price': nav,
-                        'buy_date': sim_date,
-                        'buy_step': step_idx,
-                        'current_price': nav,
-                        'name': _sym_name,
-                        'strategies_used': strategies_used,  # track for perf recording
-                    }
-
-                    _add_journal(db, session_id, sim_date, 'decision', 'buy', symbol,
-                                 reason, {'amount': amount, 'price': nav, 'shares': shares},
-                                 confidence, amount)
-
-                    _record_trade(db, session_id, sim_date, 'buy', symbol, shares, nav, nav, 0, reason)
-                    trade_log.append({
-                        'date': sim_date, 'action': 'buy', 'symbol': symbol,
-                        'price': nav, 'amount': amount,
-                    })
-
-                    emit('sim_trade', {
-                        'step': step_idx + 1, 'sim_date': sim_date,
-                        'action': 'buy', 'symbol': symbol,
-                        'symbol_name': _SIM_FUND_NAMES.get(symbol, symbol),
-                        'amount': amount, 'price': nav,
-                    })
-
-                elif action == 'sell' and symbol:
-                    if symbol not in positions:
-                        logger.info('[Sim] Skip sell %s at %s: not in current positions', symbol, sim_date)
-                        _add_journal(db, session_id, sim_date, 'skip', 'sell', symbol,
-                                     '当前未持有该标的，无法卖出', dec, confidence)
-                        continue
-
-                    pos = positions[symbol]
-
-                    # T+1 check
-                    if config.t_plus_1 and pos['buy_date'] == sim_date:
-                        _add_journal(db, session_id, sim_date, 'skip', 'sell', symbol,
-                                     'T+1限制：买入当日不能卖出', dec, confidence)
-                        continue
-
-                    # Same rule as the buy side: a decision made on T fills at
-                    # T+1's open. No fallback to T's close.
-                    close_price, _fill_err = _next_bar_fill(
-                        db, symbol, sim_date, config.end_date)
-                    if close_price is None:
-                        logger.info('[Sim] Skip sell %s decided %s: %s', symbol, sim_date, _fill_err)
-                        _add_journal(db, session_id, sim_date, 'skip', 'sell', symbol,
-                                     _fill_err, dec, confidence)
-                        continue
-                    pos_value = close_price * pos['shares']
-                    fee = config.fee_book.fee_for(
-                        symbol, pos_value, 'sell',
-                        holding_days=_holding_days(pos['buy_date'], sim_date))['fee_amount']
-                    cash += pos_value - fee
-                    total_fees += fee
-                    total_trades += 1
-
-                    pnl_pct = (close_price - pos['buy_price']) / pos['buy_price'] * 100
-                    if pnl_pct > 0:
-                        winning_trades += 1
-
-                    # Record per-strategy performance (feedback loop)
-                    buy_strategies = pos.get('strategies_used', [])
-                    sell_strategies = strategies_used
-                    # Credit both buy-side and sell-side strategies
-                    all_strats = {s.get('name', ''): s for s in buy_strategies + sell_strategies}
-                    _record_sim_strategy_performance(
-                        db, session_id, list(all_strats.values()), pnl_pct,
-                        {'symbol': symbol, 'buy_date': pos['buy_date'], 'sell_date': sim_date}
-                    )
-
-                    _add_journal(db, session_id, sim_date, 'decision', 'sell', symbol,
-                                 reason, {'price': close_price, 'pnl_pct': pnl_pct,
-                                          'strategies_used': [s.get('name', '') for s in all_strats.values()]},
-                                 confidence)
-
-                    _record_trade(db, session_id, sim_date, 'sell', symbol,
-                                  pos['shares'], close_price, pos['buy_price'],
-                                  pnl_pct, reason)
-                    trade_log.append({
-                        'date': sim_date, 'action': 'sell', 'symbol': symbol,
-                        'price': close_price, 'pnl_pct': pnl_pct,
-                    })
-
-                    del positions[symbol]
-
-                    emit('sim_trade', {
-                        'step': step_idx + 1, 'sim_date': sim_date,
-                        'action': 'sell', 'symbol': symbol,
-                        'symbol_name': _SIM_FUND_NAMES.get(symbol, symbol),
-                        'price': close_price, 'pnl_pct': pnl_pct,
-                    })
+            SimulationDecisionExecution(
+                db=db, config=config, ledger=ledger, positions=positions,
+                trade_log=trade_log, settlement=settlement, sim_date=sim_date,
+                step_index=step_idx, portfolio_value=portfolio_value,
+                strategies_used=strategies_used, symbol_names=_SIM_FUND_NAMES, emit=emit,
+                ports=SimulationExecutionPorts(
+                    get_price_at=get_price_at, validate_symbol_code=_validate_symbol_code,
+                    ensure_price_data=_ensure_price_data, resolve_symbol_name=_resolve_symbol_name,
+                    next_bar_fill=_next_bar_fill, holding_days=_holding_days, logger=logger,
+                ),
+            ).apply(decisions)
 
             # ── Update session in DB ──
-            portfolio_value = cash + sum(
-                p.get('current_price', p['buy_price']) * p['shares']
-                for p in positions.values()
-            )
+            portfolio_value = ledger.value(positions)
             total_pnl = portfolio_value - config.initial_capital
 
-            db.execute('''
+            settlement.stage('''
                 UPDATE trading_sim_sessions SET
                   current_cash=?, current_sim_date=?, completed_steps=?,
                   total_pnl=?, total_trades=?, winning_trades=?, updated_at=?
                 WHERE session_id=?
-            ''', (cash, sim_date, step_idx + 1, total_pnl,
-                  total_trades, winning_trades,
+            ''', (ledger.cash, sim_date, step_idx + 1, total_pnl,
+                  ledger.total_trades, ledger.winning_trades,
                   datetime.now().strftime('%Y-%m-%d %H:%M:%S'), session_id))
-            db.commit()
 
             step_elapsed = time.time() - step_start
 
-            # Build actions list for frontend timeline display
-            # ★ Only include ACTUALLY EXECUTED trades, not just LLM intentions.
-            # Executed trades are already recorded in trade_log during this step.
-            step_actions = []
-            for t in trade_log:
-                if t['date'] == sim_date:
-                    step_actions.append({
-                        'action': t['action'],
-                        'symbol': t['symbol'],
-                        'symbol_name': _SIM_FUND_NAMES.get(t['symbol'], t['symbol']),
-                        'amount': t.get('amount', 0),
-                        'confidence': 0,
-                    })
-
-            # Extract a short summary from reasoning (first useful line)
-            summary = ''
-            if content:
-                for line in content.split('\n'):
-                    line = line.strip()
-                    if len(line) > 20 and not line.startswith('#') and not line.startswith('<'):
-                        summary = line[:200]
-                        break
-
-            # Extract reasoning text for frontend (content without XML blocks)
-            reasoning_text = ''
-            if content:
-                reasoning_text = re.sub(
-                    r'<decisions>.*?</decisions>', '', content, flags=re.DOTALL
-                ).strip()
-                reasoning_text = re.sub(
-                    r'<strategies_used>.*?</strategies_used>', '', reasoning_text, flags=re.DOTALL
-                ).strip()
-                # Keep full reasoning — no aggressive truncation
-                reasoning_text = reasoning_text[:10000]
+            presentation = project_step_summary(
+                content, trade_log[step_trade_start:], sim_date, _SIM_FUND_NAMES)
 
             return_pct = round((portfolio_value - config.initial_capital) /
                                config.initial_capital * 100, 2)
 
-            emit('sim_step_done', {
+            settlement.emit_after_commit('sim_step_done', {
                 'step': step_idx + 1,
                 'sim_date': sim_date,
                 'portfolio_value': round(portfolio_value, 2),
-                'cash': round(cash, 2),
+                'cash': round(ledger.cash, 2),
                 'return_pct': return_pct,
                 'positions': len(positions),
                 'decisions': len(decisions),
-                'actions': step_actions,
-                'summary': summary,
-                'reasoning': reasoning_text,
+                'actions': presentation['actions'],
+                'summary': presentation['summary'],
+                'reasoning': presentation['reasoning'],
                 'elapsed': round(step_elapsed, 1),
                 'strategies_used': strategies_used_names,
             })
@@ -1361,15 +1019,14 @@ def run_simulation(
             # The 'analysis'/'decision' entries above are per-decision;
             # this 'step_summary' aggregates everything the frontend needs
             # when loading results later (portfolio_value, return_pct, actions).
-            _add_journal(
-                db, session_id, sim_date, 'step_summary', '', '',
-                reasoning=reasoning_text,
+            settlement.add_journal(sim_date, 'step_summary', '', '',
+                reasoning=presentation['reasoning'],
                 signals={
                     'portfolio_value': round(portfolio_value, 2),
-                    'cash': round(cash, 2),
+                    'cash': round(ledger.cash, 2),
                     'return_pct': return_pct,
-                    'actions': step_actions,
-                    'summary': summary,
+                    'actions': presentation['actions'],
+                    'summary': presentation['summary'],
                     'step': step_idx + 1,
                     'positions_count': len(positions),
                 },
@@ -1378,23 +1035,29 @@ def run_simulation(
             )
 
         except Exception as e:
-            logger.error('[Sim] Step %d (%s) failed: %s', step_idx + 1, sim_date, e, exc_info=True)
-            emit('sim_error', {'step': step_idx + 1, 'sim_date': sim_date, 'error': str(e)})
+            ledger, positions = ledger_before, positions_before
+            del trade_log[step_trade_start:]
+            del daily_values[daily_value_start:]
+            config.symbols[:] = symbols_before
+            logger.error('[Sim] Step %d (%s) failed: %s', step_idx + 1, sim_date,
+                         sanitize_value(e), exc_info=True)
+            emit('sim_error', {'step': step_idx + 1, 'sim_date': sim_date,
+                               'error': sanitize_value(e)})
+            continue
+
+        # Persistence failures abort the run, outside the recoverable decision
+        # catch. No trade/step event is published until this commit returns.
+        settlement.commit(db, emit)
 
     # ── Close all remaining positions at end ──
+    settlement = SimulationSettlement(session_id)
     for sym, pos in list(positions.items()):
         close_price = pos.get('current_price', pos['buy_price'])
-        pos_value = close_price * pos['shares']
-        fee = config.fee_book.fee_for(
-            sym, pos_value, 'sell',
-            holding_days=_holding_days(pos['buy_date'], config.end_date))['fee_amount']
-        cash += pos_value - fee
-        total_fees += fee
-        total_trades += 1
-        pnl_pct = (close_price - pos['buy_price']) / pos['buy_price'] * 100
-        if pnl_pct > 0:
-            winning_trades += 1
-        _record_trade(db, session_id, config.end_date, 'sell', sym,
+        pnl_pct = ledger.sell(
+            sym, pos, close_price,
+            fee_book=config.fee_book,
+            holding_days=_holding_days(pos['buy_date'], config.end_date))
+        settlement.record_trade(config.end_date, 'sell', sym,
                       pos['shares'], close_price, pos['buy_price'],
                       pnl_pct, '模拟结束，强制平仓')
 
@@ -1407,14 +1070,14 @@ def run_simulation(
     # total_pnl written to the DB (cash, post-liquidation). One source now.
     daily_values.append({
         'date': config.end_date,
-        'value': cash,
-        'cash': cash,
+        'value': ledger.cash,
+        'cash': ledger.cash,
         'positions': 0,
     })
 
-    final_value = cash
-    metrics = _compute_metrics(daily_values, config.initial_capital, total_fees,
-                               total_trades, winning_trades, trade_log)
+    final_value = ledger.cash
+    metrics = _compute_metrics(daily_values, config.initial_capital, ledger.total_fees,
+                               ledger.total_trades, ledger.winning_trades, trade_log)
 
     # ── Compute benchmark ──
     benchmark = _compute_benchmark(db, config.benchmark_index,
@@ -1429,32 +1092,32 @@ def run_simulation(
         'benchmark': benchmark,
         'daily_values': daily_values,
         'trade_log': trade_log,
-        'total_fees': round(total_fees, 2),
+        'total_fees': round(ledger.total_fees, 2),
     }
 
-    db.execute('''
+    settlement.stage('''
         UPDATE trading_sim_sessions SET
           status='completed', current_cash=?,
           total_pnl=?, total_trades=?, winning_trades=?,
           result_json=?, updated_at=?
         WHERE session_id=?
-    ''', (cash, final_value - config.initial_capital,
-          total_trades, winning_trades,
+    ''', (ledger.cash, final_value - config.initial_capital,
+          ledger.total_trades, ledger.winning_trades,
           json.dumps(result, ensure_ascii=False, default=str),
           datetime.now().strftime('%Y-%m-%d %H:%M:%S'), session_id))
-    db.commit()
+    settlement.commit(db, emit)
 
     emit('sim_complete', {
         'session_id': session_id,
         'metrics': metrics,
         'benchmark': benchmark,
-        'total_fees': round(total_fees, 2),
-        'trade_count': total_trades,
+        'total_fees': round(ledger.total_fees, 2),
+        'trade_count': ledger.total_trades,
     })
 
     logger.info('[Sim] Completed %s: return=%.2f%%, max_dd=%.2f%%, trades=%d, sharpe=%.2f',
                 session_id, metrics.get('total_return_pct', 0),
-                metrics.get('max_drawdown_pct', 0), total_trades,
+                metrics.get('max_drawdown_pct', 0), ledger.total_trades,
                 metrics.get('sharpe_ratio', 0))
 
     return result
@@ -1805,64 +1468,6 @@ def _parse_strategies_used(content: str, all_strategies: list[dict]) -> list[dic
     return result
 
 
-def _add_journal(db, session_id, sim_date, entry_type, action, symbol,
-                 reasoning, signals=None, confidence=0, amount=0):
-    """Add entry to simulation journal."""
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    try:
-        db.execute('''
-            INSERT INTO trading_sim_journal
-            (session_id, sim_date, entry_type, action, symbol, amount,
-             reasoning, signals_json, confidence, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            session_id, sim_date, entry_type, action, symbol, amount,
-            reasoning[:10000] if reasoning else '',
-            json.dumps(signals or {}, ensure_ascii=False, default=str),
-            confidence, now,
-        ))
-    except Exception as e:
-        logger.warning('[Sim] Journal insert error (session=%s, date=%s, type=%s): %s',
-                       session_id, sim_date, entry_type, e)
-
-
-def _record_trade(db, session_id, sim_date, action, symbol, shares, price, buy_price, pnl_pct, reason):
-    """Record a trade in sim_positions table.
-
-    Args:
-        db: Database connection.
-        session_id: Session ID.
-        sim_date: Trade date.
-        action: 'buy' or 'sell'.
-        symbol: Fund/ETF code.
-        shares: Number of shares.
-        price: Trade price (nav).
-        buy_price: Original buy price (for PNL calc on sell; same as price for buy).
-        pnl_pct: P&L percentage (0 for buy).
-        reason: Trade reason text.
-    """
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    try:
-        if action == 'buy':
-            db.execute('''
-                INSERT INTO trading_sim_positions
-                (session_id, symbol, shares, buy_price, buy_date,
-                 current_price, status, reason, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)
-            ''', (session_id, symbol, shares, price, sim_date, price, reason, now))
-        elif action == 'sell':
-            pnl_abs = (price - buy_price) * shares
-            db.execute('''
-                UPDATE trading_sim_positions SET
-                  status='closed', close_price=?, close_date=?,
-                  pnl=?, pnl_pct=?
-                WHERE session_id=? AND symbol=? AND status='open'
-            ''', (price, sim_date, pnl_abs, pnl_pct,
-                  session_id, symbol))
-    except Exception as e:
-        logger.warning('[Sim] Trade record error: %s', e)
-
-
 def _get_recent_journal(db, session_id, limit=5) -> str:
     """Get recent journal entries as context text."""
     rows = db.execute(
@@ -1908,20 +1513,7 @@ def _compute_metrics(
     total_return_pct = (total_return / initial_capital) * 100
 
     # Max drawdown
-    peak = values[0]
-    max_dd = 0
-    max_dd_peak_date = dates[0]
-    max_dd_trough_date = dates[0]
-    current_peak_date = dates[0]
-    for i, v in enumerate(values):
-        if v > peak:
-            peak = v
-            current_peak_date = dates[i]
-        dd = (peak - v) / peak if peak > 0 else 0
-        if dd > max_dd:
-            max_dd = dd
-            max_dd_peak_date = current_peak_date
-            max_dd_trough_date = dates[i]
+    drawdown = maximum_drawdown(values, dates)
 
     # Daily returns for Sharpe ratio
     daily_returns = []
@@ -1985,9 +1577,9 @@ def _compute_metrics(
         'total_return': round(total_return, 2),
         'total_return_pct': round(total_return_pct, 2),
         'annualized_return_pct': round(ann_return, 2),
-        'max_drawdown_pct': round(max_dd * 100, 2),
-        'max_dd_peak_date': max_dd_peak_date,
-        'max_dd_trough_date': max_dd_trough_date,
+        'max_drawdown_pct': round(drawdown.fraction * 100, 2),
+        'max_dd_peak_date': drawdown.peak_date,
+        'max_dd_trough_date': drawdown.trough_date,
         'sharpe_ratio': round(sharpe, 2),
         'win_rate': round(win_rate, 1),
         'total_trades': total_trades,

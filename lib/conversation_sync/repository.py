@@ -7,7 +7,7 @@ from typing import Any, Protocol
 
 from lib.log import get_logger
 from lib.storage import StorageClient, get_storage_client
-from lib.storage.errors import StorageError
+from lib.storage.errors import StorageError, is_resource_bound_refusal
 
 
 logger = get_logger(__name__)
@@ -86,7 +86,7 @@ class SidecarConversationSyncRepository:
     def _query_window(
         self, operation: str, payload: dict[str, Any], limit_key: str,
     ) -> Any:
-        """Reduce only bounded reads after native resource exhaustion.
+        """Reduce only bounded reads after a deterministic resource bound.
 
         The successful storage transaction owns the page, attempts, replay head,
         and continuation cursor. Never slice a response or assemble several
@@ -98,13 +98,13 @@ class SidecarConversationSyncRepository:
                 return client.query(operation, payload)
             except StorageError as exc:
                 limit = payload.get(limit_key)
-                if (exc.code != "database_unavailable"
-                        or exc.message != "database_resource_exhausted"
+                if (not is_resource_bound_refusal(exc)
                         or not isinstance(limit, int) or limit <= 1):
                     raise
-                # The authority conflates byte-bound exhaustion with pressure.
-                # A smaller page reduces both; the geometric descent is finite.
-                # Full/branched snapshots remain loud rather than hiding lanes.
+                # A deterministic per-request bound re-fires on the identical
+                # request; a smaller page reduces it, and the geometric descent
+                # is finite. Full/branched snapshots stay loud rather than
+                # hiding lanes.
                 next_limit = max(1, limit // 2)
                 logger.warning(
                     "Conversation read reducing window op=%s count=%s next_count=%s",

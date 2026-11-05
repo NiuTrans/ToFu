@@ -223,9 +223,9 @@ class ScreenshotTest {
         override suspend fun update(profile: Profile): Int = 0
         override suspend fun deleteById(id: Long) {}
         override suspend fun setCookieHost(id: Long, host: String?): Int = 0
-        override suspend fun setCookieHostIfUrlMatches(id: Long, expectedUrl: String, host: String): Int {
+        override suspend fun setCookieHostIfCurrent(id: Long, expectedUrl: String, expectedAlias: String, expectedAuthType: AuthType, host: String): Int {
             val row = getById(id) ?: return 0
-            return if (row.baseUrl == expectedUrl) setCookieHost(id, host) else 0
+            return if (row.baseUrl == expectedUrl && row.alias == expectedAlias && row.authType == expectedAuthType) setCookieHost(id, host) else 0
         }
         override suspend fun touchLastUsed(id: Long, timestamp: Long): Int = 0
         override suspend fun setAuthType(id: Long, authType: AuthType): Int = 0

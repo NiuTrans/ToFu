@@ -21,7 +21,8 @@ logger = get_logger(__name__)
 #    — the rootname pill is only meaningful for paths the user could
 #    distinguish between project roots.
 _FS_TOOLS_FOR_ROOT_PILL = frozenset({
-    'read_files', 'inspect_image', 'list_dir', 'grep_search', 'find_files',
+    'read_files', 'inspect_image', 'inspect_video', 'list_dir', 'search_files',
+    'grep_search', 'find_files',
     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
     'run_command',
@@ -77,7 +78,7 @@ def _extract_first_path_arg(fn_name, fn_args):
         if fn_args.get('path'):
             return fn_args['path']
         return ''
-    if fn_name in ('apply_diff', 'insert_content', 'inspect_image'):
+    if fn_name in ('apply_diff', 'insert_content', 'inspect_image', 'inspect_video'):
         return fn_args.get('path') or ''
     if fn_name in ('edit_file', 'apply_diffs', 'insert_contents'):
         batch_path = fn_args.get('path')
@@ -87,7 +88,7 @@ def _extract_first_path_arg(fn_name, fn_args):
                 if isinstance(e, dict) and (e.get('path') or batch_path):
                     return e.get('path') or batch_path
         return batch_path or ''
-    if fn_name == 'grep_search' or fn_name == 'find_files':
+    if fn_name in ('search_files', 'grep_search', 'find_files'):
         searches = fn_args.get('searches')
         if isinstance(searches, list):
             for s in searches:

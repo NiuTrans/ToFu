@@ -13,6 +13,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from . import admission
+from .repository import PublicationResultChanged
 
 from lib.log import get_logger
 
@@ -65,6 +66,10 @@ def publication_reason(row: Mapping, receipt: Mapping) -> str:
                 or assignment['grant']['revision'] != binding.get('revision')
                 or assignment['grant']['revoked']):
             return 'project_publication_identity_changed'
+    except PublicationResultChanged:
+        # Actionable: the source Coordinator re-reviews the current result
+        # revision for the same checkpoint; the receiver retries each tick.
+        return 'project_publication_result_changed'
     except Exception as diagnostic_error:
         logger.debug('publication_reason failure handled: %s', type(diagnostic_error).__name__)
         return 'project_publication_authority_missing'

@@ -2,7 +2,10 @@
 import { describe, expect, it } from 'vitest';
 import type { ConversationQueueItemViewModel } from '../presentation/conversation-view-model';
 import { sameBlock, samePresentationValue, sameQueueItem } from './surface-presentation-equality';
-import type { TextBlockViewModel } from '../presentation/view-model/types';
+import type {
+  TextBlockViewModel,
+  ThinkingBlockViewModel,
+} from '../presentation/view-model/types';
 
 describe('presentation repaint decisions', () => {
   it('preserves equal snapshot values across object identity and key order', () => {
@@ -68,4 +71,15 @@ it('repaints translation attribution changes but preserves unchanged text blocks
   expect(sameBlock(block, { ...block, translationModel: 'recorded-retry-model' })).toBe(false);
   expect(sameBlock(block, { ...block, translationModel: undefined })).toBe(false);
   expect(sameBlock(block, { ...block, inputTranslationCompleted: true })).toBe(false);
+});
+
+it('keeps settled reasoning when only its opaque provider signature differs', () => {
+  // A live-settled Turn may still hold the signature that a completed
+  // snapshot omits; it never renders, so it never forces a repaint.
+  const thinking: ThinkingBlockViewModel = { kind: 'thinking', blockId: 'thinking:llm-0',
+    identitySource: 'contract', source: { type: 'thinking', text: 'plan', signature: 'opaque' },
+    markdown: 'plan', displayMarkdown: 'plan', displayMode: 'original', terminal: false,
+    memberBlockIds: ['thinking:llm-0'] };
+  expect(sameBlock(thinking, { ...thinking, source: { type: 'thinking', text: 'plan' } })).toBe(true);
+  expect(sameBlock(thinking, { ...thinking, markdown: 'new plan' })).toBe(false);
 });

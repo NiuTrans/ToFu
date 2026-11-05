@@ -118,8 +118,7 @@ impl io::Write for BoundedByteCounter {
             .checked_add(buffer.len())
             .filter(|bytes| *bytes <= self.maximum)
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                crate::resource_exhaustion::domain_bound(
                     "task result cost-experiment response exceeds 8 MiB",
                 )
             })?;
@@ -135,8 +134,7 @@ fn encoded_size_bounded<T: Serialize>(value: &T, maximum: usize) -> io::Result<u
     let mut counter = BoundedByteCounter { bytes: 0, maximum };
     serde_json::to_writer(&mut counter, value).map_err(|error| {
         if error.is_io() {
-            io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            crate::resource_exhaustion::domain_bound(
                 "task result cost-experiment response exceeds 8 MiB",
             )
         } else {
@@ -1362,8 +1360,7 @@ pub(crate) fn cost_experiment_scan(
         let remaining_bytes = MAX_COST_EXPERIMENT_RESPONSE_BYTES
             .checked_sub(response_bytes)
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                crate::resource_exhaustion::domain_bound(
                     "task result cost-experiment response exceeds 8 MiB",
                 )
             })?;
@@ -1375,8 +1372,7 @@ pub(crate) fn cost_experiment_scan(
             .and_then(|bytes| bytes.checked_add(128))
             .filter(|bytes| *bytes <= MAX_COST_EXPERIMENT_RESPONSE_BYTES)
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                crate::resource_exhaustion::domain_bound(
                     "task result cost-experiment response exceeds 8 MiB",
                 )
             })?;

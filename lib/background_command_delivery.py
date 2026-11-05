@@ -3,7 +3,9 @@
 The caller freezes payload and identity once; queue.enqueue's durable receipt
 makes a lost-ACK retry safe. completion_delivery_config projects recorded source
 roots for a fresh task; it never transfers a previous workspace registration.
-This does not claim recovery before first commit.
+This does not claim recovery before first commit. owner_absence classifies a
+refusal: only an owner-scoped read confirming the conversation absent makes it
+CompletionOwnerAbsent; the command registry decides whether that is final.
 """
 from __future__ import annotations
 
@@ -11,7 +13,42 @@ from pathlib import Path
 import time
 from typing import Any, Callable
 
+from lib.log import get_logger
 from lib.storage.errors import StorageError
+from lib.project_dispatch.admission import KEY as DISPATCH_ADMISSION_KEY
+
+logger = get_logger(__name__)
+
+
+class CompletionOwnerAbsent(Exception):
+    """queue.enqueue refused a receipt because its owner conversation is absent.
+
+    Both storage backends commit a receipt only into an active conversation
+    owned by the completion's user, so retrying the same request cannot succeed
+    unless that conversation is created.
+    """
+
+
+def owner_absence(error: BaseException, conv_id: str, *, user_id: int) -> str | None:
+    """Return why ``error`` proves the owner absent, or None while it is retryable.
+
+    Only a ``database_not_found`` refusal confirmed by the owner-scoped
+    ``conversation.get`` returning null counts. A present owner means the
+    refusal concerned something else; an unanswered read is not absence.
+    """
+    if not isinstance(error, StorageError) or error.code != 'database_not_found':
+        return None
+    from lib.conversations.repository import get_conversation
+    try:
+        owner = get_conversation(conv_id, user_id=user_id, include_messages=False)
+    except Exception as probe_error:
+        logger.debug('[BackgroundDelivery] owner probe for %s failed; the refusal stays '
+                     'retryable: %s: %s', conv_id, type(probe_error).__name__, probe_error)
+        return None
+    if owner is not None:
+        return None
+    return (f'owner conversation {conv_id!r} is absent for user {user_id} '
+            f'({error.code}: {error.message})')
 
 
 def publish_completion(enqueue: Callable[..., dict[str, Any]], *args: Any,
@@ -41,7 +78,8 @@ def completion_delivery_config(config: dict | None) -> dict:
     """Keep execution policy/preferences without copying a settled attempt."""
     original = config or {}
     cleaned = {key: value for key, value in original.items()
-               if not str(key).startswith(('_', 'checkpoint'))
+               if (key == DISPATCH_ADMISSION_KEY
+                   or not str(key).startswith(('_', 'checkpoint')))
                and key not in _COMPLETION_ATTEMPT_FIELDS
                and key not in {'canonicalProjectPath', 'canonicalProjectPaths',
                                'workspaceRuntimeRoots'}}

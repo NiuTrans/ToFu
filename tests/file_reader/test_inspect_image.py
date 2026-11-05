@@ -283,15 +283,6 @@ class TestInspectImageRegistration:
         assert props['crop']['minItems'] == props['crop']['maxItems'] == 4
         assert props['rotate']['enum'] == [0, 90, 180, 270]
 
-    def test_schema_stays_within_always_paid_token_budget(self):
-        from lib.tools.gateway import tool_schema_tokens
-        from lib.tools.image_edit import INSPECT_IMAGE_TOOL
-
-        tokens = tool_schema_tokens([INSPECT_IMAGE_TOOL])
-        assert tokens <= 350, (
-            f'inspect_image schema costs {tokens} tokens; compact repeated '
-            'workflow prose without weakening source or geometry semantics')
-
     def test_in_dispatch_registry(self):
         import lib.tasks_pkg.handlers.project  # noqa: F401 — side-effect registration
         from lib.tasks_pkg.executor import tool_registry

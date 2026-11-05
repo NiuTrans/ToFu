@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from pathlib import Path
+import threading
 from typing import Any
 
 from lib import integration_state_repository as state
@@ -19,6 +20,29 @@ logger = get_logger(__name__)
 
 _RECOVERY_CURSOR = 0
 _DELIVERY_KEY = 'delivery'
+_RETRYABLE_CAPTURE_PHASE = 'checkpoint_spawn_retry'
+# Pass state, owned by the worker thread: a recovery pass also rechecks
+# retained sources; rows seen by the current or last pass keep the next tick due.
+_RECOVERY_RETAINED = False
+_ACTION_OUTSTANDING = False
+# Requests arrive from committing threads and the worker's error paths.
+_SCAN_LOCK = threading.Lock()
+_SCAN_REQUESTED = False
+_RECOVERY_REQUESTED = False
+
+# Commands whose effects the resume pass reads: receipts and acknowledgements
+# (set_meta), registration, and the row states pending deliveries wait on.
+DELIVERY_STATE_OPERATIONS = (
+    'integration.workspace.register',
+    'integration.workspace.set_meta',
+    'integration.workspace.save_checkpoint',
+    'integration.workspace.submit',
+    'integration.workspace.retry',
+    'integration.workspace.discard',
+    'integration.workspace.mark_merged',
+    'integration.workspace.mark_failed',
+    'integration.workspace.quarantine',
+)
 
 
 def _control():
@@ -92,7 +116,25 @@ def _save(row: dict, delivery: dict, **updates: Any) -> dict:
     return value
 
 
+def _transient_git_spawn_error(error: BaseException) -> bool:
+    import errno
+    cause = error.__cause__
+    return (isinstance(cause, OSError)
+            and cause.errno in {errno.EAGAIN, errno.EINTR, errno.ENOMEM})
+
+
+def _legacy_transient_capture_receipt(receipt: dict) -> bool:
+    reason = str(receipt.get('reason') or '')
+    return (receipt.get('state') == 'blocked' and not receipt.get('retry')
+            and reason.startswith('git ')
+            and any(label in reason for label in (
+                '[Errno 11]', '[Errno 4]', '[Errno 12]')))
+
+
 def _publication_hold(row: dict, receipt: dict) -> dict | None:
+    from lib.project_mod.task_delta_delivery import checkpoint_has_no_delta
+    if receipt.get('taskOutcome') == 'completed' and checkpoint_has_no_delta(row):
+        return None
     from lib.project_dispatch.publication import publication_reason
     reason = publication_reason(row, receipt)
     if reason:
@@ -288,17 +330,22 @@ def _reclaim_completed_source(row: dict) -> None:
     """Acknowledge source retirement once; transient errors use the existing worker.
 
     This marker records cleanup only. It neither grants publication authority
-    nor changes the terminal delivery receipt. Retained artifacts are not
-    repeatedly scanned; missing ACKs and busy leases remain retryable.
+    nor changes the terminal delivery receipt. Retained checkouts are not
+    repeatedly scanned; retired placeholders, missing ACKs and busy leases
+    remain retryable.
     """
     origin = row.get('origin') or {}
     if (not row.get('managed') or origin.get('executionMode') != 'isolated-task'
-            or origin.get('sourceRetirement') in {'reclaimed', 'retained'}):
+            or origin.get('sourceRetirement') == 'reclaimed'):
         return
+    if origin.get('sourceRetirement') == 'retained':
+        marker = Path(row['workspace_path']) / '.git'
+        if marker.exists() or marker.is_symlink():
+            return
     ic = _control()
     root, task_id, owner = row['project_root'], row['task_id'], int(row['user_id'])
     try:
-        from lib.project_mod.task_delta_delivery import reclaim_delivered_workspace
+        from lib.project_mod.task_delta_delivery import checkpoint_has_no_delta, reclaim_delivered_workspace
         from lib.project_mod.workspace_lease import workspace_claims_lease
         row = state.get_workspace(root, task_id, user_id=owner)
         with workspace_claims_lease(
@@ -310,7 +357,7 @@ def _reclaim_completed_source(row: dict) -> None:
                     or receipt.get('taskOutcome') != 'completed'):
                 return
             from lib.project_dispatch.publication import publication_reason
-            if publication_reason(latest, receipt):
+            if publication_reason(latest, receipt) and not checkpoint_has_no_delta(latest):
                 return
             reclaimed = reclaim_delivered_workspace(latest)
             with ic._repo_lock(root):
@@ -360,7 +407,19 @@ def _settle_registered_delivery(row: dict, receipt: dict) -> dict:
     root, task_id, user_id = row['project_root'], row['task_id'], int(row['user_id'])
     from lib.project_mod.workspace_lease import WorkspaceBusyError, workspace_write_lease
     try:
-        frozen = ((row.get('origin') or {}).get('executionMode') == 'isolated-task'
+        failed_capture = (receipt.get('state') == 'blocked'
+                          and receipt.get('phase') == 'checkpoint'
+                          and receipt.get('taskOutcome') == 'completed'
+                          and not receipt.get('retry')
+                          and receipt.get('reason') not in {
+                              'task_background_commands_running',
+                              'task_child_agents_running'})
+        retry_legacy_capture = _legacy_transient_capture_receipt(receipt)
+        recapture_transient = (receipt.get('state') == 'pending'
+                               and receipt.get('phase') == _RETRYABLE_CAPTURE_PHASE
+                               or retry_legacy_capture)
+        frozen = (not recapture_transient and not failed_capture
+                  and (row.get('origin') or {}).get('executionMode') == 'isolated-task'
                   and row['state'] == 'checkpointed'
                   and receipt.get('taskOutcome') == 'completed'
                   and receipt.get('checkpointSha') == row.get('checkpoint_sha')
@@ -392,11 +451,21 @@ def _settle_registered_delivery(row: dict, receipt: dict) -> dict:
                 if task_has_running_agents(task_id=task_id, user_id=user_id):
                     return _save(row, receipt, state='blocked', phase='checkpoint',
                                  reason='task_child_agents_running')
-            captured_task = (automatic and row['state'] == 'checkpointed'
+            captured_task = (automatic and not recapture_transient and not failed_capture
+                             and row['state'] == 'checkpointed'
                              and receipt.get('checkpointSha') == row.get('checkpoint_sha')
                              and bool(row.get('checkpoint_sha')))
             if not captured_task and row['state'] not in {'ready', 'integrating', 'merged', 'quarantined', 'failed'}:
-                ic.checkpoint_workspace(root, task_id, user_id=user_id)
+                if failed_capture and not retry_legacy_capture:
+                    return receipt
+                try:
+                    ic.checkpoint_workspace(root, task_id, user_id=user_id)
+                except Exception as exc:
+                    if not _transient_git_spawn_error(exc):
+                        raise
+                    return _save(row, receipt, state='pending', phase=_RETRYABLE_CAPTURE_PHASE,
+                                 reason=f'retryable git spawn failure: {exc}'[:900],
+                                 checkpointSha=row.get('checkpoint_sha') or '')
                 row = state.get_workspace(root, task_id, user_id=user_id)
                 if automatic:
                     with ic._repo_lock(root):
@@ -441,6 +510,10 @@ def _settle_registered_delivery(row: dict, receipt: dict) -> dict:
                 return held
         if receipt.get('state') in {'delivered', 'preserved'}:
             return receipt
+        if _transient_git_spawn_error(exc):
+            return _save(row, receipt, state='pending', phase=_RETRYABLE_CAPTURE_PHASE,
+                         reason=f'retryable git spawn failure: {exc}'[:900],
+                         checkpointSha=row.get('checkpoint_sha') or '')
         permanent = any(term in str(exc).lower() for term in ('forbidden', 'prohibited', 'not allowed'))
         return _save(row, receipt, state='failed' if permanent else 'blocked',
                      phase=receipt.get('phase') or 'checkpoint', reason=str(exc)[:900])
@@ -656,43 +729,77 @@ def _recover_working_registration(row: dict) -> dict:
         outcome=task_outcome(task)) or _receipt(row)
 
 
-def resume_pending_workspace_deliveries() -> bool:
-    """One bounded page per worker tick; cold rows never hit the writer lane."""
-    global _RECOVERY_CURSOR
-    page = state.delivery_page(_RECOVERY_CURSOR, 64)
+def request_workspace_delivery_scan(*, recovery: bool = False) -> None:
+    """Make the worker's next pass due; ``recovery`` also rechecks retained sources.
+
+    A hint only: the pass rereads durable receipts and grants no authority.
+    """
+    global _SCAN_REQUESTED, _RECOVERY_REQUESTED
+    with _SCAN_LOCK:
+        _SCAN_REQUESTED = True
+        _RECOVERY_REQUESTED = _RECOVERY_REQUESTED or recovery
+
+
+def resume_due_workspace_deliveries() -> bool:
+    """Worker tick: continue an open pass, or start one only when it is due.
+
+    A pass is due on request (startup or worker-error recovery, a committed
+    delivery-state command) and while the last pass returned rows: a held
+    receipt whose cause clears without a commit keeps its per-tick retry.
+    Otherwise nothing is read, however long the delivery history.
+    """
+    global _SCAN_REQUESTED, _RECOVERY_REQUESTED
+    if _RECOVERY_CURSOR:
+        return resume_pending_workspace_deliveries()
+    with _SCAN_LOCK:
+        requested, recovery = _SCAN_REQUESTED, _RECOVERY_REQUESTED
+        _SCAN_REQUESTED = _RECOVERY_REQUESTED = False
+    if not (requested or _ACTION_OUTSTANDING):
+        return False
+    return resume_pending_workspace_deliveries(retained=recovery)
+
+
+def resume_pending_workspace_deliveries(*, retained: bool = False) -> bool:
+    """Act on one page of rows whose receipt asks the worker to act.
+
+    Page rows are complete workspace rows, so acknowledged history costs no
+    client read or filesystem probe. ``retained`` applies to a pass starting
+    here: a retained checkout can vanish without any commit.
+    """
+    global _RECOVERY_CURSOR, _RECOVERY_RETAINED, _ACTION_OUTSTANDING
+    if not _RECOVERY_CURSOR:
+        _RECOVERY_RETAINED, _ACTION_OUTSTANDING = retained, False
+    page = state.delivery_action_page(_RECOVERY_CURSOR, 64, retained=_RECOVERY_RETAINED)
     _RECOVERY_CURSOR = int(page.get('nextAfterId') or 0)
+    _ACTION_OUTSTANDING = _ACTION_OUTSTANDING or bool(page['rows'])
     changed = False
-    for base_row in page['rows']:
-        row = state.get_workspace(base_row['project_root'], base_row['task_id'],
-                                  user_id=int(base_row['user_id']))
-        before = _receipt(row)
-        if before.get('state') == 'delivered':
-            _checkpoint_delivered_workspace(row)
-            _reclaim_completed_source(row)
-            continue
-        if before.get('state') == 'working':
-            try:
+    for row in page['rows']:
+        try:
+            before = _receipt(row)
+            if before.get('state') == 'delivered':
+                _checkpoint_delivered_workspace(row)
+                _reclaim_completed_source(row)
+                continue
+            if before.get('state') == 'working':
                 after = _recover_working_registration(row)
-            except Exception as exc:
-                from lib.log import get_logger
-                get_logger(__name__).warning(
-                    'Workspace recovery intent pending task=%s: %s',
-                    row['task_id'], exc)
-                # Keep the durable working receipt and continue other owners.
+                changed = changed or before != after
                 continue
+            if before.get('state') not in {'pending', 'blocked'}:
+                retry = before.get('retry') or {}
+                if (before.get('state') != 'failed'
+                        or retry.get('condition') != 'validation_inputs_changed'):
+                    continue
+            if before.get('phase') == 'checkpoint' or row['state'] in {'running', 'checkpointed'}:
+                after = _settle_registered(row, before)
+            else:
+                after = deliver_registered_workspace(row['project_root'], row['task_id'], user_id=int(row['user_id']))
+            if after.get('state') == 'delivered':
+                latest = state.get_workspace(row['project_root'], row['task_id'], user_id=int(row['user_id']))
+                _checkpoint_delivered_workspace(latest)
             changed = changed or before != after
-            continue
-        if before.get('state') not in {'pending', 'blocked'}:
-            retry = before.get('retry') or {}
-            if (before.get('state') != 'failed'
-                    or retry.get('condition') != 'validation_inputs_changed'):
-                continue
-        if before.get('phase') == 'checkpoint' or row['state'] in {'running', 'checkpointed'}:
-            after = _settle_registered(row, before)
-        else:
-            after = deliver_registered_workspace(row['project_root'], row['task_id'], user_id=int(row['user_id']))
-        if after.get('state') == 'delivered':
-            latest = state.get_workspace(row['project_root'], row['task_id'], user_id=int(row['user_id']))
-            _checkpoint_delivered_workspace(latest)
-        changed = changed or before != after
+        except Exception as exc:
+            # A page contains independent owners. Keep this row's durable debt
+            # and let the same paged worker retry it without starving siblings.
+            logger.warning('Workspace recovery pending task=%s: %s',
+                           row.get('task_id', '?'), exc)
     return changed or bool(page.get('hasMore'))

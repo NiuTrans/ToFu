@@ -239,7 +239,7 @@ def test_pipeline_recovery_uses_remaining_budget_instead_of_restarting_it(monkey
     clock = SimpleNamespace(now=0)
     def sleep(seconds):
         clock.now += seconds
-    monkeypatch.setattr(orchestrator, 'time', SimpleNamespace(time=lambda: clock.now, sleep=sleep))
+    monkeypatch.setattr(orchestrator, 'time', SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
     for name in ('search_brave', 'search_bing', 'search_ddg_api', 'search_searxng', 'search_marginalia'):
         monkeypatch.setattr(orchestrator, name, lambda *args: [])
     budgets = []

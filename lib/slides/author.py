@@ -14,6 +14,7 @@ as designer-quality output while fallback pages remain.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -40,7 +41,9 @@ _INTERNAL_COPY_RE = re.compile(
     re.IGNORECASE,
 )
 _SOURCE_MARKER_RE = re.compile(r'\[S\d{1,3}\]', re.IGNORECASE)
-_NUMBER_RE = re.compile(r'(?<![A-Za-z0-9_])\d+(?:\.\d+)?')
+_NUMBER_RE = re.compile(
+    r'(?<![A-Za-z0-9_.,])[-+]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)'
+    r'(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?(?![A-Za-z0-9_]|\.\d)')
 
 #: Theme textStyles every page may reference ($title/$body/$caption/$bignum).
 PAGE_STYLES_DOC = """\
@@ -172,12 +175,10 @@ def _brief_fidelity_findings(brief: dict, text: str, *, page_index: int,
         if isinstance(source, dict):
             evidence_parts.extend((str(source.get('title') or ''),
                                    str(source.get('point') or '')))
-    allowed = {float(token) for token in _NUMBER_RE.findall(
+    allowed = {Decimal(token.replace(',', '')) for token in _NUMBER_RE.findall(
         '\n'.join(evidence_parts))}
-    # Small integers are structural labels (page numbers, steps, ranks), not
-    # quantitative claims. Larger chart values need exact page evidence.
-    allowed.update(float(value) for value in range(0, max(20, total) + 1))
-    allowed.update((float(page_index + 1), float(total)))
+    # Series values are measurements, including 0, 1 and values coinciding
+    # with a page count. Structural labels live outside the series values.
 
     unsupported: list[str] = []
     for element in data.get('elements') or []:
@@ -190,7 +191,7 @@ def _brief_fidelity_findings(brief: dict, text: str, *, page_index: int,
             for value in series.get('values') or []:
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
                     continue
-                if float(value) not in allowed:
+                if Decimal(str(value)) not in allowed:
                     unsupported.append(str(value))
     if not unsupported:
         return []

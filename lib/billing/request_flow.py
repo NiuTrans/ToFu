@@ -173,7 +173,7 @@ def settle_task(task: dict, *, user_id: str, model: str,
                 raise ValueError('native billing recovery request differs from frozen settlement')
             model = cost.matched_model
         elif task.get('_nativePricingRequired') is True or task.get('_nativeFrozenCostProjection') is True:
-            from lib.billing.cost import native_task_cost
+            from lib.billing.native_cost import native_task_cost
             cost = native_task_cost(task, model=model or '')
         else:
             cost = compute_request_cost(

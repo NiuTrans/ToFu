@@ -169,8 +169,35 @@ At worker/all-process startup, every non-terminal durable run is settled as `wor
 - Flow role tools use one occurrence identity across live task events,
   reconnect snapshots, and settled `toolRounds`; terminal projection may not
   re-number or synthesize a second timeline.
+- A chat-visible Flow/Goal Turn has one live output source: the running child
+  task's own state, the same thing an ordinary chat Turn renders from its task.
+  See "Live output source" below.
 - Fault injection, worker-handoff cleanup, terminal fences, and replay cursor
   correction remain executable behavior.
+
+## Live output source
+
+Problem: a Goal/Flow child runs as its own task while the visible Turn belongs
+to the parent. The parent used to rebuild a second copy of the child's output
+from relayed `delta`/`tool_*` events plus periodic `state` snapshots
+(`chat_event_sink.py`). Any child mutation that emits no event diverged: the
+pre-tool prose `parse_tool_calls` re-homes onto an early-announced tool row
+vanished for the whole tool execution.
+
+Decision: the sink owns a binding port (`task['_flowLiveOutputPort']`). The
+graph runner binds each child for its execution; the sink adopts the bound
+child's `content`/`thinking`/`toolRounds`/`segments` before publishing every
+frame and once more, under the child's publication fence, when it finishes.
+Relayed frames only publish; they never mutate output. A concurrent sibling
+(parallel/fanout branch) is refused the binding, publishes nothing live, and
+reaches the conversation through its completed step. Normal and Goal Turns
+therefore render from the same kind of source, and the frontend has no
+mode-specific output logic.
+
+Alternatives considered: emitting an extra snapshot at each missed boundary
+keeps the second copy and fails again at the next event-less mutation; giving
+every parallel child its own visible Turn needs several live Turns per phase in
+the Turn authority, a larger contract change with no current product surface.
 
 ## Change routing
 

@@ -373,15 +373,19 @@ of meeting 1,000-conversation latency budgets; retained reports decide that.
 
 
 The payload membership Bloom filter is reconstructible, never an authority.
-Its negative answers carry an exact process-local catalog publication witness.
+Its negative answers carry an exact process-local catalog publication witness,
+granted only when the filter covers every segment of that catalog.
 Catalog/routing replacement invalidates negative coverage before publishing the
-new view; recovery and geometric rebuilds capture their matching witness.
-Positive answers still resolve verified bytes. An incomplete filter uses the
-existing exact routing/index path, without rescanning every catalog during a
-foreground publication. Batch history promotion may lose unpublished hint bits
-when it rebuilds against the old catalog; those bits cannot disprove membership
-after the new catalog is installed. The witness uses fixed scalar memory and
-changes no durable format, pins, rollback or publication order.
+new view. Publishers cover each segment they verify and an install reads only
+segments still uncovered, so each publication stays covered; recovery and
+geometric rebuilds capture their matching witness and reset coverage. Positive
+answers still resolve verified bytes. An uncovered publication uses the
+existing exact routing/index path. Batch history promotion may lose unpublished
+hint bits when it rebuilds against the old catalog; the rebuild forgets their
+coverage, so the install re-reads those segments and they cannot be hidden.
+Coverage records are bounded by two catalogs of segment references and change
+no durable format, pins, rollback or publication order
+([packed filter across publications](TOFUDB_BLOCK_READ_PATH.md#packed-filter-across-publications-2026-10-31)).
 
 ## Borrowed history sources
 

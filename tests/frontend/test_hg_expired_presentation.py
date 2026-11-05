@@ -34,6 +34,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 TOOL_ROUNDS = Path(runtime_section_path('ui/tool_rounds.js'))
 TURN_STORE = Path(runtime_section_path('main/conversation_turn_store.js'))
+PRELUDE = ROOT / 'frontend' / 'src' / 'runtime' / 'sections' / '_prelude.js'
 
 
 def _node(harness: str, *paths: str) -> dict:
@@ -81,8 +82,21 @@ global.createConversationTurnRuntime = () => ({
   readRuntimeState() { return null; },
 });
 global.renderContextProvenanceHtml = () => '';
+global.contextProvenanceFacts = () => [];
 global.escapeHtml = (s) => String(s == null ? '' : s);
 global.t = (k) => k;
+// The composed graph receives its factories through _prelude.js imports. This
+// harness covers one renderer contract, so every factory not stubbed above
+// returns an inert stand-in instead of breaking whenever the graph gains one.
+const inert = new Proxy(function () {}, {
+  get: (_target, key) => (key === 'then' ? undefined
+    : key === Symbol.toPrimitive ? () => '' : inert),
+  apply: () => inert,
+});
+for (const [name] of fs.readFileSync(process.argv[2], 'utf8')
+    .matchAll(/\bcreate[A-Z][A-Za-z0-9_]*\b/g)) {
+  if (!(name in global)) global[name] = () => inert;
+}
 
 const captured = [];
 global._renderToolSlot = (round) => { captured.push(round); return '<x/>'; };
@@ -109,7 +123,7 @@ console.log(JSON.stringify(captured.map((r) => ({
 }))));
 process.exit(0);
 """
-    assert _node(harness, str(TURN_STORE)) == [
+    assert _node(harness, str(TURN_STORE), str(PRELUDE)) == [
         {'settled': True, 'taskId': 'task-old'},
         {'settled': False, 'taskId': 'task-old'},
         {'settled': False, 'taskId': 'task-old'},

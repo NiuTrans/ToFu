@@ -227,7 +227,8 @@ fn checked_payment(
     };
     if !text(&payment.user_id, 200, true)
         || !text(&payment.provider, 100, true)
-        || !text(&payment.provider_id, 300, true)
+        || !text(&payment.provider_id, 300, false)
+        || (payment.provider_id.is_empty() && payment.status != "pending")
         || !matches!(payment.status.as_str(), "pending" | "settled" | "failed")
         || payment.created_at > i64::MAX as u64
         || payment.settled_at > i64::MAX as u64
@@ -282,7 +283,8 @@ fn payment_snapshot(document: &Value) -> io::Result<Payment> {
         || !text(&payment.id, 200, true)
         || !text(&payment.user_id, 200, true)
         || !text(&payment.provider, 100, true)
-        || !text(&payment.provider_id, 300, true)
+        || !text(&payment.provider_id, 300, false)
+        || (payment.provider_id.is_empty() && payment.status != "pending")
         || !text(&payment.currency, 16, true)
         || !matches!(payment.status.as_str(), "pending" | "settled" | "failed")
         || payment.created_at > i64::MAX as u64

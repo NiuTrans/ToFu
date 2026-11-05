@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 
 import pytest
@@ -53,10 +52,6 @@ SEND_BUTTON = runtime_section_path('ui/send_button.js')
 SEND_CONTROLS = native_module_path(
     '.native/composer-send-controls.js',
     os.path.join(ROOT, 'frontend/src/conversation/ui/composer-send-controls.ts'))
-
-
-def _node_available() -> bool:
-    return bool(shutil.which('node'))
 
 
 def _extract_helper() -> str:
@@ -87,10 +82,14 @@ const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 // ── Fake DOM: a single #sendBtn whose innerHTML/className we can inspect ──
+// Attributes keep DOM semantics: the composer compares before it writes.
+const attributes = new Map();
 const btn = {
   tagName: 'BUTTON', innerHTML: '', className: '', style: {}, onclick: null,
   hidden: false, title: '', parentElement: null,
-  setAttribute() {}, removeAttribute() {},
+  getAttribute: (name) => (attributes.has(name) ? attributes.get(name) : null),
+  setAttribute: (name, value) => { attributes.set(name, String(value)); },
+  removeAttribute: (name) => { attributes.delete(name); },
 };
 global.document = { getElementById: (id) => (id === 'sendBtn' ? btn : null) };
 
@@ -167,7 +166,6 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_autopilot_sentinel_excluded_from_queue_badge():
     helper_js = os.path.join(HERE, '_ap_queue_badge_helper.js')
     harness = os.path.join(HERE, '_ap_queue_badge_harness.js')

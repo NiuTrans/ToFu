@@ -1,3 +1,19 @@
+/* Settings keeps its paper surface across chat themes. Resolve shared status
+   roles at that surface boundary so feedback never inherits dark-page ink. */
+.settings-panel {
+  --success-text: var(--s-ink-soft);
+  --success-bg: transparent;
+  --success-border: var(--s-line-strong);
+  --warning-text: color-mix(in srgb, var(--s-gold) 50%, var(--s-ink));
+  --warning-bg: var(--s-gold-glow);
+  --warning-border: var(--s-gold);
+  --error-text: color-mix(in srgb, var(--s-danger) 80%, var(--s-ink));
+  --error-bg: color-mix(in srgb, var(--error-text) 8%, transparent);
+  --error-border: color-mix(in srgb, var(--error-text) 35%, transparent);
+  --info-text: var(--s-ink-soft);
+  --info-bg: var(--s-cream);
+  --info-border: var(--s-line-strong);
+}
 /* ══════════════════════════════════════════════════════
    settings.css — styles specific to the Settings modal panels.
 
@@ -117,80 +133,6 @@
 /* ══════════════════════════════════════════════════════
    OAuth Subscription Login Tab
    ══════════════════════════════════════════════════════ */
-/* The only ownership decision a normal user needs: approve the account;
-   Tofu handles infrastructure and recovery behind the page. */
-.oauth-responsibility {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2);
-  margin: var(--space-2) 0 10px;
-}
-.oauth-responsibility-item {
-  display: grid;
-  gap: 3px;
-  padding: var(--space-2) var(--space-3);
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  background: var(--s-white);
-  box-shadow: var(--s-shadow-xs);
-}
-.oauth-responsibility-item.is-user { border-left: 4px solid var(--s-ink); }
-.oauth-responsibility-item.is-system {
-  border-left: 4px solid var(--s-gold);
-  background: rgba(201, 153, 63, .08);
-}
-.oauth-responsibility-label {
-  color: var(--s-muted);
-  font-size: 10.5px;
-  font-weight: 800;
-  letter-spacing: .04em;
-}
-.oauth-responsibility-item strong {
-  color: var(--s-ink);
-  font-size: var(--font-size-sm);
-  line-height: 1.45;
-}
-@media (max-width: 620px) {
-  .oauth-responsibility { grid-template-columns: 1fr; }
-}
-
-/* ── OAuth tab: 3-step flow strip (the whole flow in one glance) ── */
-.oauth-steps {
-  display: flex;
-  align-items: stretch;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: var(--space-2) 0 10px;
-}
-.oauth-step {
-  flex: 1;
-  min-width: 150px;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 7px 10px;
-  background: var(--s-white);
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  box-shadow: var(--s-shadow-xs);
-}
-.oauth-step-num {
-  flex-shrink: 0;
-  width: 20px;
-  height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--s-ink);
-  color: var(--s-white);
-  font-weight: 800;
-  font-size: var(--font-size-xs);
-  border-radius: 50%;
-}
-.oauth-step-title { font-size: var(--font-size-sm); font-weight: 800; color: var(--s-ink); }
-.oauth-step-sub { font-size: var(--font-size-xs); color: var(--s-muted); margin-top: 1px; line-height: 1.35; }
-.oauth-step-arrow { align-self: center; color: var(--s-muted); font-weight: 800; }
-
 /* China-access banner — same amber language as .stg-oauth-note */
 .oauth-china-note {
   margin: 0 0 14px;
@@ -555,36 +497,21 @@
 .prefs-pending-actions{display:flex;gap:6px;flex-shrink:0}
 /* ══════════════════════════════════════════════════════
    My Context settings tab — "paper dossier" (2026-08 redesign)
-   Index-card archive metaphor on the tofu block system: mono eyebrow
-   stamps, highlighter titles, punched-ticket WHEN→DO rules, ledger
-   capacity meter, hard-shadow card physics. No indigo glass.
+   Index-card archive metaphor on the tofu block system: highlighter
+   titles, punched-ticket WHEN→DO rules, ledger capacity meter,
+   hard-shadow card physics. No indigo glass. Decoration that carried no
+   information (English eyebrows, watermark, tilted stamp, scissors rule)
+   was removed in the 2026-11 settings audit.
    ══════════════════════════════════════════════════════ */
 
-/* ── Hero: the dossier cover ── */
+/* ── Hero: page title, scope note and the always-on badge ── */
 .ctx-hero{
   position:relative;display:flex;align-items:flex-start;justify-content:space-between;gap:var(--space-6);
-  margin:0 0 var(--space-5);padding:26px 26px 22px;
+  margin:0 0 var(--space-5);padding:22px 24px 20px;
   border:var(--s-border);background:var(--s-white);
   box-shadow:var(--s-shadow-sm);overflow:hidden;
 }
-/* gold file-tab stitched along the top edge */
-.ctx-hero::before{
-  content:'';position:absolute;top:0;left:0;right:0;height:5px;
-  background:repeating-linear-gradient(90deg,var(--s-gold) 0 22px,rgba(201,153,63,.3) 22px 26px);
-}
-/* faint archive watermark */
-.ctx-hero::after{
-  content:'DOSSIER';position:absolute;right:14px;bottom:var(--space-2);pointer-events:none;
-  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;letter-spacing:.42em;
-  color:rgba(26,24,20,.15);transform:rotate(-3deg);
-}
 .ctx-hero-copy{max-width:640px;min-width:0}
-.ctx-eyebrow{
-  display:flex;align-items:center;gap:var(--space-2);margin-bottom:9px;
-  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;
-  letter-spacing:.2em;color:var(--s-gold-dim);
-}
-.ctx-eyebrow::before{content:'';width:8px;height:8px;flex:none;background:var(--s-gold);box-shadow:1px 1px 0 var(--s-ink)}
 .ctx-title{
   align-self:flex-start;display:inline-flex;margin:0 0 var(--space-2)!important;padding:0 2px;
   font-size:22px!important;font-weight:900;letter-spacing:.01em;line-height:1.3;
@@ -592,16 +519,14 @@
   background:linear-gradient(transparent 58%,var(--s-gold-glow) 58% 94%,transparent 94%);
 }
 .ctx-intro{margin:0;color:var(--s-ink-soft);font-size:var(--font-size-md);line-height:1.8;font-weight:500}
-/* always-on: rubber stamp */
+/* always-on: a quiet status badge */
 .ctx-always-on{
-  flex:none;display:flex;align-items:center;gap:7px;margin-top:var(--space-1);padding:6px 10px;white-space:nowrap;
-  border:1.5px solid var(--s-gold-dim);outline:1px solid rgba(168,125,46,.45);outline-offset:2px;
+  flex:none;display:flex;align-items:center;gap:7px;margin-top:var(--space-1);padding:4px 10px;white-space:nowrap;
+  border:1px solid rgba(168,125,46,.45);border-radius:999px;
   background:rgba(201,153,63,.07);color:var(--s-gold-dim);
-  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;letter-spacing:.08em;
-  transform:rotate(-2deg);
+  font-size:var(--font-size-xs);font-weight:700;
 }
-.ctx-live-dot{width:7px;height:7px;flex:none;background:var(--s-gold);border:1px solid var(--s-gold-dim);animation:ctxStampPulse 2.4s ease-in-out infinite}
-@keyframes ctxStampPulse{0%,100%{opacity:1}50%{opacity:.35}}
+.ctx-live-dot{width:7px;height:7px;flex:none;border-radius:50%;background:var(--s-gold)}
 
 /* ── Toolbar: ledger capacity meter + tofu buttons ── */
 .ctx-toolbar{display:flex;align-items:center;justify-content:space-between;gap:var(--space-4);margin-bottom:10px;padding:0 2px}
@@ -751,13 +676,8 @@
 }
 .ctx-editor-done:hover{background:var(--s-gold);color:var(--s-ink);transform:translate(1px,1px);box-shadow:1px 1px 0 rgba(26,24,20,.25)}
 
-/* ── Experience-memory zone: perforated tear-off ledger ── */
-.ctx-memory-zone{position:relative;margin-top:30px;padding-top:26px}
-.ctx-memory-zone::before{content:'';position:absolute;top:0;left:0;right:0;border-top:2px dashed rgba(26,24,20,.25)}
-.ctx-memory-zone::after{
-  content:'✂';position:absolute;top:0;left:22px;transform:translateY(-56%);
-  padding-right:var(--space-2);background:var(--s-white);font-size:var(--font-size-md);color:rgba(26,24,20,.4);
-}
+/* ── Experience-memory zone: a separate section under a hairline ── */
+.ctx-memory-zone{margin-top:var(--space-6);padding-top:var(--space-5);border-top:1px solid var(--s-line-strong)}
 .ctx-memory-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:var(--space-3)}
 .ctx-memory-title{
   align-self:flex-start;display:inline-flex;margin:0 0 6px!important;padding:0 2px;
@@ -772,7 +692,7 @@
 @media(max-width:760px){
   .ctx-hero,.ctx-toolbar,.ctx-memory-head{flex-direction:column}
   .ctx-hero{padding:22px 18px 18px}
-  .ctx-always-on{align-self:flex-start;transform:rotate(-1deg)}
+  .ctx-always-on{align-self:flex-start}
   .ctx-toolbar{align-items:stretch}
   .ctx-toolbar-actions{justify-content:flex-end}
   .ctx-groups{columns:1}
@@ -1720,40 +1640,19 @@
   color: var(--s-ink);
   margin-bottom: 6px;
 }
-.sysprompt-control-row {
-  display: flex;
-  align-items: stretch;
-  gap: 10px;
-  margin-bottom: var(--space-2);
-}
-.sysprompt-control-row select {
-  flex: 1;
-  min-width: 0;
-}
-.sysprompt-control-row .stg-btn-balance {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-/* ── System-prompt compact summary row (editor lives in a modal) ── */
-.sysprompt-summary-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-bottom: 10px;
-}
+/* ── System-prompt row (General): label + live summary; the editor is a modal ── */
+.sysprompt-row-text { flex: 1; min-width: 0; }
+.sysprompt-row > button { flex: none; white-space: nowrap; }
 .sysprompt-summary {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--font-size-sm);
+  margin-top: 3px;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
   color: var(--s-ink-soft);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.sysprompt-summary.has-value {
-  color: var(--s-ink);
-  font-family: 'JetBrains Mono', monospace;
-}
+.sysprompt-summary.has-value { color: var(--s-ink); }
 /* ── Per-block system-prompt editor ── */
 .sysprompt-blocks-head {
   display: flex;
@@ -1878,6 +1777,16 @@
   border-top: 1px solid var(--border-color, rgba(128,128,128,0.12));
 }
 .sysprompt-block:not(.is-open) .sysprompt-block-text { display: none; }
+
+/* Source selection and disk provenance for the skill library. */
+.skills-library-controls { display:flex; flex-wrap:wrap; align-items:center; gap:var(--space-3); margin-bottom:var(--space-4); }
+.skills-library-controls[hidden] { display:none; }
+.skills-library-filter { flex:1 1 100%; min-width:0; }
+.skills-library-controls select { max-width:100%; }
+.skill-source-path { grid-column:2 / -1; min-width:0; overflow-wrap:anywhere; font-size:var(--font-size-xs); color:var(--s-ink-soft); }
+.skills-library-warning { flex-basis:100%; white-space:pre-line; overflow-wrap:anywhere; }
+
+@keyframes skillsToastIn{from{opacity:0;transform:translate(-50%,10px)}to{opacity:1;transform:translate(-50%,0)}}
 /* ══════════════════════════════════════
    Dropdown Visibility — tofu list
    ══════════════════════════════════════ */
@@ -1899,106 +1808,15 @@
 @media (max-width: 768px) {
   .settings-row.two-col { flex-direction: column; gap: var(--space-1); }
 }
-
-/* ── Advanced: executable/search/wire separation ─────────────────────── */
-.tool-discovery-card {
-  margin: var(--space-3) 0 var(--space-4);
-  padding: 15px;
-  border: 1px solid color-mix(in srgb, var(--s-gold, #b98a2f) 38%, transparent);
-  border-radius: 12px;
-  background:
-    radial-gradient(circle at 100% 0, color-mix(in srgb, var(--s-gold, #b98a2f) 16%, transparent), transparent 42%),
-    var(--s-white, #fff);
-  box-shadow: 0 1px 2px rgba(26, 24, 20, 0.05), 0 10px 26px rgba(26, 24, 20, 0.08);
-}
-.tool-discovery-head { display: flex; align-items: center; gap: 11px; }
-.tool-discovery-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
-  border: 0;
-  border-radius: 9px;
-  background: linear-gradient(180deg, #3d362c 0%, #1a1814 100%);
-  color: var(--s-gold, #f0c66b);
-  font: 800 16px/1 'JetBrains Mono', ui-monospace, monospace;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 2px 6px rgba(26, 24, 20, 0.30), 0 0 0 3px rgba(201, 153, 63, 0.16);
-}
-.tool-discovery-title { color: var(--s-ink, #2a2a2a); font-size: var(--font-size-lg); font-weight: 900; }
-.tool-discovery-sub { margin-top: 2px; color: var(--s-ink-soft, #6b6250); font-size: 11.5px; line-height: 1.45; }
-.tool-discovery-flow {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: center;
-  gap: var(--space-2);
-  margin: 14px 0;
-}
-.tool-discovery-flow > span {
-  min-width: 0;
-  padding: 9px 10px;
-  border: 1px solid color-mix(in srgb, var(--s-ink, #2a2a2a) 20%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--s-gold, #b98a2f) 8%, var(--s-white, #fff));
-}
-.tool-discovery-flow b,
-.tool-discovery-flow small { display: block; }
-.tool-discovery-flow b { color: var(--s-ink, #2a2a2a); font-size: 11.5px; font-weight: 850; }
-.tool-discovery-flow small { margin-top: 2px; color: var(--s-ink-soft, #6b6250); font-size: 9.5px; line-height: 1.35; }
-.tool-discovery-flow i { color: var(--s-gold, #b98a2f); font-style: normal; font-weight: 900; }
-.tool-discovery-controls { margin: 0 !important; }
-.settings-field-label {
-  display: block;
-  margin-bottom: 6px;
-  color: var(--s-ink-soft, #6b6250);
-  font-size: var(--font-size-xs);
-  font-weight: 800;
-}
-.tool-execution-policy {
-  min-height: 38px;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) 10px;
-  border: 1px solid color-mix(in srgb, var(--s-ink, #2a2a2a) 22%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, #16a34a 5%, var(--s-white, #fff));
-  color: var(--s-ink, #2a2a2a);
-  font-size: var(--font-size-xs);
-}
-.tool-execution-policy strong { min-width: 0; flex: 1; font-weight: 800; }
-.tool-execution-policy em {
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: rgba(22, 163, 74, .11);
-  color: #15803d;
-  font-size: 9px;
-  font-style: normal;
-  font-weight: 850;
-  white-space: nowrap;
-}
-.tool-discovery-note {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 5px var(--space-2);
-  margin-top: 11px;
-  padding-top: 10px;
-  border-top: 1px dashed color-mix(in srgb, var(--s-ink, #2a2a2a) 22%, transparent);
-  color: var(--s-ink-soft, #6b6250);
-  font-size: 10.5px;
-  font-weight: 650;
-}
-.tool-state-dot { width: 7px; height: 7px; border-radius: 999px; }
-.tool-state-dot.is-visible { background: #16a34a; box-shadow: 0 0 0 2px rgba(22, 163, 74, .15); }
-.tool-state-dot.is-searchable { background: #d49b27; box-shadow: 0 0 0 2px rgba(212, 155, 39, .16); }
-.tool-state-dot.is-blocked { background: #94a3b8; box-shadow: 0 0 0 2px rgba(148, 163, 184, .16); }
-
-@media (max-width: 620px) {
-  .tool-discovery-card { padding: 13px; }
-  .tool-discovery-flow { grid-template-columns: 1fr; gap: 5px; }
-  .tool-discovery-flow > i { transform: rotate(90deg); justify-self: center; line-height: 1; }
+/* The .modal and .settings-field input rules size every input like a text
+   box (full width, 36px tall); a checkbox or radio in a field keeps its
+   native box instead. */
+.settings-panel .settings-field :is(input[type="checkbox"], input[type="radio"]) {
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  box-shadow: none;
 }
 
 /* ── Cost optimization A/B channel (Settings › Advanced) ── */
@@ -2607,10 +2425,6 @@
   align-items: baseline;
   gap: 5px;
 }
-.proxy-pool-meta-sep {
-  color: rgba(26, 24, 20, .28);
-  font-size: var(--font-size-xs);
-}
 .proxy-pool-toolbar .auth-src-btn {
   border-width: 1px;
   border-radius: 6px;
@@ -2618,11 +2432,6 @@
   box-shadow: none;
 }
 #proxyPoolList { gap: 7px; margin-bottom: 0; }
-.proxy-pool-order-hint {
-  color: var(--s-ink-soft);
-  font-size: 10px;
-  font-weight: 600;
-}
 
 #settingsTab_network .proxy-pool-row {
   overflow: hidden;
@@ -2830,7 +2639,6 @@
 }
 @media (max-width: 420px) {
   .proxy-pool-toolbar { margin-bottom: 7px; }
-  .proxy-pool-order-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #settingsTab_network .proxy-pool-head { padding: 7px; }
   #settingsTab_network .pp-enabled-control { flex-basis: 32px; min-width: 32px; }
   #settingsTab_network .pp-enabled-text { display: none; }
@@ -3031,42 +2839,31 @@
   margin-bottom: 14px;
 }
 .search-pipeline-title { font-weight: 800; font-size: var(--font-size-md); color: var(--s-ink); }
-.search-pipeline-flow {
-  margin-top: 6px;
-  font-size: var(--font-size-md);
-  font-weight: 600;
-  color: var(--s-ink);
-  line-height: 1.6;
-}
-.search-pipeline-flow.filter-off { color: var(--s-ink-soft); }
 .search-pipeline-hint { margin-top: 6px; font-size: 11.5px; color: var(--s-ink-soft); font-weight: 600; }
 .settings-field-hint { font-size: 11.5px; color: var(--s-ink-soft); font-weight: 600; }
 .search-advanced-sub { font-size: 11.5px; font-weight: 600; color: var(--s-ink-soft); }
 
-/* ── Search tab: labelled knob groups inside 高级参数 ──
-   档位覆盖 (override-gated — dims while following the profile) vs
-   传输与内容上限 (profile-independent). Titles pair with a small `why`. */
-.search-knob-group {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
-  border-top: 1px dashed rgba(26, 24, 20, 0.14);
+/* ── Search tab: 搜索 API source picker — one checkbox per gateway source ── */
+.search-gateway-sources {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 8px 14px;
+  margin: var(--space-1) 0 var(--space-3);
 }
-.search-knob-group:first-child { margin-top: 2px; padding-top: 0; border-top: 0; }
-.search-knob-group-title {
+/* The picker sits in a .settings-field, whose field-label rule would turn
+   each option label into a block caption; restate the option row. */
+.settings-panel .settings-field .search-gateway-source {
   display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  font-weight: 800;
-  font-size: 12.5px;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 700;
+  letter-spacing: 0;
   color: var(--s-ink);
+  cursor: pointer;
 }
-.search-knob-group-title small { font-size: 11.5px; font-weight: 600; color: var(--s-ink-soft); }
-.search-knob-group.search-override-control { transition: opacity .15s ease; }
-.search-knob-group.search-override-control:has(input:disabled) { opacity: .5; }
+.search-gateway-source input { flex: none; }
 
 /* 访问边界 sub-section heads (屏蔽域名 / 内网放行 / 浏览器读取授权) */
 .search-boundary-head { margin: 14px 0 2px; }
@@ -4650,7 +4447,7 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
 #settingsTab_database .db-index-required {
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
+  background: var(--s-cream);
   color: var(--db-secondary);
   font-size: var(--font-size-xs);
   font-weight: var(--weight-medium);
@@ -4903,4 +4700,179 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
 .codex-shared-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-block: var(--space-3); }
 .codex-shared-content .codex-shared-hint { color: var(--text-tertiary); margin-bottom: 0; }
 .codex-shared-login[data-state="connected"] .codex-shared-feedback { color: var(--success-text); }
+/* Once ChatGPT is connected the reuse offer has nothing left to explain:
+   only the one-line source note remains. */
+.codex-shared-login:is([data-state="connected"], [data-state="own"]) {
+  padding: 0;
+  margin-block: var(--space-2);
+  border: 0;
+  background: none;
+}
+.codex-shared-login:is([data-state="connected"], [data-state="own"])
+  :is(.codex-shared-icon, .codex-shared-heading, .codex-shared-description, .codex-shared-actions, .codex-shared-hint) {
+  display: none;
+}
+.codex-shared-login:is([data-state="connected"], [data-state="own"]) .codex-shared-feedback { margin: 0; }
 .codex-shared-login[data-state="error"] .codex-shared-feedback { color: var(--warning-text); }
+/* Channel Settings panels: 大象 (settings-panels/dx.html, features/settings/
+   dx-channel.ts) and GitHub (settings-panels/github.html, github-channel.ts)
+   share one layout through features/settings/channel-settings-view.ts.
+   Layout and status tone only; controls come from the UI kit. */
+
+.channel-settings-subtitle {
+  margin: var(--space-2) 0 var(--space-5);
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-md);
+  line-height: var(--leading-body);
+}
+
+.channel-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.channel-settings .channel-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--s-line);
+  border-radius: var(--radius-sm);
+  background: var(--s-white);
+  font-size: var(--font-size-md);
+}
+
+.channel-settings .channel-card-title {
+  color: var(--s-ink);
+  font-size: var(--font-size-xl);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-title);
+}
+
+.channel-settings .channel-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--s-ink);
+  font-size: var(--font-size-lg);
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.channel-settings .channel-status[data-tone="bad"] {
+  color: var(--error-text);
+}
+
+.channel-settings .channel-status-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--s-line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--s-skin);
+}
+
+.channel-settings .channel-status[data-tone="ok"] .channel-status-dot {
+  background: var(--s-done);
+}
+
+.channel-settings .channel-status[data-tone="bad"] .channel-status-dot {
+  background: var(--s-danger);
+}
+
+.channel-settings .channel-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-2) var(--space-4);
+  align-items: center;
+  margin: 0;
+}
+
+.channel-settings .channel-facts dt {
+  color: var(--s-ink-soft);
+}
+
+.channel-settings .channel-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-settings .channel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: flex-end;
+}
+
+.channel-settings .channel-field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.channel-settings .channel-hint {
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+}
+
+.channel-settings .channel-link {
+  color: var(--s-ink);
+  font-weight: var(--weight-medium);
+  text-decoration: underline;
+}
+
+.channel-settings .channel-advanced > summary {
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.channel-settings .channel-advanced[open] > summary {
+  margin-bottom: var(--space-3);
+}
+
+.channel-settings .channel-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: end;
+  padding: var(--space-3) 0;
+}
+
+.channel-settings .channel-row + .channel-row,
+.channel-settings .channel-outbox-item + .channel-outbox-item {
+  border-top: 1px solid var(--s-line);
+}
+
+.channel-settings .channel-row-title {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.channel-settings .channel-key {
+  color: var(--s-ink-soft);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.channel-settings .channel-outbox-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+}
+
+.channel-settings .channel-outbox-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .channel-settings .channel-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

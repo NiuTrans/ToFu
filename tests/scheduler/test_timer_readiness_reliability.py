@@ -108,7 +108,11 @@ def test_ready_survives_busy_lane_and_final_poll_budget(monkeypatch, resume_read
         row.update(poll_count=1, last_poll_decision='ready')
     def dispatch(current):
         dispatches.append(current)
-        return 'task_started' if len(dispatches) == 2 else None
+        # First pass: the delivery lane is still unavailable, so the watcher
+        # must keep its committed ready verdict instead of spending the turn.
+        return (_loop.TimerContinuationOutcome('started', task_id='task_started')
+                if len(dispatches) == 2
+                else _loop.TimerContinuationOutcome('retry'))
     monkeypatch.setattr(_loop, 'poll_timer', poll)
     monkeypatch.setattr(_loop, '_record_poll', record)
     monkeypatch.setattr(_loop, '_execute_continuation', dispatch)
@@ -164,7 +168,9 @@ def test_cancelled_snapshot_cannot_start_continuation(monkeypatch):
     monkeypatch.setattr(_loop, '_get_timer_row', lambda *a, **k: {'status': 'cancelled'})
     monkeypatch.setattr(dispatcher, 'dispatch_scheduled_turn',
                         lambda **k: pytest.fail('cancelled watcher dispatched'))
-    assert _loop._execute_continuation({'id': 'tmr_cancel', 'user_id': 7}) is None
+    outcome = _loop._execute_continuation({'id': 'tmr_cancel', 'user_id': 7})
+    assert outcome.kind == 'closed'
+    assert not outcome.accepted
 
 
 def test_explicit_search_off_grants_no_search_tools():

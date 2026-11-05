@@ -152,7 +152,7 @@ function reconcileProjection(input: ApplyTurnProjectionInput, fingerprint: strin
     conversation._turnTransport = state.transport;
     if (transportChanged) {
       input.renderConversationList?.();
-      input.updateSendButton?.();
+      if (input.active) input.updateSendButton?.();
     }
     if (input.domStale && input.active) input.replaceAll?.(conversation);
     return false;
@@ -167,6 +167,8 @@ function reconcileProjection(input: ApplyTurnProjectionInput, fingerprint: strin
     input.buildNavigation?.(conversation);
   }
   input.renderConversationList?.();
-  input.updateSendButton?.();
+  // The composer projects only the active conversation; another conversation's
+  // streaming changes must not repaint it several times a second.
+  if (input.active) input.updateSendButton?.();
   return true;
 }

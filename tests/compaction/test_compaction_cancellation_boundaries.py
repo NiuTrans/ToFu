@@ -1,4 +1,7 @@
 """Cancellation is a stage boundary, not rollback of already-adopted history."""
+
+import lib.llm as _fallback_llm
+import lib.tasks_pkg.llm_fallback._recovery as _fallback_recovery
 from copy import deepcopy
 
 import pytest
@@ -82,8 +85,8 @@ def test_reactive_retry_stops_before_checklist_and_body_when_restoration_is_canc
 
     monkeypatch.setattr(_pipeline, 'recompose_context_after_compaction', stop)
     monkeypatch.setattr(checklist, 'restore_checklist_context', lambda *a, **k: calls.append('checklist'))
-    monkeypatch.setattr(_call, 'build_body', lambda *a, **k: calls.append('body') or {})
-    assert _call._prepare_reactive_retry_body(
+    monkeypatch.setattr(_fallback_llm, 'build_body', lambda *a, **k: calls.append('body') or {})
+    assert _fallback_recovery._prepare_reactive_retry_body(
         task, {}, 'test-model', messages, [], 'medium', False,
         PromptTooLongError('too long'), 'stop-restoration') is None
     assert messages == before and calls == []

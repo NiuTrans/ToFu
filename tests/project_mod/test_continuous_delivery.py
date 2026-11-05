@@ -8,7 +8,7 @@ import pytest
 
 from lib import integration_control as ic
 from lib import integration_state_repository as state
-from lib.project_mod import delivery
+from lib.project_mod import delivery, task_delta_delivery
 from lib.project_mod.delivery_retry import conflicted_paths
 from lib.project_mod.workspace_lease import workspace_write_lease
 from tests.storage.test_integration_delivery import (
@@ -104,6 +104,79 @@ def test_restart_and_unrelated_edits_do_not_repeat_conflict_merge(repo, monkeypa
     assert (root / 'new.txt').read_text() == 'publish together\n'
     assert (root / 'unrelated.txt').read_text() == 'other task\n'
 
+
+def test_landed_checkpoint_is_no_change_even_after_overlapping_target_edits(repo, monkeypatch):
+    root, _, owner = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'base.txt').write_text('task version\n')
+    git(work, 'add', 'base.txt')
+    git(work, 'commit', '-m', 'land the task through git_land')
+    with monkeypatch.context() as patch:
+        patch.setattr(delivery, '_settle_registered', lambda row, value: value)
+        delivery.settle_task_workspace(str(root), 'automatic', user_id=owner, outcome='completed')
+    ic.checkpoint_workspace(str(root), 'automatic', user_id=owner)
+    row = state.get_workspace(str(root), 'automatic', user_id=owner)
+    delivery._save(row, delivery._receipt(row), checkpointSha=row['checkpoint_sha'])
+    checkpoint = row['checkpoint_sha']
+    git(root, 'merge', '--no-ff', checkpoint, '-m', 'landed immutable task checkpoint')
+    (root / 'base.txt').write_text('later overlapping lane\n')
+    git(root, 'add', 'base.txt')
+    git(root, 'commit', '-m', 'target advances with overlapping edits')
+    target = git(root, 'rev-parse', 'HEAD')
+    merges = spy_merges(monkeypatch)
+
+    result = automatic_settle(repo)
+
+    assert result['state'] == 'delivered'
+    assert result['phase'] == 'no_changes'
+    assert result['targetSha'] == target
+    assert result['deltaCheckpointSha'] == checkpoint
+    assert result['retry'] is None
+    assert merges == []
+    assert (root / 'base.txt').read_text() == 'later overlapping lane\n'
+    probe = ic._git
+
+    def fail_ancestry(checkout, args, **kwargs):
+        if args == ['merge-base', '--is-ancestor', checkpoint, target]:
+            raise AssertionError('an unsuccessful ancestry probe cannot acknowledge delivery')
+        return probe(checkout, args, **kwargs)
+
+    with pytest.raises(AssertionError, match='unsuccessful ancestry probe'):
+        with monkeypatch.context() as patch:
+            patch.setattr(delivery, '_reclaim_completed_source', lambda row: None)
+            patch.setattr(delivery, '_wake_delivered_dependents', lambda row, value: None)
+            patch.setattr(ic, '_git', fail_ancestry)
+            delivery._settle_registered(row, receipt(root))
+    assert receipt(root)['state'] == 'delivered'
+
+
+def test_blocked_landed_checkpoint_settles_through_recovery(repo, monkeypatch):
+    root, _, _ = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'base.txt').write_text('task version\n')
+    (root / 'base.txt').write_text('canonical version\n')
+    first = automatic_settle(repo)
+    assert first['state'] == 'blocked'
+    assert first['reason'].startswith('task_delta_conflict:')
+    (root / 'base.txt').write_text('base\n')
+    checkpoint = state.get_workspace(str(root), 'automatic', user_id=1)['checkpoint_sha']
+    git(root, 'merge', '--no-ff', checkpoint, '-m', 'land blocked checkpoint externally')
+    (root / 'base.txt').write_text('later overlapping lane\n')
+    git(root, 'add', 'base.txt')
+    git(root, 'commit', '-m', 'advance beyond the blocked receipt')
+    target = git(root, 'rev-parse', 'HEAD')
+    merges = spy_merges(monkeypatch)
+
+    assert delivery.resume_pending_workspace_deliveries()
+
+    result = receipt(root)
+    assert result['state'] == 'delivered'
+    assert result['phase'] == 'no_changes'
+    assert result['targetSha'] == target
+    assert result['deltaCheckpointSha'] == checkpoint
+    assert result['retry'] is None
+    assert merges == []
+    assert (root / 'base.txt').read_text() == 'later overlapping lane\n'
 
 def test_gate_failure_does_not_delay_workspace_delivery(repo, monkeypatch):
     root, _, _ = repo
@@ -217,6 +290,43 @@ def test_unchanged_poll_reuses_pinned_commit_without_git_object_growth(repo, mon
         assert not delivery.resume_pending_workspace_deliveries()
     assert receipt(root) == result
     assert git(root, 'count-objects', '-v') == before
+
+
+def commit_objects(root):
+    listing = git(root, 'cat-file', '--batch-all-objects',
+                  '--batch-check=%(objecttype) %(objectname)')
+    return {line.split()[1] for line in listing.splitlines() if line.startswith('commit ')}
+
+
+def test_blocked_polls_after_unrelated_canonical_edits_mint_no_commits(repo, monkeypatch):
+    """A shared checkout changes between polls; each poll used to leave an unreachable commit."""
+    root, _ = setup_conflict(repo, monkeypatch)
+    first = automatic_settle(repo)
+    before = commit_objects(root)
+    for poll in range(3):
+        (root / 'unrelated.txt').write_text(f'other session, edit {poll}\n')
+        assert not delivery.resume_pending_workspace_deliveries()
+    assert receipt(root) == first
+    assert commit_objects(root) == before
+
+
+def test_delivery_mints_only_commits_its_refs_keep(repo, monkeypatch):
+    root, _, _ = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'new.txt').write_text('candidate\n')
+    (root / 'peer.txt').write_text('uncommitted peer work\n')
+    merge = task_delta_delivery._merge_workspace_delta
+
+    def peer_edits_during_merge(*args, **kwargs):
+        (root / 'peer.txt').write_text('peer edited while the merge ran\n')
+        return merge(*args, **kwargs)
+
+    monkeypatch.setattr(task_delta_delivery, '_merge_workspace_delta', peer_edits_during_merge)
+    before = commit_objects(root)
+    assert automatic_settle(repo)['state'] == 'delivered'
+    minted = commit_objects(root) - before
+    assert minted and minted <= set(git(root, 'rev-list', '--all').split())
+    assert (root / 'new.txt').read_text() == 'candidate\n'
 
 
 def test_repair_preserves_unrelated_canonical_wip_and_original_source(repo, monkeypatch):
@@ -392,16 +502,6 @@ def test_git_pathspec_shaped_names_are_literal_retry_inputs(repo, monkeypatch):
     assert (root / name).read_text() == 'task version\n'
 
 
-def test_gate_timeout_does_not_delay_workspace_delivery(repo, monkeypatch):
-    root, _, _ = repo
-    work = automatic_workspace(repo, monkeypatch)
-    (work / 'new.txt').write_text('candidate\n')
-    monkeypatch.setattr(ic, '_gate_commands', lambda *a, **k: pytest.fail('workspace delivery invoked release gate'))
-    git(root, 'config', 'tofu.integrationTestCommand', 'missing-release-command')
-    assert automatic_settle(repo)['state'] == 'delivered'
-    assert (root / 'new.txt').read_text() == 'candidate\n'
-
-
 def test_failed_optional_repair_narrative_does_not_lose_durable_blocker(repo, monkeypatch):
     root, _ = setup_conflict(repo, monkeypatch)
     from lib.conversations import project_brain
@@ -427,23 +527,3 @@ def test_real_gate_deadline_is_transient_integration_failure(repo, monkeypatch, 
     assert not passed
     assert detail.startswith('integration_gate_timeout: ')
     assert git(root, 'worktree', 'list', '--porcelain').count('worktree ') == 2
-
-
-def test_local_gate_change_does_not_block_workspace_merge(repo, monkeypatch):
-    root, _, _ = repo
-    work = automatic_workspace(repo, monkeypatch)
-    (work / 'new.txt').write_text('candidate\n')
-    monkeypatch.setattr(ic, '_gate_commands', lambda *a, **k: pytest.fail('workspace delivery invoked release gate'))
-    git(root, 'config', 'tofu.integrationTestCommand', 'missing-release-command')
-    assert automatic_settle(repo)['state'] == 'delivered'
-    assert (root / 'new.txt').read_text() == 'candidate\n'
-
-
-def test_task_delta_gate_policy_change_does_not_control_workspace_merge(repo, monkeypatch):
-    root, _, _ = repo
-    work = automatic_workspace(repo, monkeypatch)
-    (work / 'new.txt').write_text('candidate\n')
-    monkeypatch.setattr(ic, '_gate_commands', lambda *a, **k: pytest.fail('workspace delivery invoked release gate'))
-    git(root, 'config', 'tofu.integrationTestCommand', 'missing-release-command')
-    assert automatic_settle(repo)['state'] == 'delivered'
-    assert (root / 'new.txt').read_text() == 'candidate\n'

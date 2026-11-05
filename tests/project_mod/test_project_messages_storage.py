@@ -24,9 +24,9 @@ def test_real_storage_round_trip_and_consideration_survive_reconstruction(chat_s
     considered = pm.execute('consider_project_message', {'message_id': incoming['id'], 'expected_revision': 1, 'decision': 'accepted', 'note': 'Will review within existing authority'}, worker)
     assert not considered['execution_started']
     reply = pm.execute('send_project_message', {'conversation_id': 'coordinator', 'kind': 'report', 'content': 'Evidence checked', 'reply_to': incoming['id'], 'idempotency_key': 'reply'}, worker)
-    reloaded = pm.ProjectMailbox(1, project, 'coordinator').load()[0]['messages'][0]
+    reloaded = pm.ProjectMailbox(1, project, 'coordinator').read()[0]
     assert reloaded['id'] == reply['message']['id']
     assert reloaded['replyTo'] == incoming['id']
     outgoing = pm.execute('get_project_messages', {'direction': 'outgoing', 'conversation_id': 'worker'}, coordinator)['messages'][0]
     assert outgoing['decision'] == 'accepted' and outgoing['state'] == 'submitted'
-    assert len(pm.ProjectMailbox(1, project, 'worker').load()[0]['messages']) == 1
+    assert len(pm.ProjectMailbox(1, project, 'worker').read()) == 1

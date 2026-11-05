@@ -94,12 +94,20 @@ pub struct TurnSearchDocument {
     pub match_field: String,
 }
 
+/// Chunk identity prefix of retained archive (and frozen pre-Turn) messages;
+/// such text has no live Turn to address.
+pub(crate) const ARCHIVED_SOURCE_PREFIX: &str = "history:";
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct ConversationSearchHit {
     pub id: String,
     pub snippet: String,
     pub role: Option<String>,
     pub match_field: String,
+    /// The matching chunk's live main-lane Turn and its lane ordinal; both
+    /// null for title/id hits and for retained archive text.
+    pub turn_id: Option<String>,
+    pub ordinal: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -160,10 +168,6 @@ fn invalid_input(message: &str) -> io::Error {
 
 fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
-}
-
-fn exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
 }
 
 fn validate_identity(value: &str, name: &str, maximum: usize) -> io::Result<()> {
@@ -411,7 +415,7 @@ fn reserved_header_bytes(encoded_bytes: usize, id_bytes: usize) -> io::Result<u6
         .and_then(|n| id_bytes.checked_mul(2).and_then(|ids| n.checked_add(ids)))
         .and_then(|n| n.checked_add(128))
         .map(|n| n as u64)
-        .ok_or_else(|| exhausted("search header reservation overflow"))
+        .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("search header reservation overflow"))
 }
 
 fn decode_header(mut input: &[u8]) -> io::Result<Header> {
@@ -1173,7 +1177,7 @@ impl OpenTurnSearchProjection {
             .checked_sub(old_title_bytes)
             .and_then(|n| n.checked_add(new_title_bytes))
             .filter(|n| *n <= self.maximum_logical_bytes_per_owner)
-            .ok_or_else(|| exhausted("search title exceeds its resource budget"))?;
+            .ok_or_else(|| crate::resource_exhaustion::domain_bound("search title exceeds its resource budget"))?;
         build.generation_bytes = build
             .generation_bytes
             .checked_sub(old_title_bytes)
@@ -1348,13 +1352,13 @@ impl OpenTurnSearchProjection {
         usage = usage
             .checked_add(build.generation_bytes)
             .filter(|n| *n <= self.maximum_logical_bytes_per_owner)
-            .ok_or_else(|| exhausted("search header exceeds its resource budget"))?;
+            .ok_or_else(|| crate::resource_exhaustion::domain_bound("search header exceeds its resource budget"))?;
         let (_, dictionary_bytes) = generation_dictionary::allocate(
             &self.database, &mut transaction, &generation_digest(conversation_id, generation),
             self.maximum_logical_bytes_per_owner - usage,
         )?;
         usage = usage.checked_add(dictionary_bytes)
-            .ok_or_else(|| exhausted("search dictionary usage overflow"))?;
+            .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("search dictionary usage overflow"))?;
         self.database
             .entity_put(&mut transaction, build_key, encode_build(&build)?)?;
         write_usage(&self.database, &mut transaction, usage)?;
@@ -1451,7 +1455,7 @@ impl OpenTurnSearchProjection {
             let meta_bytes = encode_meta(&meta)?;
             added_bytes = added_bytes
                 .checked_add((meta_key.key_bytes().len() + meta_bytes.len()) as u64)
-                .ok_or_else(|| exhausted("search projection usage overflow"))?;
+                .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("search projection usage overflow"))?;
             self.database
                 .entity_put(&mut transaction, meta_key, meta_bytes)?;
             for (index, chunk) in chunks.into_iter().enumerate() {
@@ -1466,7 +1470,7 @@ impl OpenTurnSearchProjection {
                 )?;
                 added_bytes = added_bytes
                     .checked_add((chunk_key.key_bytes().len() + chunk.len()) as u64)
-                    .ok_or_else(|| exhausted("search projection usage overflow"))?;
+                    .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("search projection usage overflow"))?;
                 self.database
                     .entity_put(&mut transaction, chunk_key, chunk.to_vec())?;
             }
@@ -1477,7 +1481,7 @@ impl OpenTurnSearchProjection {
                 &generation_digest,
                 usage
                     .checked_add(added_bytes)
-                    .ok_or_else(|| exhausted("search projection usage overflow"))?,
+                    .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("search projection usage overflow"))?,
                 self.maximum_logical_bytes_per_owner,
                 &mut gram_delta,
                 &mut emission,
@@ -1497,12 +1501,12 @@ impl OpenTurnSearchProjection {
             .and_then(|n| n.checked_add_signed(gram_delta))
             .filter(|value| *value <= self.maximum_logical_bytes_per_owner)
             .ok_or_else(|| {
-                exhausted("conversation search projection reached its resource budget")
+                crate::resource_exhaustion::capacity_quota("conversation search projection reached its resource budget")
             })?;
         build.generation_bytes = build
             .generation_bytes
             .checked_add(added_bytes)
-            .ok_or_else(|| exhausted("search projection generation size overflow"))?;
+            .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("search projection generation size overflow"))?;
         self.database
             .entity_put(&mut transaction, build_key, encode_build(&build)?)?;
         write_usage(&self.database, &mut transaction, next_usage)?;
@@ -1608,7 +1612,7 @@ impl OpenTurnSearchProjection {
         usage = usage
             .checked_add_signed(gram_delta)
             .filter(|n| *n <= self.maximum_logical_bytes_per_owner)
-            .ok_or_else(|| exhausted("search gram postings exceed their resource budget"))?;
+            .ok_or_else(|| crate::resource_exhaustion::capacity_quota("search gram postings exceed their resource budget"))?;
         let header = Header {
             conversation_id: conversation_id.to_owned(),
             generation: generation.to_owned(),
@@ -2113,7 +2117,9 @@ mod tests {
                 id: "newer".to_owned(),
                 snippet: "…alpha here…".to_owned(),
                 role: Some("user".into()),
-                match_field: "content".into()
+                match_field: "content".into(),
+                turn_id: Some("t2".into()),
+                ordinal: Some(1),
             }]
         );
         assert!(projection.search(&request(11, "a")).unwrap().is_empty());

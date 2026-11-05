@@ -11,6 +11,7 @@
     {"model_id": "openai/gpt-5.6-sol", "capabilities": ["text"]},
     {"model_id": "openai/gpt-oss-120b", "capabilities": ["text"]},
     {"model_id": "z-ai/glm-5.3", "capabilities": ["text"]},
-    {"model_id": "moonshotai/kimi-k3", "capabilities": ["text"]}
+    {"model_id": "moonshotai/kimi-k3", "capabilities": ["text"]},
+    {"model_id": "moonshotai/kimi-k3.1-pro", "capabilities": ["text"]}
   ]
 }

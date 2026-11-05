@@ -63,6 +63,7 @@ _ready_lock = threading.Lock()
 _ready_identity: tuple[str, str] | None = None
 _REQUIRED_EXPORT_IMPORTS = (
     'brotli',
+    'defusedxml.ElementTree',
     'fontTools.ttLib',
     'pptx',
     'yaml',

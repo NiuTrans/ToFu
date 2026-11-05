@@ -1,11 +1,14 @@
 """Demand-driven execution of canonical leased automation jobs.
 
-Entry point: AutomationWorkerService. One coordinator bounds executor submissions
-by the launch-probed task capacity; a single speculative claim discovers idle
-work. Row principals, leases, cancellation and recovery remain with the existing
-worker/repository authorities. No per-rule thread, new queue or polling receipt.
+Entry point: AutomationWorkerService. One coordinator starts every claimed job
+on a demand executor; ``max_workers`` only sizes idle thread reuse and never
+caps concurrent jobs. Claims are event-driven: a read-only
+``worker_job.claim_horizon`` probe precedes every exclusive
+``worker_job.claim_next``, and the coordinator sleeps until that horizon, a
+committed in-process producer command or a settled claim. Row principals,
+leases, cancellation and recovery remain with the existing worker/repository
+authorities. No per-rule thread, new queue, idle poll or polling receipt.
 """
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import threading
 import time
@@ -15,7 +18,8 @@ from typing import assert_never
 from lib.durable_worker import StorageWorkerJobStore, SynchronousWorkerRunner
 from lib.identity import PrincipalContext
 from lib.log import get_logger
-from runtime_guards import MAX_TASK_CONCURRENCY
+from lib.storage.commit_events import subscribe_committed_operations
+from tofu_workers.executor import DemandThreadPoolExecutor
 from .runtime_policy import runtime_policy
 
 logger = get_logger(__name__)
@@ -25,6 +29,7 @@ logger = get_logger(__name__)
 class _ClaimObservation:
     known: threading.Event = field(default_factory=threading.Event)
     claimed: bool = False
+    claimable_in_ms: int | None = None
 
 
 class _ObservedJobStore(StorageWorkerJobStore):
@@ -34,13 +39,33 @@ class _ObservedJobStore(StorageWorkerJobStore):
         self._wake = wake
 
     def claim_next(self, **arguments):
-        document = super().claim_next(**arguments)
+        # The read path answers an empty or not-yet-due queue. Only a horizon
+        # of 0 enters the exclusive writer, whose claim re-validates everything.
+        delay = self.claim_horizon(task_kinds=arguments['task_kinds'])
+        document = super().claim_next(**arguments) if delay == 0 else None
         # This is a concurrency hint; only the runner's owned fence proof can
         # authorize dispatch. A lost acknowledgement never becomes execution.
         self._observation.claimed = document is not None
+        self._observation.claimable_in_ms = delay
         self._observation.known.set()
         self._wake.set()
         return document
+
+
+def _next_probe(observation, now, policy):
+    """Monotonic time of the next probe after one resolved claim, or None."""
+    if not observation.known.is_set() or observation.claimed:
+        # A failed probe retries after its backoff; a claim may have queued
+        # successors at the same horizon.
+        return now
+    delay = observation.claimable_in_ms
+    if delay is None:
+        return None
+    if delay == 0:
+        # Another claimer won the job the horizon reported.
+        return now + policy['failureBackoffMilliseconds'] / 1000
+    # Monotonic waits do not advance across host suspend or follow UTC steps.
+    return now + min(delay, policy['horizonReanchorMilliseconds']) / 1000
 
 
 class AutomationWorkerService:
@@ -50,8 +75,8 @@ class AutomationWorkerService:
                 or principal.owner_user_id is not None or principal.tenant_id is not None
                 or principal.scopes != frozenset({policy['controlScope']})):
             raise PermissionError('Automation service requires an ownerless worker control principal')
-        if type(max_workers) is not int or not 1 <= max_workers <= MAX_TASK_CONCURRENCY:
-            raise ValueError('Automation capacity must be an admitted task-worker budget')
+        if type(max_workers) is not int or max_workers < 1:
+            raise ValueError('Automation idle worker hint must be a positive integer')
         self.principal = principal
         self.max_workers = max_workers
         self._factory, self._now_ms = client_factory, now_ms
@@ -59,6 +84,9 @@ class AutomationWorkerService:
         self._instance = uuid.uuid4().hex
         self._stop = threading.Event()
         self._wake = threading.Event()
+        # Set by a committed producer command; cleared just before a probe is
+        # submitted, so a commit racing that probe forces one more probe.
+        self._claim_hint = threading.Event()
         self._lock = threading.Lock()
         self._thread = None
         self._state = 'new'
@@ -78,7 +106,7 @@ class AutomationWorkerService:
 
     def snapshot(self):
         with self._lock:
-            return {'state': self._state, 'capacity': self.max_workers,
+            return {'state': self._state, 'idleWorkers': self.max_workers,
                     'inflight': self._active, 'highWater': self._high_water}
 
     def start(self):
@@ -113,15 +141,20 @@ class AutomationWorkerService:
             return not thread.is_alive()
         return True
 
+    def _hint(self, _operation):
+        self._claim_hint.set()
+        self._wake.set()
+
     def _execute(self, observation):
         return self._runner(observation).run_once(shutdown_event=self._stop)
 
     def _finished(self, futures, now):
-        backoff_until = now
+        """Reap done futures; return (backoff deadline, whether a claim settled)."""
+        backoff_until, settled = now, False
         for future in tuple(futures):
             if not future.done():
                 continue
-            futures.pop(future)
+            observation = futures.pop(future)
             try:
                 result = future.result()
             except Exception as exc:
@@ -129,7 +162,9 @@ class AutomationWorkerService:
                 # The durable lease remains recoverable; never fake settlement.
                 logger.warning('[Automation] worker execution unavailable: %s', type(exc).__name__)
                 backoff_until = now + runtime_policy()['failureBackoffMilliseconds'] / 1000
+                settled = True
                 continue
+            settled = settled or observation.claimed
             match result.state:
                 case 'succeeded' | 'failed' | 'cancelled' | 'suspended' | 'idle':
                     pass
@@ -138,26 +173,31 @@ class AutomationWorkerService:
                     backoff_until = now + runtime_policy()['failureBackoffMilliseconds'] / 1000
                 case _:
                     assert_never(result.state)
-        return backoff_until
+        return backoff_until, settled
 
     def _coordinate(self):
         policy = runtime_policy()
-        futures, pending, idle_until = {}, None, 0.0
+        futures, pending = {}, None
+        due, backoff_until = 0.0, 0.0
         failed = False
+        unsubscribe = subscribe_committed_operations(policy['claimWakeOperations'], self._hint)
         try:
-            with ThreadPoolExecutor(max_workers=self.max_workers,
+            with DemandThreadPoolExecutor(max_workers=self.max_workers,
                     thread_name_prefix=policy['threadNamePrefix']) as executor:
                 try:
                     while not self._stop.is_set():
                         self._wake.clear()
                         now = time.monotonic()
-                        idle_until = max(idle_until, self._finished(futures, now))
+                        reaped_until, settled = self._finished(futures, now)
+                        backoff_until = max(backoff_until, reaped_until)
                         if pending is not None and (pending.known.is_set() or
                                 not any(value is pending for value in futures.values())):
-                            if not pending.claimed:
-                                idle_until = max(idle_until, now + policy['idlePollMilliseconds'] / 1000)
-                            pending = None
-                        if pending is None and len(futures) < self.max_workers and now >= idle_until:
+                            due, pending = _next_probe(pending, now, policy), None
+                        if settled:
+                            due = now
+                        if (pending is None and now >= backoff_until
+                                and (self._claim_hint.is_set() or (due is not None and now >= due))):
+                            self._claim_hint.clear()
                             pending = _ClaimObservation()
                             future = executor.submit(self._execute, pending)
                             futures[future] = pending
@@ -165,7 +205,11 @@ class AutomationWorkerService:
                         with self._lock:
                             self._active = len(futures)
                             self._high_water = max(self._high_water, self._active)
-                        wait = max(0.0, idle_until - time.monotonic()) if idle_until > now else None
+                        wait = None
+                        if pending is None:
+                            target = now if self._claim_hint.is_set() else due
+                            if target is not None:
+                                wait = max(0.0, max(target, backoff_until) - time.monotonic())
                         self._wake.wait(wait)
                 finally:
                     self._stop.set()
@@ -176,6 +220,7 @@ class AutomationWorkerService:
             failed = True
             logger.exception('[Automation] coordinator failed')
         finally:
+            unsubscribe()
             with self._lock:
                 self._active = 0
                 self._state = 'failed' if failed else 'stopped'

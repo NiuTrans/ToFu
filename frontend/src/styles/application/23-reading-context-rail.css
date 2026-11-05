@@ -1,0 +1,376 @@
+/* Per-turn context rail: track reservation, rail track and card, content and
+ * fold. Owner: frontend/src/conversation/ui/turn-context-rail/ (markup; see
+ * its AGENTS.md for the whole ownership map). The pane grid track lives in
+ * 01-shell-navigation.css, its adaptive width in runtime main.js, the track
+ * measurement and live rows in runtime info-rail.js.
+ */
+
+/* ── Track reservation ────────────────────────────────────────────────────
+ * Context space is reserved per conversation, never per mounted window. The
+ * Surface root writes data-turn-context-rail (the shell reads that latch,
+ * not the Surface's class): `present` once any Turn of the
+ * conversation has shown a rail, `pending` while its loaded transcript cannot
+ * tell yet (the first page is in flight, or a byte-budgeted tail holds only a
+ * reply), and `absent` only when that transcript proves the conversation
+ * rail-less. Only `absent` and the new-chat welcome (no Surface) collapse the
+ * track, so opening a conversation never paints the column centered and then
+ * shifts it when the round's input Turn lands. The composer keeps its
+ * left-edge lock on the same grant (02-composer-geometry.css). */
+.chat-inner:not(:has([data-turn-context-rail]:not([data-turn-context-rail="absent"]))),
+.chat-container:not(:has([data-turn-context-rail]:not([data-turn-context-rail="absent"]))) ~ .input-area > .input-inner {
+  --rail-w: 0px !important;
+  --rail-gap: 0px !important;
+}
+
+/* ── One vocabulary for every fact ───────────────────────────────────────
+ * Sections share one anatomy (heading: label, count, disclosure; then the
+ * facts), separated by whitespace rather than rules. Ink steps: identity in
+ * primary ink, facts in secondary, labels and glyphs in tertiary. The
+ * background-agent dock speaks it in the rail and in the narrow-pane fold. */
+.turn-ctx,
+.tctx-fold,
+.agent-dock {
+  --tctx-ink: var(--text-primary);
+  --tctx-ink-soft: var(--text-secondary);
+  --tctx-ink-faint: var(--text-tertiary);
+  --tctx-fill: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  --tctx-fill-hover: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  --tctx-accent-fill: color-mix(in srgb, var(--accent) 18%, transparent);
+  --tctx-rule: color-mix(in srgb, var(--border) 85%, transparent);
+  --tctx-line-h: 20px;
+  --tctx-chip-h: 22px;
+  --tctx-radius: 6px;
+  --tctx-section-gap: var(--space-4);
+  --tctx-stack-gap: var(--space-2);
+  /* Clearance between a pinned card and the pane's top and bottom edges. */
+  --tctx-pin-gap: var(--space-2);
+}
+
+/* ── The rail: a track and its card ───────────────────────────────────────
+ * The rail root is the TRACK. Out of flow, it keeps the rail column's box
+ * (right edge, top-aligned to its Turn) but never sizes the Turn's row, so a
+ * one-line input with many MCP servers keeps the conversation's own rhythm.
+ * info-rail.js stretches it down to the next railed Turn, or to the end of
+ * the transcript, whenever layout changes; never on scroll. The CARD inside
+ * it is sticky: the browser pins it under the pane's top edge while its
+ * round is read and pushes it out exactly as the next round's card arrives,
+ * in the same frame as the scroll. */
+.turn-ctx {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: var(--rail-w);
+  box-sizing: border-box;
+  min-width: 0;
+  color: var(--tctx-ink-soft);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-regular);
+  line-height: 1.5;
+  user-select: text;
+  /* The track spans its round's reply gutter; only the card takes pointer
+   * input, so the track never shadows what lies beneath it. */
+  pointer-events: none;
+}
+/* The card is never taller than the pane (the height info-rail.js publishes
+ * as --tctx-pane-h; the viewport until its first pass) and shrinks into a
+ * shorter track, so once pinned every fact is in view or one scroll of the
+ * card away. Only the card scrolls: an overflow-clipping track would become
+ * the card's sticky scroller in place of the transcript. At either end of
+ * its own scroll, the wheel moves on to the transcript. */
+.turn-ctx > .tctx-card {
+  position: sticky;
+  top: var(--tctx-pin-gap);
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: var(--tctx-section-gap);
+  box-sizing: border-box;
+  min-height: 0;
+  max-height: calc(var(--tctx-pane-h, 100dvh) - 2 * var(--tctx-pin-gap));
+  padding: var(--space-1) var(--space-1) var(--space-3) var(--space-4);
+  border-left: var(--control-edge-inset) solid var(--tctx-rule);
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  /* Hit-testable (it scrolls, paths carry titles); the delegated guard in
+   * info-rail.js keeps every click away from message-level handlers. */
+  pointer-events: auto;
+}
+
+/* The track extends beyond its host's border box, so rail hosts drop
+ * content-visibility's paint containment and keep layout+style; layout
+ * containment also keeps that overflow out of the transcript's scroll
+ * extent. */
+.message:has(> .turn-ctx) { content-visibility: visible; contain: layout style; }
+/* Populated rail hosts sit above later transparent Turn boxes so real
+ * pointer clicks reach the rail's controls. */
+.message:has(> .turn-ctx:not([hidden])) { z-index: var(--z-turn-context); }
+
+/* No track (narrow pane, inspector drawer open): the facts fold into one line
+ * under the message header instead. */
+.turn-ctx { display: none; }
+@container chatpane (min-width: 1056px) {
+  .turn-ctx {
+    /* A column, so the card shrinks into a track shorter than itself. */
+    display: flex;
+    flex-direction: column;
+    /* The track is already reserved, so a rail arriving with its round's
+     * input Turn settles into place instead of popping in. */
+    transition: opacity var(--motion-base) var(--ease-standard);
+  }
+  @starting-style {
+    .turn-ctx { opacity: 0; }
+  }
+}
+/* A track shorter than the card's own padding cannot show a fact. Keep the
+ * geometry measurable; info-rail.js clears this state as soon as a later
+ * layout grants space again. */
+.turn-ctx.tctx-no-space { visibility: hidden; }
+
+/* ── Identity: brand, model, effort, run modes ───────────────────────────── */
+.turn-ctx .tctx-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-height: var(--tctx-chip-h);
+}
+.turn-ctx .tctx-logo { display: inline-flex; flex: 0 0 auto; align-items: center; width: 16px; height: 16px; }
+.turn-ctx .tctx-logo .stg-brand-icon svg { display: block; width: 100%; height: 100%; fill: currentColor; }
+/* A compact unit: a short name keeps its effort beside it, a long name
+ * truncates before the badge instead of wrapping the badge alone. */
+.turn-ctx .tctx-model-group {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.turn-ctx .tctx-model {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--tctx-ink);
+  font-size: var(--font-size-md);
+  font-weight: var(--weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.turn-ctx :is(.tctx-depth, .tctx-mode-badge) {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 18px;
+  padding: 0 var(--space-1);
+  border-radius: 4px;
+  color: var(--tctx-ink-soft);
+  background: var(--tctx-fill);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: .05em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+/* Effort is the one setting a reader compares between rounds. */
+.turn-ctx .tctx-depth { color: var(--tctx-ink); background: var(--tctx-accent-fill); }
+
+/* ── Sections ──────────────────────────────────────────────────────────── */
+.turn-ctx .tctx-row { display: flex; flex-direction: column; gap: var(--tctx-stack-gap); min-width: 0; }
+/* The heading carries the label, its count and, at its end, the disclosure.
+ * The control stays on its heading while the facts grow below it, so it never
+ * travels away from the reader's pointer or focus. */
+.turn-ctx .tctx-row-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: var(--tctx-line-h);
+}
+.turn-ctx .tctx-row-h {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--tctx-ink-faint);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: .05em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.turn-ctx .tctx-row-count {
+  min-width: 18px;
+  padding: var(--control-edge-inset) var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--tctx-fill);
+  color: var(--tctx-ink-soft);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-medium);
+  letter-spacing: normal;
+  text-align: center;
+}
+.turn-ctx .tctx-row-count.is-done { color: var(--tctx-ink); background: var(--tctx-accent-fill); }
+
+/* Disclosure: a quiet ghost control; click/keyboard, never hover, because
+ * expanding grows the rail in flow. */
+.turn-ctx .tctx-more {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--tctx-line-h);
+  padding: 0 var(--space-1) 0 var(--space-2);
+  border: none;
+  border-radius: var(--tctx-radius);
+  background: transparent;
+  color: var(--tctx-ink-faint);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  pointer-events: auto;
+}
+.turn-ctx .tctx-more::after {
+  width: var(--space-1);
+  height: var(--space-1);
+  margin: 0 var(--space-1);
+  border-inline-end: 1.5px solid currentColor;
+  border-block-end: 1.5px solid currentColor;
+  content: '';
+  transform: translateY(-25%) rotate(45deg);
+}
+.turn-ctx .tctx-more:hover { background: var(--tctx-fill-hover); color: var(--tctx-ink); }
+.turn-ctx .tctx-more[aria-expanded="true"] { color: var(--tctx-ink-soft); }
+.turn-ctx .tctx-more[aria-expanded="true"]::after { transform: translateY(25%) rotate(-135deg); }
+.turn-ctx .tctx-more:focus-visible { outline: var(--control-edge-inset) solid var(--accent); outline-offset: var(--control-edge-inset); }
+@media (pointer: coarse) {
+  .turn-ctx .tctx-more { min-height: var(--control-h-sm); padding: 0 var(--space-2); }
+}
+/* The hidden group dissolves into its list once shown, so its items wrap and
+ * stack exactly like the visible ones. */
+.turn-ctx .tctx-overflow { display: contents; }
+.turn-ctx .tctx-overflow[hidden] { display: none; }
+
+/* Glyphs: line icons at the text size, always one ink step quieter. */
+.turn-ctx .tctx-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  color: var(--tctx-ink-faint);
+  font-size: var(--font-size-sm);
+}
+
+/* ── Tools: one quiet chip per capability ─────────────────────────────── */
+.turn-ctx .tctx-chips { display: flex; flex-wrap: wrap; gap: var(--space-1); min-width: 0; }
+.turn-ctx .tctx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  box-sizing: border-box;
+  height: var(--tctx-chip-h);
+  max-width: 100%;
+  min-width: 0;
+  padding: 0 var(--space-2);
+  border-radius: var(--tctx-radius);
+  background: var(--tctx-fill);
+  color: var(--tctx-ink-soft);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  line-height: 1;
+  white-space: nowrap;
+}
+.turn-ctx .tctx-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Workspace roots: one root per line, its branch after a colon ───────
+ * The glyph centres on the first line box, so a root whose branch wraps
+ * keeps its glyph beside its first line; a one-line root keeps the rail's
+ * line rhythm. */
+.turn-ctx .tctx-paths { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.turn-ctx .tctx-path {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  min-height: var(--tctx-line-h);
+  min-width: 0;
+  padding-block: calc((var(--tctx-line-h) - 1.4em) / 2);
+  color: var(--tctx-ink-soft);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+.turn-ctx .tctx-path > .tctx-icon { height: calc(var(--font-size-xs) * 1.4); }
+.turn-ctx .tctx-path-text { min-width: 0; overflow-wrap: anywhere; }
+.turn-ctx .tctx-path-sep { color: var(--tctx-ink-faint); }
+/* Each name is one line-breaking unit. A `root:branch` pair too long for its
+ * line breaks only after the colon (an inline block always allows a break
+ * before it), never at a hyphen of a name that fits a line of its own; only
+ * a name wider than its line wraps inside itself. A root followed by a branch
+ * keeps one column (1ch in the monospace face) for its colon, which baseline
+ * alignment sets at the end of the root's last line. */
+.turn-ctx .tctx-path-name { display: inline-block; max-width: 100%; }
+.turn-ctx .tctx-path-name:has(+ .tctx-path-branch) { max-width: calc(100% - 1ch); }
+
+/* ── Checklist: progress, the live edge, then the plan in order ───────── */
+.turn-ctx .tctx-todos { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.turn-ctx .tctx-todo-progress {
+  display: block;
+  height: 3px;
+  margin-bottom: var(--space-1);
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--tctx-fill);
+}
+.turn-ctx .tctx-todo-progress-fill { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.turn-ctx .tctx-todo-list { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.turn-ctx .tctx-todo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--tctx-ink-soft);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+/* The mark centres on the first line box, so a wrapped item keeps its mark
+ * beside its first line. */
+.turn-ctx .tctx-todo-mark {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 1.45em;
+  color: var(--tctx-ink-faint);
+}
+.turn-ctx .tctx-todo-mark svg { width: 10px; height: 10px; }
+.turn-ctx .tctx-todo-text { min-width: 0; overflow-wrap: anywhere; }
+.turn-ctx .tctx-todo-current { color: var(--tctx-ink); font-weight: var(--weight-medium); }
+.turn-ctx .tctx-todo-in_progress .tctx-todo-mark { color: var(--accent); }
+.turn-ctx .tctx-todo-completed { color: var(--tctx-ink-faint); }
+.turn-ctx .tctx-todo-completed .tctx-todo-mark { color: var(--accent); }
+.turn-ctx .tctx-todo-blocked,
+.turn-ctx .tctx-todo-blocked .tctx-todo-mark { color: var(--error-text); }
+
+/* ── Fold: the same facts as one line under the message header ────────────
+ * Shown exactly when the pane cannot grant the rail a track. Its DOM home is
+ * inside `.message-content`, between header and body: a direct Turn child
+ * would auto-place into the zero-width track and paint nothing. */
+.tctx-fold {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-bottom: var(--space-2);
+  overflow: hidden;
+  color: var(--tctx-ink-soft);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+.tctx-fold > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tctx-fold .tctx-fold-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+@container chatpane (min-width: 1056px) {
+  .tctx-fold { display: none; }
+}

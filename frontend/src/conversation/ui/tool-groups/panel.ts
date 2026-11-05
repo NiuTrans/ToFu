@@ -4,7 +4,7 @@ import { presentToolExecutionPanel } from '../../presentation/tool-execution-gro
 import { narrationByRound } from './narration';
 import type { ToolGroupRound, ToolNarrationSegment, ToolGroupPorts, ToolGroupSession } from './contracts';
 export function renderToolPanel(allRounds: readonly ToolGroupRound[], segments: readonly ToolNarrationSegment[] | undefined, ports: ToolGroupPorts, session: ToolGroupSession): string {
-  const anyActive = allRounds.some((r) => r.status === "searching" || r._swarmActive);
+  const anyActive = allRounds.some((r) => r.status === "searching" || r.status === "queued" || r._swarmActive);
   /* The header counts REAL tool rounds only — never the display-only
    *   inject chips (swarm-inbox / peer / steer / stall-nudge) that ride the
    *   panel for chronological context. They are not calls the model made, and

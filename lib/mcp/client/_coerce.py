@@ -103,9 +103,10 @@ def _coerce_args_to_schema(
 
 
 # MCP ToolAnnotations behavioural hints: (wire camelCase, v2 SDK snake_case).
-# The execution partition (read vs write) continues to key off readOnlyHint
-# alone — see lib/tasks_pkg/tool_dispatch/_flags.py — so exposing the other
-# hints here must never widen that partition.
+# The execution partition (read vs write) keys off readOnlyHint alone, plus a
+# catalog's host-reviewed read list (lib.mcp.registry.reviewed_read_only_tools)
+# — see lib/tasks_pkg/tool_dispatch/_flags.py — so exposing the other hints
+# here must never widen that partition.
 _ANNOTATION_HINTS = (
     ('readOnlyHint', 'read_only_hint'),
     ('destructiveHint', 'destructive_hint'),

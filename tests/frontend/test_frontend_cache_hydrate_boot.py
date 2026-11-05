@@ -191,6 +191,7 @@ let _okSequence = __OK_SEQUENCE__;   // e.g. [false,false,true] or [false,false,
 async function loadConversationCatalog(){
   _loadCalls++;
   // Simulate the REAL contract: swallows the tunnel error and RESOLVES.
+  runtimeScope.conversationCatalogAvailability?.settled(serverLoadOk());
   return undefined;
 }
 function serverLoadOk(){
@@ -245,7 +246,12 @@ def _run_recon(ok_sequence, neuter_trigger=False, concurrent=False, neuter_idemp
     if neuter_trigger:
         # NEUTER: the backoff never actually retries / shows the banner.
         backoff = "async function _bootReconnectWithBackoff() { return; }"
-    fns = "let _bannerEverShown=false; let _bannerShowCount=0;\n" + show + "\n" + clear + "\n" + backoff
+    fns = ("let _bannerEverShown=false; let _bannerShowCount=0;\n"
+           + show + "\n" + clear
+           + "\nruntimeScope.conversationCatalogAvailability = {"
+           + "retryStarted: _showBootReconnectBanner,"
+           + "settled: (ok) => { if (ok) _clearBootReconnectBanner(); else _showBootReconnectBanner(); },"
+           + "};\n" + backoff)
     script = (_RECON_HARNESS
               .replace("__FNS__", fns)
               .replace("__OK_SEQUENCE__", json.dumps(ok_sequence))

@@ -77,6 +77,11 @@ VERDICT_FIRST_BOOT = 'first_boot'   # no prior marker — nothing to classify
 VERDICT_CLEAN = 'clean'             # previous exit ran a graceful path
 VERDICT_UNCLEAN = 'unclean'         # previous process died dirty → OS kill
 
+# This process's boot report. A retried startup phase re-enters
+# report_and_arm after the first call already re-armed the marker for this
+# live process; reading it again would report ourselves as an OS kill.
+_this_process_report: dict[str, Any] | None = None
+
 
 def marker_path() -> str:
     """Absolute path to the shutdown marker file."""
@@ -280,8 +285,12 @@ def report_and_arm() -> dict[str, Any]:
     the caller (startup recovery) can tag recovered turns ``killed`` vs
     ``manual``. An ``unclean`` verdict is logged at ERROR and audited so the
     silent-kill incident is finally visible in ``logs/error.log`` +
-    ``logs/audit.log``.
+    ``logs/audit.log``. Later calls in the same process return the first
+    report without classifying, recording or arming again.
     """
+    global _this_process_report
+    if _this_process_report is not None:
+        return dict(_this_process_report)
     cls = classify_previous_shutdown()
     verdict = cls['verdict']
     if verdict == VERDICT_UNCLEAN:
@@ -317,6 +326,7 @@ def report_and_arm() -> dict[str, Any]:
         logger.warning('[shutdown_marker] boot-ring/storm check failed (non-fatal): %s', e)
         cls['restart_storm'] = False
     arm()
+    _this_process_report = dict(cls)
     return cls
 
 

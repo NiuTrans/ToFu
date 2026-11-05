@@ -19,6 +19,10 @@
  * @returns {Promise<'steer'|'queue'|'cancel'>}
  */
 async function _promptInjectMode(convId) {
+  /* Talking to a bound Coordinator (a project's, the Global Router or the
+   * Watchdog) is chat: steer into its live reply without asking (the server
+   * queues the message once that window closed). */
+  if (runtimeScope.isCoordinatorConversation?.(convId)) return 'steer';
   if (typeof showChoice !== 'function') return 'cancel';
   const _tt = (k, d) => (typeof t === 'function' ? (t(k) !== k ? t(k) : d) : d);
   // Inline SVGs (§3.4 — no emoji). steer = pen-to-line (interject into the
@@ -406,6 +410,14 @@ async function _submitComposerDraft() {
     await awaitSendPreparation(_waitForImageProcessing(), t('send.preparationTimeout'));
   }
   if (activeConvId !== selectionBeforePreparation) return;
+  // The project roots are captured below; an archive mounts its root only
+  // after its upload, so let it settle first.
+  if (pendingPdfTexts.some((entry) => entry?._archive && entry.method === 'parsing')
+      && typeof _waitForPendingArchives === 'function') {
+    await awaitSendPreparation(_waitForPendingArchives(), t('send.preparationTimeout'),
+      undefined, 2 * 60 * 1000);
+  }
+  if (activeConvId !== selectionBeforePreparation) return;
   const finalText = input.value.trim();
   if (!finalText && pendingImages.length === 0 && pendingPdfTexts.length === 0
       && pendingVideos.length === 0) {
@@ -542,7 +554,11 @@ async function _submitComposerDraft() {
   if (msgPayload.videos) draftProjection.videos = msgPayload.videos;
   if (turnContext) draftProjection._ctx = turnContext;
 
-  const sendStart = createSendStartupLease(conv, { timeoutMs: 90000 });
+  /* The lease is only the stop button's cancellation scope. Deadlines belong
+   * to each attempt inside retryTransientSendStartup: a whole-send timer
+   * shorter than the resolver's own recovery window abandoned sends that
+   * were about to succeed and made the user resend by hand. */
+  const sendStart = createSendStartupLease(conv, { timeoutMs: 0 });
   let willTranslate = false;
 
   let translationWait = null;
@@ -589,6 +605,11 @@ async function _submitComposerDraft() {
       _renderTranslatingBubble(label);
     }
   };
+  const announceAutomaticRetry = ({ retry, error }) => {
+    debugLog('Send retry #' + retry + ' after a transient failure: '
+      + (error?.message || String(error)), 'warn');
+    showSendPreparation('connecting', t('send.retrying', { n: retry }));
+  };
   showOptimisticEcho(injectMode);
   if (activeConvId === convId) {
     const welcome = document.getElementById('welcome');
@@ -602,16 +623,46 @@ async function _submitComposerDraft() {
     await _waitForVlmParsing(draftProjection, convId, sendStart.signal);
     if (sendStart.signal.aborted) throw _sendAbortError();
     if (draftProjection.pdfTexts) {
-      msgPayload.pdfTexts = draftProjection.pdfTexts;
+      /* A document still uploading at capture settled during the wait. One
+       * that now has a server reference joins the attachment lane (the same
+       * rule as capture); one that failed or never finished is dropped rather
+       * than reaching the model as an empty document. */
+      const settledReferences = draftProjection.pdfTexts.filter(
+        (documentAttachment) => documentAttachment?.attachmentId,
+      );
+      const legacy = draftProjection.pdfTexts.filter(
+        (documentAttachment) => documentAttachment
+          && !documentAttachment.attachmentId
+          && documentAttachment.method !== 'failed'
+          && documentAttachment.method !== 'parsing',
+      );
+      if (settledReferences.length > 0) {
+        msgPayload.attachments = [
+          ...(msgPayload.attachments || []),
+          ...settledReferences.map((documentAttachment) =>
+            typeof _documentPayloadForSend === 'function'
+              ? _documentPayloadForSend(documentAttachment) : documentAttachment),
+        ];
+      }
+      if (legacy.length > 0) msgPayload.pdfTexts = legacy;
+      else delete msgPayload.pdfTexts;
+      if (legacy.length + settledReferences.length < draftProjection.pdfTexts.length) {
+        const skipped = t('upload.documentSkipped');
+        if (typeof showToast === 'function') showToast(skipped, 'warning');
+        else debugLog(skipped, 'warn');
+      }
     }
 
     const {
       config: sendConfig,
       settings: sendSettings,
-    } = await awaitSendPreparation(_buildConvSubmission(conv, {
-      ...projectAtSend, folderId: folderAtSend,
-    }),
-      t('send.preparationTimeout'), sendStart.signal);
+    } = await retryTransientSendStartup({
+      signal: sendStart.signal,
+      run: (signal) => _buildConvSubmission(conv, {
+        ...projectAtSend, folderId: folderAtSend,
+      }, { signal }),
+      onRetry: announceAutomaticRetry,
+    });
     draft.submittedModelId = sendConfig.model;
     sendConfig.assistantMsgId = (typeof _newClientMsgId === 'function')
       ? _newClientMsgId()
@@ -642,16 +693,21 @@ async function _submitComposerDraft() {
     let acknowledgement;
     let selectedInjectMode = injectMode;
     for (let submissionAttempt = 0; submissionAttempt < 2; submissionAttempt += 1) {
-      const turnExtra = buildTurnSubmissionExtra({
-        commandId: draft.commandId,
-        settings: sendSettings,
-        config: sendConfig,
-        signal: sendStart.signal,
-        injectMode: selectedInjectMode,
-      });
       try {
-        acknowledgement = await runtimeScope.ConversationTurnStore
-          .submitConversation(conv, msgPayload, sendConfig, turnExtra);
+        /* Every repeat sends the same frozen request and command identity,
+         * so a commit whose ACK was lost replays instead of duplicating. */
+        acknowledgement = await retryTransientSendStartup({
+          signal: sendStart.signal,
+          run: (signal) => runtimeScope.ConversationTurnStore.submitConversation(
+            conv, msgPayload, sendConfig, buildTurnSubmissionExtra({
+              commandId: draft.commandId,
+              settings: sendSettings,
+              config: sendConfig,
+              signal,
+              injectMode: selectedInjectMode,
+            })),
+          onRetry: announceAutomaticRetry,
+        });
         break;
       } catch (submissionError) {
         if (submissionAttempt > 0 || selectedInjectMode
@@ -816,8 +872,9 @@ async function _submitComposerDraft() {
     updateSendButton();
   }
   /* The outer serializer may drain one send intent received while this
-   * command was in flight. A user stop or uncertain/non-committed failure is
-   * a hard boundary: leave the restored draft for an explicit retry. */
+   * command was in flight. Transient failures never reach this point; a user
+   * stop or definitive failure is a hard boundary that leaves the restored
+   * draft with the user. */
   return accepted && !userStopped;
 }
 

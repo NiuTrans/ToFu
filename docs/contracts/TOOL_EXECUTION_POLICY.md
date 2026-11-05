@@ -11,14 +11,242 @@ paths mint an exact, expiring, single-use gateway receipt before the handler
 can install. Scope, origin verification, bounded attempts, and immediate
 instruction disclosure are owned by [the skills contract](../modules/skills.md).
 
+## Concurrent tool rounds (owner decision 2026-10-28)
+
+**Problem:** every write-partition call — `run_command`, file writes,
+non-read-only MCP tools, `kill` — ran one at a time on the dispatcher thread,
+and `ask_human`/`await_task(wait)` plus blocking approvals ran inline in the
+admission loop before any sibling started. A round of N slow commands cost the
+sum of their durations, and one pending human answer or approval held back
+every unrelated call of the round.
+
+**Decision:** `execute_tool_pipeline` admits a round without blocking (parse,
+authority and reusable-result checks), then `tool_dispatch/_execution.py`
+starts every admitted call at once on the shared demand executor; its
+idle-reuse hint never caps concurrency. Approval, the post-approval Stop check,
+human-wait argument injection and pre-hooks run on the call's own worker, so a
+pending human decision delays only that call; one invocation-local lock keeps
+settlement exactly-once while refusals settle from workers. Order survives
+only where concurrent starts would silently change what sequential calls meant
+and keeping it is cheap (`tool_dispatch/_ordering.py`):
+
+- mutations of the same resolved file (`write_file`, `edit_file`,
+  `apply_diff(s)`, `insert_content(s)`, compared after canonical rebinding and
+  symlink resolution), `desktop_write_file` calls on the same device path,
+  memory mutations of the same `memory_id`, and browser page actions on the
+  same `tab_id` (an action without one conflicts with every tab) apply in call
+  order; a successor waits for its predecessor's approval and handler before
+  its own approval starts;
+- `todo_write` revisions apply in call order;
+- every `run_command` working directory is frozen at admission in call order,
+  so a sticky `working_dir` set earlier in the round is honoured, and after the
+  round the sticky directory is re-asserted to the call-order result. A command
+  that inherits an earlier sibling's directory waits for that sibling's
+  admission verdict (never its completion) before its own approval: a sibling
+  refused at approval, by a pre-hook or by Stop never moved the sticky
+  directory, so the command falls back to the previous candidate.
+
+Tool messages still replay in provider call order. Each call keeps its former
+lane's contract: writes, ordered state and ratified human waits have no pool
+ceiling and no declared timer, run admission and handler in a copy of the
+dispatcher's context (for example the swarm progress sink that `run_command`
+output feeds), and after Stop are joined and keep their own receipt and effect
+evidence. Every other call keeps the bounded contract: the pool ceiling and its
+declared timer, measured from handler entry, and the Stop placeholder. A call
+not yet in its handler when Stop arrives settles `aborted` without entering it.
+A round that writes still never caches its write-sensitive reads, and
+approval receipts mutate under the task receipt lock. Several foreground
+commands can now run in one task on every execution path (see "Per-command
+slots on every execution path" below): the task's single-command slots (the
+`_subprocess_pid` mirror read by the interrupt route, abort signal and stall
+reaper, and `_cmd_handoff_control` read by the background route) name the
+newest live command and fall back to the next one when it exits or detaches;
+a background request reaches the exact call it names, every command can hand
+off on its own elapsed time or a steer, and an interrupt addressed to one live
+command is never consumed or voided by its sibling's read loop. The streaming
+pre-executor still starts only read-only calls while a response streams; side
+effects start only once the response is final.
+
+**Alternatives rejected:** keeping a serial write lane, a global write lock or
+a per-tool-name lock (each reintroduces the serial lane); ordering every
+mutation of a round (loses most of the gain for unrelated files); deciding
+approvals on the dispatcher before starting siblings (a pending approval still
+delays their settlement); freezing only explicit `working_dir` values (a later
+call without one races the earlier sticky update); serializing foreground
+commands to keep the single-command slots (forfeits command overlap). Writes
+without a declared target (`run_command`, MCP tools) are not target-ordered:
+their targets are unknowable, and the owner asked for them to overlap.
+
+Known limits: native-application rounds follow these rules through the
+settled call order ("Native application rounds" below), where a sibling counts
+as admitted once it is approved, because Rust decides a round's approvals
+before any call starts. The interrupt route and the durable interrupt sweep
+still name the newest live command, not a chosen one.
+
+Measurement (`/tmp` harness through the real pipeline, executor replaced by a
+0.5 s sleep, median of three rounds): 4 writes 2.005 s → 0.506 s, 8 writes
+4.009 s → 0.514 s. `tests/tools/test_parallel_dispatch_overlap.py` pins overlap,
+same-target order, waits, approvals, Stop, replay order, working directories
+and the max-not-sum round time; `tests/tasks_pkg/test_run_command_background_handoff.py`
+pins concurrent foreground commands.
+
+### Per-command slots on every execution path
+
+**Problem:** the per-command view lived only in the conversation handoff
+proxy. Swarm, Goal and Flow workers, headless requests, Evolution and timers
+ran `run_command` on the task itself: the first command to finish erased the
+live sibling's PID mirror, a sibling's read loop voided an interrupt addressed
+to another live command, and the stall watchdog judged task-level silence and
+interrupted the newest command. A stalled command beside a finished sibling
+therefore failed the whole worker task, and a chatty newest command could be
+interrupted in place of the silent one.
+
+**Decision:** `lib/project_mod/foreground_command_slots.py` owns the per-task
+foreground-command registry. Both `run_command` runners always run against a
+`CommandTaskView` (the conversation `DetachableCommandTask` extends it with
+handoff), so every path publishes each command's PID into the registry, keeps
+the mirror on the newest live command, hides an interrupt addressed to a live
+sibling and voids it only once that pid no longer runs. Each command keeps its
+own output clock. The stall watchdog (`reap_stuck_running_tasks`, judging with
+`lib/tasks_pkg/liveness.py`) interrupts the live command whose own output has
+been silent longest past `TOFU_STUCK_TASK_MAX_SILENT_SECS`, while the dispatch
+heartbeat is stale; a sibling's output no longer hides it, and siblings keep
+running. Only an interrupt that a live command leaves unconsumed past its
+grace, with both task clocks stale, fails the task. The same ladder applies to
+Swarm, Goal and Flow workers: a worker's silent command is interrupted and the
+worker continues; a wedged worker settles with its own typed stall. Stop still ends every command, and a stdin prompt
+keeps only its own command in the foreground. Child invocations still never
+hand a running command off (they own no conversation delivery); each
+concurrent call can choose `background=true` and read its handle with `poll`.
+A Flow parent blocked on a child invocation advances its clocks only through
+child events, so it publishes the wait (`explained_wait.child_invocation_wait`)
+and the reaper treats its silence as explained while that child is live: the
+child's silent command is interrupted, never the whole Flow turn. Once the
+child is stopped or settled, the parent's own clocks decide again, counting
+from the end of that wait (`liveness.silence_origin`).
+
+**Alternatives rejected:** clearing the mirror only when it names the
+command's own pid (a live sibling still disappears when the newest command
+exits first); keeping the task-level silence gate for the interrupt (a chatty
+sibling hides a stalled command until it exits, and the newest command is
+interrupted instead); a second registry inside `run_command.py` beside the
+proxy's (two owners of one mirror); wrapping only `run_with_steer_handoff`'s
+unattended branch (misses the Evolution and other direct runner callers).
+Specs: section 7 of `tests/tasks_pkg/test_run_command_interrupt.py` (real
+subprocesses on an unattended worker task: interrupt one, watchdog after a
+sibling exits, watchdog beside a chatty sibling, Stop, background beside a
+foreground command) and the stdin case in
+`tests/tasks_pkg/test_run_command_background_handoff.py`; the interrupt,
+watchdog and stdin specs fail on the previous code.
+
+### Task counters written by concurrent calls
+
+**Problem:** with every call of a round running at once, handler-owned
+read-modify-write updates on the task lose increments: the three-attempt skill
+install budget admitted a fourth install, two identical `search_tools` calls
+both counted as the first, two searches dropped each other's disclosed
+schemas, and MCP search telemetry under-counted. **Decision:** each owner
+makes its update one step under a module-level leaf lock
+(`handlers/skills.py`, `handlers/tool_gateway.py` `_note_search_query`,
+`tools/disclosure_state.py`, `context_telemetry.record_mcp_search`), matching
+the existing task-local locks for execution budgets, receipts and media bytes.
+**Alternatives rejected:** serializing those tools in `_ordering` (loses their
+overlap for a microsecond update); a per-task lock dictionary on the task (state
+copied onto the task for no gain). Specs force every reader to read before any
+writer and fail on the previous code.
+
+## Native application rounds (owner decision 2026-10-28)
+
+**Problem:** the native application path kept the serial lane the Python
+dispatch removed. The Rust scheduler (`packages/tofu-runtime/src/tool_scheduler.rs`)
+started only explicitly qualified reads on their own workers and ran every
+write, `run_command` and `todo_write` one at a time on its dispatcher thread,
+and `NativeGateway.execute` serialized the same callbacks again behind one
+lock. Four 0.5 s writes took 2.02 s and eight took 4.05 s (peak overlap 1).
+
+**Decision:** application composition (`run_native_task`) selects
+`concurrent_tool_dispatch` in the stdio contract. Rust starts every admitted
+call of a round on its own joined worker (`Scheduler::concurrent`); a call
+waits only for the earlier calls the host names. The host names them on round
+settlement: `NativeGateway.prepare_response` runs the `_ordering` authority of
+`execute_tool_pipeline` (`tool_dispatch.api.plan_concurrent_round`) over the
+settled declarations and binds the result to the settlement's
+`NativeToolOrder`; the `round_ack` carries it as `tool_order` (model call ID
+to earlier call IDs). The same step freezes every `run_command` `working_dir`
+into its prepared occurrence in call order, and each finishing command
+re-asserts the call-order sticky directory. A command that inherits a
+sibling's directory settles it at its own decision
+(`CommandDirectoryPlan.resolve`): Rust decides a round's approvals one at a
+time in call order, so every earlier sticky-setting sibling is already decided
+(`settle` publishes each verdict), and a denied or never-decided sibling never
+moved the sticky directory. The gateway lock is not used in this mode. Results still replay in provider call order. Rust validates the
+order (earlier calls of the same response only; required on returned
+evidence, refused otherwise) before any approval or effect. A declared
+predecessor that never reached dispatch (denied or refused) is not awaited.
+A waiting call observes parent Stop and its deadline within 10 ms, and a batch
+Stop wakes it at once; it then settles (cancelled or deadline-exceeded) without
+entering its handler. Declared timeouts and the human-wait exemptions are
+unchanged: every callback still runs through `execute_tool_pipeline`, which
+applies them per call. An
+explicit `parallel_tool_names` keeps the read-qualified scheduler for callers
+that ask for it; the two selections exclude each other, and an archive that
+predates the field refuses the configuration before any provider or tool
+effect. Because this mode always settles the model's declarations,
+`tool_order` names model call IDs even when a recycled ID was reminted (see
+"Recycled model call IDs" below).
+
+**Alternatives rejected:** computing ordering keys in Rust (file identity
+needs the host's root resolution and symlink rules, so a second copy would
+diverge); ordering in the gateway alone (it cannot tell a denied or refused
+predecessor from one still in flight, so a successor could wait forever, and a
+Stop while waiting would need a fabricated result); sending every callback the
+batch membership (a new handler port for information the settlement already
+carries); settling an inheriting command's directory when it starts (its
+approval receipt is bound to the arguments its decision saw); keeping the
+ordered lane for writes (the owner decision).
+
+Known limits: native approvals are still decided one at a time, in call
+order, on the exclusive control slot before the round dispatches, so a pending
+human decision delays the start of the whole round rather than only its own
+call; a sibling that was approved but then refused by a pre-hook or Stop before
+its handler still counts as admitted for an inheriting command (its pre-hooks
+run after every approval of the round); a command refused before its handler
+does not move the sticky directory.
+
+Measurement (`/tmp` harness through a built archive, stdio host, gateway
+default Auto approval and the canonical pipeline; handler replaced by a 0.5 s
+sleep; median of three rounds): 4 writes to different files 2.018 s → 0.502 s,
+8 writes 4.052 s → 0.507 s (peak overlap 1 → N); 4 and 8 writes to one file
+stay ordered (2.017 s and 4.046 s, peak 1). Specs: Rust `tests/tool_scheduler.rs`
+and `tests/agent_stdio.rs` (`concurrent_*`, waiting-successor Stop and deadline),
+`tests/agent_core/test_native_process.py` (settlement ACK),
+`tests/tasks_pkg/test_native_gateway_concurrent.py` (including a denied
+sticky sibling) and the installed
+`tests/tasks_pkg/test_native_parallel_writes_installed.py` (N slow writes take
+about one write; writes to one file keep call order).
+
 ## Native application approval composition
 
-Native parallel qualification uses the same live write and ordered-state
-classification as ordinary dispatch. Only explicitly admitted read names may
-overlap; `todo_write` and writes remain ordered. Scheduling metadata supplies
+An explicitly read-qualified native composition still uses the live write and
+ordered-state classification: only admitted read names overlap there.
+Scheduling metadata (the qualification and the settled call order) supplies
 neither approval nor tool visibility. Original model occurrence IDs and argument
 proofs must both match the settled response before execution; equal arguments
 do not make two model occurrences interchangeable.
+
+Recycled model call IDs: when the gateway settles the model's declarations, a
+native decision precedes pipeline admission. A provider that repeats a call ID
+(positional `{tool}_{index}` IDs) made admission remint it after the receipt
+had been bound to the old ID, so the write fell back to a human decision
+(120 s, then Stop). `NativeGateway.prepare_response` applies admission's own
+remint rule first (`tool_dispatch.api.repair_prepared_call_ids`). Callbacks
+and checkpoint records keep naming the model's ID; the canonical row, receipt
+and effect use the admission ID. Alternative rejected: carrying a receipt
+across the remint inside admission, which cannot tell this occurrence's
+receipt from a stale one under the same ID. Known limit: a registered child's
+file-batch recovery refuses a batch whose model reused an earlier call ID,
+because its persisted effect carries the admission ID. Spec:
+`test_recycled_model_call_id_keeps_its_approved_identity`.
 
 Concurrent pipeline invocations own separate settlement/envelope carriers.
 Shared result caches, call-ID receipts, unchanged-result receipts and search
@@ -262,6 +490,27 @@ the execution allowlist revives revoked grants; admitting arbitrary `mcp__`
 names bypasses exact membership; rotating frozen wire breaks prefix stability.
 Verify assembly → refusal → recovery in
 `tests/mcp_protocol/test_mcp_declaration_lifecycle.py`.
+
+**Declaration slot encoding.** Problem: the frozen wire lives in conversation
+settings, and every catalog page, list, get and Turn settlement reads the whole
+header. As JSON text (live mean 10.7 KB, maximum 32 KB) it pushed 397 of 533
+native headers past the 8 KiB inline entity value bound, so a cold sidebar
+catalog page made one blob read per header (live mean 6.3 ms against 0.25 ms
+inline, over 16k payload segments on the shared volume) to project four
+settings keys. Decision: version-2 slots keep identity/reset semantics and
+store the exact wire JSON text zlib-compressed and base85-encoded; version-1
+text stays readable. One fail-soft post-ready pass per writer process
+(`start_legacy_slot_compaction`) re-encodes owned and copied version-1 slots
+through the existing settings snapshot CAS, leaving `updated_at`, `rev` and the
+decoded wire unchanged. Seeded from the live headers, blob-backed headers fell
+to 50 and catalog blob reads from 806 to 96 per page; wires whose compressed
+form still exceeds the bound stay correct but blob-backed. Alternatives
+rejected: a separate body record outlives conversation purge on both backends
+(the lifecycle-free records already rejected for this authority); an engine
+catalog projection index needs a native format change and backfill; dropping or
+reselecting the wire breaks prefix stability. Verify
+`tests/storage/test_mcp_declarations.py` on SQLite and native lanes.
+
 Retries of side-effecting tools require an idempotency contract. The generic
 LLM retry loop must not replay a completed write, webhook, browser action, or
 human-guidance resolution.
@@ -354,6 +603,42 @@ decoded from sparse canonical `toolContent`: validation failures project as
 warning-level skipped child rows, while an executed child's lifecycle owns its
 typed V2 code, message, and next action. The wrapper is not rendered twice.
 
+## Project-dispatch execution admission
+
+`project_dispatch.scope.admit_tool` is the single admission of a dispatch task in
+every executor: pipeline batch admission, the serial executor
+(`executor/_execute.py`) and streaming prefetch
+(`StreamingToolAccumulator._execute_one`). Each calls it before the
+Coordinator/Delegate role policies, approval, custom tool environments,
+speculative effects or handler resolution, and it never reads the catalog, so a
+missing or stale catalog projection cannot admit a tool. It is default deny in
+every mode (consult, files, project, coordinator): an ungranted name, any custom
+tool environment, or authority that cannot be re-established (lost grant
+carrier, revoked or rebound grant, unreadable record) raises
+`ToolAdmissionRefused`, which settles as failed `tool_call_rejected`. Only a
+cooperative Stop (`task['aborted']`) keeps its cancellation. A prefetch refusal
+only defers the call; the pipeline then refuses it and fails the turn.
+
+Problem: the serial executor ran the Coordinator role policy first. That policy
+resolves the dispatch continuation and folds any lookup failure into a
+model-visible "Coordinator policy unavailable" result, so a Worker whose grant
+carrier was lost or revoked continued its turn under the wrong role's refusal,
+a racing Stop of a Coordinator continuation became that soft result, and its
+ungranted calls became soft denials. Streaming prefetch never ran dispatch
+admission: with the request-owned contract documents absent it treats the call
+as legacy-permissive, so a consultation (no tools) performed `fetch_url` or
+`web_search` network effects before the pipeline refused the call. The files
+custom-environment refusal was a plain `AbortedError`, which settles as a user
+Stop. Decision: one typed boundary, called first by every executor.
+Alternatives rejected: relying on catalog or contract filtering (a projection,
+not authority); disabling prefetch for dispatch tasks (drops the latency win of
+project Workers and leaves the serial ordering wrong); teaching the role
+policies to tolerate dispatch errors (two authorities, and the soft-result path
+remains). Specification:
+`tests/project_mod/test_project_dispatch_executor_admission.py` (each mode with
+the catalog removed: ungranted name, custom environment, removed carrier, Stop,
+prefetch).
+
 ## Child process environment
 
 Commands and MCP validate string-only, NUL-free mappings at launch and resolve
@@ -369,6 +654,73 @@ persistent cache defaults and resolution against the final child PATH.
 launcher readiness checks; `lib/project_mod/run_command.py` keeps command
 credential admission and workspace Python selection. No caller mutates the
 server environment or evaluates login-shell startup files.
+
+Vault credentials selected through `credentials` reach only the child; their
+exact values never reach model-visible output. `_CommandRedaction` activates at
+the injection seam with the resolved `credential_env` and replaces each value
+with `[redacted credential: NAME]` in the returned text, in `on_chunk`
+progress, in the bounded capture before its head/tail cut, and in
+`_format_run_output`, the formatter every run_command and background-command
+result passes through. A per-stream redactor holds back only a trailing piece
+that could still begin a value, so a value split across reads is replaced
+whole. A recorded background wrapper keeps the values active in its worker's
+private context, where the result is rebuilt from the record files. Problem: a
+command printing `$GITHUB_TOKEN`, or a tool echoing an authenticated URL, put
+the secret into tool results, progress events and transcripts. Decision:
+exact-value redaction at the injection seam, before capture and truncation.
+Alternatives rejected: pattern-based secret detection (heuristic: misses opaque
+values, redacts non-secrets); redacting only the final text (the capture cut or
+a chunk boundary leaves a fragment); a process-global registry of injected
+values (redacts other commands' output and keeps plaintext for the process
+lifetime). Known limit: exact values only, not encoded forms (base64,
+URL-escaped).
+
+A background command's record files hold raw output, and a result rebuilt from
+them after a server restart (a command that finished or died while the server
+was down, or one reattached and settled later, including its `poll` and `kill`
+results) has no in-memory values. `record.json` therefore keeps `credentials`:
+each selected vault entry name with an opaque write revision (a digest of the
+entry's ciphertext; every write re-encrypts under a fresh IV), read at launch
+before the worker resolves the values. A result rebuilt without the launching
+worker re-resolves the values from the vault only while every revision is
+unchanged (`resolve_recorded_run_command_env`), proving they are the injected
+ones; a reattached watcher resolves once at reattachment. An entry deleted,
+changed or undecryptable since launch withholds the retained output behind
+`Output withheld (credential_unresolvable): …`, and a record without
+`credentials` (written before they were recorded, or unrecordable at launch)
+behind `Output withheld (credential_record_missing): …`; both keep the exit
+status, and a vault read failure leaves the record for the next recovery sweep.
+The record read redacts before its 200 KB head/tail cut and drops a fragment at
+either cut that could belong to a value split by it. Problem: recovered
+results delivered injected secrets into conversations. Decision: names and
+revisions in the record, values re-proven at read, fail closed otherwise.
+Alternatives rejected: persisting values or a reversible encryption of them (a
+second secret store beside the vault); names alone (a rotated or deleted entry
+leaves the old value unredacted); a digest of the value (offline-guessable for
+low-entropy secrets); delivering records without evidence unredacted.
+Verification: `tests/project_mod/test_run_command_credential_redaction.py`.
+
+Command children never inherit handles to the running server's storage
+instance. `_SERVER_PRIVATE_STORAGE_ENV`, declared beside the inherited-secret
+sanitizer in `lib/project_mod/run_command.py`, names
+`TOFU_STORAGE_CONNECTION_FILE`, `TOFU_STORAGE_TOKEN`, `TOFU_STORAGE_PARENT_PID`,
+`TOFU_STORAGE_SERVICE_ID` and `TOFU_STORAGE_SERVICE_STATE`; `_get_cmd_env` and
+workspace runtime preparation drop them through the same predicate. Storage
+configuration stays inherited: backend selection, `TOFUDB_BIN`, fastpath, RPC
+budgets and `PORT` let `debug/inspect_conversation.py` follow the configured
+backend to the application's loopback API or the read-only SQLite fastpath.
+Problem: with the connection file inherited, any script importing `lib.storage`
+selected the live engine as its attach target, and a SQL Sidecar started from a
+command would publish its own document to the live path. Decision: the set
+mirrors the instance transport keys the manager already excludes from its
+configuration identity (`serverctl_pkg/native_storage_host.py`); without them a
+script's `StorageSupervisor()` selects a managed child, which contends for the
+exclusive project lease instead of attaching. Alternatives: per-script
+`env -u` unsets depend on every caller remembering them; dropping every
+`TOFU_STORAGE_*`/`TOFUDB_*` name breaks backend-following diagnostics and engine
+checks; the pytest scrub in `tests/conftest.py` covers only pytest. Verification:
+`test_command_child_drops_live_storage_handles_but_keeps_storage_configuration`
+in `tests/tools/test_process_environment.py`.
 
 The command dispatcher passes the containing authorized root explicitly.
 The nearest complete `.venv` from cwd up to that root wins, including after
@@ -491,7 +843,7 @@ Verify `tests/tasks_pkg/test_tool_outcome_finality.py` and
 
 Settlement splits the record once. Complete text remains text; complete structured success uses its compact JSON value; partial/error results retain only actionable non-empty fields. Constant recovery plumbing (`observation: "new"`, `historicalRecovery: false`, the single-valued `kind: "source"`) stays server-side and is re-inflated from class defaults when the sparse projection is read back; so are source-recovery arguments that would merely restate the still-adjacent tool call — only genuinely narrowed replay queries (`read_files` slices) project `recovery.arguments`, and the constant `cursor: "0"` never projects at all. The bounded `v1` sidecar carries evidence outside provider messages. Artifact-policy tools expose at most 8,000 tokens and store recoverable overflow in the owner-scoped content-addressed repository. Source-policy tools may use the otherwise-idle 24,000-token round allowance and never copy overflow into that repository; the aggregate sibling ceiling stays 24,000 tokens.
 
-`grep_search` source recovery states exactly what was withheld. A capped or
+`search_files` source recovery states exactly what was withheld. A capped or
 char-limited result ends with a bounded two-line trailer naming the fired
 limit and the per-file remainder distribution (counts and line ranges from a
 short post-cap drain; index-path skipped chunks get an exact bounded count
@@ -500,7 +852,11 @@ Recovery is `path`/`include` narrowing when the remainder spreads across
 files and the `from_line` per-file line floor for paging one file — a
 line-number cursor like the `read_files` range, never a match ordinal. A
 drain that reaches the backend's natural EOF proves the page complete, so an
-exactly cap-sized result is not marked truncated.
+exactly cap-sized result is not marked truncated. Path-printing searches run
+with `--null`, so a path always ends at a NUL byte, and single-file searches
+print bare `lineno:` records. Line numbers, the `from_line` floor, match
+counts and per-file grouping therefore never depend on a `:` or `-N-` run
+inside a path or the content (log timestamps, dated file names).
 
 `read_files` source recovery preserves requested identities, shares preview
 space fairly, retains at most 20 public reads, and narrows replay to a shared
@@ -527,8 +883,37 @@ and uploaded text paths; small files are never widened. Bounds are positive and
 
 ## Timeouts and loop guards
 
-Timeout attribution is exact. The pool ceiling (`TOOL_PARALLEL_TIMEOUT`,
-default 300 s) bounds a whole parallel batch, and its verdict says so.
+Timeout attribution is exact. The ordinary pool ceiling (`TOOL_PARALLEL_TIMEOUT`,
+default 300 s) bounds each parallel occurrence from submission. Its collection
+deadline is the larger of that ceiling and the tool's declared timeout.
+Problem: a 300 s batch deadline cut off `await_project_workers` before its
+normal 1800 s wait result; its subsequent 1805 s timeout still expired during
+result collection. Decision: collect with independent deadlines and derive a
+bounded wait's execution deadline from the wait argument's JSON-schema
+maximum plus `TOOL_WAIT_COMPLETION_ALLOWANCE_MS` (60 s), the liveness budget
+for result collection and handler unwinding, instead of maintaining separate
+per-tool timeout constants. The schema declares defaults too: omitted
+`await_project_workers.timeout_seconds` waits 1800 s, while omitted `poll.wait_s`
+remains an instant snapshot. Per-call values select their own derived bound.
+The same rule covers command, task and swarm waits through `poll` and the
+compatibility `await_agents` and `check_background_command` surfaces. A
+registration wait is not synchronous (`await_device`), and an approval-policy
+TTL is not a wait (`set_approval_delegate`); neither gains this allowance.
+An expired occurrence requests its own runtime cancellation immediately and
+closes result publication; longer siblings continue and retained receipts
+stay unchanged. Worker waits and poll waits observe the same per-call
+cancellation through their existing interruption loops and unsubscribe their
+notifications. This abandons only the wait: no Worker, swarm agent or
+background command is restarted or cancelled by its timeout.
+Alternatives rejected: reducing the advertised wait would break the one-long-
+wait contract; another fixed per-tool deadline can again drift from its schema;
+one enlarged batch deadline prolongs unrelated hung tools; a human-wait
+exemption removes finite timeout and reaper safeguards. Verification:
+`tests/tasks_pkg/test_tool_parallel_deadlines.py`,
+`tests/tools/test_tool_declared_timeout.py` and the Coordinator worker suites.
+`poll`'s reaper-safe wait of up to 1500 s remains below the stuck-task silence
+threshold (`reaper_safe_wait_s`, normally 300 s of margin), and returns on
+completion, waiting input or its cap ([cost decision](../LLM_COST_OPTIMIZATION.md#long-waits-and-the-conversation-tail-ttl)).
 `ToolSpec.timeout_ms_by_name` declares a tool's own deadline: on expiry the
 call's runtime context is asked to cancel cooperatively, and only that timer's
 own firing replaces the late result with the canonical
@@ -625,8 +1010,8 @@ Only connected stdio servers share host workspace paths; network servers and des
 Unrelated parameters remain opaque: names such as `path` or `out_path` alone confer no policy.
 Declared files use admitted stable roots and canonical-to-execution mappings; all targets are checked before side effects.
 Unknown roots, traversal outside roots, escaping symlinks, readonly outputs and canonical/peer writes refuse invocation.
-Inputs must exist. Declared output parents are prepared only within authorized roots after cancellable lease admission.
-Read/write leases cover the call; transport cancellation is forwarded and ambiguous calls are not automatically replayed.
+Inputs must exist. Declared output parents are prepared only within authorized roots; no workspace lease is taken or awaited.
+Transport cancellation is forwarded and ambiguous calls are not automatically replayed; a call cancelled before invocation is refused.
 Receipts retain error, structured and media payloads and report effective absolute paths; transport failures never claim not-started.
 Path routing grants no remote publication approval or new root, and does not sandbox the external server process.
 External file writes retain their server durability/undo contract; directory preparation is not native file-history publication.
@@ -656,6 +1041,38 @@ host. This measures one received-DOM extraction, not network/LLM latency. No
 resident cache/concurrency is added; original fetch byte/deadline, expanded-text,
 artifact quota and lifetime bounds remain authoritative.
 
+
+**Fixed search defaults — Problem:** search had a host tuning layer: four
+profiles (fast/balanced/deep/custom), six numeric limits, an LLM relevance-gate
+toggle and link deepening, saved in `server_config.json`, shown in Settings and
+writable through `update_search_settings`. Under the saved deep profile every
+non-`site:` `web_search` in two days of production logs (6 of 6) ended at the
+45 s deadline. The gate judged 5 of 7 explicitly requested official
+documentation pages irrelevant, and it cost about eleven side-model calls per
+search (5,455 input characters each on average) for verdicts the lexical ranker
+already provides. Deepening fetched 0 of 4 deeper pages in the logged runs.
+**Decision:** search and fetch limits are tofu-search's own defaults; the host
+no longer re-declares them, and it keeps the gate off. The fetch blocklist and
+the optional search gateway are the only saved search settings. Settings,
+the server-config route and `update_search_settings` accept only those: the
+route drops retired keys from older clients, and the tool rejects them without
+writing. Operators keep the package's `FETCH_*` environment overrides.
+With the gate off, `fetch_url` no longer describes it or asks for a relevance
+`reason`; its schema shrank from 280 to 217 tokens (o200k) on every request
+that offers it.
+**Alternatives rejected:** choosing a better default profile keeps four presets
+and their controls for one value set; an opt-in gate toggle keeps a control
+that measurably removed requested evidence; deleting the gate from the package
+removes a feature that standalone callers configure.
+
+Live measurement (16 queries in two phases separated by the 120 s breaker
+cooldown, one host, network variance applies): with the deep profile and gate,
+the steady-state phase took 17.9 s median (19.6 s mean) and made 87 gate calls
+for 8 searches; with fixed defaults it took 4.5 s median (6.2 s mean), made no
+gate calls, found the authoritative source for 8 of 8 queries as before, and
+delivered about 10% fewer model-visible characters per search. The engine-wave
+change in `packages/tofu-search/docs/free-search.md` ("Waiting only for useful
+work") alone moved the median to 7.1 s.
 
 **Canonical preview retention — Problem:** representation differences caused false
 missing-source hints, while small omitted originals lacked a MODEL recovery ref.

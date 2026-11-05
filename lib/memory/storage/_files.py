@@ -513,38 +513,52 @@ def _list_memories_in_dir(
     The ``global`` sub-directory is excluded when scanning the project
     root — it is enumerated separately as scope='global'.
     """
-    flat_memories = []
+    return list(_iter_memories_in_dir(
+        dirpath, scope, include_body, record_view))
+
+
+def _iter_memories_in_dir(
+    dirpath,
+    scope='global',
+    include_body=True,
+    record_view='complete',
+):
+    """Yield :func:`_list_memories_in_dir` records lazily, in its order.
+
+    Flat memories come first in name order, then packages. Each record is
+    read only when the consumer asks for it, so an early-exit caller stops
+    reading files at its answer.
+    """
     package_entries = []
     for entry in _sorted_visible_dir_entries(dirpath):
         try:
-            if (entry.name.endswith('.md')
+            if not (entry.name.endswith('.md')
                     and entry.is_file(follow_symlinks=False)):
-                fingerprint_hint = None
-                if not include_body:
-                    fingerprint_hint = _memory_file_fingerprint_from_stat(
-                        entry.stat(follow_symlinks=False))
-                memory = _memory_from_file(
-                    entry.path,
-                    scope=scope,
-                    include_body=include_body,
-                    fingerprint_hint=fingerprint_hint,
-                    record_view=record_view,
-                )
-                if memory is not None:
-                    flat_memories.append(memory)
+                package_entries.append(entry)
                 continue
-            package_entries.append(entry)
+            fingerprint_hint = None
+            if not include_body:
+                fingerprint_hint = _memory_file_fingerprint_from_stat(
+                    entry.stat(follow_symlinks=False))
+            memory = _memory_from_file(
+                entry.path,
+                scope=scope,
+                include_body=include_body,
+                fingerprint_hint=fingerprint_hint,
+                record_view=record_view,
+            )
         except OSError:
             logger.debug('Memory entry disappeared during scan: %s',
                          entry.path, exc_info=True)
+            continue
+        if memory is not None:
+            yield memory
 
-    packages = []
     for entry in package_entries:
         memory = _memory_package_from_entry(
             entry, scope, include_body, record_view)
         if memory is not None:
-            packages.append(memory)
-    return flat_memories + packages
+            yield memory
 
 
 def _memory_summary_from_id_in_dir(dirpath, memory_id, scope='global'):

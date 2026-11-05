@@ -714,6 +714,48 @@ def _register_output_artifact_origin(task, round_entry, artifact, *,
     )
 
 
+def finalize_command_output(task, round_entry, progress, tool_content, *,
+                            runtime_context, command, tool_call_id,
+                            command_failed=False):
+    """Close captured output for both command surfaces, retaining failure evidence.
+
+    Call from the execution ``finally`` after retiring progress callbacks.
+    A failed command owns its original exception; secondary storage/projection
+    errors are logged rather than replacing it. Successful execution still
+    reports output-finalization errors through normal tool settlement.
+    """
+    finalize_output = getattr(progress, 'finalize_output', None)
+    if not callable(finalize_output):
+        return tool_content
+    from lib.tasks_pkg.handlers._background_command import is_background_command_result
+
+    incomplete = command_failed or (
+        runtime_context is not None and runtime_context.cancellation_requested
+    ) or '[Command timed out]' in tool_content or (
+        '[Command interrupted by' in tool_content
+    ) or is_background_command_result(tool_content)
+    try:
+        artifact = finalize_output(complete=not incomplete)
+        tool_content = _project_output_artifact(tool_content, artifact)
+        _register_output_artifact_origin(
+            task, round_entry, artifact,
+            tool_name='run_command', display=command, tool_call_id=tool_call_id)
+        if artifact.spilled:
+            round_entry['outputArtifact'] = {
+                'artifactRef': artifact.artifact_ref,
+                'sizeBytes': artifact.size_bytes,
+                'complete': artifact.complete,
+                'degraded': artifact.degraded,
+                'degradedReason': artifact.degraded_reason,
+            }
+    except Exception:
+        if not command_failed:
+            raise
+        logger.warning('Command output finalization failed after execution failure',
+                       exc_info=True)
+    return tool_content
+
+
 @tool_registry.special('__code_exec__', category='code',
                        description='Execute a shell command in the project sandbox')
 def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
@@ -743,6 +785,15 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         return tc_id, redirected.tool_content, False
     # Explicit mode uses the same durable completion lane as steer handoff.
     if fn_args.get('background'):
+        from lib.tasks_pkg.conversation_delivery import (
+            conversation_delivery_available, deferred_completion_refusal)
+        refusal = deferred_completion_refusal(task, fn_name, fn_args)
+        if refusal:
+            meta = {'toolName': 'code_exec', 'command': cmd, 'output': refusal,
+                    'exitCode': 'not-run', 'notRun': True, 'timedOut': False,
+                    'badge': 'unsupported'}
+            _finalize_tool_round(task, rn, round_entry, [meta], status='error')
+            return tc_id, refusal, False
         from lib.tasks_pkg.background_commands import (
             background_command_result, start_background_command,
         )
@@ -750,7 +801,7 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
             task=task,
             config=cfg,
             command=cmd,
-            execute=lambda bg_task: execute_standalone_command(
+            execute=lambda bg_task, _exec_ctx: execute_standalone_command(
                 fn_name, fn_args,
                 stdin_callback=None,
                 on_chunk=None,
@@ -759,10 +810,11 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
                 runtime_context=None,
                 task=bg_task,
             ),
+            credentials=fn_args.get('credentials'),
         )
         tool_content = background_command_result(
             cmd, bg_cmd_id, task=task,
-            has_conversation=bool(task.get('convId') and task.get('_userId')),
+            has_conversation=conversation_delivery_available(task),
         )
         meta = {
             'toolName': 'code_exec', 'command': cmd,
@@ -796,6 +848,8 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         if callable(detach):
             detach()
 
+    tool_content = ''
+    command_failed = True
     try:
         # task= (): without it the runner got task=None — the
         #   subprocess was NEVER registered (_subprocess_pid), so a silent
@@ -821,6 +875,7 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
                 task=command_task,
             ),
         )
+        command_failed = False
     finally:
         # Cancel the live-start timer for short commands, or join an in-flight
         # running checkpoint before the terminal round is emitted.
@@ -830,27 +885,10 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
             progress_cb.flush()
         except Exception as e:
             logger.debug('[code_exec] progress flush failed: %s', e)
-    artifact = None
-    finalize_output = getattr(progress_cb, 'finalize_output', None)
-    if callable(finalize_output):
-        backgrounded = is_background_command_result(tool_content)
-        incomplete = (
-            runtime_context is not None and runtime_context.cancellation_requested
-        ) or '[Command timed out]' in tool_content or (
-            '[Command interrupted by' in tool_content) or backgrounded
-        artifact = finalize_output(complete=not incomplete)
-        tool_content = _project_output_artifact(tool_content, artifact)
-        _register_output_artifact_origin(
-            task, round_entry, artifact,
-            tool_name='run_command', display=cmd, tool_call_id=tc_id)
-        if artifact.spilled:
-            round_entry['outputArtifact'] = {
-                'artifactRef': artifact.artifact_ref,
-                'sizeBytes': artifact.size_bytes,
-                'complete': artifact.complete,
-                'degraded': artifact.degraded,
-                'degradedReason': artifact.degraded_reason,
-            }
+        tool_content = finalize_command_output(
+            task, round_entry, progress_cb, tool_content,
+            runtime_context=runtime_context, command=cmd,
+            tool_call_id=tc_id, command_failed=command_failed)
     # Must anchor to END — command output may itself contain [exit code: N]
     m_exit = re.search(r'\[exit code: (-?\d+)\]\s*$', tool_content)
     exit_code = m_exit.group(1) if m_exit else '?'
@@ -964,13 +1002,14 @@ def _handle_check_background(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
             f'(elapsed {info["elapsed_s"]}s). Command: {info["command"][:200]}'
         )
         if wait_s:
+            from lib.tasks_pkg.conversation_delivery import completion_reaches
+            from lib.tools.background_guidance import background_wait_cap_advice
             waited = min(wait_s, WAIT_BACKGROUND_COMMAND_MAX_S)
             clamp = (f' (wait_s clamped to {WAIT_BACKGROUND_COMMAND_MAX_S:g}s)'
                      if wait_s > WAIT_BACKGROUND_COMMAND_MAX_S else '')
             tool_content += (
-                f'\n\nWaited {waited:g}s{clamp}. Use '
-                f'poll(id={command_id!r}, wait_s=60) only when no useful work '
-                f'remains, or end the turn — completion is delivered automatically.')
+                f'\n\nWaited {waited:g}s{clamp}. ' + background_wait_cap_advice(
+                    command_id, automatic_delivery=completion_reaches(task, info)))
 
     meta = _build_simple_meta(
         fn_name, tool_content, source='BackgroundCommand',

@@ -2,6 +2,7 @@
 from copy import deepcopy
 from types import SimpleNamespace
 import threading
+import time
 
 import pytest
 
@@ -31,9 +32,17 @@ def runtime(base_runtime, monkeypatch):
         'actor': 'assistant', 'parentTurnId': 'human-turn'}
     r.turns['human-turn'] = r.c.turn
     r.attempts['coordinator-attempt'] = {'conversationId': 'coordinator', 'turnId': 'coordinator-turn',
-        'attemptId': 'coordinator-attempt', 'taskId': r.task['id'], 'status': 'running', 'createdAt': 1_000_000}
+        'attemptId': 'coordinator-attempt', 'taskId': r.task['id'], 'status': 'running', 'createdAt': 1_000_000,
+        'config': deepcopy(r.task['config'])}
     r.c.repo.turn_get = lambda conv, turn, **kw: deepcopy(r.turns.get(turn))
-    r.c.repo.attempt_get = lambda attempt, **kw: deepcopy(r.attempts.get(attempt))
+
+    def attempt_get(attempt, *, user_id=None, include_execution_config=False):
+        # Like turn.attempt.get: the accepted execution config only on request.
+        row = deepcopy(r.attempts.get(attempt))
+        if isinstance(row, dict) and not include_execution_config:
+            row.pop('config', None)
+        return row
+    r.c.repo.attempt_get = attempt_get
     monkeypatch.setattr(repository, 'ProjectDispatchRepository', lambda owner, path: r.c.repo)
     monkeypatch.setattr(workers, 'ProjectDispatchRepository', lambda owner, path: r.c.repo)
     class Commands:
@@ -55,8 +64,23 @@ def runtime(base_runtime, monkeypatch):
     r.service = ProjectDispatchService(r.c.repo, commands=Commands(),
         turn_get=r.c.repo.turn_get, attempt_get=r.c.repo.attempt_get)
     monkeypatch.setattr(workers, 'ProjectDispatchService', lambda repo: r.service)
+    # '/project' is a fake port; the real isolation preflight is specified on real directories.
+    monkeypatch.setattr(workers, 'require_isolated_worker_root', lambda project: None)
+    # Waits read the Coordinator's real project mailbox through the record store.
+    from lib.storage import service as storage_service
+    from tests.swarm.test_retained_agents import RecordClient
+    records, conversation_storage = RecordClient(), storage_service._runtime.client()
+    class Storage:
+        def query(self, operation, payload):
+            return records.query(operation, payload)
+        def command(self, operation, payload, command_id):
+            owner = records if operation.startswith('record.') else conversation_storage
+            return owner.command(operation, payload, command_id)
+    monkeypatch.setattr(storage_service, '_runtime', SimpleNamespace(client=lambda **kwargs: Storage()))
+    r.c.conversations.snapshot = True
     capture_worker_policy(r.task, r.task['config'], [
-        {'function': {'name': name}} for name in ('run_command', 'read_files', 'write_file', 'spawn_agents', 'timer_create')], 'model-a')
+        {'function': {'name': name}} for name in ('run_command', 'read_files', 'write_file', 'spawn_agents', 'timer_create')], 'model-a',
+        worker_model='model-a')
     r.args = {'title': 'Implement one part', 'brief': 'Implement and verify the requested feature.', 'idempotency_key': 'part-one'}
     return r
 
@@ -64,7 +88,7 @@ def runtime(base_runtime, monkeypatch):
 def test_one_human_request_creates_and_starts_independent_worker_without_grant_click(runtime):
     r = runtime
     result = r.call('delegate_project_work', **r.args)
-    assert result['dispatch'] == 'accepted', result
+    assert result.get('dispatch') == 'accepted', result
     assert result['conversation_id'] != r.task['convId'] and r.calls == [result['conversation_id']]
     row = r.c.repo.read(result['assignment_id'])
     assert row['request']['authorizationSource'] == r.c.request['authorizationSource']
@@ -77,6 +101,21 @@ def test_one_human_request_creates_and_starts_independent_worker_without_grant_c
     assert replay == result and len(r.calls) == len(r.created) == 1
     assert 'error' in r.call('delegate_project_work', **{**r.args, 'brief': 'Different request'})
     assert len(r.calls) == len(r.created) == 1
+
+
+def test_project_history_lists_worker_without_delegation_and_exact_lookup_keeps_it(runtime, monkeypatch):
+    r = runtime
+    monkeypatch.setattr(r.c.repo, 'workspace_get', lambda *args, **kwargs: None)
+    result = r.call('delegate_project_work', **r.args)
+    stored = r.c.repo.read(result['assignment_id'])['request']
+    assert stored['delegation']['attemptId'] == 'coordinator-attempt'
+    listed = r.service.history_page(principal=r.c.principal)['assignments']
+    row = next(view for view in listed if view['assignmentId'] == result['assignment_id'])
+    assert row['request'] == {name: stored[name] for name in
+                              ('projectPath', 'coordinatorId', 'recipientId', 'brief', 'profile')}
+    exact = r.service.history_page(principal=r.c.principal, assignment_id=result['assignment_id'])
+    assert exact['assignments'][0]['request'] == stored
+    assert r.c.repo.read(result['assignment_id'])['request'] == stored
 
 
 @pytest.mark.parametrize('violation', ['synthetic', 'unattended', 'source', 'attempt', 'parent', 'plan', 'readonly', 'binding', 'no-policy', 'model-argument'])
@@ -99,19 +138,144 @@ def test_invalid_source_never_creates_conversation_or_grant(runtime, violation):
     assert not r.created and not r.calls and not r.c.repo.list()
 
 
-def test_reserved_allowance_blocks_extra_workers_and_confirmed_usage_releases_it(runtime, monkeypatch):
+def test_workers_have_no_spend_or_concurrency_ceiling(runtime, monkeypatch):
     r = runtime
-    monkeypatch.setattr('runtime_guards.task_concurrency_hard_ceiling', lambda: 10)
-    results = [r.call('delegate_project_work', **{**r.args, 'idempotency_key': str(i)}) for i in range(8)]
+    monkeypatch.setattr('runtime_guards.task_concurrency_hard_ceiling', lambda: 2)
+    results = [r.call('delegate_project_work', **{**r.args, 'idempotency_key': str(i)}) for i in range(12)]
     assert all(item.get('dispatch') == 'accepted' for item in results), results
-    denied = r.call('delegate_project_work', **{**r.args, 'idempotency_key': 'next'})
-    assert 'reserved or exhausted' in denied['error'] and len(r.created) == 8
-    first = r.c.repo.read(results[0]['assignment_id'])
-    r.attempts[first['execution']['attemptId']]['status'] = 'completed'
-    # This worker made no physical model call. Its confirmed unused reservation
-    # can be assigned again; unfinished workers retain their whole allowance.
-    admitted = r.call('delegate_project_work', **{**r.args, 'idempotency_key': 'next'})
-    assert admitted['dispatch'] == 'accepted' and len(r.created) == 9
+    assert all(r.c.repo.read(item['assignment_id'])['request']['budget'] == {} for item in results)
+    assert all('maxConcurrent' not in r.c.repo.read(item['assignment_id'])['request']['delegation']['policy']
+               for item in results)
+    assert len(r.created) == len(r.calls) == 12
+
+
+def test_background_completion_continues_same_assignment_and_moves_result_to_new_turn(runtime, monkeypatch):
+    from lib.message_queue import dispatch_completed_background_batch
+    from lib.tasks_pkg import background_commands
+    r = runtime
+    worker = r.call('delegate_project_work', **r.args)
+    assignment = r.c.repo.read(worker['assignment_id'])
+    from lib.agent_core.execution_budget import model_budget_admission
+    from lib.project_dispatch import admission
+    binding = admission.TrustedDispatch(r.c.repo.admission(assignment['id']))
+    cfg = binding.capture({}, 7, binding.principal, worker['conversation_id'])
+    cfg['_turnOwnerUserId'] = 7
+    initial = {'id': assignment['execution']['taskId'], 'convId': worker['conversation_id'],
+               'status': 'running', '_userId': 7,
+               '_principalContext': binding.principal.to_payload(),
+               '_turnId': assignment['execution']['turnId'],
+               '_attemptId': assignment['execution']['attemptId'],
+               '_attended': False, 'usage': {}, 'config': cfg,
+               'abort_event': threading.Event()}
+    assert cfg['model'] == assignment['request']['model']
+    assert cfg.get('_turnPrincipalTenantId', '') == (binding.binding['tenant'] or '')
+    r.attempts[assignment['execution']['attemptId']]['taskId'] = assignment['execution']['taskId']
+    admission.bind_account(initial)
+    lease = model_budget_admission(initial)(input_tokens=4, max_output_tokens=6)
+    lease.mark_dispatched()
+    lease.settle({'prompt_tokens': 4, 'completion_tokens': 6})
+    old = assignment['execution']
+    old['taskId'] = 'project-worker:' + assignment['id']
+    r.attempts[old['attemptId']]['taskId'] = old['taskId']
+    r.attempts[old['attemptId']]['status'] = 'interrupted'
+    r.turns[old['turnId']].update(status='interrupted', projectionRevision=1,
+        settlement={'cause': 'server_restart', 'resumeOptions': [{'operation': 'continue', 'anchor': {}}]})
+    monkeypatch.setattr(background_commands, 'conversation_results_complete', lambda **kwargs: True)
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    monkeypatch.setattr(chat_task_runtime, 'snapshot_owned', lambda **kwargs: [])
+    import lib.message_queue as queue
+    monkeypatch.setattr(queue, 'next_dispatchable_turn', lambda *args, **kwargs: None)
+    queued = []
+    class QueueClient:
+        def command(self, operation, payload, command_id):
+            assert operation == 'queue.enqueue'
+            queued.append(payload)
+            return {'queueId': payload['queue_id']}
+        def query(self, operation, payload):
+            assert operation == 'queue.list'
+            return []
+    monkeypatch.setattr(queue, '_queue_client', lambda **kwargs: QueueClient())
+    monkeypatch.setattr('lib.message_queue._background_receipts', lambda *args, **kwargs: [{
+        'queueId': 'receipt-1', 'kind': 'background_receipt', 'timestamp': 1,
+        'config': deepcopy(r.attempts[old['attemptId']].get('config') or {
+            'model': 'model-a', '_projectDispatchAdmission': r.c.repo.admission(assignment['id']),
+            'canonicalProjectPath': '/project', 'projectPath': '/project'}),
+    }])
+    dispatched = []
+    def create(conv, turn_id, owner, body, **kwargs):
+        new_turn, new_attempt = turn_id, 'continuation-attempt'
+        trusted = kwargs['trusted_dispatch']
+        r.turns[new_turn] = {'conversationId': conv, 'turnId': new_turn,
+                             'actor': 'assistant', 'projectionRevision': 1,
+                             'projection': {'content': ''}, 'status': 'running'}
+        r.attempts[new_attempt] = {'conversationId': conv, 'turnId': new_turn,
+                                  'attemptId': new_attempt, 'taskId': old['taskId'],
+                                  'status': 'running'}
+        continued = trusted.continue_execution(new_turn, new_attempt)
+        assert continued['execution']['attemptId'] == new_attempt
+        dispatched.append(body)
+        return SimpleNamespace(value={'attempt': r.attempts[new_attempt]})
+    from lib.conversation_sync.runtime import conversation_turn_commands
+    monkeypatch.setattr(conversation_turn_commands, 'resume_turn', create)
+    assert dispatch_completed_background_batch(assignment['request']['recipientId'], user_id=7) == 'continuation-attempt'
+    continued = r.c.repo.read(assignment['id'])['execution']
+    assert continued['turnId'] == old['turnId'] and continued['attemptId'] == 'continuation-attempt'
+    assert continued['taskId'] == old['taskId']
+    assert dispatched[0]['config']['_projectDispatchAdmission']['assignmentId'] == assignment['id']
+    r.turns[old['turnId']]['projection'] = {'content': 'Consolidated result'}
+    r.attempts['continuation-attempt']['status'] = 'completed'
+    r.attempts['coordinator-attempt']['status'] = 'completed'
+    stored = r.c.repo.read(assignment['id'])
+    stored['request']['delegation']['policy']['continuation'] = {
+        'version': 1, 'model': 'model-a', 'workerModel': 'model-a',
+        'workerTools': ['read_files', 'write_file', 'run_command'],
+        'tools': ['get_project_workers', 'get_project_assignment']}
+    def add_policy(value):
+        row = next(row for row in value['assignments'] if row['id'] == assignment['id'])
+        row['request']['delegation']['policy']['continuation'] = deepcopy(
+            stored['request']['delegation']['policy']['continuation'])
+        return row
+    r.c.repo._change(add_policy)
+    outcome = r.call('await_project_workers', assignment_ids=[assignment['id']], timeout_seconds=0)
+    assert outcome['wait'] == 'settled' and outcome['workers'][0]['result_excerpt'] == 'Consolidated result'
+    assert outcome['workers'][0]['turn_id'] == old['turnId']
+    from lib.project_dispatch import continuation
+    original = continuation.recover_coordinator
+    wakes = []
+    def wake(repository, **kwargs):
+        result = original(repository, **kwargs)
+        wakes.append(result)
+        return result
+    monkeypatch.setattr(continuation, 'recover_coordinator', wake)
+    from lib.project_dispatch import recovery
+    recovery.recover_project_dispatch(7, '/project', repository=r.c.repo,
+                             service=r.service, was_aborted_after=lambda *args: False,
+                             clock=lambda: r.c.now[0])
+    assert wakes and all(result == ['accepted'] for result in wakes), wakes
+    from lib.agent_core.execution_budget import model_budget_admission
+    from lib.project_dispatch import admission
+    binding = r.c.repo.admission(assignment['id'])
+    trusted = admission.TrustedDispatch(binding)
+    cfg = trusted.capture({}, 7, trusted.principal, assignment['request']['recipientId'])
+    cfg.update(_turnOwnerUserId=7, _turnId=old['turnId'], _attemptId='continuation-attempt',
+               _turnOperation='continue',
+               _resumeSource={'attemptId': old['attemptId'], 'taskId': old['taskId'],
+                              'status': 'interrupted', 'cause': 'server_restart'})
+    r.attempts['continuation-attempt'].update(status='running', taskId=old['taskId'])
+    restored = {'id': old['taskId'], 'convId': assignment['request']['recipientId'],
+                'status': 'running', '_userId': 7,
+                '_principalContext': trusted.principal.to_payload(),
+                '_turnId': old['turnId'], '_attemptId': 'continuation-attempt',
+                '_attended': False, 'usage': {}, 'config': cfg,
+                'abort_event': threading.Event()}
+    admission.bind_account(restored)
+    lease = model_budget_admission(restored)(input_tokens=4, max_output_tokens=6)
+    assert lease.ordinal == 2
+    lease.mark_dispatched()
+    lease.settle({'prompt_tokens': 5, 'completion_tokens': 7})
+    attempts = r.c.repo.read(assignment['id'])['modelAttempts']
+    assert [row['attempt_ordinal'] for row in attempts] == [1, 2]
+    assert sum(row['reported_tokens'] for row in attempts) == 22
 
 
 def test_wait_uses_terminal_notification_and_removes_subscription(runtime):
@@ -136,6 +300,37 @@ def test_wait_uses_terminal_notification_and_removes_subscription(runtime):
         thread.join(2)
     assert not thread.is_alive() and result[0]['wait'] == 'settled', result
     assert result[0]['workers'][0]['result_excerpt'] == 'Verified result'
+    assert worker['task_id'] not in admission._term_callbacks
+    assert len(r.calls) == 1
+
+
+def test_cancelled_wait_wakes_and_unsubscribes_without_stopping_the_worker(runtime, monkeypatch):
+    from lib.agent_core import admission
+    from lib.tasks_pkg.tool_runtime import ToolExecutionContext
+    r = runtime
+    subscribed = _subscriptions(monkeypatch)
+    worker = r.call('delegate_project_work', **r.args)
+    context = ToolExecutionContext(
+        task=r.task, round_num=1, tool_call_id='wait', tool_name='await_project_workers',
+        owner_user_id=7, round_entry={})
+
+    def cancel():
+        from lib.conversations.coordinator_workers import await_workers
+        from lib.conversations.coordinator_tools import _scope
+        scope = _scope(r.task)
+        return await_workers(
+            r.task, scope, {'assignment_ids': [worker['assignment_id']], 'timeout_seconds': 1800},
+            runtime_context=context)
+
+    results = []
+    thread = threading.Thread(target=lambda: results.append(cancel()))
+    thread.start()
+    assert subscribed(worker['task_id'])
+    context.request_resource_cancellation()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert results[0]['wait'] == 'timeout'
+    assert not r.task.get('aborted')
     assert worker['task_id'] not in admission._term_callbacks
     assert len(r.calls) == 1
 
@@ -182,20 +377,14 @@ def test_stop_of_original_request_prevents_new_grants_even_before_task_flag_catc
     assert not r.created and not r.c.repo.list()
 
 
-@pytest.mark.parametrize('limits', [{'max_tokens': 1000}, {'max_tokens': 0}, {'max_tool_calls': 10}])
-def test_explicit_source_execution_budget_cannot_be_bypassed_with_default_worker_pool(runtime, limits):
-    r = runtime; r.task['config']['executionLimits'] = limits
-    assert 'explicit execution budget' in r.call('delegate_project_work', **r.args)['error']
-    assert not r.created and not r.calls and not r.c.repo.list()
-
-
-def test_worker_deadline_cannot_outlive_original_request(runtime):
-    r = runtime; r.task['config']['executionLimits'] = {'deadline': 1005, 'max_tokens': None}
+def test_long_running_request_keeps_delegating_with_no_deadline(runtime):
+    r = runtime
     first = r.call('delegate_project_work', **r.args)
-    assert first['budget']['deadline'] == 1005
-    r.c.now[0] = 1006
-    assert 'deadline expired' in r.call('delegate_project_work', **{**r.args, 'idempotency_key': 'late'})['error']
-    assert len(r.created) == len(r.calls) == 1
+    assert first['dispatch'] == 'accepted' and 'budget' not in first
+    r.c.now[0] += 30 * 24 * 3600
+    late = r.call('delegate_project_work', **{**r.args, 'idempotency_key': 'late'})
+    assert late['dispatch'] == 'accepted', late
+    assert len(r.created) == len(r.calls) == 2
 
 
 def _worker_task(r):
@@ -290,3 +479,331 @@ def test_role_visible_delegation_keeps_request_authority_gates(runtime, violatio
     result = r.call('delegate_project_work', **r.args)
     assert 'error' in result
     assert not r.created and not r.calls and not r.c.repo.list()
+
+
+def test_plain_folder_is_prepared_and_delegation_proceeds(runtime, monkeypatch, tmp_path):
+    from lib.conversations import coordinator_workers as workers
+    from lib.project_dispatch import admission
+    r = runtime
+    plain = (tmp_path / 'rsi-exam').resolve()
+    plain.mkdir()
+    (plain / 'plan.md').write_text('# plan\n')
+    monkeypatch.setattr(workers, 'require_isolated_worker_root',
+                        lambda project: admission.require_isolated_worker_root(str(plain)))
+    accepted = r.call('delegate_project_work', **r.args)
+    assert accepted['dispatch'] == 'accepted', accepted
+    assert (plain / '.git').is_dir() and (plain / 'AGENTS.md').is_file()
+    assert (plain / 'plan.md').read_text() == '# plan\n'
+
+
+def test_unisolatable_root_refuses_before_any_worker_conversation_or_grant(runtime, monkeypatch, tmp_path):
+    import subprocess
+    from lib.conversations import coordinator_workers as workers
+    from lib.project_dispatch import admission
+    r = runtime
+    repository = (tmp_path / 'repo').resolve()
+    (repository / 'nested').mkdir(parents=True)
+    for args in (['init', '-q'], ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid',
+                                  'commit', '-q', '--allow-empty', '-m', 'mine']):
+        subprocess.run(['git', '-C', str(repository), *args], check=True, capture_output=True, timeout=20)
+    checked = []
+    def preflight(project):
+        checked.append(project)
+        admission.require_isolated_worker_root(str(repository / 'nested'))
+    monkeypatch.setattr(workers, 'require_isolated_worker_root', preflight)
+    refused = r.call('delegate_project_work', **r.args)
+    assert checked == ['/project']
+    assert 'subdirectory of the Git repository' in refused['error'] and 'git ' not in refused['error']
+    assert refused['execution_started'] is False and 'instead of retrying' in refused['recovery']
+    assert not r.created and not r.calls and not r.c.repo.list()
+    assert not (repository / 'nested' / '.git').exists()
+
+
+def test_accepted_delegation_replays_without_rechecking_the_root(runtime, monkeypatch):
+    from lib.conversations import coordinator_workers as workers
+    r = runtime
+    accepted = r.call('delegate_project_work', **r.args)
+    assert accepted['dispatch'] == 'accepted', accepted
+    monkeypatch.setattr(workers, 'require_isolated_worker_root',
+                        lambda project: pytest.fail('an accepted replay rechecked the root'))
+    assert r.call('delegate_project_work', **r.args) == accepted
+    assert len(r.created) == len(r.calls) == 1
+
+
+def test_await_reports_the_settled_cause_of_a_failed_worker(runtime):
+    r = runtime
+    failed = r.c.repo.read(r.call('delegate_project_work', **r.args)['assignment_id'])
+    done = r.c.repo.read(r.call('delegate_project_work', **{**r.args, 'idempotency_key': 'two'})['assignment_id'])
+    r.attempts[failed['execution']['attemptId']]['status'] = 'failed'
+    r.turns[failed['execution']['turnId']]['settlement'] = {'outcome': 'failed', 'error': {
+        'kind': 'task_start_failed', 'detail': 'The agent worker could not begin task execution: no Git',
+        'hint': 'Initialize Git in the project root', 'raw': 'x' * 300, 'message': 'title'}}
+    r.attempts[done['execution']['attemptId']]['status'] = 'completed'
+    result = r.call('await_project_workers', assignment_ids=[failed['id'], done['id']], timeout_seconds=2)
+    assert result['wait'] == 'settled', result
+    first, second = result['workers']
+    assert first['status'] == 'failed' and first['error'] == {
+        'kind': 'task_start_failed', 'detail': 'The agent worker could not begin task execution: no Git',
+        'hint': 'Initialize Git in the project root'}
+    assert second['status'] == 'completed' and 'error' not in second
+
+
+def _subscriptions(monkeypatch):
+    """Observe real terminal subscriptions; a notification alone never settles a worker."""
+    from lib.agent_core import admission
+    real, seen, changed = admission.on_terminal, [], threading.Condition()
+    def subscribe(task_id, fn):
+        unsubscribe = real(task_id, fn)
+        with changed:
+            seen.append(task_id)
+            changed.notify_all()
+        return unsubscribe
+    monkeypatch.setattr(admission, 'on_terminal', subscribe)
+    def subscribed(*task_ids):
+        with changed:
+            return changed.wait_for(lambda: set(task_ids) <= set(seen), timeout=2)
+    return subscribed
+
+
+def _await_in_thread(r, **arguments):
+    result = []
+    def run():
+        started = time.monotonic()
+        result.append((r.call('await_project_workers', **arguments), time.monotonic() - started))
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, result
+
+
+def _delivery_receipts(r, monkeypatch):
+    """Serve each worker's exact registered workspace receipt to delivery_view."""
+    from lib.project_dispatch import admission
+    receipts = {}
+    def workspace_get(project, task_id, *, user_id):
+        for identity, receipt in list(receipts.items()):
+            row = r.c.repo.read(identity)
+            if r.attempts[row['execution']['attemptId']]['taskId'] == task_id:
+                return {'task_id': task_id, 'user_id': user_id, 'project_root': project,
+                        'origin': {admission.KEY: r.c.repo._admission(row), 'delivery': dict(receipt)}}
+        return None
+    monkeypatch.setattr(r.c.repo, 'workspace_get', workspace_get)
+    return receipts
+
+
+def test_wait_returns_when_any_running_worker_settles_and_names_the_rest(runtime, monkeypatch):
+    from lib.agent_core import admission
+    r = runtime; subscribed = _subscriptions(monkeypatch)
+    first = r.call('delegate_project_work', **r.args)
+    second = r.call('delegate_project_work', **{**r.args, 'idempotency_key': 'two'})
+    done, running = (r.c.repo.read(item['assignment_id']) for item in (first, second))
+    thread, result = _await_in_thread(r, assignment_ids=[done['id'], running['id']], timeout_seconds=30)
+    assert subscribed(first['task_id'], second['task_id'])
+    r.turns[done['execution']['turnId']]['projection'] = {'content': 'First verified result'}
+    r.attempts[done['execution']['attemptId']]['status'] = 'completed'
+    admission.fire_terminal_callbacks(first['task_id'])
+    thread.join(5)
+    assert not thread.is_alive() and result, 'the wait held a settled result until every worker settled'
+    value, elapsed = result[0]
+    assert value['wait'] == 'progress' and elapsed < 5, value
+    assert [row['status'] for row in value['workers']] == ['completed', 'running']
+    assert value['workers'][0]['result_excerpt'] == 'First verified result'
+    assert running['id'] in value['instruction'] and done['id'] not in value['instruction']
+    assert not {first['task_id'], second['task_id']} & set(admission._term_callbacks)
+    assert len(r.calls) == 2
+
+
+def test_worker_settled_before_the_call_never_ends_the_wait_early(runtime, monkeypatch):
+    from lib.agent_core import admission
+    r = runtime; subscribed = _subscriptions(monkeypatch)
+    done = r.c.repo.read(r.call('delegate_project_work', **r.args)['assignment_id'])
+    running = r.call('delegate_project_work', **{**r.args, 'idempotency_key': 'two'})
+    r.attempts[done['execution']['attemptId']]['status'] = 'completed'
+    ids = [done['id'], running['assignment_id']]
+    started = time.monotonic()
+    timed_out = r.call('await_project_workers', assignment_ids=ids, timeout_seconds=0.6)
+    assert timed_out['wait'] == 'timeout' and time.monotonic() - started >= 0.6, timed_out
+    assert running['task_id'] not in admission._term_callbacks
+    thread, result = _await_in_thread(r, assignment_ids=ids, timeout_seconds=30)
+    assert subscribed(running['task_id'])
+    row = r.c.repo.read(running['assignment_id'])
+    r.attempts[row['execution']['attemptId']]['status'] = 'failed'
+    admission.fire_terminal_callbacks(running['task_id'])
+    thread.join(5)
+    assert not thread.is_alive() and result[0][0]['wait'] == 'settled', result
+    assert running['task_id'] not in admission._term_callbacks
+
+
+@pytest.mark.parametrize('state', ['blocked', 'failed', 'preserved'])
+def test_held_delivery_settles_a_delivery_wait_with_its_reason(runtime, monkeypatch, state):
+    from lib.agent_core import admission
+    r = runtime; subscribed = _subscriptions(monkeypatch)
+    worker = r.call('delegate_project_work', **r.args)
+    row = r.c.repo.read(worker['assignment_id'])
+    receipts = _delivery_receipts(r, monkeypatch)
+    receipts[row['id']] = {'state': 'working'}
+    arguments = {'assignment_ids': [row['id']], 'wait_for': 'delivery', 'timeout_seconds': 30}
+    thread, result = _await_in_thread(r, **arguments)
+    assert subscribed(worker['task_id'])
+    r.attempts[row['execution']['attemptId']]['status'] = 'completed'
+    receipts[row['id']] = {'state': state, 'reason': 'canonical_dirty', 'checkpointSha': 'abc123'}
+    admission.fire_terminal_callbacks(worker['task_id'])
+    thread.join(5)
+    assert not thread.is_alive() and result, 'a held delivery receipt kept the wait open'
+    value, elapsed = result[0]
+    assert value['wait'] == 'settled' and elapsed < 5, value
+    assert value['workers'][0]['delivery']['status'] == state
+    assert value['workers'][0]['delivery']['reason'] == 'canonical_dirty'
+    assert value['workers'][0]['canonical_delivery'] is False
+    assert 'delivery.reason' in value['instruction'] and row['id'] in value['instruction']
+    started = time.monotonic()
+    assert r.call('await_project_workers', **arguments)['wait'] == 'settled'
+    assert time.monotonic() - started < 2
+    assert worker['task_id'] not in admission._term_callbacks
+
+
+@pytest.fixture
+def coordinator_inbox():
+    from lib import agent_inbox
+    agent_inbox.reset_for_test('coordinator')
+    yield agent_inbox
+    agent_inbox.reset_for_test('coordinator')
+
+
+@pytest.mark.parametrize('mode', ['user-steer', 'background-command'])
+def test_input_for_the_coordinator_ends_the_wait_and_names_the_pending_workers(
+        runtime, monkeypatch, coordinator_inbox, mode):
+    from lib.agent_core import admission
+    r = runtime; subscribed = _subscriptions(monkeypatch)
+    worker = r.call('delegate_project_work', **r.args)
+    arguments = {'assignment_ids': [worker['assignment_id']], 'timeout_seconds': 30}
+    thread, result = _await_in_thread(r, **arguments)
+    assert subscribed(worker['task_id'])
+    # A human message (or another completion) waits for the Coordinator's next round.
+    coordinator_inbox.enqueue('coordinator', 'Status? Also add a changelog entry.', mode=mode)
+    thread.join(5)
+    assert not thread.is_alive() and result, 'the wait held human input until a worker settled'
+    value, elapsed = result[0]
+    assert value['wait'] == 'pending_input' and elapsed < 5, value
+    assert value['workers'][0]['status'] == 'running'
+    assert value['instruction'] == _pending_input_instruction(worker['assignment_id']), value['instruction']
+    assert worker['task_id'] not in admission._term_callbacks
+    # Input still waiting when a call starts ends that call at once too.
+    started = time.monotonic()
+    assert r.call('await_project_workers', **arguments)['wait'] == 'pending_input'
+    assert time.monotonic() - started < 2
+    assert len(r.calls) == 1, 'a wait that yields to input never restarts or recreates work'
+
+
+def _worker_message(worker, key):
+    from lib.conversations import project_messages
+    sender = {'id': 'sender-' + key, 'convId': worker['conversation_id'], '_userId': 7,
+              'config': {'projectPath': '/project'}}
+    return project_messages.execute('send_project_message', {
+        'conversation_id': 'coordinator', 'kind': 'question', 'idempotency_key': key,
+        'content': 'Which API version should this target?'}, sender)['message']
+
+
+def test_project_message_submitted_during_the_wait_ends_it_but_an_earlier_one_does_not(
+        runtime, monkeypatch, coordinator_inbox):
+    from lib.agent_core import admission
+    r = runtime
+    monkeypatch.setattr(coordinator_workers, '_DURABLE_RECHECK_SECONDS', 0.2)
+    worker = r.call('delegate_project_work', **r.args)
+    _worker_message(worker, 'earlier')
+    arguments = {'assignment_ids': [worker['assignment_id']], 'timeout_seconds': 0.6}
+    # Already waiting at call start: the Coordinator's round already acquires it,
+    # so it never makes every later wait return at once in a paid model loop.
+    assert r.call('await_project_workers', **arguments)['wait'] == 'timeout'
+    subscribed = _subscriptions(monkeypatch)
+    thread, result = _await_in_thread(r, **{**arguments, 'timeout_seconds': 30})
+    assert subscribed(worker['task_id'])
+    question = _worker_message(worker, 'question')
+    thread.join(5)
+    assert not thread.is_alive() and result, 'a Worker question waited for the Coordinator timeout'
+    value, elapsed = result[0]
+    assert value['wait'] == 'pending_input' and elapsed < 5, value
+    assert value['instruction'] == _pending_input_instruction(worker['assignment_id'])
+    assert question['state'] == 'submitted' and worker['task_id'] not in admission._term_callbacks
+
+
+def test_notification_before_durable_settlement_rechecks_promptly_and_cheaply(runtime, monkeypatch):
+    from lib.agent_core import admission
+    r = runtime; subscribed = _subscriptions(monkeypatch)
+    worker = r.call('delegate_project_work', **r.args)
+    row = r.c.repo.read(worker['assignment_id'])
+    reads, turn_get = [], r.service.turn_get
+    def recorded(conversation, turn, **kwargs):
+        reads.append(kwargs.get('include_projection', True))
+        return turn_get(conversation, turn, **kwargs)
+    monkeypatch.setattr(r.service, 'turn_get', recorded)
+    thread, result = _await_in_thread(r, assignment_ids=[row['id']], timeout_seconds=30)
+    assert subscribed(worker['task_id'])
+    # The in-memory signal precedes the durable attempt status it announces.
+    admission.fire_terminal_callbacks(worker['task_id'])
+    time.sleep(0.8)
+    assert thread.is_alive(), 'a notification alone declared settlement'
+    r.turns[row['execution']['turnId']]['projection'] = {'content': 'Durable result'}
+    r.attempts[row['execution']['attemptId']]['status'] = 'completed'
+    flipped = time.monotonic()
+    thread.join(5)
+    assert not thread.is_alive() and result[0][0]['wait'] == 'settled', result
+    assert time.monotonic() - flipped < 1.5, 'the wait slept to the slow durable recheck'
+    assert result[0][0]['workers'][0]['result_excerpt'] == 'Durable result'
+    # Polls read Turn metadata only; the returned row alone reads the projection.
+    assert reads.count(False) >= 3 and reads.count(True) == 1, reads
+    assert worker['task_id'] not in admission._term_callbacks
+
+
+def _pending_input_instruction(*pending):
+    # One instruction for every input that ends a wait: it names the Workers to wait on next.
+    return ('New input is waiting for you and arrives right after this result: a human message or steer, '
+            'a project message, or a background completion. Workers keep running; still pending: '
+            + ', '.join(pending) + '. Answer or act on that input first, then call await_project_workers '
+            'again with only the pending assignment IDs and the same wait_for. Ending a wait for input is not '
+            'failure.')
+
+
+@pytest.fixture
+def user_message(runtime):
+    """Send a chat message into the Coordinator's live turn (the steer lane)."""
+    from lib import agent_inbox
+    conversation = runtime.task['convId']
+    agent_inbox.reset_for_test(conversation)
+    yield lambda: agent_inbox.enqueue(conversation, 'Answer me first', mode='user-steer', priority='next')
+    agent_inbox.reset_for_test(conversation)
+
+
+def test_pending_user_message_ends_the_wait_before_it_starts(runtime, user_message):
+    from lib.agent_core import admission
+    r = runtime; worker = r.call('delegate_project_work', **r.args)
+    user_message()
+    result = r.call('await_project_workers', assignment_ids=[worker['assignment_id']], timeout_seconds=30)
+    assert result['wait'] == 'pending_input', result
+    assert result['instruction'] == _pending_input_instruction(worker['assignment_id'])
+    assert [row['status'] for row in result['workers']] == ['running']
+    assert worker['task_id'] not in admission._term_callbacks
+    assert len(r.calls) == 1
+
+
+def test_user_message_during_the_wait_ends_it_promptly(runtime, monkeypatch, user_message):
+    from lib.agent_core import admission
+    r = runtime; subscribed = _subscriptions(monkeypatch)
+    worker = r.call('delegate_project_work', **r.args)
+    thread, result = _await_in_thread(r, assignment_ids=[worker['assignment_id']], timeout_seconds=30)
+    assert subscribed(worker['task_id'])
+    sent = time.monotonic()
+    user_message()
+    thread.join(5)
+    assert not thread.is_alive() and result[0][0]['wait'] == 'pending_input', result
+    assert time.monotonic() - sent < 1.5, 'the wait slept past the user message'
+    assert result[0][0]['workers'][0]['status'] == 'running'
+    assert worker['task_id'] not in admission._term_callbacks
+    assert len(r.calls) == 1
+
+
+def test_already_settled_workers_return_at_once_despite_a_pending_message(runtime, user_message):
+    r = runtime
+    row = r.c.repo.read(r.call('delegate_project_work', **r.args)['assignment_id'])
+    r.attempts[row['execution']['attemptId']]['status'] = 'completed'
+    user_message()
+    assert r.call('await_project_workers', assignment_ids=[row['id']], timeout_seconds=30)['wait'] == 'settled'

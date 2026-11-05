@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from quart import Blueprint, request
 
+from lib.error_envelope import BadRequest
 from lib.api_response import api_bad_request, api_error, api_internal_error, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
@@ -97,7 +98,7 @@ def upsert_auth_source():
             login_url=data.get('login_url'),
             fields=data.get('fields'),
         )
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e), field='domain')
     return api_ok({'source': row})
 

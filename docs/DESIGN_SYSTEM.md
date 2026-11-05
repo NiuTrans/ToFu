@@ -43,10 +43,11 @@ margins/paddings (gate: phase 3).
 | Scale | Tokens | Notes |
 |---|---|---|
 | Spacing | `--space-0`…`--space-16` (4px base) | margins/padding/gaps; theme-invariant |
-| Font size | `--font-size-xs`…`--font-size-4xl` | consolidated from the legacy 9–16px half-step sprawl |
+| Font size | `--font-size-xs`…`--font-size-4xl` | consolidated from the legacy 9–16px half-step sprawl; `--font-size-base` (15px) is the conversation prose step only |
 | Leading/weight | `--leading-*`, `--weight-*` | tight/title/body; regular→bold |
-| Conversation measure | `--conversation-reading-measure` = 760px | Default input to the existing `--msg-measure` authority (about 720px of prose after the icon inset); explicit overrides continue to size shell, prose, composer and context rails together. |
-| Conversation process | `--conversation-process-*`, `--conversation-flow-gap`, `--conversation-prose-gap` | Shared 14px labels, marker/label columns, evidence inset, process density and prose separation. Touch rows use the existing large control height. |
+| Conversation measure | `--conversation-reading-measure` = 800px | Shared `--msg-measure` authority for prose, composer and rails, inside the 700–800px reading contract. The context track is reserved per conversation once any of its Turns shows a rail; new chats and rail-less conversations keep the centered column. The composer keeps its left-edge lock on the same grant. |
+| Conversation process | `--conversation-process-*`, `--conversation-flow-gap`, `--conversation-prose-gap`, `--conversation-leading-*` | 15px prose (1.65), 14px tables, 13px rows and evidence, 12px metadata. A grouped reply's calls sit in one tool-panel paper card: one 28px row per call with its tool glyph, a one-line intent in secondary ink and one outcome at a shared end column (quiet telemetry, a bare check for routine success, a chip only for an exception); folds, anchors and carets on hover/focus; exact identity inline once a step is open or needs attention; every round's reasoning merges into one disclosure in the same activity card: the reasoning and tool headers share full-width rows, glyph tiles and trailing chevrons, and expand independently. Native evidence controls retain keyboard/touch behavior. |
+| Tool rows | `--tool-row-intent-ink(-live)`, `--tool-row-meta-ink`, `--tool-row-ok-ink`, `--tool-row-glyph-ink(-live/-attention)` | The one role vocabulary for every tool family's call row, aliased onto the palette per theme. `23-reading-tool-summary.css` draws every row from it; the panel adds only the card. Accent = liveness on the glyph; identity, telemetry and routine outcomes share the meta ink. Retune tool rows here, never per family or per theme selector. |
 | Control height | `--control-h-sm/md/lg` = 28/34/42 | one height ramp → rows align by construction |
 | Motion | `--motion-fast/base/slow`, `--ease-*` | collapses to 0.01s under reduced-motion |
 | Z-index | `--z-dropdown`…`--z-tooltip` | new code only; native `<dialog>` needs none |
@@ -63,6 +64,18 @@ Theme values live in per-theme blocks at the bottom of
 theme-INVARIANT by design; the tofu theme's distinct body typeface may
 shift text-flow container heights and text-bearing control widths by ±1px —
 asserted scope of that exception: `verify.py` check #2.
+
+The warm dark palette (V5, 2026-10-27) replaces the dark violet/green accents
+with charcoal `#24221f`, cream `#f0e7d8`, warm secondary `#b9ae9c` and coral
+error `#e4a193`. Light/paper palettes remain independent. The V5 sizing (18px
+rows, two-line 64px headers, 960px measure) is superseded by compact action
+reading. `23-reading-tool-summary.css` owns the shared one-line action row
+and the reasoning fold; existing specialized sheets own evidence bodies.
+`ui/tool-summary.ts` places exact identity right after the native intent and
+keeps the full intent as its tooltip, including lazy hydration;
+`ui/round-outline.ts` owns only reader expansion/search over the immutable
+ordered projection. Rationale is in
+[RENDER_CONTRACT.md](RENDER_CONTRACT.md#compact-action-reading-2026-10-27).
 
 ### Conversation typography
 
@@ -113,7 +126,7 @@ invisible retry/reload actions to layout or the keyboard focus order.
 |---|---|---|
 | Layout: stack / row / grid / toolbar | `.ui-stack` `.ui-row` `.ui-grid` `.ui-toolbar` (+`--tight/--loose/--between/--wrap`) | ✅ |
 | Button | `createButton` — primary/secondary/ghost/danger × sm/md/lg | ✅ |
-| Icon button | `createIconButton` — aria-label required | ✅ |
+| Icon button | `createIconButton` — aria-label required; `pressed` exposes an on/off toggle through `aria-pressed` | ✅ |
 | Field (label+hint+error) | `createField`, `setFieldError` | ✅ |
 | Text input / textarea | `.ui-input` | ✅ |
 | Select | `.ui-select` wrapping native `<select>` | ✅ |
@@ -135,6 +148,20 @@ invisible retry/reload actions to layout or the keyboard focus order.
 Tabs preserve native `hidden` even when a panel uses a layout primitive such
 as `.ui-stack`; inactive panels leave layout and keyboard navigation. Tab labels
 retain one line in their existing horizontal scrolling container on narrow screens.
+The strip stays inside its dialog or split-pane bounds; keyboard and pointer
+scrolling reveal off-screen labels without scrolling the whole dialog.
+
+### Native dialog backdrop ownership
+
+Problem: modal and drawer factories duplicated the same gesture logic.
+Decision: the kit's internal `dialog-backdrop.ts` binds one implementation to
+each native dialog. Dismissal requires press and release outside the current
+box; selecting text across its edge, an unpaired click, or a release on its
+border keeps it open. Gesture state stays local to each element, and an inside
+press needs no layout read on release. The factories retain their own close
+callbacks and promise-settlement ordering. Sharing their whole lifecycle was
+rejected because dialog actions and drawer dismissal have distinct results.
+`dialog.test.ts` covers both controls, changing geometry and independent mounts.
 
 ### Project workbench dialog appearance
 
@@ -149,6 +176,36 @@ Problem: a generic cold/hairline dialog did not match the established CO-PILOT
 workbench. Decision: extend the existing factory/kit with semantic tokens.
 Rejected: adding legacy `.modal` classes or feature-level `.ui-*` overrides
 would duplicate chrome authority and couple native dialogs to legacy skins.
+
+### Settings status colors
+
+Settings status colors follow the Settings surface. Problem: Settings retains
+its paper background in dark chat, but inherited dark-page success, warning and
+information colors could fall below 4.5:1 there (the Database Running badge was
+2.06:1). Decision: `styles/settings/00-status-colors.css` binds the shared status
+roles to existing Settings ink, paper, gold and danger tokens at `.settings-panel`.
+Success and information use quiet ink; warnings and failures keep distinct
+accent treatment. This also covers OAuth feedback and field errors. Alternatives
+rejected: per-badge color overrides would repeat the same surface mismatch;
+changing the global dark palette would alter chat to repair a local surface.
+The Database browser contract measures all four status roles across all themes
+and retains its actual text, keyboard and narrow-layout checks. Database's
+required-index badge also pairs Settings ink with Settings paper; inheriting a
+dark chat background behind that ink had produced 1.15:1 contrast.
+
+### Settings density and copy
+
+Problem: Settings accumulated explanation instead of controls. Everyday
+switches folded into disclosures left General mostly blank, while other tabs
+repeated one sentence as description, hint and empty state, narrated
+implementation details, and drew diagrams that controlled nothing.
+Decision: every tab passes the same audit (`designs/ui-gallery/settings_audit.py`
+and its checklist): everyday controls on the first screen, at most one short
+hint per control, no implementation narration or decoration, one visual
+vocabulary, one language per locale. Disclosures hold only rarely used or
+bulky groups. Alternatives rejected: a character budget enforced by a test
+(an arbitrary threshold that cannot judge redundancy) and per-tab restyling
+without a shared checklist, which is how the tabs drifted apart.
 
 ### Adding a control
 
@@ -222,7 +279,8 @@ review: when touching a feature, migrate its controls to
 
 ## Agent-driven development ("一句话起项目")
 
-The skill `.agents/skills/tofu-design-system` routes any "build me a new
+The installed `tofu-design-system` skill package (owner-installed like the
+other retired `.agents/skills` development guides) routes any "build me a new
 project/page" request (翻译项目、企业项目、new feature UI) into this
 workflow, so an agent lands on the kit instead of a blank stylesheet:
 
@@ -248,10 +306,10 @@ operation creates the opposite problem: too many competing boundaries.
 
 **Decision:** compose each Turn as an editorial reading sequence. Human input is
 a compact, right-aligned note; assistant identity is a small accent mark and
-byline. Authored narration stays open on the page. Consecutive operational leaves
-share one lightly tinted, rounded activity surface with a continuous icon rail.
-Narration, deliverables and the current page/window boundary interrupt that
-surface. The `RoundOutline` derives start/middle/end/single decoration from the
+byline. Authored narration stays open on the page. A reply's calls share one
+rounded paper card under its tool-panel header (`23-reading-tool-panel.css`);
+without calls, consecutive operational leaves form one quiet run. Narration,
+deliverables and the current page/window boundary interrupt that run. The `RoundOutline` derives start/middle/end/single decoration from the
 mounted sequence without regrouping, reparenting or creating disclosures. Its
 small map is replaced on each bounded projection. Accepted WorkUnits keep their
 own delivery surface, as do artifacts and other durable content.
@@ -301,44 +359,120 @@ at rest, caramel wash on hover, paper fill when open, no offset shadow. The
 model selector is a *field* (paper fill + hairline, brand hue confined to its
 12px glyph); the rest are *actions*. Menus and the model picker share one
 floating sheet: 14px radius, one hairline, layered warm shadow, 10px rows, and
-a selected state of caramel wash plus a 2px left spine — the same grammar as a
-selected conversation row. New Chat is a paper slip with a leading filled
-caramel plus; the label stays left-aligned and keyboard focus stays visible.
+a single-select state of caramel wash plus a 2px left spine — the same grammar as
+a selected conversation row. Capability toggles are independent and often on
+together, so an "on" toggle keeps the wash and its filled seal but no spine,
+consecutive toggle rows sit one `--space-1` apart, and every toggle shares the
+theme's on-state (no per-capability hue). **Rejected:** flush toggle rows with
+spines (concurrent rows fused into one slab whose stacked spines read as a curly
+bracket) and dropping the wash ("on" would show only at the row's far edge).
+New Chat is a paper slip with a leading filled caramel plus; the label stays left-aligned and keyboard focus stays visible.
 Message actions retain their icon shelf, localized accessible names and native
 tooltips; Review keeps its visible label. Shared controls remain keyboard and
 touch accessible.
 
 The assistant byline, narration, process labels, localized **Answer** title and
 answer text share `--conversation-reading-inset`; the avatar occupies the gutter
-instead of shifting a separate grid column. The answer toolbar carries the
-existing Process disclosure and, for at least three direct Markdown headings, a
-bounded **On this page** menu (at most 32 headings). Navigation focuses the actual
+instead of shifting a separate grid column. For at least three direct Markdown
+headings the answer toolbar carries a bounded **On this page** menu (at most 32
+headings). Navigation focuses the actual
 current heading; replay retains menu focus. The first answer heading is 28px on
 desktop / 22px on phones, with 16px prose. The Answer title identifies settled
 authored content and never declares success. During generation every content block keeps
 the narration treatment, regardless of translation progress; only authoritative
 Turn settlement enables the answer title, hierarchy and bilingual disclosure.
 
-Opening Process presents the same demand-mounted evidence in a nonmodal native
-popover: a right-hand reading panel on desktop and a bottom sheet on phones.
-The answer stays in place. One inspector is open per Surface. Back to answer and
-Escape return keyboard focus; closing unmounts evidence through the existing
-cancellation port. An engine without Popover keeps the inline disclosure.
-Pagination appears only for multiple pages, below the persistent close/header
-row. Only disclosure chrome moves into the toolbar, never Markdown or a mounted
-evidence leaf. A native menu, stable keyed nodes and the existing reader-state
-owner avoid a second transcript or panel state machine.
+**Grouped reply card (2026-10-31).** Problem (owner report): once calls were
+grouped, the panel still used the compact action grammar — one glyph-less
+grey sentence per call with a plain "exit 0" — so a long reply read as a wall
+of text with no design, unlike the original tool panel the owner preferred.
+Decision: the panel is one paper card (`23-reading-tool-panel.css`) drawn over
+sibling keyed blocks, so streaming never reparents a leaf. The header tops it
+with a caramel glyph tile, the count and an error chip; each call is a 28px row
+with its tool's own line glyph, a one-line intent that wraps only at words, and
+one outcome under the calm row grammar below. Hidden calls are announced
+by an in-card "N earlier tool calls" row. Reasoning is a pill above the card.
+The card uses the reading system's process palette, so each theme keeps its
+own chip decisions (the warm dark palette keeps routine success quiet). Phones
+keep one row per call; a narrow pointer window takes invisible controls out of
+layout until hover or focus. Alternatives rejected: restyling the quiet rows
+globally (every non-grouped surface would change); a wrapper element per panel
+(reparents live leaves on toggle and windowing); new colour values (the chip
+and process palettes already carry per-theme decisions; the tool-row roles
+below only alias them).
 
-The context rail uses the same paper/ink palette and readable 12px facts. Tool
-and workspace section headings show counts; their disclosure stays at the
-heading while entries expand below it. Four initial tool chips and three paths
-form the preview; all remaining facts are reachable by click or keyboard. The
-rail remains out of message flow, follows its existing measured free-track
-budget and scrolls within that budget. Populated rail hosts sit above later
-transparent Turn boxes so real pointer clicks reach the controls. The compact
-context line remains available when the pane cannot grant a rail track. Status
-and blocked-checklist semantics remain explicit; tool configuration categories
-use a consistent quiet fill rather than competing outline colors.
+**Calm tool rows (2026-11-01).** Problem (owner report): the rows still
+repeated themselves in the accent. A running step printed its exact identity
+("run_command cd /mnt/…") in caramel beside an intent that already said what
+ran, and every routine call carried a tinted mono pill ("31 tok", "1 result")
+whose Tofu info cast was the same `#7A441F` as the warning chip, so telemetry
+read like a warning. Control was diffuse: one command status was skinned by
+six stylesheets, and the panel re-pilled what the shared summary flattened.
+Decision: the accent marks liveness only, on a running step's glyph. Exact
+identity, telemetry, counts and status words are metadata in one quiet ink at
+text contrast, in the UI face with tabular numerals (monospace is for code:
+the identity); a routine success is a bare check. Chip chrome is reserved for
+failures, warnings, skips and refusals, so a chip always means "look here".
+Identity shows only for an open step or one needing attention, never while it
+runs and never beside an open command pane that already prints the command;
+an attention step's identity line hangs on the intent column at every width.
+`23-reading-tool-summary.css` owns this outcome/identity grammar for every
+family, `23-reading-tool-panel.css` only the card and glyph column, and both
+read the `--tool-row-*` roles in `00-design-tokens.css`. Alternatives
+rejected: recolouring the panel's pills (keeps a chip on every row, so a chip
+stops meaning anything); retuning `--chip-info-*` (also skins swarm roles and
+notes outside tool rows); dropping telemetry (token cost is evidence readers
+use); dimming metadata to `--text-tertiary` (3.4–4.0:1 on the light and Tofu
+panels, below text contrast). Spec: `tests/visual/test_visual_tool_row_roles.py`
+(three themes, 1180/390px, including a one-token retune).
+
+The context rail uses the same paper/ink palette and readable 12px facts,
+with one section anatomy for every fact (2026-11-01 owner report: each piece
+of the rail was styled on its own). The identity line carries the
+brand mark, the model in primary ink and effort as the rail's one accent pill;
+run modes are neutral pills. Every other section is a heading (an uppercase
+tertiary label, a count pill and, at its end, the disclosure) above its facts:
+tools as quiet chips with their registry glyph (MCP chips show the server
+beside a plug glyph, the full label in the tooltip), workspace roots as
+monospace fact lines with folder or lock glyphs, each ending with its branch
+after a colon (`tofu:main`), and the
+checklist as a thin progress bar, its live edge in primary ink, then the rest
+of the plan in order (completed items fade, blocked ones stay in the error
+ink). Sections are separated by whitespace, not rules; the background-agents
+section joins the same heading voice and lists each agent the way the
+checklist lists items: a state glyph in the tool rows' outcome inks, what the
+agent does in at most two lines (primary ink while live), then its state word,
+round count and quiet monospace ID. All values come from the rail's
+`--tctx-*` vocabulary in `23-reading-context-rail.css`, built on the shared
+tokens. The disclosure stays at the heading while entries expand below it.
+A branch is written after its root, `root:branch`, in the root's own line
+(2026-11-01 owner follow-up: a branch line with its own glyph under the roots
+spent a line and a glyph on a fact of the root above it). Capture records each
+root's own branch; snapshots recorded before that collapsed roots on one
+branch into the first root, which alone shows it. A turn without roots shows
+no branch. Each name is one line-breaking unit: a pair too long for its line
+breaks only after the colon (`your-username/tofu:` over
+`eval/opencode-glm53-tb21`), and a name wraps inside itself only when it
+alone is wider than the line; the root keeps a column for its colon, so the
+colon never starts a line. **Alternatives rejected:** branch lines closing the
+workspace list (the previous form); a separate Branch section (split one
+workspace fact in two); a branch pill beside the path (a second chip style
+inside a fact line); a branch-only Workspace section for root-less turns (their
+branch is the live fallback or an inactive project's saved path, never a
+workspace the turn ran in); `<wbr>` after the colon in one text run (every
+hyphen in a branch is also a break, so 1100-1160px panes showed
+`eval/opencode-` over `glm53-tb21`); only the branch as a unit (a root that
+exactly fills a line pushed the colon to the start of the next).
+Four initial tool chips and three paths form the preview; all remaining facts
+are reachable by click or keyboard. The rail remains out of message flow;
+its card is sticky within its round's track, never taller than the pane,
+and scrolls within itself when its facts outgrow the pane.
+Populated rail hosts sit above later transparent Turn boxes so real pointer
+clicks reach the controls. The compact context line remains available when
+the pane cannot grant a rail track. Alternatives rejected: a boxed card per
+rail competes with the prose it annotates; per-tool colours compete with
+status semantics; hairlines between sections tripled the rail's lines without
+adding structure.
 
 Visual references reviewed: [Linear Agent](https://linear.app/docs/linear-agent)
 for quiet activity and content hierarchy; [Cursor's agents workspace](https://cursor.com/blog/cursor-3)
@@ -367,19 +501,37 @@ owned by the existing conversation-reading shell test. Reviewed images live in
 expansion, stationary controls, complete facts, pane containment and narrow-pane
 fallback in three themes and both languages. Its live-shell case checks the
 actual adaptive rail grant, prose width and composer left-edge alignment.
-Historical-process, intent-first
+Grouped-turn-layout, intent-first
 and program-surface suites own neighboring interaction and lifecycle contracts.
 
 ## Verification
 
-- `python3 designs/ui-gallery/verify.py` — 37 structural checks (height
+- `python3 designs/ui-gallery/verify.py` — structural checks (height
   ramp, theme-invariant geometry, 320px overflow, dialog/drawer focus trap
   and dismissal paths, tabs roving tabindex, dropdown keyboard map, toast
   region bounds, alert dismiss, progress, tooltip reveal, field error
   wiring, focus ring, token contract resolution in all three themes).
+  The gallery locally restores document scrolling on phones because application
+  viewport containment clipped its long captures; the check verifies footer
+  scrolling and actual footer pixels in the full-page PNG without changing
+  production shell styles.
 - `python3 designs/ui-gallery/capture.py` — regenerates
   `previews/{desktop,mobile,dialog}-{tofu,dark,light}.png` +
   `contrast-report.json` (feedback text ≥4.5:1 gate; legacy on-accent
-  cases WARN).
+  cases WARN), and refreshes `previews/rich-components-*.png` and
+  `previews/dynamic-*.png` by running the visual tests that render them.
 - `npm run check:styles` — composed stylesheet stays in sync.
 - `npm run typecheck` — factories type-check under the repo tsconfig.
+- `python3 designs/ui-gallery/settings_audit.py <out>` — screenshots and a
+  copy inventory for every Settings tab, reviewed with the checklist in
+  `designs/ui-gallery/README.md` ("Settings audit").
+
+**Test-rendered previews.** Problem: the rich-response and dynamic-surface
+visual tests screenshotted straight into the tracked `previews/`, so every
+suite run dirtied the checkout and unreviewed rendering drift was later swept
+into unrelated commits. Decision: visual tests write screenshots only to their
+`tmp_path`; `capture.py` is the one writer of the tracked copies, running those
+tests under a temporary pytest root and failing if a preview is missing or
+produced twice. Alternatives rejected: an environment switch that lets tests
+write `previews/` keeps a test as the writer of shipped files; copying images
+by hand from pytest's temporary directories has no stable, reviewable owner.

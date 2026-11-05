@@ -12,7 +12,7 @@ import pytest
 pytestmark = pytest.mark.visual
 
 
-def test_manual_detection_preserves_disabled_and_unsaved_settings(browser, live_server, tmp_path):
+def test_manual_detection_probes_enabled_models_without_saving_or_granting(browser, live_server, tmp_path):
     from playwright.sync_api import expect
     from lib.model_routing import normalize_document
     from tests.model_routing.test_model_routing_contract import _full_document
@@ -113,7 +113,7 @@ def test_manual_detection_preserves_disabled_and_unsaved_settings(browser, live_
             assert set(command) == {'targets', 'credential_ids', 'attempts', 'force', 'only'}
             assert document == original
 
-        detect('alpha-wire-a', enabled=False, expected_wires=['alpha-wire-a', 'beta-wire-a'])
+        assert state['starts'] == []
         # The design-system native checkbox is visually hidden; click its track.
         root.locator('.stg-mx-gtoggle .stg-toggle-track').click()
         expect(toggle).to_be_checked()
@@ -131,7 +131,7 @@ def test_manual_detection_preserves_disabled_and_unsaved_settings(browser, live_
         detect('new-wire', enabled=True, expected_wires=['renamed-wire', 'new-wire', 'beta-wire-a'])
         expect(provider.locator('.is-alias[data-id="renamed-wire"]')).to_be_visible()
         expect(provider.locator('.is-alias[data-id="new-wire"]')).to_be_visible()
-        assert len(state['starts']) == 4
+        assert len(state['starts']) == 3
         assert errors == []
         page.screenshot(path=str(tmp_path / 'manual-matrix-draft-preserved.png'))
     finally:

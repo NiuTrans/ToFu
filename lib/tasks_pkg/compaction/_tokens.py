@@ -9,12 +9,16 @@ Imports nothing from sibling sub-modules except ``_constants``.
 """
 
 import base64
+import binascii
 import hashlib
 import math
 import re
+import struct
 import time
 from collections import OrderedDict
+from contextlib import nullcontext
 
+from lib.conversation_sync.settled_rows import SettledDict, memo_get, memo_put
 from lib.log import get_logger
 from lib.tasks_pkg.compaction._constants import (
     _AUTO_COMPACT_MIN_PAYBACK_ROUNDS,
@@ -35,6 +39,7 @@ logger = get_logger(__name__)
 
 _WORKING_SET_AUDITED: set[int] = set()
 _TASK_TOOL_SCHEMA = object()
+_SETTLED_MESSAGE_ESTIMATE_KEY = ('compaction.message-estimate',)
 
 _PRICING_TIER_WORKING_SET_MARGIN = 0.90
 _COMPACTION_CADENCE_MAX_GAPS = 8
@@ -66,6 +71,105 @@ def _image_block_tokens(block: dict) -> int:
     if isinstance(detail, str) and detail.lower() == 'low':
         return _IMAGE_TOKENS_LOW
     return _IMAGE_TOKENS_DEFAULT
+
+
+# Claude vision cost (https://docs.claude.com/en/docs/build-with-claude/vision):
+# tokens ~= width * height / 750, after an image is scaled down (aspect ratio
+# preserved) to a long edge of at most 1568 px and at most ~1.15 megapixels.
+_CLAUDE_IMAGE_MAX_EDGE_PX = 1568
+_CLAUDE_IMAGE_MAX_PIXELS = 1_150_000
+_CLAUDE_IMAGE_PIXELS_PER_TOKEN = 750
+# JPEG start-of-frame markers carry the frame size (DHT/JPG/DAC excluded).
+_JPEG_SOF_MARKERS = frozenset(range(0xC0, 0xD0)) - {0xC4, 0xC8, 0xCC}
+
+
+def _data_url_image_size(url) -> tuple[int, int] | None:
+    """Read ``(width, height)`` from a base64 image data URL's header.
+
+    Decodes only the few base64 quanta that hold the PNG IHDR, GIF screen
+    descriptor, WebP VP8/VP8L/VP8X header or JPEG SOFn frame header (JPEG
+    segments before the frame are skipped by their declared lengths), never
+    the image body. Anything else returns None.
+    """
+    if not isinstance(url, str) or not url.startswith('data:'):
+        return None
+    comma = url.find(',')
+    if comma < 0 or ';base64' not in url[:comma]:
+        return None
+    start = comma + 1
+
+    def read(offset: int, size: int) -> bytes:
+        first = start + (offset // 3) * 4
+        last = start + ((offset + size + 2) // 3) * 4
+        try:
+            raw = base64.b64decode(url[first:last])
+        except (binascii.Error, ValueError):
+            return b''
+        return raw[offset % 3:offset % 3 + size]
+
+    head = read(0, 30)
+    size = None
+    if (head[:8] == b'\x89PNG\r\n\x1a\n' and head[12:16] == b'IHDR'
+            and len(head) >= 24):
+        size = struct.unpack('>II', head[16:24])
+    elif head[:6] in (b'GIF87a', b'GIF89a') and len(head) >= 10:
+        size = struct.unpack('<HH', head[6:10])
+    elif head[:4] == b'RIFF' and head[8:12] == b'WEBP' and len(head) == 30:
+        chunk = head[12:16]
+        if chunk == b'VP8X':
+            size = (1 + int.from_bytes(head[24:27], 'little'),
+                    1 + int.from_bytes(head[27:30], 'little'))
+        elif chunk == b'VP8L':
+            bits = int.from_bytes(head[21:25], 'little')
+            size = ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+        elif chunk == b'VP8 ':
+            size = (int.from_bytes(head[26:28], 'little') & 0x3FFF,
+                    int.from_bytes(head[28:30], 'little') & 0x3FFF)
+    elif head[:2] == b'\xff\xd8':
+        offset = 2
+        while size is None:
+            segment = read(offset, 9)
+            if len(segment) < 4 or segment[0] != 0xFF:
+                return None
+            marker = segment[1]
+            if marker == 0xFF:  # fill byte before a marker
+                offset += 1
+            elif marker in _JPEG_SOF_MARKERS:
+                if len(segment) < 9:
+                    return None
+                height, width = struct.unpack('>HH', segment[5:9])
+                size = (width, height)
+            else:
+                length = int.from_bytes(segment[2:4], 'big')
+                if marker in (0xD9, 0xDA) or length < 2:
+                    return None  # end of image / scan data before any frame header
+                offset += 2 + length
+    if size is None or size[0] <= 0 or size[1] <= 0:
+        return None
+    return size
+
+
+def claude_image_tokens(block: dict, model: str) -> int | None:
+    """Tokens Claude bills for one ``image_url`` block, from its pixel size.
+
+    None when ``model`` is not a Claude model or the size cannot be read from
+    a data-URL header; callers then keep their existing flat estimate.
+    """
+    if not model:
+        return None
+    from lib.model_info import is_claude
+    if not is_claude(model):
+        return None
+    image_url = block.get('image_url')
+    size = _data_url_image_size(
+        image_url.get('url') if isinstance(image_url, dict) else image_url)
+    if size is None:
+        return None
+    width, height = size
+    scale = min(1.0, _CLAUDE_IMAGE_MAX_EDGE_PX / max(width, height),
+                math.sqrt(_CLAUDE_IMAGE_MAX_PIXELS / (width * height)))
+    return max(1, math.ceil(
+        width * height * scale * scale / _CLAUDE_IMAGE_PIXELS_PER_TOKEN))
 
 
 def _audio_tokens_uncached(payload_b64: str, fmt: str) -> int:
@@ -143,7 +247,19 @@ def _estimate_msg_tokens(msg: dict) -> int:
     Audio (``input_audio`` blocks): duration-based estimate when the WAV
     payload decodes (10 tokens/sec, the codex-rs constant), size-heuristic
     fallback otherwise; cached by payload sha1.
+
+    A settled row is deep-immutable, so its estimate lives in its memo slot.
     """
+    if type(msg) is SettledDict:
+        estimate = memo_get(msg, _SETTLED_MESSAGE_ESTIMATE_KEY)
+        if estimate is None:
+            estimate = memo_put(msg, _SETTLED_MESSAGE_ESTIMATE_KEY,
+                                _estimate_message_tokens(msg))
+        return estimate
+    return _estimate_message_tokens(msg)
+
+
+def _estimate_message_tokens(msg: dict) -> int:
     from lib.token_counter import cached_cheap_estimate_text
 
     text_tokens = 0
@@ -178,6 +294,26 @@ def _estimate_total_tokens(messages: list) -> int:
     return sum(_estimate_msg_tokens(m) for m in messages)
 
 
+def estimate_msg_tokens_for_model(msg: dict, model: str = '') -> int:
+    """``_estimate_msg_tokens`` with Claude images priced by pixel size.
+
+    The shared estimator has no route, so every image uses the flat estimate.
+    For a Claude ``model`` each readable image is swapped for
+    ``claude_image_tokens``; other routes return the shared estimate.
+    """
+    tokens = _estimate_msg_tokens(msg)
+    for field in ('content', 'reasoning_content'):
+        value = msg.get(field)
+        if not isinstance(value, list):
+            continue
+        for block in value:
+            if isinstance(block, dict) and block.get('type') == 'image_url':
+                billed = claude_image_tokens(block, model)
+                if billed is not None:
+                    tokens += billed - _image_block_tokens(block)
+    return tokens
+
+
 def _fallback_tool_schema_tokens(tools, *, model: str) -> int:
     """Keep the full-request contract when the canonical counter degrades."""
     if not tools:
@@ -195,6 +331,35 @@ def _fallback_tool_schema_tokens(tools, *, model: str) -> int:
         return 0
 
 
+def _task_text_count_memo(task: dict | None):
+    """Return the task-owned text-count memo; it dies with the task dict."""
+    if task is None:
+        return None
+    memo = task.get('_requestTextCountMemo')
+    if memo is None:
+        from lib.token_counter import RequestTextCounts
+        memo = task.setdefault('_requestTextCountMemo', RequestTextCounts())
+    return memo
+
+
+def task_round_text_identities(task: dict | None):
+    """Scope one loop round: its counts digest each text object once."""
+    memo = _task_text_count_memo(task)
+    return memo.shared_text_identities() if memo is not None else nullcontext()
+
+
+def _task_text_count_view(task: dict | None, tool_schema):
+    """One count's view of the task memo, named by its tool projection."""
+    memo = _task_text_count_memo(task)
+    if memo is None:
+        return None
+    # The task's own tool surfaces are copy-on-write catalog values; prompt
+    # admission already reuses their schema count by list identity.
+    return memo.view(
+        'request' if tool_schema is _TASK_TOOL_SCHEMA else 'admission',
+        reuse_tool_schema_identity=True)
+
+
 def _count_tokens_authoritative(
     messages: list,
     task: dict | None = None,
@@ -210,7 +375,28 @@ def _count_tokens_authoritative(
 
     Returns ``(tokens, method)`` where method is the backend that
     produced the count (``'usage_cache' | 'anthropic_api' | 'tiktoken' | …``).
+    The count, its network-tier prefilter and the entropy floor read one
+    view of the task memo, so each text is digested once per call and
+    tokenized or estimated only when no earlier count saw it.
     """
+    view = _task_text_count_view(task, tool_schema)
+    with view.estimating() if view is not None else nullcontext():
+        return _count_tokens_in_view(
+            messages, task, measurement_out=measurement_out,
+            tool_schema=tool_schema,
+            collect_reusable_text_counts=collect_reusable_text_counts,
+            text_count_view=view)
+
+
+def _count_tokens_in_view(
+    messages: list,
+    task: dict | None,
+    *,
+    measurement_out: dict | None,
+    tool_schema,
+    collect_reusable_text_counts: bool,
+    text_count_view,
+) -> tuple[int, str]:
     cfg = (task or {}).get('config', {}) or {}
     from lib.llm_dispatch.native_context_scope import native_task_context_profile
     routed = native_task_context_profile(task or {})
@@ -253,6 +439,7 @@ def _count_tokens_authoritative(
                         and isinstance(measurement_out, dict))
                     else None
                 ),
+                text_count_memo=text_count_view,
             )
             auth_tokens = int(result.get('tokens', 0))
             method = str(result.get('method', 'unknown'))
@@ -324,6 +511,37 @@ def _count_tokens_authoritative(
         auth_tokens = heuristic_tokens
         method = f'{method}+heuristic_floor'
 
+    # Provider-measured clamp (DOWN-ONLY). The entropy floor above can only
+    # cover tiktoken's under-count; it has no upper bound tied to reality, so an
+    # uncalibrated round-1 gate can demand a summary for a prompt the provider
+    # already accepted at ~55% of that size (conv mvf9laurcvekgh: gate 908,877
+    # vs billed 509,044). A provider's own billed input IS measured evidence for
+    # this conversation's message list, and it is recorded on every stream, so
+    # the gate no longer has to start each turn blind: calibration needs a
+    # second round to learn a ratio, this does not.
+    #
+    # Soundness: the bound is `measured + estimate(appended suffix)` × (1 +
+    # real_anchor_slack()), the slack covering in-place rewrites of the measured
+    # prefix (refreshed requirements, restored checklists, tool-result
+    # replacement) that the suffix count cannot see. Estimate tiers only: a
+    # provider-measured tier is already exact. A missing/stale/rewritten
+    # measurement yields None and leaves today's behaviour untouched.
+    _anchor_applied = False
+    if _is_estimate:
+        from lib.tasks_pkg.compaction._calibration import provider_prompt_anchor
+        _anchor = provider_prompt_anchor(task, model=model, messages=messages)
+        if _anchor is not None:
+            from lib.tasks_pkg.compaction._constants import real_anchor_slack
+            _anchor_bound = int(_anchor * (1.0 + real_anchor_slack()))
+            if _anchor_bound < auth_tokens:
+                logger.info('[Compact] gate %d clamped to provider-measured %d '
+                            '(measured %d × %.2f slack, via %s)',
+                            auth_tokens, _anchor_bound, _anchor,
+                            1.0 + real_anchor_slack(), method)
+                auth_tokens = _anchor_bound
+                _anchor_applied = True
+                method = f'{method}+anchor'
+
     # A historical provider input is not an upper bound on a reconstructed
     # request. Only UsageCacheCounter may reuse it, after validating the full
     # prefix/model/envelope and adding the suffix. A cache miss must never
@@ -336,6 +554,7 @@ def _count_tokens_authoritative(
             'method': method,
             'raw_estimate_tokens': int(_raw_estimate),
             'calibrated': bool(_calibrated),
+            'provider_anchored': bool(_anchor_applied),
         })
     return auth_tokens, method
 
@@ -952,21 +1171,21 @@ def _should_force_compact(
                     'reconsidering before retry token floor',
                     log_id, current_payback_limit,
                     witnessed_payback_limit)
-            witnessed_cache_read = int(
-                witness.get('cacheReadTokens') or 0)
+            witnessed_warm_prefix = int(
+                witness.get('warmPrefixTokens') or 0)
             if (not retry_witness_invalidated
-                    and witnessed_cache_read > 0 and conv_id):
+                    and witnessed_warm_prefix > 0 and conv_id):
                 try:
-                    from lib.tasks_pkg.compaction._cache_evidence import current_cache_read as read_cache
-                    current_cache_read = read_cache(task)
+                    from lib.tasks_pkg.compaction._cache_evidence import current_warm_prefix_tokens
+                    current_warm_prefix = current_warm_prefix_tokens(task)
                     retry_witness_invalidated = (
-                        current_cache_read < witnessed_cache_read)
+                        current_warm_prefix < witnessed_warm_prefix)
                     if retry_witness_invalidated:
                         logger.debug(
                             '[Compact] conv=%s cache witness cooled: %d < %d; '
                             'reconsidering before retry token floor',
-                            log_id, current_cache_read,
-                            witnessed_cache_read)
+                            log_id, current_warm_prefix,
+                            witnessed_warm_prefix)
                 except Exception as exc:
                     logger.debug(
                         '[Compact] conv=%s retry cache witness unavailable: %s',

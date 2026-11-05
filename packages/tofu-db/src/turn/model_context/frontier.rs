@@ -2,15 +2,18 @@
 //! Empty/legacy values force a complete scan. Directory lifecycle owns cleanup;
 //! callers never supply this state, and its key binds tenant, owner and lane.
 //! The existing authority-open epoch fences older writers across every reopen.
+//! Its count is a plain u64: the headers before a terminal hold distinct lower
+//! ordinals, so `count <= ordinal` is the only structural bound.
 use super::sha_state::ShaState;
 use super::*;
+use sha2::{Digest, Sha256};
 const MAGIC: &[u8; 8] = b"TDBCTX01";
 const MAX_CERTIFICATE_BYTES: usize = 1024;
 #[derive(Clone)]
 pub(super) struct Frontier {
     pub epoch: uuid::Uuid,
     pub ordinal: u64,
-    pub count: usize,
+    pub count: u64,
     pub terminal_id: String,
     pub state: ShaState,
 }
@@ -26,14 +29,14 @@ fn key(
 }
 impl Frontier {
     fn encode(&self, key: &EntityKey) -> io::Result<Vec<u8>> {
-        if self.count >= MAX_LIST_ROWS || self.terminal_id.len() > 512 {
+        if self.count > self.ordinal || self.terminal_id.len() > 512 {
             return Err(invalid_data("context frontier exceeds its bound"));
         }
         let mut out = MAGIC.to_vec();
         out.extend_from_slice(&Sha256::digest(key.encoded()));
         out.extend_from_slice(self.epoch.as_bytes());
         out.extend_from_slice(&self.ordinal.to_be_bytes());
-        out.extend_from_slice(&(self.count as u64).to_be_bytes());
+        out.extend_from_slice(&self.count.to_be_bytes());
         out.extend_from_slice(&(self.terminal_id.len() as u16).to_be_bytes());
         out.extend_from_slice(self.terminal_id.as_bytes());
         let state = self.state.encode();
@@ -57,8 +60,7 @@ impl Frontier {
         let ordinal = u64::from_be_bytes(body[56..64].try_into().unwrap());
         let count = u64::from_be_bytes(body[64..72].try_into().unwrap());
         let id_len = usize::from(u16::from_be_bytes(body[72..74].try_into().unwrap()));
-        if count >= MAX_LIST_ROWS as u64 || id_len == 0 || id_len > 512 || 76 + id_len > body.len()
-        {
+        if count > ordinal || id_len == 0 || id_len > 512 || 76 + id_len > body.len() {
             return Err(bad());
         }
         let terminal_id = std::str::from_utf8(&body[74..74 + id_len])
@@ -74,7 +76,7 @@ impl Frontier {
         Ok(Self {
             epoch,
             ordinal,
-            count: count as usize,
+            count,
             terminal_id,
             state,
         })
@@ -141,26 +143,21 @@ pub(crate) fn certify(
     };
     let previous =
         load(database, transaction, conversation, lane)?.filter(|v| v.ordinal <= ordinal);
-    let (mut state, count, start) = match previous {
-        Some(previous) => (previous.state, previous.count, Some(previous.ordinal)),
+    let (mut state, mut count, start) = match previous {
+        Some(previous) => (
+            previous.state,
+            previous.count,
+            Some(lane_compaction_index_key(transaction, conversation, lane, previous.ordinal)?),
+        ),
         None => (ShaState::default(), 0, None),
     };
-    let Some(headers) = scan_headers(
-        database,
-        transaction,
-        conversation,
-        start,
-        ordinal,
-        terminal_id,
-        count,
-    )?
-    else {
-        return Ok(Vec::new());
-    };
-    for header in &headers[..headers.len() - 1] {
-        state.update(&header_encoding(header)?)?;
+    let mut walk = HeaderWalk::new(transaction, conversation, start, ordinal)?;
+    while let Some(header) = walk.next(database, transaction, terminal_id)? {
+        if !header.target {
+            state.update(&header_encoding(&header.value)?)?;
+            count += 1;
+        }
     }
-    let count = count + headers.len() - 1;
     if proof != &json!({"version":2,"count":count,"digest":state.digest()}) {
         return Ok(Vec::new());
     }
@@ -242,9 +239,10 @@ mod tests {
         for length in 0..encoded.len() {
             assert!(Frontier::decode(&key, &encoded[..length]).is_err());
         }
-        // Valid checksums do not excuse malformed internal length/count fields.
+        // Valid checksums do not excuse malformed internal length/count fields:
+        // seven ordinals before turn-7 cannot hold eight headers.
         for (offset, bytes) in [
-            (64, (MAX_LIST_ROWS as u64).to_be_bytes().to_vec()),
+            (64, 8_u64.to_be_bytes().to_vec()),
             (72, 0_u16.to_be_bytes().to_vec()),
             (72, 513_u16.to_be_bytes().to_vec()),
         ] {
@@ -269,5 +267,34 @@ mod tests {
             .unwrap();
             assert!(Frontier::decode(&foreign, &encoded).is_err());
         }
+    }
+    #[test]
+    fn certificate_count_is_a_plain_counter_bounded_only_by_its_ordinal() {
+        let key = EntityKey::new(
+            7,
+            11,
+            crate::model_continuation::LANE_INDEX_NAMESPACE,
+            b"lane",
+        )
+        .unwrap();
+        for (ordinal, count) in [(10_000, 10_000), (20_000, 19_999), (u64::MAX, u64::MAX - 1)] {
+            let value = Frontier {
+                epoch: uuid::Uuid::new_v4(),
+                ordinal,
+                count,
+                terminal_id: "turn".into(),
+                state: ShaState::default(),
+            };
+            let decoded = Frontier::decode(&key, &value.encode(&key).unwrap()).unwrap();
+            assert_eq!((decoded.ordinal, decoded.count), (ordinal, count));
+        }
+        let impossible = Frontier {
+            epoch: uuid::Uuid::new_v4(),
+            ordinal: 10_000,
+            count: 10_001,
+            terminal_id: "turn".into(),
+            state: ShaState::default(),
+        };
+        assert!(impossible.encode(&key).is_err());
     }
 }

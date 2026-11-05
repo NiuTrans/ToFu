@@ -13,8 +13,12 @@ lock (dead recorded pid) is reclaimed by unlink+retry on a fresh inode; a
 foreign-host lock or a live-local-server lock is refused.
 """
 
+import fcntl
 import os
+import platform
+import subprocess
 import sys
+import time
 
 import pytest
 
@@ -66,6 +70,84 @@ def _dead_pid():
         os._exit(0)
     os.waitpid(pid, 0)
     return pid
+
+
+def _stat_fields(pid):
+    with open('/proc/%d/stat' % pid, 'rb') as f:
+        raw = f.read()
+    return raw[raw.rfind(b')') + 2:].split()
+
+
+def _await_zombie(pid, *, threads):
+    deadline = time.monotonic() + 5
+    while True:
+        fields = _stat_fields(pid)
+        if fields[0] == b'Z' and int(fields[17]) == threads:
+            return
+        assert time.monotonic() < deadline, 'child did not reach the zombie state'
+        time.sleep(0.01)
+
+
+def _flocked_holder_lock(tmp_path, pid):
+    """A lock naming *pid* whose flock stays held on the original inode."""
+    lock = str(tmp_path / '.server.lock')
+    _write_lock(lock, pid, 'thishost')
+    holder = open(lock, 'r+')
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return lock, holder
+
+
+@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='Linux zombie state')
+def test_reclaims_lock_of_exited_holder_its_parent_never_reaped(srv, tmp_path):
+    """Signal 0 still reaches an unreaped zombie and its cmdline reads empty.
+
+    Counting that as a live server made every replacement boot refuse to
+    start for as long as the parent kept the zombie.
+    """
+    zombie = os.fork()
+    if zombie == 0:
+        os._exit(0)
+    fd = None
+    try:
+        _await_zombie(zombie, threads=1)
+        lock, holder = _flocked_holder_lock(tmp_path, zombie)
+        log = _Log()
+        try:
+            ok, fd = srv._acquire_instance_lock(lock, log, hostname='thishost')
+            assert ok is True and fd is not None
+            assert log.has('warning', 'reclaiming stale lock pid=%d' % zombie)
+        finally:
+            holder.close()
+    finally:
+        if fd:
+            fd.close()
+        os.waitpid(zombie, 0)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith('linux')
+    or platform.machine() not in ('x86_64', 'AMD64'),
+    reason='Linux x86-64 thread-exit syscall fixture')
+def test_zombie_leader_with_a_running_thread_keeps_its_lock(srv, tmp_path):
+    # Its descriptors (and flock) live until the last thread exits.
+    child = subprocess.Popen([sys.executable, '-c', (
+        'import ctypes, threading, time\n'
+        'threading.Thread(target=time.sleep, args=(60,), daemon=True).start()\n'
+        'ctypes.CDLL(None).syscall(60, 0)\n')])  # SYS_exit ends the leader only
+    try:
+        _await_zombie(child.pid, threads=2)
+        lock, holder = _flocked_holder_lock(tmp_path, child.pid)
+        log = _Log()
+        try:
+            ok, fd = srv._acquire_instance_lock(lock, log, hostname='thishost')
+            assert ok is False and fd is None
+            assert log.has('critical', 'held by a LIVE local server')
+            assert os.path.exists(lock)
+        finally:
+            holder.close()
+    finally:
+        child.kill()
+        child.wait(timeout=5)
 
 
 # ── (a) local dead pid → reclaim succeeds ────────────────────────────────────

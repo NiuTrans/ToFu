@@ -1,5 +1,6 @@
 """OS-backed exit evidence remains distinct from health-probe guesses."""
 
+import json
 import os
 from pathlib import Path
 import signal
@@ -48,6 +49,112 @@ def test_owned_child_exit_evidence_survives_without_reaping(action, signum, exit
         if child.poll() is None:
             child.kill()
         child.wait(timeout=2)
+
+
+def _exited_child(code):
+    """A child that exited with *code*; holding its Popen keeps it unreaped."""
+    child = subprocess.Popen([sys.executable, '-c', f'raise SystemExit({code})'])
+    identity = {'pid': child.pid,
+                'processStartTime': manager_module.proc_start_ticks(child.pid)}
+    deadline = time.monotonic() + 5
+    while not manager_module.proc_exit_observation(identity):
+        assert time.monotonic() < deadline, 'child never exited'
+        time.sleep(0.01)
+    return child, identity
+
+
+def _disposable_manager(tmp_path):
+    project = tmp_path / 'project'
+    project.mkdir()
+    (project / 'server.py').write_text('# disposable project\n')
+    return manager_module.LifecycleManager(str(project))
+
+
+@pytest.mark.skipif(not Path('/proc/self/stat').exists(), reason='Linux exit evidence')
+@pytest.mark.parametrize('retirement', ['failure', 'planned'])
+def test_manager_reaps_its_exited_worker_only_after_saving_the_exit(
+        tmp_path, monkeypatch, retirement):
+    # An adopted worker (e.g. after a Supervisor re-exec) has no Popen; only
+    # the manager can reap it, and reaping destroys the zombie's evidence.
+    manager = _disposable_manager(tmp_path)
+    child, identity = _exited_child(7)
+    waits = []
+    real_waitpid = os.waitpid
+
+    def waitpid(pid, options):
+        saved = json.loads(manager.state_path.read_text())
+        waits.append((pid, options, saved['lastWorkerProcessExit'].get('exitCode')))
+        return real_waitpid(pid, options)
+
+    try:
+        manager._state['worker'] = {**identity, 'spawnedAt': time.time()}
+        monkeypatch.setattr(manager_module, 'cgroup_oom_kill_count', lambda: 0)
+        monkeypatch.setattr(manager_module.os, 'waitpid', waitpid)
+        if retirement == 'failure':
+            manager._record_failure()
+        else:
+            manager._record_planned_exit(
+                'restart', pid=child.pid, marker_key='manager:test:restart',
+                recovery_source='manager-restart')
+        monkeypatch.undo()
+
+        assert waits == [(child.pid, os.WNOHANG, 7)]
+        saved = json.loads(manager.state_path.read_text())
+        assert saved['lastWorkerProcessExit']['pid'] == child.pid
+        assert saved['lastWorkerProcessExit']['exitCode'] == 7
+        assert saved['worker'] == {}
+        with pytest.raises(ChildProcessError):
+            os.waitpid(child.pid, os.WNOHANG)
+    finally:
+        monkeypatch.undo()
+        child.wait(timeout=2)
+
+
+@pytest.mark.skipif(not Path('/proc/self/stat').exists(), reason='Linux exit evidence')
+def test_manager_never_waits_for_a_live_reused_or_foreign_worker_pid(
+        tmp_path, monkeypatch):
+    manager = _disposable_manager(tmp_path)
+    live = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+    exited, identity = _exited_child(3)
+    # A zombie grandchild: its own parent, not this process, owns its status.
+    parent = subprocess.Popen(
+        ['sh', '-c', '(exit 0) & echo $!; exec sleep 30'],
+        stdout=subprocess.PIPE, text=True)
+    try:
+        grandchild = {'pid': int(parent.stdout.readline())}
+        grandchild['processStartTime'] = manager_module.proc_start_ticks(
+            grandchild['pid'])
+        deadline = time.monotonic() + 5
+        while not manager_module.proc_exit_observation(grandchild):
+            assert time.monotonic() < deadline, 'grandchild never exited'
+            time.sleep(0.01)
+        candidates = [
+            {'pid': live.pid,
+             'processStartTime': manager_module.proc_start_ticks(live.pid)},
+            {**identity, 'processStartTime': identity['processStartTime'] + 1},
+            grandchild,
+        ]
+        waits = []
+        monkeypatch.setattr(
+            manager_module.os, 'waitpid',
+            lambda *args: waits.append(args) or (0, 0))
+        for index, worker in enumerate(candidates):
+            manager._state['worker'] = {**worker, 'spawnedAt': time.time()}
+            manager._record_planned_exit(
+                'restart', pid=worker['pid'], marker_key=f'manager:test:{index}')
+        monkeypatch.undo()
+
+        assert waits == []
+        assert live.poll() is None
+        assert exited.wait(timeout=2) == 3
+    finally:
+        monkeypatch.undo()
+        live.kill()
+        live.wait(timeout=5)
+        exited.wait(timeout=5)
+        parent.kill()
+        parent.wait(timeout=5)
+        parent.stdout.close()
 
 
 def test_unknown_or_running_identity_never_invents_an_exit():

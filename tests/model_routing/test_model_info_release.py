@@ -17,6 +17,7 @@ def test_canonical_ids_resolve_to_vendor_dates() -> None:
     assert release_date('glm-5.3') == '2026-08'  # vendor card dated 2026-08-14
     assert release_date('claude-opus-4-8') == '2026-08'
     assert release_date('kimi-k3') == '2026-07'
+    assert release_date('kimi-k3.1-pro') == '2026-10-23'  # not K3's 2026-07
     assert release_date('gemini-3.7-flash') == '2026-08'
     assert release_date('gemini-3.8-flash') == '2026-09'
     assert release_date('gemini-4-argon') == '2026-10'  # model page, Oct 2026
@@ -33,6 +34,9 @@ def test_wire_respellings_hit_the_trained_model_rule() -> None:
     assert release_date('doubao-seed-2-0-pro-260215') == '2026-02'
     # Case folding.
     assert release_date('MiniMax-M3') == '2026-06'
+
+    # Relay namespace prefix.
+    assert release_date('moonshotai/kimi-k3.1-pro') == '2026-10-23'
 
     # Contributor SKU rides the same-day listing rule.
     assert release_date('muse-spark-1.3-contributor') == '2026-09-02'

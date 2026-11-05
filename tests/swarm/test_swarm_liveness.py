@@ -41,7 +41,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from lib.swarm.liveness import DEFAULT_STALL_TIMEOUT_SEC, ProgressBeacon  # noqa: E402
+from lib.swarm.liveness import ProgressBeacon  # noqa: E402
 from lib.swarm.protocol import SubAgentResult, SubAgentStatus, SubTaskSpec  # noqa: E402
 from lib.swarm.scheduler import StreamingScheduler  # noqa: E402
 
@@ -171,17 +171,83 @@ def test_settled_agent_is_forgotten_and_cannot_hold_the_swarm_open():
     assert b.is_making_progress(), 'no tracked agents → nothing is stalling'
 
 
-def test_default_stall_timeout_is_not_a_runtime_budget():
-    """The constant bounds SILENCE, not total runtime.
+def test_default_window_is_the_shared_silence_threshold(monkeypatch):
+    """One threshold for every agent: a sub-agent is not judged by its own clock.
 
-    Pinned because the whole regression was budgets masquerading as health
-    checks: any value near a plausible total runtime (600/1800) would let this
-    module re-become the thing it replaced.
+    The beacon once stalled children at a private 900s while the root rule
+    waited for the shared threshold. The window bounds SILENCE, never total
+    runtime: an agent that keeps producing is never stalled (tests above).
     """
-    assert DEFAULT_STALL_TIMEOUT_SEC >= 600, \
-        'too tight — a slow-but-working agent would be reaped'
-    assert DEFAULT_STALL_TIMEOUT_SEC != 1800, \
-        'must not silently re-adopt the old wall-clock budget'
+    import math
+    monkeypatch.setenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', '777')
+    assert ProgressBeacon().stall_timeout == 777
+    monkeypatch.setenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', '0')
+    disabled = ProgressBeacon()
+    assert disabled.stall_timeout == math.inf
+    disabled.touch('a1')
+    assert disabled.is_making_progress('a1') and not disabled.stalled_agents()
+
+
+def _running_task(**clocks):
+    now = time.time()
+    task = {'id': 'child-task', 'status': 'running', 'aborted': False,
+            'created_at': now - 3600, '_t_last_event': now, '_dispatch_heartbeat': now}
+    task.update(clocks)
+    return task
+
+
+def test_bound_agent_is_judged_by_its_task_like_a_root_turn():
+    """A live provider wait keeps a child alive; heartbeat self-ticks do not.
+
+    Touches used to decide alone: a child in a long model wait with no
+    stream events was stalled although its dispatch heartbeat was fresh, and
+    a hung tool's self-ticks kept a child alive although they prove nothing
+    (owner ruling 2026-07-31). A bound agent now follows the root rule.
+    """
+    stale = time.time() - 600
+    beacon = ProgressBeacon(stall_timeout=300)
+    beacon.bind('waiting', _running_task(_t_last_event=stale))
+    assert beacon.is_making_progress('waiting'), 'fresh dispatch heartbeat = alive'
+
+    beacon.bind('hung', _running_task(_t_last_event=stale, _dispatch_heartbeat=stale))
+    beacon.touch('hung', 'tool_progress')  # a self-tick touch proves nothing
+    assert not beacon.is_making_progress('hung')
+    assert [row[0] for row in beacon.stalled_agents()] == ['hung']
+    assert beacon.seconds_since_activity('hung') == pytest.approx(600, abs=5)
+    assert beacon.is_making_progress(), 'one live agent keeps the swarm alive'
+
+
+def test_bound_agent_in_an_explained_wait_is_not_stalled():
+    stale = time.time() - 600
+    beacon = ProgressBeacon(stall_timeout=300)
+    task = _running_task(_t_last_event=stale, _dispatch_heartbeat=stale,
+                         _workspaceAdmission={'since': 0.0, 'depth': 1})
+    beacon.bind('queued', task)
+    assert beacon.is_making_progress() and not beacon.stalled_agents()
+    assert beacon.seconds_since_activity('queued') == 0.0
+
+    # Unbinding returns the agent to touch judgement with a fresh settlement.
+    beacon.unbind('queued', task)
+    assert beacon.seconds_since_activity('queued') < 1
+    beacon.unbind('queued', task)  # idempotent; a stale task never unbinds a newer one
+
+
+def test_unresponsive_filesystem_stalls_no_agent(monkeypatch):
+    """2026-11-02: a 27-minute mount freeze silenced the whole swarm."""
+    import lib.fs_keepalive as fs_keepalive
+    beacon = ProgressBeacon(stall_timeout=0.05)
+    beacon.touch('unbound')
+    beacon.bind('bound', _running_task(_t_last_event=0.0, _dispatch_heartbeat=0.0))
+    time.sleep(0.1)
+    monkeypatch.setattr(fs_keepalive, 'filesystem_unresponsive', lambda: True)
+    assert beacon.is_making_progress() and not beacon.stalled_agents()
+
+    monkeypatch.setattr(fs_keepalive, 'filesystem_unresponsive', lambda: False)
+    # Silence before the recovery is forgiven for touch-judged agents too.
+    monkeypatch.setattr(fs_keepalive, 'filesystem_resumed_at',
+                        lambda: (time.monotonic(), time.time()))
+    assert beacon.is_making_progress('unbound')
+    assert beacon.is_making_progress('bound')
 
 
 # ═══════════════════════════════════════════════════════
@@ -393,7 +459,8 @@ def test_session_ttl_still_reaps_a_dead_session():
             st._cleanup_stale_sessions()
         assert key not in st._active_sessions, \
             'an expired session with no activity must still be reaped'
-        assert aborted.is_set()
+        # Teardown runs on the retirement worker, off the registry lock.
+        assert aborted.wait(5)
     finally:
         with st._sessions_lock:
             st._active_sessions.pop(key, None)
@@ -546,7 +613,7 @@ def test_async_scheduler_shares_the_master_beacon():
         sched.shutdown()
 
 
-def test_broken_beacon_is_logged_loudly(caplog):
+def test_broken_beacon_is_logged_loudly(caplog, monkeypatch):
     """A broken liveness probe fails OPEN but must scream.
 
     Fail-open is correct (never invent a reason to kill work), but while it is
@@ -555,23 +622,21 @@ def test_broken_beacon_is_logged_loudly(caplog):
     must not be a quiet warning.
     """
     import logging
+    import lib.tasks_pkg.liveness as liveness
 
-    beacon = ProgressBeacon(stall_timeout=1.0)
-    beacon.touch('a1')
+    beacon = ProgressBeacon(stall_timeout=0.0)
+    beacon.bind('a1', {'id': 'a1', 'status': 'running', 'aborted': False})
 
     def _boom(*_a, **_k):
         raise RuntimeError('probe exploded')
 
-    original = ProgressBeacon.seconds_since_activity
-    try:
-        ProgressBeacon.seconds_since_activity = _boom
-        with caplog.at_level(logging.ERROR):
-            assert beacon.is_making_progress('a1') is True, \
-                'must fail OPEN — never kill work because the probe broke'
-        assert any(r.levelno >= logging.ERROR for r in caplog.records), \
-            'a broken liveness probe was not logged at ERROR'
-    finally:
-        ProgressBeacon.seconds_since_activity = original
+    monkeypatch.setattr(liveness, 'judge', _boom)
+    with caplog.at_level(logging.ERROR):
+        assert beacon.is_making_progress('a1') is True, \
+            'must fail OPEN — never kill work because the probe broke'
+        assert beacon.stalled_agents() == []
+    assert any(r.levelno >= logging.ERROR for r in caplog.records), \
+        'a broken liveness probe was not logged at ERROR'
 
 
 # ═══════════════════════════════════════════════════════
@@ -901,15 +966,19 @@ def test_aborted_swarm_still_says_aborted_not_stalled():
 def test_panel_maps_the_stalled_status_end_to_end():
     """Frontend wiring: status 'stalled' → amber card + i18n label, not 无结果.
 
-    Source-level on purpose (this project's frontend guards are): the phase
-    map, the status-override, the CSS class, and BOTH locale entries must all
-    exist — a missing any-one silently falls back to the noResult bucket.
+    The card names every worker state through one label policy,
+    ``swarmAgentPhaseLabel`` (docs/RENDER_CONTRACT.md: per-surface phase maps
+    were the drift behind mismatched words), so the REAL panel renders stalled
+    cards over that composed owner. The CSS class, the recovery mapping and
+    BOTH locale entries are source guards — a missing any-one silently falls
+    back to the noResult bucket.
     """
     import re
+    import subprocess
 
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     import json
-    from tests._runtime_sections import runtime_section
+    from tests._runtime_sections import runtime_section, runtime_section_path
     panel = runtime_section('ui/streaming_swarm_panel.js')
     locale_dir = os.path.join(root, 'frontend/src/i18n/locales')
     catalogs = {
@@ -919,13 +988,41 @@ def test_panel_maps_the_stalled_status_end_to_end():
     }
     css = open(os.path.join(root, 'static/styles.css'), encoding='utf-8').read()
 
-    assert re.search(r'stalled:\s*t\("swarm\.phase\.stalled"', panel), \
-        'phaseMap does not map stalled — falls through to noResult'
-    # Anchor the WHOLE branch line, not the substring: a 'false &&' neuter
-    # keeps the substring alive while killing the behaviour (measured — the
-    # first draft of this guard stayed green under exactly that neuter).
-    assert re.search(r'else if \(a\.status === "stalled"\) \{', panel), \
-        'the status-override (which wins for terminated agents) lacks stalled'
+    harness = r'''
+const fs = require('fs');
+global.window = globalThis;
+global.document = {readyState: 'complete', hidden: false, addEventListener() {},
+  removeEventListener() {}, querySelectorAll() { return []; }, getElementById() { return null; }};
+global.setInterval = () => 0; global.clearInterval = () => {};
+global.setTimeout = () => 0; global.clearTimeout = () => {};
+global.t = (key, args) => args ? key + ':' + JSON.stringify(args) : key;
+global.escapeHtml = (value) => String(value == null ? '' : value);
+global._TOOL_DISPLAY = {};
+eval(fs.readFileSync(SOURCE_PATH, 'utf8'));
+const round = {roundNum: 1, _swarm: true, _swarmActive: false,
+  _swarmStartTime: Date.now() - 60000, _swarmEndTime: Date.now() - 1000,
+  _swarmAgents: [
+    // A live phase stranded on a judged-stalled worker: the status wins.
+    {id: 'wedged', role: 'coder', objective: 'x', status: 'stalled',
+     phase: 'tool_exec', stallSilentSeconds: 312.4},
+    {id: 'quiet', role: 'coder', objective: 'y', status: 'stalled'},
+  ]};
+const html = _buildSwarmPanelHTML(round, [round]);
+const card = /<div class="sw-agent ([^"]*)" data-agent-id="([^"]*)"[\s\S]*?class="sw-a-phase-pill">([^<]*)</g;
+console.log(JSON.stringify([...html.matchAll(card)].map(
+  ([, classes, id, pill]) => ({id, classes: classes.split(' '), pill}))));
+'''.replace('SOURCE_PATH', json.dumps(runtime_section_path('ui/streaming_swarm_panel.js')))
+    proc = subprocess.run(
+        ['node', '-e', harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    cards = {card['id']: card for card in json.loads(proc.stdout)}
+    assert set(cards) == {'wedged', 'quiet'}, f'agent cards did not render: {cards!r}'
+    assert cards['wedged']['pill'] == 'swarm.phase.stalledSilent:{"seconds":312}', \
+        f"a stalled worker's pill lost its verdict or silence: {cards['wedged']['pill']!r}"
+    assert cards['quiet']['pill'] == 'swarm.phase.stalled', \
+        f"stalled without silence evidence must still read stalled: {cards['quiet']['pill']!r}"
+    assert all('sw-a-stalled' in card['classes'] for card in cards.values()), \
+        'a stalled worker lost the stalled card class'
     assert 'stallSilentSeconds' in panel, \
         'the silent-seconds label is not rendered'
     # Recovery path: a reloaded panel must carry the backend's stall evidence

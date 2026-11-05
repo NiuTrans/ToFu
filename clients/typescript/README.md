@@ -88,7 +88,8 @@ new Tofu({
 
 The client adds Bearer auth when `apiKey` is present. It retries safe GETs and
 idempotent agent submissions on transport errors, 429, and 5xx responses with
-bounded backoff. `TofuError` retains the HTTP status and structured body.
+bounded backoff. `TofuError` retains `status` and the unchanged `body`, and exposes
+canonical `kind`, `retryable`, and `retryAfter` (positive seconds or `null`).
 
 Successful API v4 envelopes are unwrapped once by the SDK. Object results retain
 the historical `ok: true` discriminator when the payload omits it; explicit
@@ -111,3 +112,9 @@ CRLF and CR normalize to one LF for framing. Exceeding either bound closes the
 stream and raises `TofuError` with status 413, kind `stream_resource_exhausted`,
 and source `sdk`. This local rejection is not automatically retried. The budget
 applies to individual frames, not the lifetime of a long-running stream.
+
+JSON objects are emitted at the blank line ending a complete SSE frame. Multiple
+`data:` lines form one event; incomplete final frames are discarded. Only valid
+integer sequences advance the resume cursor, so missing, null, boolean and
+malformed values cannot skip replay events. Named `done` / `error` / `aborted`
+events terminate task replay without an extra status request.

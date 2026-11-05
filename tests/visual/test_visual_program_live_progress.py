@@ -42,6 +42,9 @@ def test_live_children_update_without_resetting_source_disclosure_or_focus(
     card = page.locator('.ptc-card')
     assert card.locator('.ptc-status').inner_text() == 'Executing program'
     assert re.match(r'^1\b', card.locator('.ptc-meta').inner_text())
+    assert 'not recorded' not in card.locator('.ptc-meta').inner_text()
+    assert card.evaluate('node=>node.open') is False
+    card.locator('.ptc-head').click()
     card.locator('.ptc-code summary').click()
     assert card.locator('.ptc-code').evaluate('node=>node.open')
     page.evaluate("row=>renderProgramExecutionCard(document.getElementById('program'),row)", snapshots[1])

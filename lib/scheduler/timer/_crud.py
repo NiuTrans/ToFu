@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lib.log import get_logger
 
 from ._state import _active_timers as _active_timers, _timers_lock as _timers_lock, remove_live_watcher as remove_live_watcher
+
+if TYPE_CHECKING:
+    from ._loop import TimerContinuationOutcome
 
 logger = get_logger(__name__)
 
@@ -141,11 +144,13 @@ def cancel_timer(timer_id: str, *, user_id: int) -> bool:
     return changed
 
 
-def force_trigger_timer(timer_id: str, *, user_id: int) -> str | None:
+def force_trigger_timer(timer_id: str, *, user_id: int,
+                        ) -> 'TimerContinuationOutcome | None':
     """Force-trigger a timer, skipping the poll.
 
     Returns:
-        The execution task_id, or None on failure.
+        A ``TimerContinuationOutcome``, or None when the timer is gone or no
+        longer active.
     """
     from ._loop import _execute_continuation
 

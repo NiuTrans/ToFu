@@ -1,8 +1,8 @@
 /**
  * Retained HTML and detail disclosure primitives. Rich markup passes through
  * the existing reconciliation owner; no content policy.
- * Entry points: directClassChild, setManagedHtml, setStreamingMarkdownHtml, setCompletedMarkdownHtml, setManagedRichHtml,
- * resetManagedHtml, preserveDetailsOpen.
+ * Entry points: directClassChild, setStableData, setManagedHtml, setStreamingMarkdownHtml, setCompletedMarkdownHtml,
+ * setManagedRichHtml, resetManagedHtml, preserveDetailsOpen.
  * Dependencies: rich-card-reconciliation.
  */
 import { reconcileRichCardHtml } from '../rich-card-reconciliation';
@@ -19,6 +19,16 @@ export function directClassChild<T extends HTMLElement>(
     if (child.classList.contains(className)) return child as T;
   }
   return null;
+}
+
+/** Write one data attribute only when it changes; undefined removes it.
+ * Rewriting an equal value still queues a DOM mutation and restyles the node. */
+export function setStableData(node: HTMLElement, key: string, value: string | undefined): void {
+  if (value === undefined) {
+    if (key in node.dataset) delete node.dataset[key];
+  } else if (node.dataset[key] !== value) {
+    node.dataset[key] = value;
+  }
 }
 
 export function setManagedHtml(node: HTMLElement, html: string): boolean {
@@ -73,10 +83,7 @@ export function setStreamingMarkdownHtml(node: HTMLElement, html: string): boole
   const previous = managedNode._tofuRenderedHtml;
   if (previous === html) return false;
   const tail = node.lastElementChild;
-  if (!previous || !tail
-      || (tail.tagName !== 'P' && tail.tagName !== 'PRE')) {
-    return replaceChangedMarkdownSuffix(node, html, previous);
-  }
+  if (!previous || !tail) return replaceChangedMarkdownSuffix(node, html, previous);
   // The parser/sanitizer still authorizes the COMPLETE new HTML. Preserve
   // earlier DOM only when its exact HTML prefix is unchanged and the old
   // final block has the same canonical serialization as the mounted block.
@@ -93,7 +100,8 @@ export function setStreamingMarkdownHtml(node: HTMLElement, html: string): boole
   template.innerHTML = html.slice(boundary);
   const nextTail = template.content.firstChild;
   // Growing plain paragraphs preserve their Text node and native selection.
-  // Rich paragraphs/code replace only the changed final block. No source,
+  // Any other final block (rich paragraph, code, list, table, quote) is
+  // replaced alone, without re-serializing earlier blocks. No source,
   // token or DOM cache is added beyond the existing managed HTML witness.
   if (tail.tagName === 'P' && !tail.attributes.length
       && tail.childNodes.length === 1 && tail.firstChild?.nodeType === 3

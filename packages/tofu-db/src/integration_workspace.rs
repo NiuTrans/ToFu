@@ -49,14 +49,11 @@ fn invalid_data(message: &str) -> io::Error {
 fn conflict(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, message)
 }
-fn exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
 fn encode<T: Serialize>(value: &T, name: &str) -> io::Result<Vec<u8>> {
     let bytes = serde_json::to_vec(value)
         .map_err(|_| invalid_data(&format!("{name} cannot be encoded")))?;
     if bytes.len() > MAX_INTEGRATION_WORKSPACE_DOCUMENT_BYTES {
-        return Err(exhausted("integration document exceeds 16 KiB"));
+        return Err(crate::resource_exhaustion::domain_bound("integration document exceeds 16 KiB"));
     }
     Ok(bytes)
 }
@@ -67,7 +64,7 @@ fn bounded_response(value: &Value) -> io::Result<Option<Vec<u8>>> {
     let bytes = serde_json::to_vec(value)
         .map_err(|_| invalid_data("integration response cannot be encoded"))?;
     if bytes.len() > MAX_INTEGRATION_RESPONSE_BYTES {
-        return Err(exhausted("integration response exceeds 8 MiB"));
+        return Err(crate::resource_exhaustion::domain_bound("integration response exceeds 8 MiB"));
     }
     Ok(Some(bytes))
 }
@@ -408,6 +405,7 @@ impl Request {
                 | "integration.workspace.get_integrating"
                 | "integration.workspace.peek_ready"
                 | "integration.workspace.delivery_page"
+                | "integration.workspace.delivery_action_page"
         )
     }
 }
@@ -625,7 +623,7 @@ fn ensure_checkout_claims(
         _ => return Err(invalid_data("integration checkout claims version is invalid")),
     }
     if database.entity_get(tx, &checkout_claims_cursor_key(tx)?)?.is_some() {
-        return Err(exhausted("integration checkout claims require bounded offline backfill"));
+        return Err(crate::resource_exhaustion::domain_bound("integration checkout claims require bounded offline backfill"));
     }
     // Only a complete bounded legacy catalog proves absence of an old owner.
     // The range witness and readiness marker serialize bootstrap with writers.
@@ -636,7 +634,7 @@ fn ensure_checkout_claims(
     )?;
     let rows = database.entity_scan(tx, &start, &end, MAX_LEGACY_CHECKOUT_BACKFILL + 1)?;
     if rows.len() > MAX_LEGACY_CHECKOUT_BACKFILL {
-        return Err(exhausted("integration checkout claims require bounded offline backfill"));
+        return Err(crate::resource_exhaustion::domain_bound("integration checkout claims require bounded offline backfill"));
     }
     for (key, raw) in rows {
         backfill_checkout_row(database, tx, &key, &raw)?;
@@ -716,6 +714,38 @@ fn origin_document(raw: &str) -> Value {
 fn delivery_denied(origin: &Value) -> bool {
     matches!(origin.get("delivery").and_then(|d| d.get("taskOutcome")).and_then(Value::as_str),
         Some("failed" | "cancelled" | "stopped"))
+}
+/// The receipt asks the delivery worker to act (`delivery.py` dispatch).
+/// Retained sources are acknowledged; only an explicit startup recovery asks
+/// for them, because their checkout marker can vanish without a commit.
+fn delivery_needs_action(workspace: &Workspace, retained: bool) -> bool {
+    let origin = origin_document(&workspace.origin_raw);
+    let Some(receipt) = origin.get("delivery").and_then(Value::as_object) else {
+        return false;
+    };
+    let text = |field: &str| receipt.get(field).and_then(Value::as_str);
+    match text("state") {
+        Some("working" | "pending" | "blocked") => true,
+        Some("failed") => {
+            receipt
+                .get("retry")
+                .and_then(|retry| retry.get("condition"))
+                .and_then(Value::as_str)
+                == Some("validation_inputs_changed")
+        }
+        Some("delivered")
+            if origin.get("executionMode").and_then(Value::as_str) == Some("isolated-task") =>
+        {
+            let retirement = origin.get("sourceRetirement").and_then(Value::as_str);
+            (origin.get("deliveryCheckpoint").is_none()
+                && text("taskOutcome") == Some("completed")
+                && text("publicationMode") == Some("working_tree"))
+                || (workspace.managed
+                    && retirement != Some("reclaimed")
+                    && (retained || retirement != Some("retained")))
+        }
+        _ => false,
+    }
 }
 fn preserve_denied_delivery(old: &Value, patch: &mut Map<String, Value>) {
     if !delivery_denied(old) {
@@ -836,6 +866,9 @@ pub(crate) fn execute(
         "integration.workspace.peek_ready" => peek_ready(database, tx, request),
 
         "integration.workspace.delivery_page" => delivery_page(database, tx, request),
+        "integration.workspace.delivery_action_page" => {
+            delivery_action_page(database, tx, request)
+        }
         "integration.workspace.get_integrating" => get_integrating(database, tx, request),
         "integration.workspace.quarantine" => cas_state(database, tx, request, "quarantined"),
         "integration.workspace.requeue" => cas_state(database, tx, request, "ready"),
@@ -1332,6 +1365,44 @@ fn delivery_page(
     bounded_response(&json!({"rows":projected,"hasMore":more,"nextAfterId":if more { last_id } else { 0 }}))
 }
 
+// Locator windows are physical read pages, never a total-scan limit; only an
+// empty page proves the end. Cold history costs this scan, not a client read.
+fn delivery_action_page(
+    database: &AuthorityDatabase,
+    tx: &mut AuthorityTransaction,
+    request: &Request,
+) -> io::Result<Option<Vec<u8>>> {
+    let after_id = request.payload.get("after_id").and_then(Value::as_u64).unwrap_or(0);
+    let limit = request.payload.get("limit").and_then(Value::as_u64).unwrap_or(64).clamp(1, 128) as usize;
+    let retained = request.payload.get("retained").and_then(Value::as_bool).unwrap_or(false);
+    let mut start = row_locator_key(tx, after_id)?.exact_range()?.1;
+    let (_, end) = EntityKey::prefix_range(
+        tx.tenant_id(), TENANT_GLOBAL_OWNER_ID, INTEGRATION_ROW_LOCATOR_NAMESPACE, b"")?;
+    let mut rows = Vec::new();
+    'scan: loop {
+        let page = database.entity_scan(tx, &start, &end, MAX_ENTITY_RANGE_ROWS)?;
+        let Some((last, _)) = page.last() else { break };
+        let next = last.clone().exact_range()?.1;
+        for (_, raw) in page {
+            let locator: Locator = decode(&raw, "integration delivery locator")?;
+            let row = read_workspace_by_id(database, tx, locator.id)?
+                .ok_or_else(|| invalid_data("integration delivery locator has no workspace"))?;
+            if delivery_needs_action(&row, retained) {
+                rows.push(row);
+                if rows.len() > limit {
+                    break 'scan;
+                }
+            }
+        }
+        start = next;
+    }
+    let more = rows.len() > limit;
+    rows.truncate(limit);
+    let next_after_id = if more { rows.last().map_or(0, |row| row.id) } else { 0 };
+    let projected: Vec<Value> = rows.iter().map(workspace_projection).collect();
+    bounded_response(&json!({"rows":projected,"hasMore":more,"nextAfterId":next_after_id}))
+}
+
 fn get_integrating(
     database: &AuthorityDatabase,
     tx: &mut AuthorityTransaction,
@@ -1459,7 +1530,7 @@ fn status(
     let (start, end) = project_updated_range(tx, owner, project_root)?;
     let workspace_rows = scan_paged(database, tx, start, &end, MAX_INTEGRATION_STATUS_ROWS + 1)?;
     if workspace_rows.len() > MAX_INTEGRATION_STATUS_ROWS {
-        return Err(exhausted(
+        return Err(crate::resource_exhaustion::domain_bound(
             "integration status workspace rows exceed their bound",
         ));
     }

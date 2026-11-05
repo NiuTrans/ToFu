@@ -184,20 +184,20 @@ def test_duplicate_credentials_do_not_duplicate_controls_or_resolver_work(monkey
 
 
 def test_projection_materializes_one_authorization_witness_per_deployment(monkeypatch):
-    import lib.model_routing.routing as routing
+    from lib.model_routing import candidate_compiler
     document = _document()
     for index in range(256):
         credential = copy.deepcopy(document['credentials'][0])
         credential['credential_id'] = f'extra-{index}'
         document['credentials'].append(credential)
     checks = []
-    authorized = routing._credential_rejection
+    authorized = candidate_compiler._credential_rejection
 
     def counted(credential, **kwargs):
         checks.append(credential['credential_id'])
         return authorized(credential, **kwargs)
 
-    monkeypatch.setattr(routing, '_credential_rejection', counted)
+    monkeypatch.setattr(candidate_compiler, '_credential_rejection', counted)
     compiler = RouteCandidateCompiler(document)
     candidates = compiler.compile_deployments(NativeModelSelection(ModelRef('creator', 'alpha'), None))
     assert len(candidates) == 2

@@ -119,12 +119,15 @@ class TestCostMath:
             assert cost._qwen_cny(100, "input", "no-such-model") in (
                 pytest.approx(100 * 1.0 / 1e6),)  # falls back to _default tier 1
 
-    def test_scan_costs_degrades_on_authority_error(self):
+    def test_scan_costs_raises_on_authority_error(self):
+        """A failed authority read must never masquerade as an empty month:
+        the scan raises so no day is persisted as zero-cost."""
         with mock.patch(
                 "lib.conversations.repository.scan_conversations_bounded",
                 side_effect=RuntimeError("authority unavailable")):
-            assert cost._scan_costs_in_range(
-                0, 10**13, owner_user_id=OWNER_USER_ID) == {}
+            with pytest.raises(RuntimeError, match="authority unavailable"):
+                cost._scan_costs_in_range(
+                    0, 10**13, owner_user_id=OWNER_USER_ID)
 
     def test_cost_scan_projects_usage_from_authority_snapshot(self):
         from lib.conversations.repository import ConversationSnapshot

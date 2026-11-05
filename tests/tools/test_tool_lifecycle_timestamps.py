@@ -60,7 +60,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import threading
 import time
@@ -376,7 +375,6 @@ console.log(JSON.stringify({ direct, projected, original: round }));
 """
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
 def test_frontend_projection_preserves_tool_clocks():
     """Both direct and full-state projections preserve diagnostic clocks."""
     built = native_module_path(

@@ -27,6 +27,22 @@ describe('translation preview deltas', () => {
     expect(mergeTranslationActivity(first, { status: 'pending', partial: 'whole turn' }).partial).toBe('whole turn');
     expect(mergeTranslationActivity(first, { status: 'failed', error: 'failed' }).partialByRound).toBeUndefined();
   });
+  it('converges on the same preview when superseded cumulative partials are skipped', () => {
+    const final = '完整译文。'.repeat(8);
+    const frames = Array.from(final, (_char, index) => (
+      { status: 'pending' as const, partialByRound: { 'text:llm-1': final.slice(0, index + 1) } }));
+    const merge = (sequence: typeof frames) => sequence.reduce(
+      (activity, frame) => mergeTranslationActivity(activity, frame),
+      mergeTranslationActivity(undefined, { status: 'pending', partialByRound: { 'text:llm-0': 'zero' } }));
+    const every = merge(frames);
+    const sparse = merge(frames.filter((_frame, index) => index % 7 === 3 || index === frames.length - 1));
+    const latestOnly = merge(frames.slice(-1));
+    for (const skipped of [sparse, latestOnly]) {
+      expect(skipped.partialByRound).toEqual(every.partialByRound);
+      expect(skipped.partial).toBe(every.partial);
+    }
+    expect(every.partialByRound?.['text:llm-1']).toBe(final);
+  });
   it('accepts prototype-shaped keys without altering inherited behavior', () => {
     const incoming = JSON.parse('{"__proto__":"preview","constructor":"ctor"}');
     const value = mergeTranslationActivity(undefined, { status: 'pending', partialByRound: incoming });

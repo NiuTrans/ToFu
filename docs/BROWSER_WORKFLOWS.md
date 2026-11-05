@@ -32,9 +32,8 @@ steps from starting; cleanup commands remain executable after cancellation.
 Partial receipts retain completed step/item indexes and stop reasons; cleanup
 runs before returning. Resume only unfinished reads.
 
-Admission permits one workflow/owner, and a process limit derived from the
-launch-probed poll-inflight budget divided by four, clamped to 1–4 (lean default
-2). Each active workflow retains one sequential page, at most two additional
+Workflows start on demand without a hardware-derived process limit. Each active
+workflow retains one sequential page, at most two additional
 fan-out pages and two worker threads; pools close at workflow exit. All pages
 also consume the existing process lease budget. No durable workflow/cache store
 is added. Intermediate records are redacted and bounded by the output budget;
@@ -75,4 +74,8 @@ evidence, not an assumed
 eight-second delay per command.
 
 
-Verification: `pytest -q tests/browser/test_browser_workflows.py tests/browser/test_browser_authenticated_read.py tests/browser/test_browser_site_tool.py`.
+Verification: `pytest -q tests/browser/test_browser_workflows.py tests/browser/test_browser_authenticated_read.py tests/browser/test_browser_site_tool.py tests/browser/test_browser_native_runtime.py`.
+The workflow suite fakes `BrowserPage` to observe planning; the native runtime
+suite runs workflows on real pages, `invoke_adapter` and leases against a fake
+extension bridge, because a fake page once hid a constructor mismatch that
+failed every workflow and leaked its lease.

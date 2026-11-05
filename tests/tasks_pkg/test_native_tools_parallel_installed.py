@@ -32,6 +32,8 @@ pytestmark = pytest.mark.api
     (8, 'tool_recovery_status_httpx_legacy'), (8, 'tool_recovery_status_httpx_v2'),
     (8, 'tool_recovery_status_requests_legacy'), (8, 'tool_recovery_status_requests_v2'),
     (8, 'tool_recovery_fetch_legacy'), (8, 'tool_recovery_fetch_v2'),
+    (8, 'tool_recovery_storage_legacy'), (8, 'tool_recovery_storage_v2'),
+    (8, 'tool_recovery_diagnostic_legacy'), (8, 'tool_recovery_diagnostic_v2'),
     (2, 'measure_ordered'), (2, 'measure_parallel'), (8, 'measure_ordered'), (8, 'measure_parallel')])
 def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path, count, mode, record_property, monkeypatch):
     source = os.environ.get('TOFU_NATIVE_WORKER_TEST_ARCHIVE')
@@ -51,6 +53,7 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
     monkeypatch.setattr(threading.Thread, 'start', start)
     owner = task()
     recover_tool = mode.startswith('tool_recovery_')
+    recover_storage = '_storage_' in mode
     recover_fetch = '_fetch_' in mode
     recover_status = '_status_' in mode or recover_fetch
     status_requests = []
@@ -118,6 +121,15 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
                     response.raise_for_status()
                     source_result = response.text
             if recover_tool and call_id == 'original-0':
+                if '_diagnostic_' in mode:
+                    class UnprintableConnection(ConnectionResetError):
+                        def __str__(self):
+                            raise ValueError('exception diagnostic is unavailable')
+                    raise UnprintableConnection('source disconnected during read')
+                if recover_storage:
+                    from lib.agent_core.storage_errors import StorageError
+                    raise StorageError.from_payload(StorageError('database_busy',
+                        'authority pressure', retryable=False, retry_after_ms=0).to_payload())
                 if '_httpx_' in mode:
                     import httpx
                     raise httpx.RemoteProtocolError('source disconnected during read')
@@ -171,7 +183,7 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
         image = NativeArchiveImage(archive=archive, sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
             application_version=manifest['build']['application_version'], budget=budget)
         host = NativeHost(image)
-        host.enable_worker_reuse({'root_maximum': 1})
+        host.enable_worker_reuse(1)
         gateway = NativeGateway(principal=principal(), task=owner, executor=executor, configuration=owner['config'],
             tool_list=definitions, permissions={'fetch_url': 'read'}, project_path=None, project_enabled=False,
             model='fixture', round_source=None, decision_policy=None, pending_calls=16, pending_bytes=65536)
@@ -247,10 +259,16 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
                         error = tool_result_error(row['content'])
                         expected_code = ('tool_http_rate_limited' if status_code == 429 else
                             'tool_http_unavailable') if recover_status else 'tool_connection_failed'
+                        if recover_storage:
+                            expected_code = 'database_busy'
                         assert error.code == expected_code and error.retryable
+                        if '_diagnostic_' in mode:
+                            assert 'UnprintableConnection' in error.message
                         assert 'gateway' in error.next_action and 'independent' in error.next_action
                         if recover_status:
                             assert 'Retry-After' in error.next_action and '0 seconds' in error.next_action
+                        if recover_storage:
+                            assert '0 milliseconds' in error.next_action
                     else:
                         assert 'evidence:' + row['tool_call_id'] in row['content']
                 if recover_tool:

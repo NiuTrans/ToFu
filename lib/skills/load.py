@@ -331,6 +331,12 @@ def _resource_relative_path(skill_id: str, resource: str) -> str:
     if (not value or value.startswith('/') or '\x00' in value
             or any(part in ('', '.', '..') for part in value.split('/'))):
         raise ValueError('resource must be a normalized package-relative path')
+    # Hidden entries hold package-private state (session caches, credentials)
+    # and are never listed by list_skill_files.
+    if any(part.startswith('.') for part in value.split('/')):
+        raise ValueError(
+            'dot-prefixed (hidden) package entries are not skill resources; '
+            'read only skill:// paths listed by load_skill')
     return value
 
 

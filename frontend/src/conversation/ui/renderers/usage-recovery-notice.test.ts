@@ -276,6 +276,20 @@ describe('concrete terminal receipt integration', () => {
     expect(api.inspect).not.toHaveBeenCalled();
   });
 
+  it.each(['continue', 'checkpoint_resume'])('defers to the ordinary %s resume the settlement offers', operation => {
+    const { node, ports, api } = setup();
+    const finish = { tone: 'warning' as const, label: 'Failed' as const, detail: '',
+      resumeOptions: [{ operation }, { operation: 'regenerate' }] };
+    renderActivityEventBlock(node, terminalBlock(), ports, { ...sourceTurn(), finish });
+    expect(phase(node)).toBeUndefined();
+    expect(Array.from(node.querySelectorAll('button'))
+      .some(candidate => candidate.textContent === 'Continue generating')).toBe(false);
+    expect(api.inspect).not.toHaveBeenCalled();
+    renderActivityEventBlock(node, terminalBlock(), ports,
+      { ...sourceTurn(), finish: { ...finish, resumeOptions: [{ operation: 'regenerate' }] } });
+    expect(button(node, 'Continue generating')).toBeDefined();
+  });
+
   it('classic renderer disposal reaches the pending read and retires its controls', async () => {
     const pending = deferred<ConversationUsageRecovery>();
     const inspect = vi.fn<UsageRecoveryPorts['inspect']>().mockReturnValue(pending.promise);

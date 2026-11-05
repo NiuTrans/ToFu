@@ -84,7 +84,8 @@ def site_tool(args: dict, runtime):
             raise AdapterValidationError('params must be an object')
         result = invoke_adapter(
             adapter.id, command.name, args.get('params', {}),
-            owner_user_id=runtime.owner_user_id, client_id=runtime.client_id)
+            owner_user_id=runtime.owner_user_id, client_id=runtime.client_id,
+            cancel_event=getattr(runtime, 'cancel_event', None))
         encoded = json.dumps(redact_value(result, max_string_chars=80000), ensure_ascii=False)
         if len(encoded) > 80000:
             return failure('output_budget_exhausted',

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu-agent"
-version = "0.18.3"
+version = "0.18.4"
 description = "Embeddable and headless Tofu agent runtime with network and tool capabilities"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -28,6 +28,12 @@ dependencies = [
     "python-dateutil>=2.8",
     "mcp>=2,<3",
     "httpx>=0.28",
+    # Codex subscription request bodies use Codex CLI's zstd encoding; Python
+    # 3.14+ ships compression.zstd. Absent codec: identity encoding.
+    "zstandard>=0.23; python_version < '3.14'",
+    # Responses WebSocket transport (Codex CLI's default for the ChatGPT
+    # backend); 15.0 adds the sync client's proxy support. Absent: SSE.
+    "websockets>=15.0",
     "orjson>=3.9",
     "pydantic>=2.7,<3",
     "tiktoken>=0.7",
@@ -37,10 +43,9 @@ dependencies = [
 
     "jsonschema>=4.18",
     # repo_map agent tool: tree-sitter-based code outline + PageRank ranking.
-    # grep-ast is the tag extractor (needs a grammar pack — see full extra),
-    # networkx runs aider-style reference PageRank over the import graph.
+    # grep-ast is the tag extractor (needs a grammar pack — see full extra);
+    # ranking is the dependency-free CSR PageRank in lib/repo_map/_python_rank.py.
     "grep-ast>=0.9",
-    "networkx>=3.0",
     "pathspec>=0.12",
 ]
 
@@ -63,10 +68,13 @@ tofu-agent = "tofu_agent.cli:main"
 # deliberately separate so embedding Tofu never implies PostgreSQL or a
 # checked-out web application.
 full = [
-    "tofu-search>=0.12.17",
+    "tofu-search>=0.12.25",
     "trafilatura>=2.3.1",
-    "Pillow>=10.0",
+    "Pillow>=13.0.0",
     "python-pptx>=0.6.21",
+    # Native PPTX export parses every finished package part through defusedxml
+    # (lib/slides/pptx_qa.py) before publication.
+    "defusedxml>=0.7.1",
     "fontTools>=4.40",
     "brotli>=1.1",
     "lxml>=5.3",
@@ -102,11 +110,15 @@ release = [
 # depend on its own optional extra in a portable uv lock.
 app = [
     "psycopg[binary,pool]>=3.2",
-    "uv>=0.4",
-    "tofu-search>=0.12.17",
+    "uv>=0.13.4",
+    # Internal exports carry installed skills whose bundled scripts run with the
+    # application interpreter; codelab-ssh-connect imports paramiko (SSH/SFTP).
+    "paramiko>=3.4",
+    "tofu-search>=0.12.25",
     "trafilatura>=2.3.1",
-    "Pillow>=10.0",
+    "Pillow>=13.0.0",
     "python-pptx>=0.6.21",
+    "defusedxml>=0.7.1",
     "fontTools>=4.40",
     "brotli>=1.1",
     "lxml>=5.3",
@@ -133,7 +145,7 @@ test = [
     # The repository suite exercises the full application as well as the
     # storage-free public runtime.
     "psycopg[binary,pool]>=3.2",
-    "uv>=0.4",
+    "uv>=0.13.4",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "requests-mock>=1.12",
@@ -162,12 +174,16 @@ test = [
     # (parses styles.css rules instead of regex). Without it that module died at
     # COLLECTION with ModuleNotFoundError in every CI lane (2026-08-05).
     "tinycss2>=1.2",
+    # Independent PageRank oracle for repository ranking tests; production
+    # ranking is dependency-free and never imports it.
+    "networkx>=3.0",
     # The repository suite exercises document/media/search parsing too, so it
     # needs the `full` surface (duplicated — extras cannot compose).
-    "tofu-search>=0.12.17",
+    "tofu-search>=0.12.25",
     "trafilatura>=2.3.1",
-    "Pillow>=10.0",
+    "Pillow>=13.0.0",
     "python-pptx>=0.6.21",
+    "defusedxml>=0.7.1",
     "fontTools>=4.40",
     "brotli>=1.1",
     "lxml>=5.3",
@@ -196,15 +212,17 @@ dev = [
     "hypothesis>=6.0",
     "fakeredis>=2.20",
     "tinycss2>=1.2",
+    "networkx>=3.0",
     "psycopg[binary,pool]>=3.2",
-    "uv>=0.4",
+    "uv>=0.13.4",
     "ruff",
     "pyright>=1.1.403",
     # Same `full` duplication as `test`.
-    "tofu-search>=0.12.17",
+    "tofu-search>=0.12.25",
     "trafilatura>=2.3.1",
-    "Pillow>=10.0",
+    "Pillow>=13.0.0",
     "python-pptx>=0.6.21",
+    "defusedxml>=0.7.1",
     "fontTools>=4.40",
     "brotli>=1.1",
     "lxml>=5.3",
@@ -237,6 +255,17 @@ scale = [
 # The Git repository is the source authority for all first-party Python
 # artifacts. Each member keeps independent build metadata and release version;
 # workspace resolution only replaces published dependencies in development.
+# Transitive floors for the release vulnerability gate. `mcp` pulls in certifi
+# and pyjwt; pinning them here keeps the resolution honest without declaring
+# direct dependencies the runtime never imports. Trivy blocks HIGH/CRITICAL
+# findings that have a fix, so these floors must stay at or above the first
+# fixed release (certifi 2026.10.19, pyjwt 2.14.0).
+[tool.uv]
+constraint-dependencies = [
+    "certifi>=2026.10.19",
+    "pyjwt>=2.14.0",
+]
+
 [tool.uv.workspace]
 members = ["packages/tofu-search", "plugins/tofu-trading"]
 # Optional MCP subprocesses resolve their SDK/dependencies independently.

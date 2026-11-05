@@ -1,12 +1,22 @@
 /** Apply canonical attempt-aware grouping, then attach rich tool occurrences without rewriting segment values. */
 import { toolExecutionLlmRound } from '../../presentation/tool-execution-groups';
+
+import { isDuplicatedInboxDeliveryNote } from '../../presentation/context-note-grouping';
 import { createToolOccurrenceResolver } from './occurrences';
 import type { TimelineBatch, TimelineRound, TimelineSegment, TimelinePorts } from './contracts';
 export function resolveTimelineBatches(segments: readonly TimelineSegment[], rounds: readonly TimelineRound[],
-  superseded: ReadonlySet<string>, hasInbox: boolean, ports: Pick<TimelinePorts, 'groupSegments'>): TimelineBatch[] {
+  superseded: ReadonlySet<string>, displayRounds: readonly TimelineRound[],
+  ports: Pick<TimelinePorts, 'groupSegments'>): TimelineBatch[] {
+  // Adapt retained synthetic rows to the same durable preview receipt shape.
+  const inboxReceipts = displayRounds.filter(round => round._inboxInject).map(round => ({
+    ...round, round: round.inboxRound, count: round.inboxCount, previews: round.inboxPreviews,
+  }));
+  const peerReceipts = displayRounds.filter(round => round._peerInject).map(round => ({
+    ...round, round: round.peerRound, count: round.peerCount, previews: round.peerPreviews,
+  }));
   const visible = segments.filter(segment => segment && !segment.terminal
     && !(segment.type === 'text' && segment.deliverable)
-    && !(hasInbox && segment.type === 'system_note' && segment.noteKind === 'context-injection' && segment.reason === 'inbox_delivery'));
+    && !(segment.type === 'system_note' && isDuplicatedInboxDeliveryNote(segment, inboxReceipts, peerReceipts)));
   const hasLlm = visible.some(segment => toolExecutionLlmRound(segment) != null);
   const resolve = createToolOccurrenceResolver(rounds);
   const batches: TimelineBatch[] = [];

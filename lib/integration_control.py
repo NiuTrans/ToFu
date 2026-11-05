@@ -47,7 +47,7 @@ from lib.git_checkpoint_policy import (
     PROJECT_GATE_REQUIRED_SUFFIXES as _PROJECT_GATE_REQUIRED_SUFFIXES,
     forbidden_checkpoint_paths as _forbidden_checkpoint_paths,
     GatePolicyError, git_policy_environment, select_gate_commands,
-    semantic_gate_paths, require_unchanged_gates,
+    semantic_gate_paths, require_unchanged_gates, retire_unrelated_publication_refs,
 )
 
 logger = get_logger(__name__)
@@ -65,6 +65,11 @@ _WORKER_AUTHORITY_ARMED = False
 _STATUS_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
 _STATUS_CACHE_LOCK = threading.Lock()
 _STATUS_CACHE_TTL_SECONDS = 10.0
+# Fixed-class liveness bound (contracts/resource_policy_v1.json): constant,
+# never derived from hardware or tree size. It renews whenever any thread of a
+# snapshot Git command executes, so it ends only a command blocked on an
+# unresponsive volume and never a slow one; there is no total deadline.
+_SNAPSHOT_STALL_SECONDS = 90.0
 
 IntegrationError = RuntimeError
 
@@ -75,33 +80,119 @@ def _control_root() -> Path:
     return root
 
 
+_PLACED_WORKSPACE_ROOTS: dict[tuple[str, ...], Path] = {}
+_PLACED_WORKSPACE_ROOTS_LOCK = threading.Lock()
+_PLACEMENT_ENV_KEYS = ('TOFU_LOCAL_WORKSPACES', 'TOFU_LOCAL_DIR', 'XDG_STATE_HOME', 'HOME')
+
+
+def _data_workspace_root() -> Path:
+    return _control_root() / 'worktrees'
+
+
+def _local_workspace_root(placement_root: str | Path) -> Path:
+    # One namespace per data root: deployments sharing a user state
+    # directory never see each other's checkouts.
+    namespace = hashlib.sha256(
+        str(Path(data_root()).resolve()).encode('utf-8')).hexdigest()[:12]
+    return Path(placement_root) / namespace
+
+
+def _placed_workspace_root() -> Path:
+    """Data-dir checkouts, or an operator-approved faster private local volume.
+
+    Decided once per process and environment by the shared placement policy
+    (``serverctl_pkg.local_placement``). Off unless ``TOFU_LOCAL_WORKSPACES``
+    opts in: ``auto`` relocates only from a slow volume onto a provably
+    persistent local disk; ``on`` also accepts container overlays whose
+    persistence cannot be proven.
+    """
+    default = _data_workspace_root()
+    key = (str(default), *(os.environ.get(name, '') for name in _PLACEMENT_ENV_KEYS))
+    with _PLACED_WORKSPACE_ROOTS_LOCK:
+        cached = _PLACED_WORKSPACE_ROOTS.get(key)
+        if cached is not None:
+            return cached
+        from serverctl_pkg.local_placement import PURPOSE_WORKSPACES, choose_local_root
+        placement = choose_local_root(default, PURPOSE_WORKSPACES)
+        root = _local_workspace_root(placement.root) if placement.selected else default
+        _PLACED_WORKSPACE_ROOTS[key] = root
+    logger.info('[Integration] task workspace root %s (placement %s)',
+                root, json.dumps(placement.as_status(), sort_keys=True))
+    return root
+
+
 def _workspace_root() -> Path:
     override = os.environ.get('TOFU_INTEGRATION_WORKSPACE_DIR', '').strip()
     root = (Path(override).expanduser().resolve()
-            if override else _control_root() / 'worktrees')
+            if override else _placed_workspace_root())
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
+def _controlled_workspace_roots() -> list[Path]:
+    """Every root this control plane may have created checkouts under.
+
+    Placement can change between launches (policy, free space, volume speed);
+    checkouts created under an earlier choice must stay removable.
+    """
+    from serverctl_pkg.local_placement import PURPOSE_WORKSPACES, candidate_roots
+    roots = [_workspace_root(), _data_workspace_root()]
+    roots += [_local_workspace_root(root) for root in candidate_roots(PURPOSE_WORKSPACES)]
+    return list(dict.fromkeys(root.resolve() for root in roots))
+
+
 def _git(cwd: str | Path, args: list[str], *, env: dict[str, str] | None = None,
-         timeout: float = 30.0, check: bool = False) -> subprocess.CompletedProcess[str]:
+         timeout: float = 30.0, check: bool = False, stall_seconds: float | None = None,
+         cancel=None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Run Git under a wall-clock ``timeout``, or under a no-progress window.
+
+    ``stall_seconds`` is for commands whose duration follows the tree and the
+    volume: no total deadline applies, only a stall or ``cancel`` ends them.
+    """
     from lib.project_mod.workspace_lease import workspace_lease_fds
+    from lib.project_mod.git_inspection_execution import (
+        GitInspectionPreparationError, prepare_git_index_read)
     merged_env = git_policy_environment()
     if env:
         merged_env.update(env)
     try:
-        cp = subprocess.run(
-            [git_executable(), '-c', 'core.fsmonitor=false', *args],
-            cwd=str(cwd), env=merged_env, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
-            check=False, pass_fds=workspace_lease_fds(),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        executable = git_executable()
+        with prepare_git_index_read(executable, args, str(cwd), environment=merged_env) as (arguments, environment):
+            argv = [executable, '-c', 'core.fsmonitor=false', *arguments]
+            if stall_seconds is None:
+                cp = subprocess.run(
+                    argv, cwd=str(cwd), env=environment, text=True, input=input_text,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+                    check=False, pass_fds=workspace_lease_fds(),
+                )
+            else:
+                cp = _run_stall_supervised_git(argv, args[0], cwd, environment,
+                                               stall_seconds, cancel)
+    except (OSError, subprocess.TimeoutExpired, GitInspectionPreparationError) as exc:
         raise IntegrationError(f'git {args[0]} failed: {exc}') from exc
     if check and cp.returncode != 0:
         detail = (cp.stderr or cp.stdout or '').strip()
         raise IntegrationError(f'git {args[0]} failed: {detail[:800]}')
     return cp
+
+
+def _run_stall_supervised_git(argv: list[str], command: str, cwd: str | Path,
+                              env: dict[str, str], stall_seconds: float,
+                              cancel) -> subprocess.CompletedProcess[str]:
+    from lib.project_mod.activity_supervised_process import (
+        ProcessCancelled, ProcessRetirementUnproven, ProcessStalled, run_activity_supervised)
+    from lib.project_mod.workspace_lease import workspace_lease_fds
+    try:
+        return run_activity_supervised(argv, cwd=cwd, env=env, stall_seconds=stall_seconds,
+                                       pass_fds=workspace_lease_fds(), cancellation=cancel)
+    except ProcessCancelled as exc:
+        raise IntegrationError(f'Task cancelled during git {command}') from exc
+    except ProcessStalled as exc:
+        raise IntegrationError(
+            f'git {command} made no progress for {stall_seconds:g}s (no Git thread ran; '
+            f'the checkout volume is unresponsive); it was stopped: {exc}') from exc
+    except ProcessRetirementUnproven as exc:
+        raise IntegrationError(f'git {command} failed: {exc}') from exc
 
 
 def _materialize_worktree(root: Path, destination: Path, revision: str, *, cancel=None):
@@ -332,6 +423,14 @@ def _ensure_refs(root: Path) -> tuple[str, str]:
     head = _rev(root, 'HEAD')
     if not head:
         raise IntegrationError('The project repository has no commits yet')
+    # A candidate stranded by a history rewrite would seed new workspaces with
+    # the abandoned tree; archive it so the current history owns publication.
+    retired = retire_unrelated_publication_refs(
+        lambda args, input_text=None: _git(root, args, input_text=input_text), head)
+    if retired:
+        logger.warning(
+            '[Integration] retired publication refs from an unrelated history root=%s: %s',
+            root, ', '.join(f'{name} -> {archive}' for name, archive in retired.items()))
     candidate = _rev(root, _CANDIDATE_REF)
     stable = _rev(root, _STABLE_REF)
     if not candidate:
@@ -512,12 +611,26 @@ def create_task_workspace(project_path: str, task_id: str, *, user_id: int,
             raise
 
 
+def _merge_tree_lacks_write_tree(cp: subprocess.CompletedProcess[str]) -> bool:
+    """True when Git cannot run ``merge-tree --write-tree`` (2.38; ``--merge-base`` 2.40).
+
+    Legacy ``merge-tree`` takes exactly ``<base-tree> <branch1> <branch2>``:
+    any other argument count exits 129 with its usage, and three arguments
+    make it read ``--write-tree`` as the base revision and die with
+    ``unknown rev --write-tree`` (exit 128). Git 2.38/2.39 reject
+    ``--merge-base`` as an unknown option. None of these is a merge conflict.
+    """
+    detail = (cp.stderr or '').lower()
+    return (cp.returncode == 129 or 'unknown option' in detail
+            or 'unknown rev --write-tree' in detail)
+
+
 def _task_delta_tree(root: Path, baseline: str, head: str, checkpoint: str,
                      task_id: str) -> tuple[str, str]:
     """Explicit-base three-way tree; legacy Git uses private synthetic parents."""
     cp = _git(root, ['merge-tree', '--write-tree', '--merge-base=' + baseline,
                      head, checkpoint], timeout=90.0)
-    if cp.returncode == 129 or 'unknown option' in (cp.stderr or '').lower():
+    if _merge_tree_lacks_write_tree(cp):
         # Older Git cannot choose an explicit merge base. Make two transient
         # commits with that exact parent, then reuse the controlled scratch
         # merge. These helper commits never become publication parents.
@@ -594,33 +707,72 @@ def has_active_workspace_for_work(
     return bool(row and row.get('state') in {'running', 'checkpointed'})
 
 
-def _alternate_index_tree(workspace: Path, parent: str, index_path: str) -> str:
-    """Stage working bytes into a private index; never mutate the real index."""
-    with measure_task_startup('workspace_index_validate'):
-        if _git(workspace, ['ls-files', '-u'], check=True).stdout:
-            raise IntegrationError('Unresolved writer index conflicts; checkpoint refused')
-        changed = (_git(workspace, ['diff', '--name-only', '--diff-filter=ACMRT', '-z', parent], check=True).stdout
-                   if parent else _git(workspace, ['ls-files', '-z'], check=True).stdout)
-        untracked = _git(workspace, ['ls-files', '--others', '--exclude-standard', '-z'], check=True).stdout
-        forbidden = _forbidden_checkpoint_paths([p for p in (changed + untracked).split('\0') if p])
-        if forbidden:
-            raise IntegrationError('Checkpoint contains forbidden dependency/generated/runtime paths: ' + ', '.join(forbidden))
+def _borrow_index_stat_cache(workspace: Path, index_path: str, *, cancel=None) -> None:
+    """Start a new private index from a read-only copy of the writer's index.
+
+    Git replaces an index by rename, so one descriptor reads one complete
+    version. The copy keeps that version's mtime, which Git's racy-entry check
+    compares with entry mtimes exactly as it would for the original. An index
+    with assume-unchanged or skip-worktree entries is not borrowed: those bits
+    survive the reseed and would hide working bytes from ``add -A``.
+    """
+    tagged = _git(workspace, ['ls-files', '-v', '-z'], check=True, cancel=cancel,
+                  stall_seconds=_SNAPSHOT_STALL_SECONDS).stdout
+    if any(entry[:1].islower() or entry[:1] == 'S' for entry in tagged.split('\0')):
+        return
+    location = _git(workspace, ['rev-parse', '--git-path', 'index'], check=True).stdout.strip()
+    try:
+        source = open(Path(workspace, location), 'rb')
+    except FileNotFoundError:
+        return  # A checkout without an index has no stat cache to borrow.
+    with source, open(index_path, 'xb') as target:
+        version = os.fstat(source.fileno())
+        shutil.copyfileobj(source, target)
+    os.utime(index_path, ns=(version.st_atime_ns, version.st_mtime_ns))
+
+
+def _alternate_index_tree(workspace: Path, parent: str, index_path: str, *,
+                          cancel=None) -> str:
+    """Stage working bytes into a private index; never write the writer's index.
+
+    Every command scales with the tree and the volume, so each runs under the
+    snapshot stall window instead of a wall-clock deadline. The writer's index
+    is only read: ``ls-files`` never writes it, and paths are validated against
+    the private index because porcelain ``diff`` rewrites the index it reads
+    whenever it meets stat-only changes.
+    """
     env = {'GIT_INDEX_FILE': index_path}
+
+    def git(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        return _git(workspace, args, check=True, cancel=cancel,
+                    stall_seconds=_SNAPSHOT_STALL_SECONDS, **kwargs)
+
     # Reset membership on each observation: a previously untracked file must
     # not stay privately tracked after ignore rules change in the source.
     # Single-tree merge still replaces membership, but carries stat data for
     # matching entries. Plain read-tree drops it and makes every observation
-    # rehash the entire tracked tree (especially expensive on network volumes).
-
+    # rehash the entire tracked tree (especially expensive on network volumes);
+    # for the same reason a first observation starts from the writer's stat
+    # cache instead of an empty index.
     # -i confines merging to this disposable index: source bytes may change
     # between observations and are never checkout/update targets here.
     with measure_task_startup('workspace_index_seed'):
-        _git(workspace, ['read-tree', '-m', '-i', parent] if parent else ['read-tree', '--empty'],
-             env=env, check=True)
+        if git(['ls-files', '-u']).stdout:
+            raise IntegrationError('Unresolved writer index conflicts; checkpoint refused')
+        if parent and not os.path.exists(index_path):
+            _borrow_index_stat_cache(workspace, index_path, cancel=cancel)
+        git(['read-tree', '-m', '-i', parent] if parent else ['read-tree', '--empty'], env=env)
+    with measure_task_startup('workspace_index_validate'):
+        changed = (git(['diff', '--name-only', '--diff-filter=ACMRT', '-z', parent], env=env).stdout
+                   if parent else '')
+        untracked = git(['ls-files', '--others', '--exclude-standard', '-z'], env=env).stdout
+        forbidden = _forbidden_checkpoint_paths([p for p in (changed + untracked).split('\0') if p])
+        if forbidden:
+            raise IntegrationError('Checkpoint contains forbidden dependency/generated/runtime paths: ' + ', '.join(forbidden))
     with measure_task_startup('workspace_index_add'):
-        _git(workspace, ['add', '-A', '--', '.'], env=env, timeout=90.0, check=True)
+        git(['add', '-A', '--', '.'], env=env)
     with measure_task_startup('workspace_index_tree'):
-        return _git(workspace, ['write-tree'], env=env, check=True).stdout.strip()
+        return git(['write-tree'], env=env).stdout.strip()
 
 
 def _checkpoint_tree(workspace: Path, parent: str, tree: str, task_id: str, *,
@@ -646,6 +798,19 @@ def _alternate_index_checkpoint(workspace: Path, parent: str,
         tree = _alternate_index_tree(workspace, parent, str(Path(directory) / 'index'))
         return _checkpoint_tree(workspace, parent, tree, task_id, reuse_commit=reuse_commit)
 
+
+def _clean_input_tree(root: Path, parent: str, *, cancel) -> str:
+    """Return the selected tree when Git proves no captured input is needed."""
+    if not parent:
+        return ''
+    flags = _git(root, ['ls-files', '-v', '-z'], check=True, cancel=cancel,
+                 stall_seconds=_SNAPSHOT_STALL_SECONDS).stdout
+    if any(entry[:1].islower() or entry[:1] == 'S' for entry in flags.split('\0')):
+        return ''
+    status = _git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+                  env={'GIT_OPTIONAL_LOCKS': '0'}, check=True, cancel=cancel,
+                  stall_seconds=_SNAPSHOT_STALL_SECONDS).stdout
+    return _rev(root, parent + '^{tree}') if not status else ''
 
 def _task_input_checkpoint(root: Path, parent: str, task_id: str, cancel, *,
                            source_ref: str = '') -> tuple[str, str]:
@@ -674,14 +839,17 @@ def _task_input_checkpoint(root: Path, parent: str, task_id: str, cancel, *,
             if cancel.is_set():
                 raise IntegrationError('Task cancelled before workspace admission')
             seed = _rev(root, 'HEAD')
-            tree = _alternate_index_tree(root, seed, index_path)
+            tree = _alternate_index_tree(root, seed, index_path, cancel=cancel)
             if cancel.is_set():
                 raise IntegrationError('Task cancelled during workspace snapshot')
             return tree
 
         previous_tree = capture()
         for _observation in range(3):
-            tree = capture()
+            head = _rev(root, 'HEAD')
+            tree = (_rev(root, head + '^{tree}')
+                    if _clean_input_tree(root, head, cancel=cancel)
+                    else capture())
             if tree == previous_tree:
                 return checkpoint(tree)
             previous_tree = tree
@@ -1056,8 +1224,12 @@ def _remove_controlled_worktree_owned(root: Path, path: Path) -> None:
     external worktrees never flow through this helper.
     """
     try:
-        path.resolve().relative_to(_workspace_root().resolve())
+        resolved = path.resolve()
+        controlled = any(resolved.is_relative_to(controlled_root) and resolved != controlled_root
+                         for controlled_root in _controlled_workspace_roots())
     except (OSError, ValueError):
+        controlled = False
+    if not controlled:
         logger.error('[Integration] refused to remove uncontrolled path %s', path)
         return
     from lib.project_mod.workspace_lease import WorkspaceBusyError, workspace_claims_lease
@@ -1124,7 +1296,7 @@ def _merge_checkpoint(root: Path, candidate: str, checkpoint: str,
         return checkpoint, ''
     cp = _git(root, ['merge-tree', '--write-tree', candidate, checkpoint], timeout=90.0)
     lines = (cp.stdout or '').splitlines()
-    if cp.returncode in {129} or 'unknown option' in (cp.stderr or '').lower():
+    if _merge_tree_lacks_write_tree(cp):
         return _scratch_merge(root, candidate, checkpoint, task_id)
     if cp.returncode != 0:
         detail = '\n'.join(lines[1:] if len(lines) > 1 else lines)
@@ -1367,6 +1539,13 @@ def _worker_loop() -> None:
     # Boot with a full claim so a crash-interrupted claim from the previous
     # process is considered immediately rather than one cadence later.
     boot_claim_pending = True
+    from lib.project_mod import delivery
+    from lib.storage.commit_events import subscribe_committed_operations
+    # Boot recovery resumes every pending receipt. Later passes follow commits
+    # observed by this worker's subscription, errors and rows awaiting action.
+    delivery.request_workspace_delivery_scan(recovery=True)
+    unsubscribe = subscribe_committed_operations(
+        delivery.DELIVERY_STATE_OPERATIONS, _delivery_state_committed)
     try:
         while _autorun_enabled():
             observed_generation = _worker_generation()
@@ -1374,9 +1553,9 @@ def _worker_loop() -> None:
                 claim_due = boot_claim_pending or _peek_ready() is not None
                 boot_claim_pending = False
                 progressed = process_ready_once() if claim_due else False
-                from lib.project_mod.delivery import resume_pending_workspace_deliveries
-                progressed = resume_pending_workspace_deliveries() or progressed
+                progressed = delivery.resume_due_workspace_deliveries() or progressed
             except StorageError as exc:
+                delivery.request_workspace_delivery_scan(recovery=True)
                 logger.warning(
                     '[Integration] storage error in worker loop '
                     '(retryable=%s code=%s): %s',
@@ -1388,6 +1567,7 @@ def _worker_loop() -> None:
                 backoff = min(30.0, backoff * 2.0)
                 continue
             except Exception as exc:
+                delivery.request_workspace_delivery_scan(recovery=True)
                 logger.warning('[Integration] uncaught error in worker loop: %s',
                                exc, exc_info=True)
                 keep_running, _woken = _wait_for_worker(
@@ -1408,6 +1588,7 @@ def _worker_loop() -> None:
                 _idle_poll_bounds()[0]
                 if work_woke else _next_idle_poll_delay(idle_delay))
     finally:
+        unsubscribe()
         with _WORKER_CONDITION:
             if _WORKER is current_thread:
                 _WORKER = None
@@ -1421,6 +1602,23 @@ def notify_workspace_write_released() -> bool:
     The worker's own scratch/publication leases cannot keep waking itself.
     Cross-process/external writes remain covered by bounded recovery polling.
     """
+    return _wake_existing_worker()
+
+
+def _delivery_state_committed(_operation: str) -> None:
+    """A delivery-state command committed in this process: rescan, then wake.
+
+    The hint grants nothing; the pass rereads durable receipts. The worker's
+    own commits only mark the pass due; its next tick reaches it.
+    TODO(enterprise): another process's delivery intent waits for this worker's
+    next recovery or due pass; a cross-process commit notice would end that wait.
+    """
+    from lib.project_mod.delivery import request_workspace_delivery_scan
+    request_workspace_delivery_scan()
+    _wake_existing_worker()
+
+
+def _wake_existing_worker() -> bool:
     global _WORKER_WAKE_GENERATION
     with _WORKER_CONDITION:
         worker = _WORKER
@@ -1718,11 +1916,12 @@ def prune_worktree_metadata(project_path: str, *, user_id: int) -> dict[str, Any
 def _porcelain(path: Path, timeout: float = 12.0) -> dict[str, Any]:
     try:
         cp = _git(path, ['status', '--porcelain=v1', '-z', '--untracked-files=normal'],
-                  timeout=timeout)
+                  timeout=timeout, check=True)
     except IntegrationError as exc:
         logger.debug('[Integration] status scan failed for %s: %s', path, exc)
         return {'modified': 0, 'deleted': 0, 'untracked': 0, 'total': 0,
-                'timedOut': True, 'scanned': False, 'error': str(exc)}
+                'timedOut': isinstance(exc.__cause__, subprocess.TimeoutExpired),
+                'scanned': False, 'error': str(exc)}
     modified = deleted = untracked = 0
     entries = [part for part in cp.stdout.split('\0') if part]
     index = 0

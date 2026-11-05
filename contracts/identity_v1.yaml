@@ -15,6 +15,13 @@ identifiers:
     purpose: durable resource ownership and isolation
     personalReservedValue: 1
     allocation: transactional-global-sequence
+    normalization:
+      authority: lib.identity.require_user_id
+      acceptedRepresentations: [integer, base-10-integer-text]
+      floatingPointInput: reject
+      booleanInput: reject
+      implicitObjectConversion: reject
+      rounding: forbidden
   tenantId:
     type: optional-opaque-string
     purpose: enterprise partition evolution seam

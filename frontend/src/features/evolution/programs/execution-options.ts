@@ -138,5 +138,6 @@ export function executionPolicyText(program: ExplorationProgram, models: ModelOp
     `${copy('policyAttempts')}: ${cap(attempts)}`,
     `${copy('policy.executor')}: ${label('executor')}`,
     `${copy('policy.reviewer')}: ${label('reviewer')}`,
+    ...((options.skill_bindings || []).map(binding => `${copy('skills')}: ${binding.skill_id} · ${binding.content_hash}`)),
   ].join('\n');
 }

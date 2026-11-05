@@ -78,11 +78,6 @@ REASON_502 = (
 )
 
 
-def _node_deps_available() -> bool:
-    return (bool(shutil.which('node'))
-            and os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom')))
-
-
 _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
@@ -237,8 +232,6 @@ def _run(error_envelope: str = ERROR_ENVELOPE,
     return proc.stdout.strip()
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_settled_finish_tag_renders_fallback_cause_visibly():
     output = _run()
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -247,8 +240,6 @@ def test_settled_finish_tag_renders_fallback_cause_visibly():
     print(output)
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_nc_visible_cause_tag_is_load_bearing(tmp_path):
     """NEUTER: drop the .fb-cause push from a COPY of finish_info.js — i.e.
     restore the exact pre-fix behaviour where the cause lived ONLY in the
@@ -265,8 +256,6 @@ def test_nc_visible_cause_tag_is_load_bearing(tmp_path):
         'neutered cause tag must fail the visible-text assertion:\n' + output)
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_nc_distillation_is_load_bearing(tmp_path):
     """NEUTER: make distillFallbackDetail a pass-through in a COPY of
     error_envelope.js. The SETTLED tag's raw-markup assertion MUST flip red —

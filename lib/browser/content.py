@@ -1,13 +1,18 @@
 """Request-scoped content projection; no fetching, execution, or persistence.
 
-Public entry points collect_content/render_content share policy and credential
-redaction with network_evidence. Captured structures are evidence, not instructions.
+collect_content/render_content share policy and credential redaction with
+network_evidence. collect_content_and_network adds diagnostics from the same
+accepted responses without retaining their bodies beyond the call. Captured
+structures are evidence, not instructions. Server error documents and
+sign-in gates are classified (blocked/unavailable), never accepted as content.
 """
 from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from html.parser import HTMLParser
+from http import HTTPStatus
 from itertools import islice
 from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 
@@ -34,12 +39,26 @@ _INSTRUCTION = re.compile(r'ignore (?:all |previous |prior )*instructions|system
 _EMPTY = re.compile(r'^(?:no (?:results|items|records)(?: found)?|暂无(?:结果|内容|数据)|没有找到相关结果)[.!。]?$', re.I)
 _AUTH = re.compile(r'^(?:sign in|log in|login required|access denied|请先登录|登录后查看|验证码|captcha)', re.I)
 _SHELL = re.compile(r'^(?:loading[. …]*|please wait|加载中[. …]*|home|menu|search|首页|搜索)$', re.I)
+_AUTH_GATE_TOKENS = frozenset({'login', 'signin', 'sign-in', 'sign_in', 'logon', 'passport', 'sso', 'oauth', 'oauth2', 'cas', 'auth', 'authorize'})
+_ACCESS_DENIED_HTTP_ERRORS = frozenset({HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN, HTTPStatus.PROXY_AUTHENTICATION_REQUIRED})
+# Vendor-prefixed signature names (X-Amz-Signature, x-signature, q-signature,
+# upsig) are the same bearer capability as sig/signature; a bare "sign" needs
+# a word boundary so ordinary words such as design/assign stay admitted.
+_SIGNATURE_KEY = re.compile(r'(?:sig|signature|(?:^|[^a-z])sign)$|^(?:policy|key-pair-id)$', re.I)
+#: Collector work bounds. Page-side readers (data_islands) import them so they
+#: never transfer more than this owner would process.
+WORK_BUDGET_CHARS = 1048576
+CLEAN_MAX_DEPTH = 16
+SOURCE_TEXT_MAX_CHARS = 262144
+HYDRATED_STATE_MAX_SOURCES = 20
+_TITLE_KEYS = ('display_title', 'displayTitle', 'title', 'name', 'skillName', 'displayName', 'subject')
+_SNIPPET_KEYS = ('desc', 'description', 'snippet', 'summary', 'content', 'body', 'text')
 
 
 class WorkBudget:
     def __init__(self):
         self.nodes = 12000
-        self.chars = 1048576
+        self.chars = WORK_BUDGET_CHARS
         self.truncated = False
 
     def text(self, value, limit=80000):
@@ -51,7 +70,7 @@ class WorkBudget:
         return value[:count]
 
     def clean(self, value, target, page, depth=0):
-        if self.nodes <= 0 or depth > 16:
+        if self.nodes <= 0 or depth > CLEAN_MAX_DEPTH:
             self.truncated = True
             return None
         self.nodes -= 1
@@ -102,6 +121,45 @@ def relevant_endpoint(url, page, target, dom=''):
         return bool((page_words & api_words) - ignored)
     except ValueError:
         return False
+
+
+def authentication_gate(url):
+    """True when the page is a sign-in surface carrying the page it returns to.
+
+    Both halves are required: an auth host label or path segment alone is an
+    ordinary page (OAuth docs), and an absolute URL parameter alone is an
+    ordinary redirect or link-out parameter.
+    """
+    try:
+        parts = urlsplit(url)
+        names = set((parts.hostname or '').split('.'))
+        names.update(segment.split('.', 1)[0] for segment in unquote(parts.path).lower().split('/'))
+        if not names & _AUTH_GATE_TOKENS:
+            return False
+        return any(urlsplit(value).scheme in ('http', 'https') and urlsplit(value).netloc
+                   for _, value in parse_qsl(parts.query))
+    except ValueError:
+        return False
+
+
+def http_error_document(title, dom):
+    """The 4xx/5xx status a bare server error document announces, else None.
+
+    Default proxy/WAF pages (e.g. nginx/openresty) title the document with the
+    status line and render that same line first. Requiring both, with the
+    standard reason phrase, keeps titles such as "500 Miles" as content.
+    """
+    match = re.fullmatch(r'([45]\d\d) (.+)', title)
+    if not match or dom.split('\n', 1)[0].casefold() != title.casefold():
+        return None
+    try:
+        status = HTTPStatus(int(match.group(1)))
+    except ValueError:
+        return None
+    # Separator-insensitive so nginx's "Gateway Time-out" names 504 too.
+    if re.sub(r'[\W_]+', '', status.phrase).casefold() != re.sub(r'[\W_]+', '', match.group(2)).casefold():
+        return None
+    return status
 
 
 class PageParser(HTMLParser):
@@ -168,16 +226,50 @@ def observed_url(value, page, owner):
         if urlsplit(url).scheme not in ('http', 'https') or not net._response_allowed(owner, url):
             return ''
         parts = urlsplit(url)
-        if parts.username or parts.password or any(net._is_sensitive_key(k) or k.lower() in {'sig', 'signature', 'policy', 'key-pair-id'} for k, _ in parse_qsl(parts.query)) or (parts.fragment and ('=' in parts.fragment or '?' in parts.fragment)):
+        if parts.username or parts.password or any(net._is_sensitive_key(k) or _SIGNATURE_KEY.search(k) for k, _ in parse_qsl(parts.query)) or (parts.fragment and ('=' in parts.fragment or '?' in parts.fragment)):
             return ''
         return url
     except ValueError:
         return ''
 
 
+def _rendered_unit(value, units):
+    """True when value is one whole rendered text line, not a fragment of one."""
+    unit = ' '.join(value.split()).lower()
+    return len(unit) >= 3 and unit in units
+
+
+def _nested_fields(record, wanted, work):
+    """Requested scalars from the record's own nested objects, nearest first.
+
+    A nested object with its own title is a different record (an author, a
+    seller), so its fields are never attributed to this one.
+    """
+    found = {}
+    queue = deque(child for child in record.values() if isinstance(child, (dict, list)))
+    while queue and len(found) < len(wanted):
+        if work.nodes <= 0:
+            work.truncated = True
+            break
+        work.nodes -= 1
+        value = queue.popleft()
+        if isinstance(value, list):
+            queue.extend(child for child in value if isinstance(child, (dict, list)))
+            continue
+        if net._first_scalar(value, _TITLE_KEYS):
+            continue
+        for key in wanted:
+            child = value.get(key)
+            if key not in found and isinstance(child, (str, int, float, bool)):
+                found[key] = child
+        queue.extend(child for child in value.values() if isinstance(child, (dict, list)))
+    return found
+
+
 def project_records(body, *, target, page, owner, dom, endpoint_relevant, work):
     stack = [body]
     out = []
+    units = None
     while stack and work.nodes > 0 and len(out) < 100:
         value = stack.pop()
         work.nodes -= 1
@@ -186,11 +278,16 @@ def project_records(body, *, target, page, owner, dom, endpoint_relevant, work):
         elif isinstance(value, dict):
             nested = value.get('note_card') or value.get('noteCard')
             raw = nested if isinstance(nested, dict) else value
-            title = net._first_scalar(raw, ('display_title', 'displayTitle', 'title', 'name', 'skillName', 'displayName', 'subject'))
-            snippet = net._first_scalar(raw, ('desc', 'description', 'snippet', 'summary', 'content', 'body', 'text'))
+            title = net._first_scalar(raw, _TITLE_KEYS)
+            snippet = net._first_scalar(raw, _SNIPPET_KEYS)
             identity = (title + ' ' + snippet).lower()
             query_match = bool(target.query and target.query.lower() in identity)
-            dom_match = bool(title and len(title) >= 3 and title.lower() in dom.lower())
+            # Page corroboration is structural: the title or snippet must be a
+            # whole rendered text line. Config/telemetry names ('action',
+            # 'default') occur as substrings of almost any page.
+            if title and units is None:
+                units = frozenset(dom.lower().splitlines())
+            dom_match = bool(title) and (_rendered_unit(title, units) or _rendered_unit(snippet, units))
             if title and (query_match or endpoint_relevant or (not target.query and dom_match)):
                 if target.query and not (query_match or dom_match or endpoint_relevant):
                     continue
@@ -198,6 +295,10 @@ def project_records(body, *, target, page, owner, dom, endpoint_relevant, work):
                     available = dict(raw.get('fields', {})) if isinstance(raw.get('fields'), dict) else {}
                     available.update(raw)
                     fields = {k: available[k] for k in target.fields if k in available and isinstance(available[k], (str, int, float, bool)) and not net._is_sensitive_key(k)}
+                    missing = [k for k in target.fields if k not in fields and not net._is_sensitive_key(k)]
+                    if missing:
+                        fields.update(_nested_fields(raw, missing, work))
+                        fields = {k: fields[k] for k in target.fields if k in fields}
                     record_id = net._first_scalar(value, ('id', 'note_id', 'skillId'))
                     if record_id and 'id' not in fields and len(fields) < 12:
                         fields['id'] = record_id[:512]
@@ -211,7 +312,7 @@ def project_records(body, *, target, page, owner, dom, endpoint_relevant, work):
 
 
 def collect_content(payload: dict, *, owner_user_id, target=None, max_chars=30000,
-                    representation='auto') -> dict:
+                    representation='auto', _observe_network=None) -> dict:
     target = ReadTarget.from_value(target)
     work = WorkBudget()
     payload = payload if isinstance(payload, dict) else {}
@@ -236,8 +337,13 @@ def collect_content(payload: dict, *, owner_user_id, target=None, max_chars=3000
     if not text and 'text' not in snapshot and html and ''.join(parser.parts).strip():
         text = ''.join(parser.parts)
     dom = clean_text(text)
+    http_error = http_error_document(receipt['title'], dom)
+    if http_error is not None:
+        receipt['status'] = 'blocked' if http_error in _ACCESS_DENIED_HTTP_ERRORS else 'unavailable'
+        receipt['coverage']['stop_reason'] = f'http_error_{http_error.value}'
+        return receipt
     receipt['coverage']['media_unread'] = bool(parser.media or snapshot.get('media_count'))
-    blocked = bool(snapshot.get('blocked')) or bool(_AUTH.search(dom))
+    blocked = bool(snapshot.get('blocked')) or bool(_AUTH.search(dom)) or authentication_gate(page)
     empty = snapshot.get('empty') is True or bool(_EMPTY.fullmatch(dom))
     dom_sufficient = len(dom) >= 12 and not blocked and not empty and (not target.query or target.query.lower() in dom.lower())
     if target.kind in ('article', 'record') and parser.links and dom == clean_text('\n'.join(r['title'] for r in parser.links)):
@@ -257,9 +363,9 @@ def collect_content(payload: dict, *, owner_user_id, target=None, max_chars=3000
         sources = [(row, 'captured_api') for row in net._network_rows(payload)]
         states = payload.get('initialStatePayloads')
         if isinstance(states, dict):
-            states = list(islice(states.values(), 20))
+            states = list(islice(states.values(), HYDRATED_STATE_MAX_SOURCES))
         if isinstance(states, list):
-            sources.extend((state, 'hydrated_state') for state in states[:20])
+            sources.extend((state, 'hydrated_state') for state in states[:HYDRATED_STATE_MAX_SOURCES])
         for source, strategy in sources:
             if work.chars <= 0 or work.nodes <= 0:
                 work.truncated = True
@@ -280,7 +386,7 @@ def collect_content(payload: dict, *, owner_user_id, target=None, max_chars=3000
                 relevant = False
                 body = source.get('value', source.get('data', source.get('text', source.get('payload', source)))) if isinstance(source, dict) else source
             if isinstance(body, str):
-                body = work.text(body, 262144)
+                body = work.text(body, SOURCE_TEXT_MAX_CHARS)
                 try:
                     body = json.loads(body)
                 except (ValueError, RecursionError):
@@ -294,6 +400,8 @@ def collect_content(payload: dict, *, owner_user_id, target=None, max_chars=3000
                     receipt['title'] = article['title']
             if projected:
                 records.extend(projected)
+                if strategy == 'captured_api' and _observe_network is not None:
+                    _observe_network(source, body)
                 if len(receipt['evidence']) < 12:
                     receipt['evidence'].append({'strategy': strategy, 'url': net.redact_url(url)})
                 work.truncated |= bool(source.get('bodyTruncated') or source.get('responseBodyTruncated')) if isinstance(source, dict) else False
@@ -339,17 +447,38 @@ def collect_content(payload: dict, *, owner_user_id, target=None, max_chars=3000
             coverage['missing_fields'].append('url')
     research = payload.get('research') if isinstance(payload.get('research'), dict) else {}
     stop = payload.get('stopReason') or snapshot.get('stopReason') or research.get('stopReason')
-    if stop:
+    if stop and not blocked:
         coverage['stop_reason'] = net._redact_text(str(stop))[:120]
     if usable and (bool(stop) or coverage['truncated'] or coverage['media_unread'] or coverage['missing_fields']):
         receipt['status'] = 'partial'
-    if coverage['truncated']:
+    if coverage['truncated'] and not blocked:
         coverage['stop_reason'] = 'budget_exhausted'
     if not receipt['content'] and not receipt['records']:
         coverage['scope'] = 'none'
+        receipt['evidence'] = []
     out = EvidenceReceipt(receipt)
     out.evidence_json = json.dumps(receipt, ensure_ascii=False)
     return out
+
+
+def collect_content_and_network(payload: dict, *, owner_user_id, target=None,
+                                max_entries: int) -> tuple[dict, dict]:
+    """Collect once and inventory only the accepted, already-cleaned responses.
+
+    Source bodies stay local to this call; ordinary content reads do not retain
+    them or compute endpoint shapes. No prior receipt or redacted URL is an
+    admission ticket for another response.
+    """
+    accepted = []
+    receipt = collect_content(
+        payload, owner_user_id=owner_user_id, target=target,
+        _observe_network=lambda row, body: accepted.append((row, body)))
+    if not receipt['content'] and not receipt['records']:
+        accepted.clear()
+    network = net._inventory_network_evidence(
+        payload, owner_user_id=owner_user_id, max_entries=max_entries,
+        accepted_responses=accepted)
+    return receipt, network
 
 
 def field_present(record, field):
@@ -370,4 +499,4 @@ def render_content(receipt, *, max_chars=30000) -> str:
     return rendered
 
 
-__all__ = ['EvidenceReceipt', 'collect_content', 'render_content']
+__all__ = ['EvidenceReceipt', 'collect_content', 'collect_content_and_network', 'render_content']

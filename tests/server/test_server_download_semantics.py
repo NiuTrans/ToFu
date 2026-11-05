@@ -142,7 +142,9 @@ def test_download_tool_is_the_declared_server_location_contract():
     assert owners == ['browser_download']
     owner = next(spec for spec in all_specs() if spec.key == owners[0])
     assert owner.category == 'browser'
-    assert owner.discovery_policy == 'eager'
+    # Rare domain capability: deferred behind Tool Search and still
+    # discoverable on every backend (tests/tools/test_tool_exposure_policy.py).
+    assert owner.discovery_policy == 'searchable'
     assert owner.cacheable_tools == frozenset()
 
 
@@ -193,7 +195,7 @@ def test_browser_element_resolves_exact_untruncated_link_without_click_or_cookie
             calls.append(command)
             if command == 'list_tabs':
                 return [{
-                    'id': 7, 'active': True,
+                    'id': 7, 'active': True, 'automation': True,
                     'url': 'https://files.test/releases',
                 }], None
             if command == 'get_interactive_elements':
@@ -203,7 +205,9 @@ def test_browser_element_resolves_exact_untruncated_link_without_click_or_cookie
                     'href': 'https://files.test/download?token=truncated',
                 }]}, None
             if command == 'execute_js':
-                assert '#latest' in params['code']
+                # A discovered selector is first-match by construction.
+                assert params['code'] == target._link_reader_script(
+                    '#latest', exact=False)
                 return {
                     'url': (
                         'https://files.test/download?token='
@@ -252,7 +256,7 @@ def test_browser_element_retargets_when_remembered_tab_died(monkeypatch):
             calls.append((command, dict(params or {})))
             if command == 'list_tabs':
                 return [{
-                    'id': 8, 'active': True,
+                    'id': 8, 'active': True, 'automation': True,
                     'url': 'https://files.test/releases',
                 }], None
             if command == 'get_interactive_elements':
@@ -363,7 +367,7 @@ def test_browser_element_action_button_fails_fast_to_browser_click(monkeypatch):
             calls.append(command)
             if command == 'list_tabs':
                 return [{
-                    'id': 7, 'active': True,
+                    'id': 7, 'active': True, 'automation': True,
                     'url': 'https://mlp.test/ml/#/codeLab/list',
                 }], None
             if command == 'get_interactive_elements':
@@ -411,7 +415,7 @@ def test_browser_element_read_denial_is_a_typed_download_failure(monkeypatch):
             assert command == 'list_tabs'
             return [{
                 'id': 7,
-                'active': True,
+                'active': True, 'automation': True,
                 'url': 'https://denied.test/releases',
             }], None
 
@@ -477,13 +481,14 @@ def test_download_handler_routes_page_element_and_transfer_through_same_device(
     monkeypatch.setattr(
         handlers, '_finalize_tool_round', lambda *_args, **_kwargs: None)
 
-    _tc_id, content, is_read = handlers._handle_browser_download_url_to_server(
+    _tc_id, content, is_search = handlers._handle_browser_download_url_to_server(
         {'_userId': '41'}, {}, 'browser_download_url_to_server', 'tc-link',
         {'text': '下载最新版', 'tab_id': 7}, 1, {},
         {'browserClientId': ''}, '', False,
     )
 
-    assert is_read is True
+    # A staging receipt is never web evidence for the no-prose fallback.
+    assert is_search is False
     assert acquired == [resolved_url]
     assert bindings == [('41', 'browser-a', ('file_export',))]
     assert json.loads(content)['path'] == '/safe/exact.zip'
@@ -833,6 +838,7 @@ def test_standalone_run_command_never_spawns_for_cookie_file_download(
 
 
 def test_project_run_command_uses_the_same_pre_spawn_redirect(monkeypatch):
+    import lib.project_mod as project_mod
     import lib.tasks_pkg.handlers.project as project_handler
     import lib.tasks_pkg.handlers.search._core as core
 
@@ -859,6 +865,10 @@ def test_project_run_command_uses_the_same_pre_spawn_redirect(monkeypatch):
     command = (
         "curl -fsSL -b 'session=top-secret' -o citadel.zip "
         "https://files.test/download")
+    monkeypatch.setattr(
+        project_mod, 'execute_tool',
+        lambda *_args, **_kwargs: pytest.fail('subprocess path must not run'),
+    )
     _tc_id, content, _is_read = project_handler._handle_project_tool(
         {'_userId': '41', 'id': 'task-1', 'convId': 'conv-1'},
         {}, 'run_command', 'tc-1', {'command': command}, 1, {},
@@ -935,14 +945,14 @@ def test_download_handler_returns_machine_readable_server_receipt(monkeypatch):
         lambda _task, _rn, _entry, results, **kwargs: finalized.update(
             results=results, status=kwargs.get('status')),
     )
-    _tc_id, content, is_read = handlers._handle_browser_download_url_to_server(
+    _tc_id, content, is_search = handlers._handle_browser_download_url_to_server(
         {'_userId': '41'}, {}, 'browser_download_url_to_server', 'tc-1',
         {'url': 'https://files.test/download'}, 1, {},
         {'browserClientId': 'browser-a'}, '', False,
     )
 
     receipt = json.loads(content)
-    assert is_read is True
+    assert is_search is False
     assert receipt['location'] == 'server_staging'
     assert receipt['path'] == '/safe/browser-transfer-citadel.zip'
     assert receipt['sha256'] == 'c' * 64
@@ -951,7 +961,7 @@ def test_download_handler_returns_machine_readable_server_receipt(monkeypatch):
 
 def test_explicit_large_file_stream_is_independent_of_search_body_limit(
         monkeypatch, tmp_path):
-    import lib as settings
+    from tofu_search.config import bind_call_config, get_config
     import lib.browser.access as access
     import lib.browser.protocol as protocol
     import lib.browser.queue as queue
@@ -963,7 +973,6 @@ def test_explicit_large_file_stream_is_independent_of_search_body_limit(
     store = transfer_mod.BrowserFileTransferStore()
     monkeypatch.setattr(transfer_mod, 'file_transfer_store', store)
     monkeypatch.setattr(transfer_mod, '_live_staging_headroom', lambda _n: True)
-    monkeypatch.setattr(settings, 'FETCH_MAX_BYTES', 20 * 1024 * 1024)
     monkeypatch.setattr(core, 'fetch_url_bytes', lambda _url: None)
     monkeypatch.setattr(queue, 'is_extension_connected', lambda *a, **kw: True)
     monkeypatch.setattr(protocol, 'require_capabilities', lambda *a: {'profile': 'Work'})
@@ -993,15 +1002,17 @@ def test_explicit_large_file_stream_is_independent_of_search_body_limit(
                               chunk_count=chunk_count, **auth), None
 
     monkeypatch.setattr(queue, 'send_browser_command', send)
-    result = core.download_url_to_server(
-        'https://files.test/camera.pkg', owner_user_id='41')
+    search_limits = get_config().copy(fetch_max_bytes=20 * 1024 * 1024)
+    with bind_call_config(search_limits):
+        result = core.download_url_to_server(
+            'https://files.test/camera.pkg', owner_user_id='41')
     assert result['location'] == 'server_staging'
     assert result['transport'] == 'browser_authenticated'
     assert result['size_bytes'] == len(chunk) * chunk_count
+    assert result['size_bytes'] > search_limits.fetch_max_bytes
     assert result['sha256'] == digest.hexdigest()
     assert Path(result['saved_path']).stat().st_size == result['size_bytes']
     assert not store._transfers
-    assert settings.FETCH_MAX_BYTES == 20 * 1024 * 1024
 
 
 @pytest.mark.parametrize('failure_kind', ['local', 'server', 'unrelated', 'wrong_limit'])
@@ -1054,7 +1065,7 @@ def test_explicit_download_limit_refusal_is_not_a_retryable_command_failure(
 @pytest.mark.parametrize('search_timeout', [1, 15])
 def test_explicit_download_stream_deadline_is_not_the_search_page_deadline(
         monkeypatch, tmp_path, search_timeout):
-    import lib as settings
+    from tofu_search.config import bind_call_config, get_config
     import lib.browser.access as access
     import lib.browser.protocol as protocol
     import lib.browser.queue as queue
@@ -1065,7 +1076,6 @@ def test_explicit_download_stream_deadline_is_not_the_search_page_deadline(
     _patch_fetched_root(monkeypatch, tmp_path)
     store = transfer_mod.BrowserFileTransferStore()
     monkeypatch.setattr(transfer_mod, 'file_transfer_store', store)
-    monkeypatch.setattr(settings, 'FETCH_TIMEOUT', search_timeout)
     monkeypatch.setattr(core, 'fetch_url_bytes', lambda _url: None)
     monkeypatch.setattr(queue, 'is_extension_connected', lambda *a, **kw: True)
     monkeypatch.setattr(protocol, 'require_capabilities', lambda *a: {'profile': 'Work'})
@@ -1091,13 +1101,13 @@ def test_explicit_download_stream_deadline_is_not_the_search_page_deadline(
                               chunk_count=1, **auth), None
 
     monkeypatch.setattr(queue, 'send_browser_command', send)
-    result = core.download_url_to_server(
-        'https://files.test/slow.zip', owner_user_id='41')
+    with bind_call_config(get_config().copy(fetch_timeout=search_timeout)):
+        result = core.download_url_to_server(
+            'https://files.test/slow.zip', owner_user_id='41')
     assert result['location'] == 'server_staging'
     assert Path(result['saved_path']).read_bytes() == payload
     assert result['sha256'] == hashlib.sha256(payload).hexdigest()
     assert issued_deadlines == [(120, 110000)]
-    assert settings.FETCH_TIMEOUT == search_timeout
     assert not store._transfers
 
 

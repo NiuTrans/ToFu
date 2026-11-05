@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 
@@ -70,6 +71,9 @@ def test_elapsed_command_hands_off_and_remains_owner_queryable(monkeypatch):
         on_handoff=handoffs.append)
     assert background.is_background_command_result(result)
     command_id = result.split(background.BACKGROUND_COMMAND_MARKER, 1)[1].split('.', 1)[0].strip()
+    # A running (not queued) command's receipt keeps its exact bytes.
+    assert result == background_commands.background_command_result(
+        'slow-test', command_id, task=task)
     assert task.get('_subprocess_pid') is None
     assert handoffs == [command_id]
     assert background_commands.check_background_command(
@@ -82,6 +86,17 @@ def test_elapsed_command_hands_off_and_remains_owner_queryable(monkeypatch):
     assert settled['status'] == 'completed'
     assert settled['result'].endswith('[exit code: 0]')
     assert delivered.wait(2)
+
+
+def _git_repo(path):
+    path.mkdir()
+    subprocess.run(['git', 'init', '-q', str(path)], check=True)
+    (path / 'file.txt').write_text('x\n')
+    return path
+
+
+def _command_id(result):
+    return result.split(background.BACKGROUND_COMMAND_MARKER, 1)[1].split('.', 1)[0].strip()
 
 
 def test_manual_handoff_is_command_scoped_and_preserves_process(monkeypatch):
@@ -347,6 +362,36 @@ def test_elapsed_handoff_accepts_with_more_than_32_live_commands(monkeypatch):
         task=task, config={}, command='slow-test', execute=execute)
     assert background.is_background_command_result(result)
     assert delivered.wait(3)
+
+
+def test_handoff_waits_long_but_never_past_the_reaper(monkeypatch):
+    """A foreground wait costs no model request (owner decision 2026-10-28):
+    the handoff waits 25 minutes, clamped by reaper_safe_wait_s so a silent
+    foreground command is handed off before the silence reaper interrupts it."""
+    from lib.tasks_pkg import manager
+    monkeypatch.delenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', raising=False)
+    assert background.AUTO_BACKGROUND_AFTER_S == 1500
+    assert manager.reaper_safe_wait_s(background.AUTO_BACKGROUND_AFTER_S) == 1500
+
+    clamps = []
+    monkeypatch.setattr(manager, 'reaper_safe_wait_s',
+                        lambda cap: clamps.append(cap) or 0.05)
+    monkeypatch.setattr(background, '_queue_completion', lambda **_kwargs: True)
+    release = threading.Event()
+
+    def execute(command_task):
+        command_task['_subprocess_pid'] = 321
+        release.wait(3)
+        command_task.pop('_subprocess_pid', None)
+        return '$ slow-test\npassed\n[exit code: 0]'
+
+    try:
+        result = background.run_with_steer_handoff(
+            task=_task(), config={}, command='slow-test', execute=execute)
+    finally:
+        release.set()
+    assert background.is_background_command_result(result)
+    assert clamps == [1500]
 
 
 def test_no_subprocess_does_not_auto_handoff(monkeypatch):
@@ -642,24 +687,199 @@ def test_project_handler_hands_a_real_subprocess_to_background(
     assert '[Command aborted by user]' in queued[0]['result']
 
 
-def test_project_command_failure_keeps_original_error_and_partial_output(monkeypatch, tmp_path):
-    import lib.tasks_pkg.handlers.project as handler
-    import lib.tasks_pkg.handlers.code_exec as code_exec
+@pytest.mark.parametrize('surface', ['project', 'standalone'])
+@pytest.mark.parametrize('cleanup_failure', [False, True])
+@pytest.mark.parametrize('execution_failure', [False, True])
+def test_command_failure_keeps_original_error_and_partial_output(
+        monkeypatch, tmp_path, surface, cleanup_failure, execution_failure):
+    from lib.tasks_pkg.handlers import code_exec, project
     from types import SimpleNamespace
+    from lib.tasks_pkg.handlers import _project_execution
+    handler = _project_execution if surface == 'project' else code_exec
+    settlement_owner = project if surface == 'project' else code_exec
+    invoke = (project._handle_project_tool if surface == 'project'
+              else code_exec._handle_code_exec)
     complete = []
-    artifact = SimpleNamespace(spilled=False)
-    progress = SimpleNamespace(flush=lambda: None,
-        finalize_output=lambda **kwargs: (complete.append(kwargs['complete']), artifact)[1])
+    retired = []
+    artifact = SimpleNamespace(spilled=False, degraded=False, artifact_ref=None)
+
+    def finalize_output(**kwargs):
+        complete.append(kwargs['complete'])
+        if cleanup_failure:
+            raise OSError('synthetic output storage failure')
+        return artifact
+
+    progress = SimpleNamespace(flush=lambda: None, finalize_output=finalize_output)
     monkeypatch.setattr(handler, '_make_run_command_progress_cb', lambda *a, **k: progress)
-    monkeypatch.setattr(handler, '_make_run_command_spawn_cb', lambda *a, **k: None)
-    monkeypatch.setattr(code_exec, '_project_output_artifact', lambda content, result: content)
-    monkeypatch.setattr(code_exec, '_register_output_artifact_origin', lambda *a, **k: None)
+    monkeypatch.setattr(handler, '_make_run_command_spawn_cb',
+        lambda *a, **k: SimpleNamespace(finish=lambda: retired.append(True)))
+    finalized = []
+    monkeypatch.setattr(settlement_owner, '_finalize_tool_round',
+        lambda *a, **k: finalized.append(True))
     failure = RuntimeError('synthetic execution failure')
     def fail(**kwargs):
-        raise failure
+        if execution_failure:
+            raise failure
+        return '$ fail\noutput\n[exit code: 0]'
     monkeypatch.setattr(background, 'run_with_steer_handoff', fail)
-    with pytest.raises(RuntimeError) as caught:
-        handler._handle_project_tool(_task(), None, 'run_command', 'tc-fail',
+    def run():
+        return invoke(_task(), None, 'run_command', 'tc-fail',
             {'command': 'fail'}, 1, {'status': 'searching'}, {}, str(tmp_path), True)
-    assert caught.value is failure
-    assert complete == [False]
+    if execution_failure:
+        with pytest.raises(RuntimeError) as caught:
+            run()
+        assert caught.value is failure
+    elif cleanup_failure:
+        with pytest.raises(OSError, match='synthetic output storage failure'):
+            run()
+    else:
+        assert run()[1] == '$ fail\noutput\n[exit code: 0]'
+    assert retired == [True]
+    assert complete == [not execution_failure]
+    assert finalized == ([] if execution_failure or cleanup_failure else [True])
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Concurrent foreground commands (owner decision 2026-10-28)
+# ═══════════════════════════════════════════════════════════════════
+# Every call of a model round now starts at once, so one task can run several
+# foreground commands. Each command keeps its own handoff, interrupt and PID
+# evidence; the task-level slots describe the newest live command.
+
+def _start_command(task, pid, *, round_num=None, tool_call_id=''):
+    """Run one foreground command on its own thread; return its handles."""
+    spawned, release, settled = threading.Event(), threading.Event(), []
+
+    def execute(command_task):
+        command_task['_subprocess_pid'] = pid
+        spawned.set()
+        release.wait(10)
+        command_task.pop('_subprocess_pid', None)
+        return f'$ job-{pid}\npassed\n[exit code: 0]'
+
+    worker = threading.Thread(target=lambda: settled.append(
+        background.run_with_steer_handoff(
+            task=task, config={}, command=f'job-{pid}', execute=execute,
+            round_num=round_num, tool_call_id=tool_call_id)))
+    worker.start()
+    assert spawned.wait(5)
+    return worker, release, settled
+
+
+def test_pid_mirror_tracks_the_newest_live_foreground_command():
+    task = _task()
+    first = background.DetachableCommandTask(task)
+    second = background.DetachableCommandTask(task)
+    first['_subprocess_pid'] = 101
+    second['_subprocess_pid'] = 102
+    assert task['_subprocess_pid'] == 102
+
+    second.pop('_subprocess_pid', None)
+    assert task['_subprocess_pid'] == 101, (
+        'the live command lost its PID mirror when its sibling exited')
+
+    third = background.DetachableCommandTask(task)
+    third['_subprocess_pid'] = 103
+    third.detach()
+    assert task['_subprocess_pid'] == 101
+    first.pop('_subprocess_pid', None)
+    assert '_subprocess_pid' not in task
+    assert '_foregroundCommands' not in task
+
+
+def test_interrupt_for_a_live_sibling_is_neither_consumed_nor_voided():
+    from lib.project_mod.run_command import _pop_cmd_interrupt
+    task = _task()
+    first = background.DetachableCommandTask(task)
+    second = background.DetachableCommandTask(task)
+    first['_subprocess_pid'] = 101
+    second['_subprocess_pid'] = 102
+    task['_cmd_interrupt'] = {'pid': 102, 'source': 'user', 'ts': time.time()}
+
+    assert _pop_cmd_interrupt(first, 101) is None
+    assert task['_cmd_interrupt']['pid'] == 102, (
+        "a sibling's read loop voided an interrupt addressed to a live command")
+    assert _pop_cmd_interrupt(second, 102)
+    assert '_cmd_interrupt' not in task
+
+    task['_cmd_interrupt'] = {'pid': 999, 'source': 'user', 'ts': time.time()}
+    assert _pop_cmd_interrupt(first, 101) is None
+    assert '_cmd_interrupt' not in task, 'a stale interrupt must still be voided'
+
+
+def test_concurrent_commands_each_hand_off_after_elapsed_time(monkeypatch):
+    monkeypatch.setattr(background, 'AUTO_BACKGROUND_AFTER_S', 0.05)
+    monkeypatch.setattr(background, '_queue_completion', lambda **_kwargs: True)
+    task = _task()
+    first = _start_command(task, 101)
+    second = _start_command(task, 102)
+    try:
+        for worker, _release, settled in (first, second):
+            worker.join(5)
+            assert not worker.is_alive(), (
+                'an older concurrent command could not leave the foreground')
+            assert background.is_background_command_result(settled[0])
+        assert '_subprocess_pid' not in task
+        assert '_foregroundCommands' not in task
+    finally:
+        for worker, release, _settled in (first, second):
+            release.set()
+            worker.join(5)
+    for _worker, _release, settled in (first, second):
+        status = background_commands.check_background_command(
+            _command_id(settled[0]), user_id=7, wait_s=5)
+        assert status['status'] == 'completed'
+
+
+def test_background_request_reaches_the_exact_concurrent_call(monkeypatch):
+    monkeypatch.setattr(background, 'AUTO_BACKGROUND_AFTER_S', 1000)
+    monkeypatch.setattr(background, '_queue_completion', lambda **_kwargs: True)
+    task = _task()
+    task['status'] = 'running'
+    older = _start_command(task, 101, round_num=3, tool_call_id='call-a')
+    newer = _start_command(task, 102, round_num=3, tool_call_id='call-b')
+    try:
+        slot = task['_cmd_handoff_control']
+        assert slot.tool_call_id == 'call-b'
+        assert slot.request(round_num=3, tool_call_id='call-z') == {
+            'backgrounded': False, 'reason': 'command_changed'}
+        assert slot.request(round_num=3, tool_call_id='call-a') == {
+            'backgrounded': True}
+        older[0].join(5)
+        assert background.is_background_command_result(older[2][0])
+        assert newer[0].is_alive(), 'the request moved the wrong command'
+        assert task['_subprocess_pid'] == 102
+        assert task['_cmd_handoff_control'].request(
+            round_num=3, tool_call_id='call-b') == {'backgrounded': True}
+        newer[0].join(5)
+        assert background.is_background_command_result(newer[2][0])
+        assert '_cmd_handoff_control' not in task
+    finally:
+        for worker, release, _settled in (older, newer):
+            release.set()
+            worker.join(5)
+
+
+def test_a_sibling_waiting_for_stdin_does_not_hold_another_command(monkeypatch):
+    """A stdin prompt keeps only its own command in the foreground."""
+    monkeypatch.setattr(background, 'AUTO_BACKGROUND_AFTER_S', 1000)
+    monkeypatch.setattr(background, '_queue_completion', lambda **_kwargs: True)
+    task = _task()
+    task['status'] = 'running'
+    prompting = _start_command(task, 101, round_num=3, tool_call_id='call-a')
+    running = _start_command(task, 102, round_num=3, tool_call_id='call-b')
+    task['toolRounds'].append(
+        {'roundNum': 3, 'toolCallId': 'call-a', 'status': 'awaiting_stdin'})
+    try:
+        slot = task['_cmd_handoff_control']
+        assert slot.request(round_num=3, tool_call_id='call-a') == {
+            'backgrounded': False, 'reason': 'awaiting_stdin'}
+        assert slot.request(round_num=3, tool_call_id='call-b') == {
+            'backgrounded': True}, "a sibling's stdin prompt held this command"
+        running[0].join(5)
+        assert background.is_background_command_result(running[2][0])
+        assert prompting[0].is_alive()
+    finally:
+        for worker, release, _settled in (prompting, running):
+            release.set()
+            worker.join(5)

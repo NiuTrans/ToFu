@@ -55,6 +55,10 @@ export interface TurnHistoryLaneState {
   nextBeforeOrdinal: number | null;
   hasMore: boolean;
   totalTurns: number;
+  /** Turns this replica loaded below a replacing tail window stay mounted in
+   * [retainedFromOrdinal, nextBeforeOrdinal) until continuous frontier pages
+   * re-read that range (see retainedBelowWindow / revalidateRetainedTurns). */
+  retainedFromOrdinal?: number;
 }
 
 export interface TurnCommandResult extends UnknownRecord {
@@ -489,6 +493,46 @@ function reduceEvent(
   if (event.turnId in next.commandPending) delete draft.record('commandPending')[event.turnId];
 }
 
+/* A tail window is authoritative only from its oldest ordinal; replacing the
+ * older Turns this replica paged in would unmount history the reader already
+ * sees until it is paged in again. They stay as the same objects, and only
+ * continuous frontier pages may remove them (revalidateRetainedTurns). */
+function retainedBelowWindow(
+  state: TurnState,
+  window: ConversationTurnWindow | undefined,
+  replacing: ReadonlyArray<ProjectionTurn> | undefined,
+): ProjectionTurn[] {
+  const floor = window?.hasMore ? window.nextBeforeOrdinal : null;
+  if (!window || typeof floor !== 'number') return [];
+  const replaced = new Set((replacing ?? []).map((turn) => turn?.turnId));
+  return (state.laneOrder[window.laneId] ?? []).flatMap((turnId) => {
+    const turn = state.turnsById[turnId];
+    return turn && !replaced.has(turnId) && Number(turn.ordinal) < floor ? [turn] : [];
+  });
+}
+
+/* A continuous frontier page lists every lane Turn in [its oldest ordinal,
+ * beforeOrdinal), or below beforeOrdinal when it has no more. Retained Turns
+ * it omits in that range were deleted while this replica was out of sync.
+ * Returns the retained floor still awaiting a page, if any. */
+function revalidateRetainedTurns(
+  draft: TurnStateDraft,
+  laneId: string,
+  page: TurnSnapshotInput,
+  retainedFrom: number,
+): number | undefined {
+  const floor = page.hasMore ? page.nextBeforeOrdinal : Number.NEGATIVE_INFINITY;
+  const ceiling = page.beforeOrdinal;
+  if (typeof floor !== 'number' || typeof ceiling !== 'number') return retainedFrom;
+  const listed = new Set((page.turns ?? []).map((turn) => turn?.turnId));
+  const next = draft.state;
+  removeTurns(draft, (next.laneOrder[laneId] ?? []).filter((turnId) => {
+    const ordinal = Number(next.turnsById[turnId]?.ordinal);
+    return ordinal >= Math.max(floor, retainedFrom) && ordinal < ceiling && !listed.has(turnId);
+  }));
+  return retainedFrom < floor ? retainedFrom : undefined;
+}
+
 function removeTurns(
   draft: TurnStateDraft,
   turnIds: ReadonlyArray<string> | undefined,
@@ -588,9 +632,18 @@ export function reduceTurnState(
   const next = draft.state;
   if (action.type === 'snapshot') {
     const snapshot = action.snapshot ?? {};
-    if (Number(snapshot.conversationRevision || 0)
-        < Number(next.conversationRevision || 0)) return state;
-    next.conversationRevision = Number(snapshot.conversationRevision || 0);
+    /* A detached page brings Turns outside the replay window in for
+     * navigation and may be older than projections streamed since it was
+     * read (only a Turn change overtakes it). It adds what is missing and is
+     * never revision, replacement or deletion authority. */
+    const detached = snapshot.historyMode === 'detached';
+    if (!detached) {
+      if (Number(snapshot.conversationRevision || 0)
+          < Number(next.conversationRevision || 0)) return state;
+      next.conversationRevision = Number(snapshot.conversationRevision || 0);
+    }
+    const retained = snapshot.authoritativeFull
+      ? retainedBelowWindow(state, snapshot.turnWindow, snapshot.turns) : [];
     if (snapshot.authoritativeFull) {
       draft.reset = true;
 
@@ -603,6 +656,10 @@ export function reduceTurnState(
       >;
       next.attemptsById = Object.create(null) as Record<string, AttemptRecord>;
       next.pendingEventsByTurn = Object.create(null) as Record<string, TurnEvent[]>;
+      for (const turn of retained) {
+        draft.record('turnsById')[turn.turnId] = turn;
+        draft.placeTurn(turn.laneId || 'main', turn.turnId);
+      }
     }
     /* Delta-sync tombstones: a non-authoritative (incremental) snapshot
      * cannot sweep absent ids, so deletions arrive explicitly.  Removal is
@@ -614,9 +671,14 @@ export function reduceTurnState(
       options.onUnknownTurn,
       options.onProjectionGap,
     );
-    for (const turn of snapshot.turns ?? []) putTurn(draft, turn,
-      !(snapshot.laneId && 'hasMore' in snapshot && 'totalTurns' in snapshot));
-    for (const attempt of snapshot.attempts ?? []) putAttempt(draft, attempt);
+    for (const turn of snapshot.turns ?? []) {
+      if (detached && turn?.turnId && next.turnsById[turn.turnId]) continue;
+      putTurn(draft, turn, !(snapshot.laneId && 'hasMore' in snapshot && 'totalTurns' in snapshot));
+    }
+    for (const attempt of snapshot.attempts ?? []) {
+      if (detached && attempt?.attemptId && next.attemptsById[attempt.attemptId]) continue;
+      putAttempt(draft, attempt);
+    }
     if (snapshot.authoritativeFull && snapshot.activeAttemptPhase) {
       const active = snapshot.activeAttemptPhase;
       const turn = next.turnsById[active.turnId];
@@ -634,11 +696,15 @@ export function reduceTurnState(
         nextBeforeOrdinal: pageWindow.nextBeforeOrdinal,
         hasMore: pageWindow.hasMore,
         totalTurns: pageWindow.totalTurns,
+        ...(retained.length ? { retainedFromOrdinal: Number(retained[0]!.ordinal) } : {}),
       };
     } else if (snapshot.laneId && 'hasMore' in snapshot
         && 'totalTurns' in snapshot && snapshot.historyMode !== 'detached'
         && (!next.historyByLane[snapshot.laneId]
           || snapshot.beforeOrdinal === next.historyByLane[snapshot.laneId]?.nextBeforeOrdinal)) {
+      const retainedFrom = next.historyByLane[snapshot.laneId]?.retainedFromOrdinal;
+      const stillRetained = retainedFrom === undefined ? undefined
+        : revalidateRetainedTurns(draft, snapshot.laneId, snapshot, retainedFrom);
       draft.record('historyByLane')[snapshot.laneId] = {
         nextBeforeOrdinal: snapshot.nextBeforeOrdinal ?? null,
         hasMore: Boolean(snapshot.hasMore),
@@ -646,6 +712,7 @@ export function reduceTurnState(
           Number(snapshot.totalTurns || 0),
           next.laneOrder[snapshot.laneId]?.length ?? 0,
         ),
+        ...(stillRetained === undefined ? {} : { retainedFromOrdinal: stillRetained }),
       };
     } else if (snapshot.authoritativeFull) {
       for (const [laneId, ids] of Object.entries(next.laneOrder)) {

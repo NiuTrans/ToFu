@@ -226,7 +226,8 @@ class PreviewBuildScheduler:
         except StorageError as exc:
             # Retention pressure/conflicts are storage failures, not TeX errors.
             self.production.finish(task['id'], error={
-                'kind': 'server_busy' if exc.code == 'database_busy' else 'generic',
+                'kind': 'storage_unavailable' if exc.code in (
+                    'database_busy', 'database_unavailable') else 'generic',
                 'code': exc.code, 'message': str(exc), 'retryable': exc.retryable, 'hint': ''})
         except Exception:
             # Adapter/IO failures must settle the same TaskRuntime lifecycle;

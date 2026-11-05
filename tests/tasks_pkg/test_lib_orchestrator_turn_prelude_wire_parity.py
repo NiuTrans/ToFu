@@ -2,22 +2,18 @@
 turn prelude from _run.py into
 lib.tasks_pkg.orchestrator._turn_prelude.run_turn_prelude().
 
-Three independent preamble steps, in the original order:
+Independent preamble steps, in the original order, include:
 
-    1. Swarm autocontinue chain reset on HUMAN turns: a human-initiated
-       turn (NOT carrying ``cfg['_swarmAutoContinue']``) means the user
-       is back in the loop, so the consecutive-auto-continue ceiling
-       starts fresh. Fail-soft (debug log on error). See
-       lib/swarm/integration.py.
-    2. Capability profile merge: named profile defaults merge UNDER the
-       explicit cfg (explicit caller values always win); no-op for
-       'default'. Rebinds cfg AND task['config'] — the leaf RETURNS the
-       merged cfg so the caller rebinds identically.
+    * Capability profile merge: named profile defaults merge UNDER the
+      explicit cfg (explicit caller values always win); no-op for
+      'default'. Rebinds cfg AND task['config'] — the leaf RETURNS the
+      merged cfg so the caller rebinds identically.
 Browser routing is not a prelude side effect. The device choice remains in
 the config until the browser handler binds it together with the task owner.
 
-Branches (behavioural-pinned): step 1 skips when _swarmAutoContinue is set;
-step 2 rebinds cfg only when the profile is non-default.
+Branches (behavioural-pinned): the profile merge rebinds cfg only when the
+profile is non-default. Swarm continuation turns run the same prelude; their
+wake policy is structural and lives in lib/swarm/integration/_autocontinue.py.
 
 Failing-first: written BEFORE the extraction; the module/signature/
 delegation guards turn RED until the leaf exists and _run.py delegates.
@@ -72,8 +68,7 @@ def test_run_task_delegates_with_cfg_rebind():
 # ---------------------------------------------------------------------------
 def test_run_py_no_inline_prelude_steps():
     src = RUN_PY.read_text()
-    for needle in ('reset_autocontinue_chain(', 'apply_profile(',
-                   '_set_active_client('):
+    for needle in ('apply_profile(', '_set_active_client('):
         assert needle not in src, (
             f'{needle} must live in _turn_prelude.py, not _run.py')
 
@@ -81,10 +76,8 @@ def test_run_py_no_inline_prelude_steps():
 # ---------------------------------------------------------------------------
 # 4. leaf carries the pivotal semantics
 # ---------------------------------------------------------------------------
-def test_leaf_carries_all_three_steps():
+def test_leaf_carries_its_steps():
     src = LEAF_PY.read_text()
-    assert 'reset_autocontinue_chain(' in src, 'leaf must reset the chain'
-    assert '_swarmAutoContinue' in src, 'leaf must gate on _swarmAutoContinue'
     assert 'apply_profile(' in src and 'resolve_profile_name(' in src, (
         'leaf must merge the capability profile')
     assert '_set_active_client' not in src
@@ -95,16 +88,12 @@ def test_leaf_carries_all_three_steps():
 # ---------------------------------------------------------------------------
 # 5. BEHAVIOURAL: the three branches (owner directive)
 # ---------------------------------------------------------------------------
-def test_behaviour_human_turn_resets_chain_and_merges_profile(monkeypatch):
-    """Human turn (no _swarmAutoContinue) → chain reset fires; non-default
-    profile → cfg replaced + task['config'] updated; browserClientId set →
-    routing fires."""
+def test_behaviour_non_default_profile_merges(monkeypatch):
+    """Non-default profile → cfg replaced + task['config'] updated; the
+    browserClientId stays in the config."""
     import lib.agent_core.profiles as prof
     import lib.swarm.integration as swi
     import lib.tasks_pkg.orchestrator._turn_prelude as leaf
-    calls = {'reset': []}
-    monkeypatch.setattr(swi, 'reset_autocontinue_chain',
-                        lambda k: calls['reset'].append(k))
     monkeypatch.setattr(swi, 'swarm_key_for', lambda t: 'K')
     monkeypatch.setattr(prof, 'resolve_profile_name', lambda c: 'studio')
     monkeypatch.setattr(prof, 'apply_profile',
@@ -112,29 +101,20 @@ def test_behaviour_human_turn_resets_chain_and_merges_profile(monkeypatch):
     task = {'config': {'model': 'm'}}
     cfg = {'model': 'm', 'browserClientId': 'client-abc'}
     out = leaf.run_turn_prelude(task, cfg, 'deadbeef')
-    assert calls['reset'] == ['K'], 'human turn must reset the chain'
     assert out.get('_profiled') is True and task['config'].get('_profiled') is True, (
         'non-default profile must rebind cfg AND task[\'config\']')
     assert out['browserClientId'] == 'client-abc'
 
 
-def test_behaviour_auto_continue_turn_skips_reset_default_profile_noop(monkeypatch):
-    """_swarmAutoContinue turn → NO chain reset (the ceiling bounds the
-    runaway loop); 'default' profile → cfg returned unchanged, task
-    untouched; no browserClientId → no routing."""
+def test_behaviour_auto_continue_turn_default_profile_noop(monkeypatch):
+    """_swarmAutoContinue turn with the 'default' profile → cfg returned
+    unchanged, task untouched; no browserClientId → no routing."""
     import lib.agent_core.profiles as prof
-    import lib.swarm.integration as swi
     import lib.tasks_pkg.orchestrator._turn_prelude as leaf
-    calls = {'reset': []}
-    monkeypatch.setattr(swi, 'reset_autocontinue_chain',
-                        lambda k: calls['reset'].append(k))
     monkeypatch.setattr(prof, 'resolve_profile_name', lambda c: 'default')
     cfg = {'model': 'm', '_swarmAutoContinue': True}
     task = {'config': cfg}
     out = leaf.run_turn_prelude(task, cfg, 'deadbeef')
-    assert calls['reset'] == [], (
-        'auto-continue turn must NOT reset the chain (the ceiling '
-        'bounds the runaway unattended loop)')
     assert out is cfg, "default profile must return the SAME cfg object"
 
 def test_behaviour_revives_tombstoned_inbox_slot(monkeypatch):

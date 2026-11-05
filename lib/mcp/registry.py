@@ -28,6 +28,8 @@ logger = get_logger(__name__)
 # environment-specific absolute path (CLAUDE.md §3.5).
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _GITHUB_BATCH_PATH = os.path.join(_PROJECT_ROOT, 'tools', 'github-batch-mcp')
+_COMPANION_SKILLS_ROOT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'companion_skills')
 
 
 # ── Types ─────────────────────────────────────────────────
@@ -89,6 +91,30 @@ class CatalogEntry(TypedDict, total=False):
                                 # defaults, validation, classifier) lives in
                                 # lib/mcp/health_probe.py; custom servers can
                                 # declare the same key in mcp_servers.json.
+    aliases: list[str]          # distinctive product names (any language)
+                                # that unambiguously name this vendor, e.g.
+                                # 腾讯文档. A Tool Search query containing one
+                                # gets setup guidance while the connector is
+                                # unusable (lib/mcp/connector_guidance.py).
+                                # Never generic capability words.
+    document_url_prefixes: list[str]  # https URL prefixes (lowercase host)
+                                # of documents only this connector can read;
+                                # fetch answers them with setup guidance or a
+                                # pointer to the connector instead of the
+                                # anonymous login wall.
+    companion_skill: str        # directory name under lib/mcp/companion_skills/
+                                # of a vendor-neutral workflow skill installed
+                                # into the owner's skills when this server is
+                                # installed from the catalog
+                                # (lib/skills/companion.py).
+    read_only_tools: tuple[str, ...]  # raw MCP tool names a reviewer
+                                # confirmed are pure reads although the server
+                                # does not annotate readOnlyHint=true. Applied
+                                # only to a server whose configured URL is this
+                                # entry's ``endpoint`` (see
+                                # reviewed_read_only_tools); it can mark tools
+                                # read-only, never demote one. Unlisted tools
+                                # keep the conservative write default.
 
 
 # ── Categories ────────────────────────────────────────────
@@ -139,6 +165,69 @@ def is_opensource_build() -> bool:
 # ══════════════════════════════════════════════════════════
 #  Curated Catalog
 # ══════════════════════════════════════════════════════════
+
+# Shared SSO setup is one contract for all internal MCPs; secrets are never
+# persisted into these specs. The installed adapter owns provider discovery.
+_INTERNAL_SSO_ENV_SPECS = [
+    {'key': 'MTSSO_AUTH_MODE', 'label': 'SSO provider mode', 'required': False,
+     'secret': False, 'type': 'select', 'hint': 'auto selects registered official SSO first; otherwise reuse the same-user shared session',
+     'options': [{'label': value, 'value': value} for value in ('auto', 'official', 'shared', 'legacy')]},
+    {'key': 'MTSSO_MIS', 'label': 'Shared SSO MIS', 'hint': 'Same user across Hope, LLM and Xuecheng; login target, not identity proof',
+     'required': False, 'secret': False},
+    {'key': 'MTSSO_SESSION_SDK', 'label': 'Installed shared SSO SDK',
+     'hint': 'Optional absolute path to installed @datafe/llm-cli/dist/lib/auth.js; discovered locally by default',
+     'required': False, 'secret': False},
+    {'key': 'MTSSO_SESSION_TOKEN_FILE', 'label': 'Existing shared SSO session file',
+     'hint': 'Optional private same-user session file; defaults to existing MLP/LLM session, never copies credentials',
+     'required': False, 'secret': False},
+    {'key': 'MTSSO_NODE_EXECUTABLE', 'label': 'SSO Node executable',
+     'hint': 'Optional compatible Node 20+ path; no automatic download',
+     'required': False, 'secret': False},
+]
+
+# Kingsoft Docs annotates EVERY one of its 630 tools readOnlyHint=false and
+# destructiveHint=true, so without a review each read needs write approval, is
+# blocked in Plan Mode and is never replayed after a disconnect. Reviewed
+# 2026-11-01 against the live catalog (names and descriptions): the pure reads
+# of drive navigation and the spreadsheet / smart-table workflow. Exports,
+# downloads (temporary links), sharing changes and every Word/slide tool stay
+# writes.
+_KDOCS_REVIEWED_READ_ONLY_TOOLS = (
+    # Drive navigation and document content
+    'batch_get_file_info', 'check_file_name', 'find_folder_by_path',
+    'get_doclib_meta', 'get_file_info', 'get_file_inline_comments',
+    'get_file_link', 'get_label_meta', 'get_label_objects', 'get_share_info',
+    'list_deleted_files', 'list_doclibs', 'list_document_collaborators',
+    'list_document_comments', 'list_drive_roles', 'list_file_versions',
+    'list_files', 'list_labels', 'list_latest_items', 'list_my_files',
+    'list_star_items', 'read_file', 'search_document_collaborators',
+    'search_files', 'search_high_value_documents',
+    # Spreadsheets (表格)
+    'sheet.find_range_data', 'sheet.get_chart_information',
+    'sheet.get_conditional_format_rules', 'sheet.get_data_validations',
+    'sheet.get_filters', 'sheet.get_float_image', 'sheet.get_merged_cells',
+    'sheet.get_pivot_tables', 'sheet.get_range_data', 'sheet.get_sheet_objects',
+    'sheet.get_sheets_info', 'sheet.get_typed_value', 'sheet.list_float_images',
+    'sheet.list_protection_ranges',
+    # Smart tables (多维表) and their dashboards, forms and automations
+    'dbsheet.dashboard_chart_data', 'dbsheet.dashboard_chart_list',
+    'dbsheet.dashboard_component_list', 'dbsheet.dashboard_list',
+    'dbsheet.form_get_meta', 'dbsheet.form_list_fields', 'dbsheet.get_record',
+    'dbsheet.get_schema', 'dbsheet.get_schema_detail',
+    'dbsheet.innerdoc_block_list', 'dbsheet.innerdoc_block_query',
+    'dbsheet.list_records', 'dbsheet.list_webhooks',
+    'dbsheet.parent_list_children', 'dbsheet.parent_status',
+    'dbsheet.permission_list_roles', 'dbsheet.permission_list_subjects',
+    'dbsheet.permission_query_task', 'dbsheet.records_list',
+    'dbsheet.records_search', 'dbsheet.share_get_link_info',
+    'dbsheet.share_get_repeatable', 'dbsheet.share_view_status',
+    'dbsheet.views_get', 'dbsheet.views_list',
+    'auto_sheet.get_context', 'auto_sheet.get_flow', 'auto_sheet.list_actions',
+    'auto_sheet.list_flows', 'auto_sheet.list_runs', 'auto_sheet.validate_flow',
+    # Knowledge bases, smart documents and forms
+    'kwiki.get_knowledge_view', 'kwiki.list_items', 'kwiki.list_knowledge_views',
+    'otl.block_query', 'form.lite.get_form_info',
+)
 
 CATALOG: list[CatalogEntry] = [
 
@@ -483,6 +572,90 @@ CATALOG: list[CatalogEntry] = [
         ],
         'url': 'https://github.com/modelcontextprotocol/servers-archived/tree/main/src/gdrive',
         'tags': ['files', 'google', 'storage'],
+    },
+    # Online office suites (China). Both vendors run an official remote MCP
+    # endpoint authenticated by a self-service PERSONAL token; their own
+    # "skills" wrap the same capability for agents without native MCP.
+    {
+        'id': 'tencent-docs',
+        'name': '腾讯文档 Tencent Docs',
+        'description': 'Read and edit Tencent Docs — online sheets, smart sheets, documents, slides and mind maps — with your QQ/WeChat account. Official Tencent Docs MCP server.',
+        'icon': '\U0001f4c4',
+        'category': CAT_PROD,
+        'command': '',
+        'transport': 'streamable-http',
+        'args': [],
+        'endpoint': 'https://docs.qq.com/openapi/mcp',
+        # Tencent documents the bare token as the header value. The gateway
+        # rejects a bad token with HTTP 401 during initialize, so an invalid
+        # credential fails the install itself and needs no health_probe (whose
+        # periodic calls would also spend the account's daily quota).
+        'headers': {'Authorization': '${TENCENT_DOCS_TOKEN}'},
+        'env_specs': [
+            {'key': 'TENCENT_DOCS_TOKEN', 'label': '腾讯文档 MCP Token',
+             'hint': '粘贴你的 Token',
+             'obtain_url': 'https://docs.qq.com/open/auth/mcp.html',
+             'obtain_steps': ['用 QQ 或微信登录后打开授权页',
+                              '确认授权，复制页面上的个人 Token'],
+             'required': True, 'secret': True},
+        ],
+        'url': 'https://docs.qq.com/open/document/mcp/',
+        'tags': ['docs', 'spreadsheet', 'office', 'china', '腾讯文档',
+                 '在线表格', '智能表格', '在线文档'],
+        'aliases': ['腾讯文档', 'tencent docs', 'tencent-docs', 'docs.qq.com'],
+        # Document paths only; docs.qq.com/open/... is public developer docs.
+        'document_url_prefixes': [
+            f'https://docs.qq.com/{kind}/' for kind in (
+                'doc', 'sheet', 'smartsheet', 'aio', 'slide', 'mind',
+                'flowchart', 'form', 'pdf', 'smartcanvas')],
+        'featured': True,
+        'install_note': '调用次数计入腾讯文档的每日额度（会员额度更高）。Token 无效或过期时安装会直接失败，重新获取后再安装。安装时会同时添加「online-spreadsheets」技能指南（设置 → Skills 可查看或停用）。',
+        'companion_skill': 'online-spreadsheets',
+    },
+    {
+        'id': 'kdocs',
+        'name': '金山文档 Kingsoft Docs',
+        'description': 'Read and edit WPS cloud documents — spreadsheets, smart tables (多维表), documents and slides — with a personal WPS account. Official Kingsoft SkillHub MCP server.',
+        'icon': '\U0001f4d1',
+        'category': CAT_PROD,
+        'command': '',
+        'transport': 'streamable-http',
+        'args': [],
+        'endpoint': 'https://mcp-center.wps.cn/skill_hub/mcp',
+        'headers': {'Authorization': 'Bearer ${KDOCS_TOKEN}'},
+        'env_specs': [
+            {'key': 'KDOCS_TOKEN', 'label': '金山文档 Skill Token',
+             'hint': '粘贴你的 Token',
+             'obtain_url': 'https://www.kdocs.cn/latest',
+             'obtain_steps': ['用 WPS 个人账号登录金山文档',
+                              '点右上角头像旁的主菜单 → 「金山文档Skill」',
+                              '复制 Token'],
+             'required': True, 'secret': True},
+        ],
+        'url': 'https://github.com/kdocs-app/kdocs-skill',
+        'tags': ['docs', 'spreadsheet', 'office', 'wps', 'china', '金山文档',
+                 '表格', '多维表', '在线文档'],
+        'aliases': ['金山文档', 'kingsoft docs', 'kdocs', 'wps 云文档',
+                    'wps云文档'],
+        # Personal share links. 365.kdocs.cn belongs to enterprise accounts,
+        # which this personal-token endpoint rejects.
+        'document_url_prefixes': ['https://www.kdocs.cn/l/',
+                                  'https://kdocs.cn/l/'],
+        'featured': True,
+        'install_note': '仅支持 WPS 个人账号（企业账号请用 WPS 365）。服务端在 Token 无效时也能连接，Tofu 连接后用一次只读调用检查 Token。安装时会同时添加「online-spreadsheets」技能指南（设置 → Skills 可查看或停用）。',
+        'companion_skill': 'online-spreadsheets',
+        # The endpoint lists its catalog WITHOUT credentials and reports a
+        # missing/invalid token only inside a successful tool result
+        # (``{"code":400006,...}``), so transport health says nothing about
+        # the token; this probe is the only credential check.
+        'health_probe': {
+            'tool': 'list_latest_items',
+            'args': {'page_size': 1, 'with_link': False,
+                     'with_permission': False},
+            'fail_patterns': ['"code":400006', 'token 无效',
+                              '未提供认证凭证'],
+        },
+        'read_only_tools': _KDOCS_REVIEWED_READ_ONLY_TOOLS,
     },
 
     # ── DevOps ─────────────────────────────────────────────
@@ -1170,6 +1343,42 @@ def get_catalog_entry(server_id: str) -> CatalogEntry | None:
     if entry is not None and _OPENSOURCE_BUILD and entry.get('internal_only'):
         return None
     return entry
+
+
+def obtain_credential_spec(entry: CatalogEntry | None) -> EnvSpec | None:
+    """Return the entry's first required credential that has a token page."""
+    for spec in (entry or {}).get('env_specs') or ():
+        if spec.get('required') and spec.get('obtain_url'):
+            return spec
+    return None
+
+
+def companion_skill_dir(entry: CatalogEntry | None) -> str | None:
+    """Return the in-tree companion skill package of a catalog entry, if any."""
+    name = str((entry or {}).get('companion_skill') or '')
+    if not name or os.path.basename(name) != name or name.startswith('.'):
+        return None
+    package = os.path.join(_COMPANION_SKILLS_ROOT, name)
+    return package if os.path.isfile(os.path.join(package, 'SKILL.md')) else None
+
+
+def reviewed_read_only_tools(server_id: str, server_config) -> frozenset[str]:
+    """Return the catalog's reviewed pure-read tool names for one server.
+
+    A review describes one vendor endpoint, so it applies only when the
+    configured server IS that endpoint: a custom server that reuses the id for
+    another URL gets nothing. The result can only add read-only
+    classification; a tool the server itself annotates stays as annotated.
+    """
+    entry = get_catalog_entry(server_id)
+    reviewed = entry.get('read_only_tools') if entry else None
+    if not reviewed or not isinstance(server_config, dict):
+        return frozenset()
+    from lib.mcp.transport import normalize_transport
+    if (normalize_transport(server_config) != normalize_transport(entry)
+            or str(server_config.get('url') or '') != entry.get('endpoint')):
+        return frozenset()
+    return frozenset(reviewed)
 
 
 def build_server_config(server_id: str, env_values: dict[str, str] | None = None) -> dict | None:

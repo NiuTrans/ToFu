@@ -11,6 +11,8 @@ have none.
 
 from __future__ import annotations
 
+import lib.server.server_background_services as background_services
+
 import asyncio
 from types import SimpleNamespace
 
@@ -19,7 +21,7 @@ import pytest
 import lib.knowledge.enrichment as enrichment
 import lib.oauth.codex_catalog as codex_catalog
 import routes
-import routes.plugin_registry as plugins
+import lib.app.plugin_registry as plugins
 
 
 pytestmark = pytest.mark.unit
@@ -48,7 +50,7 @@ def hook_calls(monkeypatch):
 
 def test_runs_inline_without_a_serving_gate(hook_calls):
     app = SimpleNamespace(extensions={})
-    started = routes.start_registered_background_services(
+    started = background_services.start_registered_background_services(
         app, process_role='worker')
     assert started == 2
     assert hook_calls == ['hooks']
@@ -56,7 +58,7 @@ def test_runs_inline_without_a_serving_gate(hook_calls):
 
 def test_role_without_task_workers_defers_no_hooks(hook_calls):
     app = SimpleNamespace(extensions={})
-    started = routes.start_registered_background_services(
+    started = background_services.start_registered_background_services(
         app, process_role='api')
     assert started == 0
     assert hook_calls == []
@@ -77,7 +79,7 @@ def test_defers_until_the_gate_opens(hook_calls):
     })
 
     async def exercise():
-        started = routes.start_registered_background_services(
+        started = background_services.start_registered_background_services(
             app, process_role='worker')
         # Only the still-inline owners count; the hooks land post-gate.
         assert started == 1
@@ -112,7 +114,7 @@ def test_deferred_hook_is_skipped_when_shutdown_races(hook_calls):
     })
 
     async def exercise():
-        routes.start_registered_background_services(app, process_role='worker')
+        background_services.start_registered_background_services(app, process_role='worker')
         _name, coro = collected[0]
         gate.set()
         await coro

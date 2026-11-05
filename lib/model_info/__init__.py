@@ -75,7 +75,6 @@ from lib.model_info._capabilities import (  # noqa: E402,F401
     model_requires_reasoning_content_replay,
     model_requires_thinking_signature_replay,
     model_requires_thought_signature_on_tool_calls,
-    model_supports_assistant_prefill,
     model_supports_vision,
 )
 
@@ -150,7 +149,7 @@ __all__ = [
     'model_requires_reasoning_content_replay',
     'model_requires_thinking_signature_replay',
     'model_requires_thought_signature_on_tool_calls',
-    'model_supports_assistant_prefill', 'model_supports_vision',
+    'model_supports_vision',
     # max output limits
     '_MODEL_MAX_OUTPUT', '_DEFAULT_UNKNOWN_MAX_OUTPUT',
     '_qwen_max_output', '_minimax_max_output', '_ernie_max_output',

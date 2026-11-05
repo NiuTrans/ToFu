@@ -41,7 +41,6 @@ build/
 dist/
 
 # ── Documentation & meta ──
-CLAUDE.md
 CONTRIBUTING.md
 export.py
 install.py

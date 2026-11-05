@@ -14,10 +14,65 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+def _store_inline(monkeypatch, cache):
+    monkeypatch.setattr(cache, '_start_background_store', lambda store: store())
+
+
+def test_translate_cache_put_returns_before_a_stalled_store_lands(
+        monkeypatch, tmp_path):
+    """A shared-filesystem stall in the reconstructible write must not block
+    the translation caller; the entry still lands once the store finishes."""
+    import threading
+    import time
+
+    from lib import translate_cache as cache
+
+    monkeypatch.setattr(cache, '_CACHE_DIR', str(tmp_path))
+    monkeypatch.setattr(cache, '_initialized', False)
+    monkeypatch.setattr(cache, '_ENABLED', True)
+    release = threading.Event()
+    real_write = cache.write_json_atomic
+
+    def stalled_write(*args, **kwargs):
+        release.wait(5)
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(cache, 'write_json_atomic', stalled_write)
+    started = time.monotonic()
+    cache.put('text', 'en', 'zh', 'translated', model='m1')
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0
+    assert cache.get('text', 'en', 'zh') is None
+    release.set()
+    deadline = time.monotonic() + 5
+    while cache.get('text', 'en', 'zh') is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert cache.get('text', 'en', 'zh')['translated'] == 'translated'
+
+
+def test_translate_cache_put_keeps_the_directory_resolved_at_call_time(
+        monkeypatch, tmp_path):
+    from lib import translate_cache as cache
+
+    scheduled = []
+    monkeypatch.setattr(cache, '_start_background_store', scheduled.append)
+    monkeypatch.setattr(cache, '_ENABLED', True)
+    monkeypatch.setattr(cache, '_CACHE_DIR', str(tmp_path / 'at-call'))
+    cache.put('text', 'en', 'zh', 'translated')
+    monkeypatch.setattr(cache, '_CACHE_DIR', str(tmp_path / 'later'))
+
+    scheduled[0]()
+
+    assert list((tmp_path / 'at-call').rglob('*.json'))
+    assert not (tmp_path / 'later').exists()
+
+
 def test_translate_cache_failed_replace_keeps_old_entry_and_no_temp(
         monkeypatch, tmp_path):
     from lib import translate_cache as cache
 
+    _store_inline(monkeypatch, cache)
     monkeypatch.setattr(cache, '_CACHE_DIR', str(tmp_path))
     monkeypatch.setattr(cache, '_initialized', False)
     monkeypatch.setattr(cache, '_ENABLED', True)
@@ -69,6 +124,7 @@ def test_translate_cache_evicts_oldest_entry_to_hard_shard_budget(
         monkeypatch, tmp_path):
     from lib import translate_cache as cache
 
+    _store_inline(monkeypatch, cache)
     monkeypatch.setattr(cache, '_CACHE_DIR', str(tmp_path))
     monkeypatch.setattr(cache, '_initialized', False)
     monkeypatch.setattr(cache, '_ENABLED', True)
@@ -94,6 +150,7 @@ def test_translate_cache_skips_entry_larger_than_its_shard_share(
         monkeypatch, tmp_path):
     from lib import translate_cache as cache
 
+    _store_inline(monkeypatch, cache)
     monkeypatch.setattr(cache, '_CACHE_DIR', str(tmp_path))
     monkeypatch.setattr(cache, '_initialized', False)
     monkeypatch.setattr(cache, '_ENABLED', True)
@@ -108,6 +165,7 @@ def test_translate_cache_removes_invalid_reconstructible_entry(
         monkeypatch, tmp_path):
     from lib import translate_cache as cache
 
+    _store_inline(monkeypatch, cache)
     monkeypatch.setattr(cache, '_CACHE_DIR', str(tmp_path))
     monkeypatch.setattr(cache, '_initialized', False)
     monkeypatch.setattr(cache, '_ENABLED', True)

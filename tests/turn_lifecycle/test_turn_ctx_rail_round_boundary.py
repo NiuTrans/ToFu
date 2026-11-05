@@ -10,8 +10,10 @@ Two 2026-09-23 owner reports on the per-turn context rail:
    grew the rail flush down to it. With the assistant reply between two
    human turns, a tall rail slid past its own round and painted flush
    against the NEXT round's rail — one glued block. The boundary is now
-   the next ROUND (the next `.user-msg`), so a rail stops at its own
-   round's reply and the two never touch.
+   the host of the next railed turn (a new round's input): the rail's
+   track ends there, so its sticky card stops at its own round's reply.
+   An input without a context snapshot is not a boundary;
+   tests/visual/test_visual_context_rail_follow.py covers that travel.
 
 2. **Duplicate branch** — the live patch (`_patchLiveCtxRails`) locates
    the git/todo rows by `[data-tctx-git]` / `[data-tctx-todo]`. The TS
@@ -22,17 +24,20 @@ Two 2026-09-23 owner reports on the per-turn context rail:
 
 WHAT THIS ASSERTS
 ─────────────────
-1. **Boundary** — with round 1's rail pinned and the next human turn far
-   below, the rail's bottom never crosses the next `.user-msg` top, and
-   its inline `maxHeight` budget equals exactly that gap.
-2. **No duplicate key collision** — the fallback-rendered git/todo rows
-   carry `data-tctx-git` / `data-tctx-todo`, the same keys the live patch
-   replaces in place, so a refresh rebuilds rather than appends.
+1. **Boundary** — with round 1's card pinned and the next human turn far
+   below, the card's bottom never crosses the next `.user-msg` top, and
+   its track ends exactly at that host.
+2. **No duplicate key collision** — the fallback-rendered branch suffix
+   (after its root, `root:branch`) and todo row carry `data-tctx-git` /
+   `data-tctx-todo`, the same keys the live patch replaces in place, so a
+   refresh rebuilds rather than appends.
 """
 
 from __future__ import annotations
 
 import pytest
+
+from tests.support.context_rail_probe import RAIL_PROBE_STYLED, with_rail_probe_host
 
 pytestmark = [pytest.mark.visual, pytest.mark.slow]
 
@@ -47,7 +52,7 @@ _SNAPSHOT = """{
     {short:'INS/tofu', path:'/path/to/your/project', ro:false}
   ],
   git: {branch:'eval/opencode-glm53-tb21', branches:[
-    {branch:'eval/opencode-glm53-tb21', path:'/x', short:'INS/tofu'}]},
+    {branch:'eval/opencode-glm53-tb21', path:'/path/to/your/project'}]},
   todos: [
     {status:'in_progress', content:'Discovery: locate browser_click'},
     {status:'pending', content:'Fix 1: tighten download description'}
@@ -57,8 +62,8 @@ _SNAPSHOT = """{
 #: Plant round 1 (user turn + rail + tall assistant reply) then round 2
 #: (user turn + rail). Round 2 is the NEXT ROUND; round 1's rail must stop
 #: at it, not glide through the reply into round 2's rail.
-_PLANT = """() => {
-    const inner = document.querySelector('.chat-inner');
+_PLANT = with_rail_probe_host("""() => {
+    const inner = __RAIL_PROBE_HOST__;
     if (!inner) return 'no .chat-inner';
     const renderTurnCtxNote = window.TofuModules.resolveAction('renderTurnCtxNote');
     if (typeof renderTurnCtxNote !== 'function') return 'no renderTurnCtxNote';
@@ -73,7 +78,7 @@ _PLANT = """() => {
                     + '<span class="message-role">You</span></div>'
                     + parts.fold
                     + '<div class="message-body"><div class="md-content user-content">'
-                    + 'round</div></div></div>' + parts.rail;
+                    + 'round</div></div></div>' + __RAIL_PROBE_PART__(parts.rail);
         return d;
     };
     const mkReply = () => {
@@ -90,7 +95,7 @@ _PLANT = """() => {
     inner.appendChild(mkUser('__glue-u2'));
     inner.appendChild(mkReply());
     return 'ok';
-}""" % (_SNAPSHOT,)
+}""" % (_SNAPSHOT,))
 
 _MEASURE = """() => {
     const cont = document.querySelector('.chat-container');
@@ -98,7 +103,8 @@ _MEASURE = """() => {
     const rail1 = document.querySelector('.__glue-u1 > .turn-ctx');
     const u2 = document.querySelector('.__glue-u2');
     if (!rail1 || !u2) return { ok: false };
-    const rr = rail1.getBoundingClientRect();
+    const cr = rail1.querySelector(':scope > .tctx-card').getBoundingClientRect();
+    const track = rail1.getBoundingClientRect();
     const u2r = u2.getBoundingClientRect();
     const host = rail1.parentElement.getBoundingClientRect();
     return {
@@ -107,12 +113,11 @@ _MEASURE = """() => {
         hostDocTop: host.top - contR.top + cont.scrollTop,
         u2DocTop: u2r.top - contR.top + cont.scrollTop,
         rail: {
-            top: rr.top, bottom: rr.bottom, height: rr.height,
-            stuck: rail1.classList.contains('tctx-stuck'),
-            maxHeight: rail1.style.maxHeight || '',
+            top: cr.top, bottom: cr.bottom, height: cr.height,
+            trackBottom: track.bottom,
             gitRows: rail1.querySelectorAll('[data-tctx-git]').length,
             todoRows: rail1.querySelectorAll('[data-tctx-todo]').length,
-            gitKeyed: !!rail1.querySelector('.tctx-git-row[data-tctx-git]'),
+            gitKeyed: !!rail1.querySelector('.tctx-roots-row [data-tctx-root] > .tctx-path-text > [data-tctx-git]'),
             todoKeyed: !!rail1.querySelector('.tctx-todo-row[data-tctx-todo]'),
         },
         u2Top: u2r.top,
@@ -130,6 +135,7 @@ def _boot(page):
                   " if (s) s.classList.add('collapsed'); }")
     planted = page.evaluate(_PLANT)
     assert planted == 'ok', f'could not plant the probe turns: {planted}'
+    page.wait_for_function(RAIL_PROBE_STYLED, timeout=10000)
     page.wait_for_timeout(150)
 
 
@@ -143,12 +149,12 @@ def test_rail_stops_at_next_round_and_never_duplicates(page):
     # keys the live patch uses, and there is exactly ONE of each — a refresh
     # rebuilds in place instead of appending a duplicate.
     r0 = m0['rail']
-    assert r0['gitKeyed'], f"git row missing data-tctx-git: {r0}"
+    assert r0['gitKeyed'], f"root line missing its keyed branch suffix: {r0}"
     assert r0['todoKeyed'], f"todo row missing data-tctx-todo: {r0}"
-    assert r0['gitRows'] == 1, f"expected exactly ONE branch row: {r0}"
+    assert r0['gitRows'] == 1, f"expected exactly ONE branch suffix: {r0}"
     assert r0['todoRows'] == 1, f"expected exactly ONE checklist row: {r0}"
 
-    # Pin round 1's rail at the pane top with round 2 (the next .user-msg)
+    # Pin round 1's card at the pane top with round 2 (the next .user-msg)
     # far below — the state where it used to glide into round 2's rail.
     page.evaluate(
         "(y) => { document.querySelector('.chat-container').scrollTop = y; }",
@@ -156,17 +162,15 @@ def test_rail_stops_at_next_round_and_never_duplicates(page):
     page.wait_for_timeout(90)
     m = page.evaluate(_MEASURE)
     r = m['rail']
-    assert r['stuck'], f"round 1's rail did not pin: {r}"
+    assert 0 <= r['top'] - m['contTop'] <= 12, f"round 1's card did not pin: {r}"
 
-    # (1) Boundary: the rail's bottom never crosses the next round's top.
+    # (1) Boundary: the card's bottom never crosses the next round's top.
     assert r['bottom'] <= m['u2Top'] + 0.5, (
-        f"the rail overruns its round and glues to the next turn-ctx: "
+        f"the card overruns its round and glues to the next turn-ctx: "
         f"bottom={r['bottom']} nextRoundTop={m['u2Top']} — {r}")
 
-    # The height budget equals exactly that gap (nextRoundTop − visibleTop),
-    # so the rail fills ITS round's gutter but stops at the round boundary.
-    expected = round(m['u2Top'] - r['top'] - 1)
-    got = int(r['maxHeight'].replace('px', '') or 0)
-    assert abs(got - expected) <= 2, (
-        f"the max-height budget {got}px is not the round gap {expected}px — "
-        f"the rail is not bounded by its own round: {r}")
+    # The track the card travels ends exactly at that host, so the card
+    # can use ITS round's gutter but stops at the round boundary.
+    assert abs(r['trackBottom'] - m['u2Top']) <= 1, (
+        f"the track ends at {r['trackBottom']}, not at the next round's host "
+        f"{m['u2Top']} — the card is not bounded by its own round: {r}")

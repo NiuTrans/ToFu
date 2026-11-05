@@ -94,8 +94,9 @@ def test_build_round_usage_mirrors_sse_core_keys():
               '_wire_region', '_wire_markers', '_wire_system', '_wire_routing',
               'cache_read_tokens', 'cache_creation_input_tokens'):
         assert k in u, f'build_round_usage missing {k} (must mirror _sse_core)'
-    # routing fingerprint carries the three namespace attributes
-    assert set(u['_wire_routing']) == {'key', 'beta', 'endpoint'}
+    # routing fingerprint carries the namespace attributes, including the
+    # lineage's cache-affinity carrier evidence
+    assert set(u['_wire_routing']) == {'key', 'beta', 'endpoint', 'affinity'}
     # marker signature captured the system marker's ttl
     assert u['_wire_markers'].get('ttls'), 'marker ttl not captured'
 
@@ -174,6 +175,67 @@ def test_replay_classifies_body_change_bucket():
     assert res['buckets'].get('cache_namespace_switch', 0) == 0, res['buckets']
     # the mutated system prefix must be caught as a client body change
     assert res['buckets'].get('body_change', 0) == 1, res['buckets']
+
+
+def _uniform_ttl_body(tail_ttl):
+    """Claude wire layout with system and tools markers at 1h and a
+    conversation-tail marker ``tail_ttl`` ('1h', or '' for a bare 5m marker)."""
+    tail = ({'type': 'ephemeral'} if tail_ttl == ''
+            else {'type': 'ephemeral', 'ttl': tail_ttl})
+    return {
+        'model': 'claude-opus-4',
+        'system': [_sys_block('STATIC SYSTEM PROMPT', ttl='1h')],
+        'tools': [{'function': {'name': 't', 'description': 'd', 'parameters': {},
+                                'cache_control': {'type': 'ephemeral', 'ttl': '1h'}}}],
+        'messages': [
+            {'role': 'user', 'content': 'hello'},
+            {'role': 'assistant', 'content': [
+                {'type': 'text', 'text': 'hi there', 'cache_control': tail}]},
+        ],
+    }
+
+
+def _idle_gap_rounds(tail_ttl, gap_s):
+    same_routing = {'key_hash': 'kA', 'anthropic_beta': 'pc', 'endpoint': 'e1'}
+    body = _uniform_ttl_body(tail_ttl)
+    return [
+        {'body': body, 'cache_read': 90000, 'cache_write': 50000,
+         'routing': same_routing},
+        {'body': body, 'cache_read': 10000, 'cache_write': 80000,
+         'routing': same_routing, 'gap_s': gap_s},
+    ]
+
+
+@pytest.mark.parametrize('gap_s', [390.0, 1800.0])
+def test_replay_1h_tail_gap_inside_the_hour_is_not_a_ttl_expiry(gap_s):
+    """With every marker at 1h, a 6.5-30 minute idle gap cannot expire the
+    tail entry; a collapsed read is an upstream miss, never filed as the
+    unavoidable ttl_expiry (which waste reports exclude)."""
+    from lib.tasks_pkg.cache_tracking.replay import replay_rounds
+
+    res = replay_rounds(_idle_gap_rounds('1h', gap_s), user_id=7,
+                        conv_id=f'replay-1h-gap-{int(gap_s)}')
+    assert res['buckets'] == {'upstream_identical': 1}, res['buckets']
+
+
+def test_replay_5m_tail_gap_past_five_minutes_stays_a_ttl_expiry():
+    """COMPLEMENT: the same gap over a bare 5m tail marker is an expected
+    expiry — the TTL window comes from the wire markers, not the clock alone."""
+    from lib.tasks_pkg.cache_tracking.replay import replay_rounds
+
+    res = replay_rounds(_idle_gap_rounds('', 390.0), user_id=7,
+                        conv_id='replay-5m-gap')
+    assert res['buckets'] == {'ttl_expiry': 1}, res['buckets']
+    assert '(>5min gap)' in str(res['rounds'][1]['verdict'])
+
+
+def test_replay_1h_tail_gap_past_the_hour_is_a_ttl_expiry():
+    from lib.tasks_pkg.cache_tracking.replay import replay_rounds
+
+    res = replay_rounds(_idle_gap_rounds('1h', 3700.0), user_id=7,
+                        conv_id='replay-1h-expired')
+    assert res['buckets'] == {'ttl_expiry': 1}, res['buckets']
+    assert '(>1h gap)' in str(res['rounds'][1]['verdict'])
 
 
 def test_replay_NEUTER_without_routing_launders_nsflip_to_upstream():

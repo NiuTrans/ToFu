@@ -530,8 +530,8 @@ def _synctex_page_count(owner_user_id: int, document_id: str,
                                            'document.synctex.gz') as artifact:
             stream, _size = artifact
             from lib.paper.latex_layout import parse_synctex
-            from lib.paper.builds.synctex import _decode
-            return int(parse_synctex(_decode(stream)).get('max_page') or 0)
+            from lib.paper.builds.synctex import _decoded_lines
+            return int(parse_synctex(_decoded_lines(stream)).get('max_page') or 0)
     except Exception as _e:
         logger.debug('count synctex pages failed: %s', _e)
         # Advisory garnish; a cache/parse quirk never fails the gate.

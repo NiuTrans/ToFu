@@ -116,6 +116,30 @@ def test_activation_requires_both_human_approval_and_live_read_only(tmp_path):
             owner_approved=True, source_still_read_only=False)
 
 
+def test_lock_released_between_contention_and_age_probe_reports_contention(
+        tmp_path, monkeypatch):
+    import lib.storage_authority_sql.cutover as cutover
+
+    candidate, report = _candidate_and_report(tmp_path)
+    lock = tmp_path / cutover.CUTOVER_LOCK_DIR
+    real_mkdir = Path.mkdir
+
+    def _held_then_released(self, *args, **kwargs):
+        # The other cutover held the lock at mkdir time and released it before
+        # this process could stat it for the stale-age hint.
+        if self == lock:
+            raise FileExistsError(str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'mkdir', _held_then_released)
+    with pytest.raises(SQLiteCutoverError, match='another SQLite cutover holds'):
+        activate_candidate(
+            candidate=candidate, report_path=report,
+            canonical_path=tmp_path / 'tofu.db', data_dir=tmp_path,
+            owner_approved=True, source_still_read_only=True)
+    assert candidate.is_file()
+
+
 def test_activation_failure_restores_candidate_and_old_fallback(
         tmp_path, monkeypatch):
     import lib.storage_authority_sql.cutover as cutover

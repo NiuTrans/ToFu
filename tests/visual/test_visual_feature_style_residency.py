@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError
+from lib.vite_assets import VITE_ENTRY
 
 pytestmark = pytest.mark.visual
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,8 +26,23 @@ def _styles(entry: str) -> set[str]:
     ]
     assert len(rows) == 1, f'Feature has no unique delivery owner: {entry}'
     styles = set(rows[0].get('css', []))
-    assert styles, f'Feature lacks its declared CSS: {entry}'
-    return styles
+    # Vite may list a shared startup sheet (for example fonts) on a dynamic
+    # entry too. Hold/assert only CSS that actually depends on feature intent.
+    startup = json.loads((ROOT / 'frontend/authoring-inputs.json').read_text())
+    pending = [VITE_ENTRY]
+    if VITE_ENTRY in startup['startupDynamicImports']:
+        pending.extend(manifest[VITE_ENTRY].get('dynamicImports', ()))
+    visited, startup_styles = set(), set()
+    while pending:
+        key = pending.pop()
+        if key in visited:
+            continue
+        visited.add(key)
+        startup_styles.update(manifest[key].get('css', ()))
+        pending.extend(manifest[key].get('imports', ()))
+    deferred_styles = styles - startup_styles
+    assert deferred_styles, f'Feature lacks its declared deferred CSS: {entry}'
+    return deferred_styles
 
 
 def _ready(page):

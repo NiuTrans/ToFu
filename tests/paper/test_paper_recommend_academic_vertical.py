@@ -40,6 +40,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 os.environ.setdefault('TRADING_ENABLED', '0')
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 import lib.paper.recommend_engine._events as re_mod  # noqa: E402
 import lib.paper.recommend_engine._ground as ground_mod  # noqa: E402
 import lib.paper.recommend_engine._research as research_mod  # noqa: E402
@@ -158,7 +162,7 @@ def test_force_vertical_overrides_model_choice():
     _ok('force_vertical overrides the model-chosen vertical (off → academic)')
 
 
-def testexecute_paper_tool_default_preserves_model_vertical():
+def test_execute_paper_tool_default_preserves_model_vertical():
     """Direct unit check of the shared seam: WITHOUT force_vertical (the report /
     QA / insight callers), the model's own vertical is preserved — the change is
     byte-identical for every other caller."""
@@ -237,7 +241,7 @@ def main():
         test_constant_is_academic,
         test_research_search_forces_academic_when_model_omits_it,
         test_force_vertical_overrides_model_choice,
-        testexecute_paper_tool_default_preserves_model_vertical,
+        test_execute_paper_tool_default_preserves_model_vertical,
         test_prompt_instructs_unquoted_title_tokens,
         test_neuter_force_vertical_is_load_bearing,
     ]

@@ -66,6 +66,10 @@ logger = get_logger(__name__)
 
 # Lock for dispatch coordination (prevent double-dispatch races)
 _dispatch_lock = threading.Lock()
+# Thread currently inside dispatch_next_queued. The lock stays non-reentrant
+# (a nested dispatch must never run), but a nested entry on the owning thread
+# can only time out, so it skips at once instead of stalling the outer turn.
+_dispatch_owner: int | None = None
 _background_batch_locks_guard = threading.Lock()
 _background_batch_locks = weakref.WeakValueDictionary()
 
@@ -934,6 +938,24 @@ def dispatch_completed_background_batch(conv_id: str, *, user_id: int) -> str | 
             # Normalize even already-durable receipts from before this fix;
             # their frozen publication identity and bytes remain untouched.
             config = completion_delivery_config(receipts[0].get('config'))
+            if '_projectDispatchAdmission' in config:
+                from lib.project_dispatch.admission import TrustedDispatch
+                trusted = TrustedDispatch(config['_projectDispatchAdmission'])
+                assignment = trusted.checked()
+                if assignment['execution'] is not None:
+                    from lib.conversation_sync.runtime import conversation_turn_commands
+                    latest = trusted.repository.turn_get(
+                        conv_id, assignment['execution']['turnId'], user_id=user_id)
+                    outcome = conversation_turn_commands.resume_turn(
+                        conv_id, assignment['execution']['turnId'], user_id, {
+                            'commandId': 'project-dispatch-background:' + queue_id,
+                            'operation': 'continue',
+                            'expectedProjectionRevision': latest['projectionRevision'],
+                            'config': config,
+                        }, request_started_at=time.time(),
+                        principal=trusted.principal, trusted_dispatch=trusted)
+                    if not outcome.value.get('aborted'):
+                        return outcome.value['attempt']['attemptId']
             _queue_client(write=True).command('queue.enqueue', {
                 'conv_id': conv_id, 'user_id': int(user_id),
                 'queue_id': queue_id, 'kind': KIND_WORKFLOW,
@@ -1238,6 +1260,7 @@ def _submit_queued_turn_command(
     user_id,
     command_body: dict,
     *,
+    trusted_dispatch=None,
     trusted_goal_objective: str | None = None,
 ) -> dict:
     """Submit through the shared application service and return its value.
@@ -1253,6 +1276,7 @@ def _submit_queued_turn_command(
         user_id,
         command_body,
         request_started_at=time.time(),
+        trusted_dispatch=trusted_dispatch,
         trusted_goal_objective=trusted_goal_objective,
     ).value
 
@@ -1343,7 +1367,13 @@ def _dispatch_queued_turn(
                 ).strip() or None,
             )
         else:
-            result = _submit_queued_turn_command(conv_id, user_id, command_body)
+            trusted = None
+            if (item.get('kind') == KIND_WORKFLOW and payload.get('_backgroundBatchWake')
+                    and '_projectDispatchAdmission' in config):
+                from lib.project_dispatch.admission import TrustedDispatch
+                trusted = TrustedDispatch(config['_projectDispatchAdmission'])
+            result = _submit_queued_turn_command(
+                conv_id, user_id, command_body, trusted_dispatch=trusted)
         if result.get("aborted"):
             # A Stop won the internal command's start window before a pair was
             # allocated. The durable row still owns the input; release it for
@@ -1512,6 +1542,12 @@ def dispatch_next_queued(
     Returns:
         The public attempt id if dispatched, otherwise ``None``.
     """
+    global _dispatch_owner
+    if _dispatch_owner == threading.get_ident():
+        logger.info(
+            "[Queue] nested dispatch on the owning thread conv=%s — tick skips",
+            conv_id[:8])
+        return None
     if _wait is None:
         _dispatch_lock.acquire()
     elif not _dispatch_lock.acquire(timeout=_wait):
@@ -1519,6 +1555,7 @@ def dispatch_next_queued(
             "[Queue] dispatch lock busy (>%ss) conv=%s — tick skips", _wait, conv_id[:8]
         )
         return None
+    _dispatch_owner = threading.get_ident()
     try:
         # ── Per-conv double-dispatch guard ──
         # A dispatched task keeps running ASYNC after this function returns,
@@ -1604,6 +1641,7 @@ def dispatch_next_queued(
             conv_id, item, payload, config, pre_built_user_msg, user_id=user_id
         )
     finally:
+        _dispatch_owner = None
         _dispatch_lock.release()
 
 

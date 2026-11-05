@@ -1,12 +1,14 @@
 """Streaming Tool Executor — start executing read-only tools while the model streams.
 
 When the model emits multiple tool calls in one response, read-only tools
-(``read_files``, ``grep_search``, ``find_files``, ``list_dir``, ``web_search``,
+(``read_files``, ``search_files``, ``find_files``, ``list_dir``, ``web_search``,
 ``fetch_url``) begin executing as soon as their arguments
 finish streaming, rather than waiting for the complete response.
 
 Write tools and approval-gated tools are NOT pre-executed — they are deferred
-to the normal serial dispatch in ``tool_dispatch.py``.
+to ``tool_dispatch``, which starts every call concurrently only once the
+response is final: a stream that may still be retried or discarded never
+produces side effects.
 
 Architecture
 ------------
@@ -126,7 +128,7 @@ class _ContentWithResultProjection(str):
 # ── Read-only tools safe to pre-execute during streaming ──
 # These must have NO side effects (idempotent) and be concurrency-safe.
 _STREAMABLE_TOOLS = frozenset({
-    'read_files', 'grep_search', 'find_files', 'list_dir',
+    'read_files', 'search_files', 'grep_search', 'find_files', 'list_dir',
     'web_search', 'fetch_url',
 })
 def _stream_prefetch_worker_limit(
@@ -246,7 +248,7 @@ def _has_executable_target(fn_name: str, fn_args: dict) -> bool:
             return True
         query = fn_args.get('query')
         return isinstance(query, str) and bool(query.strip())
-    # Project tools (read_files, grep_search, …) — let the handler validate.
+    # Project tools (read_files, search_files, …) — let the handler validate.
     return True
 
 
@@ -488,7 +490,7 @@ class StreamingToolAccumulator:
                 continue
             # Only settle a still-unsettled round — never overwrite a real
             # result (defensive: an orphan should never carry one).
-            if entry.get('status') not in (None, 'searching', 'executing') \
+            if entry.get('status') not in (None, 'queued', 'searching', 'executing') \
                     or entry.get('results'):
                 continue
             tool_name = entry.get('toolName') or 'tool'
@@ -571,8 +573,11 @@ class StreamingToolAccumulator:
 
         Called from ``_stream_chat_once`` in the SSE delta processing loop.
 
-        1. Emits a ``tool_start`` SSE event for ALL tools immediately
-           (so the frontend shows "Searching…" / "Running…" right away).
+        1. Emits a ``tool_start`` SSE event for ALL tools immediately. A call
+           submitted for pre-execution is announced running (``searching``);
+           every other call is announced ``queued`` and becomes running only
+           when the dispatcher enters its handler
+           (``tool_dispatch._execution``).
         2. Submits read-only, concurrency-safe tools for pre-execution.
         """
         if not isinstance(tool_call, dict):
@@ -696,35 +701,40 @@ class StreamingToolAccumulator:
         else:
             self._claimed_callback_ids.add(tc_id)
 
-        # ── Emit tool_start SSE event immediately ──
-        try:
-            self._emit_tool_start(
-                fn_name, fn_args, tc_id,
-                json.dumps(fn_args, ensure_ascii=False, separators=(',', ':')),
-                caller=tool_call.get('caller'),
-                signature_arguments=fn_args_raw)
-        except Exception as e:
-            logger.debug('[%s] StreamingToolExec: tool_start emission failed '
-                         'for %s: %s', self._tid, fn_name, e)
-
         # ── Pre-execute read-only tools ──
         # Source-bound reads need the canonical handler's request-owned capture
         # and successful settlement before publishing their FileWitness. The
         # speculative helper returns only content; caching it would bypass that
         # boundary and lose the requested source descriptor. Keep the early
         # presentation row, then let normal dispatch execute this opt-in read.
-        if fn_name == 'read_files' and fn_args.get('bind_sources') is True:
-            return
         # The speculative filesystem helper reads this server's filesystem.
         # Remote roots must execute through the addressed project handler so
         # device containment and read-before-write tokens remain authoritative.
-        if (fn_name in ('read_files', 'grep_search', 'find_files', 'list_dir')
-                and (self._task.get('config') or {}).get('project_remote')):
-            return
-        if (contract_allows_prefetch and fn_name in _STREAMABLE_TOOLS and fn_args
-                and _has_executable_target(fn_name, fn_args)):
+        prefetch = (
+            contract_allows_prefetch and fn_name in _STREAMABLE_TOOLS and fn_args
+            and not (fn_name == 'read_files'
+                     and fn_args.get('bind_sources') is True)
+            and not (fn_name in ('read_files', 'search_files', 'grep_search',
+                                 'find_files', 'list_dir')
+                     and (self._task.get('config') or {}).get('project_remote'))
+            and _has_executable_target(fn_name, fn_args))
+
+        # ── Emit tool_start SSE event immediately ──
+        # The row must exist before the prefetch worker captures it.
+        try:
+            self._emit_tool_start(
+                fn_name, fn_args, tc_id,
+                json.dumps(fn_args, ensure_ascii=False, separators=(',', ':')),
+                caller=tool_call.get('caller'),
+                signature_arguments=fn_args_raw,
+                queued=not prefetch)
+        except Exception as e:
+            logger.debug('[%s] StreamingToolExec: tool_start emission failed '
+                         'for %s: %s', self._tid, fn_name, e)
+
+        if prefetch:
             self._submitted_count += 1
-            t0 = time.time()
+            t0 = time.monotonic()
             logger.info('[%s] StreamingToolExec: pre-executing %s (tc_id=%s) '
                         'while model streams',
                         self._tid, fn_name, tc_id[:8])
@@ -744,12 +754,16 @@ class StreamingToolAccumulator:
                     '(tc_id=%s); deferring to post-stream execution: %s',
                     self._tid, fn_name, tc_id[:8], error,
                 )
+                announced = self._announced.get(tc_id)
+                if announced is not None and announced[1].get('status') == 'searching':
+                    announced[1]['status'] = 'queued'
                 return
             self._futures[tc_id] = (future, fn_name, fn_args, t0)
 
     def _emit_tool_start(self, fn_name: str, fn_args: dict, tc_id: str,
                          tc_args_str: str, caller=None,
-                         signature_arguments: str | None = None):
+                         signature_arguments: str | None = None,
+                         queued: bool = False):
         """Emit a tool_start SSE event + append round entry to task.
 
         Uses the same ``_build_tool_round_entry`` as ``parse_tool_calls``
@@ -772,6 +786,10 @@ class StreamingToolAccumulator:
             task=self._task,
         )
         rn = round_entry['roundNum']
+
+        if queued:
+            round_entry['status'] = 'queued'
+            event_payload['status'] = 'queued'
 
         # Tag with LLM round (same as parse_tool_calls does)
         round_entry['llmRound'] = self._round_num
@@ -845,8 +863,17 @@ class StreamingToolAccumulator:
         Returns:
             Tool result content as string.
         """
+        from lib.project_dispatch.admission import is_dispatch_task
+        file_scope = None
+        if is_dispatch_task(self._task):
+            # Same single admission as the serial executor, before any effect;
+            # a refusal defers the call to the pipeline, which fails the turn.
+            from lib.project_dispatch.scope import admit_tool
+            file_scope = admit_tool(self._task, fn_name, fn_args, self._project_path)
         from lib.tasks_pkg.coordinator_policy import coordinator_call_rejection
-        denial = coordinator_call_rejection(self._task, fn_name, fn_args, self._project_path)
+        from lib.tasks_pkg.delegate_mode import delegate_call_rejection
+        denial = (coordinator_call_rejection(self._task, fn_name, fn_args, self._project_path)
+                  or delegate_call_rejection(self._task, fn_name, fn_args))
         if denial:
             return _ContentWithDisplayResults(denial, cacheable=False)
 
@@ -858,8 +885,8 @@ class StreamingToolAccumulator:
                 'Task aborted by user.', cacheable=False)
 
         try:
-            if fn_name in ('read_files', 'grep_search', 'find_files',
-                           'list_dir'):
+            if fn_name in ('read_files', 'search_files', 'grep_search',
+                           'find_files', 'list_dir'):
                 from lib.project_mod.tools import execute_tool
                 # Pass conv_id so namespaced paths resolve against this
                 #   conversation's root registry (prevents concurrent-task
@@ -869,6 +896,15 @@ class StreamingToolAccumulator:
                 ensure_execution_roots(self._task)
                 _conv_id = execution_root_key(self._task)
                 fn_args = route_project_tool_args(self._task, fn_name, fn_args)
+                # This pre-exec path bypasses _handle_project_tool (its result
+                #   is served as a prefetch hit), so it acquires the call's
+                #   applicable project rules itself, as the handler does: after
+                #   routing, before I/O, never inside a confined file grant. A
+                #   failure defers the read to the handler, which refuses it
+                #   rather than serve it without its rules.
+                if file_scope is None:
+                    from lib.tasks_pkg.project_guidance import check_project_guidance
+                    check_project_guidance(self._task, fn_name, fn_args)
                 _base = self._project_path or '.'
                 _projection_items = [] if fn_name == 'read_files' else None
 
@@ -903,7 +939,8 @@ class StreamingToolAccumulator:
                                      'read-token record failed (non-fatal): %s',
                                      self._tid, _fe)
                 _producer_metadata = None
-                if fn_name == 'grep_search' and isinstance(_content, str):
+                if (fn_name in ('search_files', 'grep_search')
+                        and isinstance(_content, str)):
                     from lib.project_mod.read_tools import (
                         grep_result_was_truncated,
                     )
@@ -929,18 +966,28 @@ class StreamingToolAccumulator:
                 # hazard as the fetch_url fix: this result is cached and the
                 # serial pipeline SKIPS re-execution, so any drift here was
                 # silently served. (Lazy import avoids a cycle.)
-                from lib.tasks_pkg.handlers.search._handlers import _load_search_backend
-                search_core, format_search_for_tool_response = _load_search_backend()
                 from lib.tasks_pkg.handlers.search._presentation import (
                     failed_search_observation, format_search_observations,
-                    search_observation,
+                    oversized_query_refusal, search_observation,
                 )
+                queries = fn_args.get('queries')
+                batch_mode = bool(queries and isinstance(queries, list))
+                single_refusal = '' if batch_mode else oversized_query_refusal(
+                    fn_args.get('query', ''))
+                if single_refusal:
+                    # A refusal is a completed failure: the serial handler
+                    # settles this exact occurrence, never a cached read.
+                    return _ContentWithDisplayResults(
+                        single_refusal, [], cacheable=False)
+                from lib.tasks_pkg.handlers.search._handlers import _load_search_backend
+                search_core, format_search_for_tool_response = _load_search_backend()
                 from lib.tasks_pkg.handlers.search._display import (
                     _format_search_display_for_results,
                     _vertical_to_sse_payload,
                 )
                 user_question = self._task.get('lastUserQuery', '')
-                from lib.search.search_bridge import bind_search_browser
+                from lib.search.browser_scope import select_search_browser
+                from lib.site_doctor.ownership import search_knowledge_scope
                 owner_user_id = self._task.get('_userId', '') or ''
                 configured_client_id = (
                     (self._task.get('config') or {}).get('browserClientId') or '')
@@ -948,20 +995,19 @@ class StreamingToolAccumulator:
                 # Resolve an unselected browser once, then bind that exact
                 # owner/device inside every worker thread. ContextVars do not
                 # propagate through ThreadPoolExecutor on their own.
-                with bind_search_browser(
-                        user_id=owner_user_id,
-                        client_id=configured_client_id) as selected_binding:
-                    selected_client_id = selected_binding[1]
+                selected_binding = select_search_browser(
+                    user_id=owner_user_id, client_id=configured_client_id)
 
                 # Batch mode: run concurrent searches (lightweight, no SSE events)
                 # Parity with serial _handle_web_search_batch (handlers/search.py):
                 # same (query, freshness, vertical) specs, run_batch_concurrent
                 # orchestration, per-query `_q` tagging, and {'batch': [...]}
                 # vertical carrier (consumed at tool_dispatch.py:1063).
-                queries = fn_args.get('queries')
                 batch_vertical = fn_args.get('vertical', 'auto')
-                if queries and isinstance(queries, list):
+                if batch_mode:
                     from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
+                    from threading import Event
+                    observed_drift = Event()
                     batch_freshness = fn_args.get('freshness', '')
                     specs = []
                     for s in queries[:5]:
@@ -976,22 +1022,28 @@ class StreamingToolAccumulator:
 
                     def _worker(spec):
                         q, f, v = spec
-                        with bind_search_browser(
-                                user_id=owner_user_id,
-                                client_id=selected_client_id):
+                        with selected_binding.activate(), search_knowledge_scope(
+                                self._task, selected_binding) as knowledge:
                             results, search_diag, breakdown, vertical_result = search_core._web_search_one(
                                 q, user_question, f, vertical=v)
+                            if knowledge is not None and knowledge.observed_drift:
+                                observed_drift.set()
                         return (results, search_diag, breakdown, vertical_result)
 
-                    ordered = run_batch_concurrent(
-                        specs, _worker, max_workers=5, tag='Search',
-                        abort=lambda: bool(self._task.get('aborted')))
+                    refusals = [oversized_query_refusal(q) for q, _f, _v in specs]
+                    ran = iter(run_batch_concurrent(
+                        [spec for spec, refusal in zip(specs, refusals) if not refusal],
+                        _worker, max_workers=5, tag='Search',
+                        abort=lambda: bool(self._task.get('aborted'))))
                     all_display_results = []
                     verticals = []
                     observations = []
                     diagnostics = []
-                    for idx, item in enumerate(ordered):
-                        q = specs[idx][0]
+                    for (q, _f, _v), refusal in zip(specs, refusals):
+                        if refusal:
+                            observations.append(failed_search_observation(q, refusal))
+                            continue
+                        item = next(ran)
                         if item is None:
                             observations.append(failed_search_observation(q))
                             continue
@@ -1014,6 +1066,7 @@ class StreamingToolAccumulator:
                         format_search_observations(
                             observations, format_search_for_tool_response),
                         all_display_results,
+                        cacheable=not observed_drift.is_set(),
                     )
                     if diagnostics:
                         formatted.search_diag = {'batch': diagnostics}
@@ -1025,9 +1078,8 @@ class StreamingToolAccumulator:
                 query = fn_args.get('query', '')
                 vertical_param = fn_args.get('vertical', 'auto')
                 freshness = fn_args.get('freshness', '')
-                with bind_search_browser(
-                        user_id=owner_user_id,
-                        client_id=selected_client_id):
+                with selected_binding.activate(), search_knowledge_scope(
+                        self._task, selected_binding) as knowledge:
                     results, search_diag, engine_breakdown, vertical_result = search_core._web_search_one(
                         query, user_question, freshness, vertical=vertical_param)
                 formatted_text = format_search_observations([
@@ -1035,7 +1087,8 @@ class StreamingToolAccumulator:
                                        engine_breakdown, vertical_result)],
                     format_search_for_tool_response)
                 display_results = _format_search_display_for_results(results)
-                formatted = _ContentWithDisplayResults(formatted_text, display_results)
+                formatted = _ContentWithDisplayResults(formatted_text, display_results,
+                    cacheable=not (knowledge is not None and knowledge.observed_drift))
                 if search_diag:
                     formatted.search_diag = search_diag
                 if engine_breakdown:
@@ -1064,18 +1117,15 @@ class StreamingToolAccumulator:
                 )
                 from lib.tasks_pkg.tool_display import _short_url
                 user_question = self._task.get('lastUserQuery', '')
-                from lib.search.search_bridge import bind_search_browser
+                from lib.search.browser_scope import select_search_browser
                 owner_user_id = self._task.get('_userId', '') or ''
                 configured_client_id = (
                     (self._task.get('config') or {}).get('browserClientId') or '')
-                with bind_search_browser(
-                        user_id=owner_user_id,
-                        client_id=configured_client_id) as selected_binding:
-                    selected_client_id = selected_binding[1]
+                selected_binding = select_search_browser(
+                    user_id=owner_user_id, client_id=configured_client_id)
 
-                # Batch mode: run concurrent fetches (lightweight, no SSE events)
-                # Parity with the serial batch worker (handlers/search.py:614) —
-                # it passes fetch_reason='' for batch URLs (no per-URL reason).
+                # Batch mode: run concurrent fetches (lightweight, no SSE events),
+                # with the same arguments as the serial batch worker.
                 urls = fn_args.get('urls')
                 if urls and isinstance(urls, list):
                     from concurrent.futures import Future, as_completed as _ac
@@ -1099,11 +1149,8 @@ class StreamingToolAccumulator:
                                 'filtered_chars': 0,
                                 'error_msg': 'Task aborted by user.',
                             }
-                        with bind_search_browser(
-                                user_id=owner_user_id,
-                                client_id=selected_client_id):
-                            return _fetch_url_one(
-                                target_url, user_question, '')
+                        with selected_binding.activate():
+                            return _fetch_url_one(target_url, user_question)
 
                     with _TP(max_workers=max(1, len(url_list)), metric_pool='tool-stream-fetch') as pool:
                         futs = {}
@@ -1155,12 +1202,8 @@ class StreamingToolAccumulator:
                     return formatted
 
                 url = fn_args.get('url', '')
-                fetch_reason = fn_args.get('reason', '')
-                with bind_search_browser(
-                        user_id=owner_user_id,
-                        client_id=selected_client_id):
-                    item = _fetch_url_one(
-                        url, user_question, fetch_reason=fetch_reason)
+                with selected_binding.activate():
+                    item = _fetch_url_one(url, user_question)
                 page_content = item.get('page_content')
                 filtered_chars = item.get('filtered_chars', 0)
                 if page_content:
@@ -1284,6 +1327,7 @@ class StreamingToolAccumulator:
             Count of published reusable results and occurrence handoffs.
         """
         from lib.tasks_pkg.tool_dispatch._flags import (
+            SEARCH_EVIDENCE_TOOLS,
             _ensure_tool_result_cache,
             _make_cache_key,
             _store_tool_result_cache_entry,
@@ -1321,8 +1365,9 @@ class StreamingToolAccumulator:
                             'not cacheable; deferring to normal pipeline',
                             self._tid, fn_name)
                         continue
-                    elapsed = time.time() - t0
-                    is_search = fn_name in ('web_search',)
+                    elapsed = time.monotonic() - t0
+                    # A replayed prefetch has no handler to declare evidence.
+                    is_search = fn_name in SEARCH_EVIDENCE_TOOLS
                     cache_key = _make_cache_key(fn_name, fn_args)
                     # Extract display_results + engine_breakdown + vertical (web_search)
                     _disp = getattr(content, 'display_results', None)
@@ -1404,8 +1449,8 @@ class StreamingToolAccumulator:
                     #   for another full io_timeout.  Add a 10s slack so
                     #   the partial-results banner gets cached instead.
                     _wait_timeout = 60
-                    if fn_name in ('grep_search', 'read_files',
-                                   'find_files', 'list_dir'):
+                    if fn_name in ('search_files', 'grep_search',
+                                   'read_files', 'find_files', 'list_dir'):
                         try:
                             from lib.project_mod.read_tools import _get_io_timeout
                             _wait_timeout = _get_io_timeout(
@@ -1431,8 +1476,8 @@ class StreamingToolAccumulator:
                             'cacheable; deferring to normal pipeline',
                             self._tid, fn_name)
                         continue
-                    elapsed = time.time() - t0
-                    is_search = fn_name in ('web_search',)
+                    elapsed = time.monotonic() - t0
+                    is_search = fn_name in SEARCH_EVIDENCE_TOOLS
                     cache_key = _make_cache_key(fn_name, fn_args)
                     _disp = getattr(content, 'display_results', None)
                     _eng_bkdn = getattr(content, 'engine_breakdown', None)

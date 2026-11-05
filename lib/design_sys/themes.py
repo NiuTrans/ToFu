@@ -61,6 +61,11 @@ SCENARIOS: dict = {
         'reader_task': '评审问题、方法、证据与贡献',
         'bible': 'academic-research.md',
     },
+    'career-interview': {
+        'label': '面试/工作整理',
+        'reader_task': '核实个人贡献、关键决策、结果与岗位匹配',
+        'bible': 'career-interview.md',
+    },
     'education-training': {
         'label': '教育培训',
         'reader_task': '理解、记住、能复述、会操作',
@@ -181,6 +186,22 @@ THEMES: tuple = (
         fonts={'display': 'noto-serif-sc', 'body': 'noto-sans-sc',
                'latin': 'liter'},
         mood='钛灰底+严格网格+大色块;理工答辩/海报式研究结果页。'),
+    # ── career-interview ──
+    Theme(
+        id='portfolio-slate', scenario='career-interview',
+        label='项目档案(浅)',
+        colors={'bg': '#F5F4F0', 'ink': '#202A35', 'primary': '#34495E',
+                'accent': '#A65332', 'muted': '#68737E', 'hairline': '#D5D9DC'},
+        fonts={'display': 'misans', 'body': 'noto-sans-sc', 'latin': 'liter'},
+        mood='暖灰纸面+石板色+铜色重点;以项目证据和个人贡献组织面试陈述。'),
+    Theme(
+        id='portfolio-midnight', scenario='career-interview',
+        label='项目陈述(深)',
+        colors={'bg': '#172126', 'ink': '#F3F3EC', 'primary': '#CFDAD4',
+                'accent': '#D5AA6D', 'muted': '#A2B1B5', 'hairline': '#34434A'},
+        fonts={'display': 'misans', 'body': 'noto-sans-sc', 'latin': 'liter'},
+        mood='深石板底+暖金单点强调;适合面试投屏和技术项目复盘。',
+        dark=True),
     # ── education-training ──
     Theme(
         id='warm-classroom', scenario='education-training',
@@ -259,6 +280,10 @@ _CLASSIFY_KEYWORDS: dict = {
     'academic-research': ('论文', '答辩', '课题', '开题', '中期', '结题',
                           '实验', '文献', 'thesis', 'paper', 'research',
                           '实验结果', '学术', '研究生', '博士', '硕士'),
+    'career-interview': ('面试', '求职', '应聘', '简历', '个人贡献',
+                         '工作整理', '项目经历', '项目复盘', '岗位匹配',
+                         'interview', 'resume', 'résumé', 'career',
+                         'job application', 'project retrospective'),
     'education-training': ('教程', '课程', '培训', '教学', '课件', '科普',
                            '入门', '学习', 'training', 'course', '指南',
                            '手册', '新手指南', '知识'),
@@ -276,6 +301,11 @@ def classify_scenario(text: str) -> str:
     (and tests) still lands on ONE coherent scenario.
     """
     low = (text or '').lower()
+    # A declared presentation purpose outranks technical subject keywords.
+    if any(word in low for word in (
+            '面试', '求职', '应聘', '简历', '工作整理', 'job interview',
+            'technical interview', 'engineering interview', 'job application')):
+        return 'career-interview'
     scores = {sid: 0 for sid in SCENARIOS}
     for sid, words in _CLASSIFY_KEYWORDS.items():
         for w in words:
@@ -312,10 +342,36 @@ def design_bible_text(scenario: str, *, include_general: bool = True,
         parts.append(_read_bible_file('_general.md'))
     meta = SCENARIOS.get(scenario) or {}
     parts.append(_read_bible_file(meta.get('bible', '')))
-    text = '\n\n'.join(p for p in parts if p)
-    if limit and len(text) > limit:
-        text = text[:limit]
-    return text
+    parts = [part for part in parts if part]
+    text = '\n\n'.join(parts)
+    if limit <= 0 or len(text) <= limit:
+        return text
+    # Reserve space for EACH source before clipping. A general-first slice
+    # otherwise consumes the entire author/edit budget and erases the scenario.
+    available = max(0, limit - 2 * (len(parts) - 1))
+    budgets = [min(len(part), available // len(parts)) for part in parts]
+    remaining = available - sum(budgets)
+    for index, part in enumerate(parts):
+        extra = min(len(part) - budgets[index], remaining)
+        budgets[index] += extra
+        remaining -= extra
+    return '\n\n'.join(_bible_excerpt(part, budget)
+                       for part, budget in zip(parts, budgets))[:limit]
+
+
+def _bible_excerpt(text: str, budget: int) -> str:
+    """Prefer complete leading paragraphs; make omitted guidance explicit."""
+    if len(text) <= budget:
+        return text
+    if budget < 3:
+        return text[:budget]
+    head = text[:budget - 2]
+    for separator in ('\n\n', '\n', ' '):
+        boundary = head.rfind(separator)
+        if boundary >= budget // 2:
+            head = head[:boundary]
+            break
+    return head.rstrip() + '\n…'
 
 
 def _read_bible_file(name: str) -> str:

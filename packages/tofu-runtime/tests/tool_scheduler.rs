@@ -724,3 +724,245 @@ fn parallel_callback_dispatch_is_refused_before_empty_batch() {
     parent.settle(Phase::Completed, "").unwrap();
     assert_eq!(sessions.active_count().unwrap(), 0);
 }
+
+/// Blocks each call until the test releases its position, ignoring Stop.
+struct Released {
+    entered: std::sync::mpsc::Sender<usize>,
+    gate: Arc<(Mutex<BTreeSet<usize>>, std::sync::Condvar)>,
+    calls: Arc<AtomicUsize>,
+}
+impl Handler for Released {
+    fn invoke(&self, _: InvocationContext<'_>, value: &Value) -> Result<Value, Value> {
+        let position = value["position"].as_u64().unwrap() as usize;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.send(position).unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        let (lock, wake) = &*self.gate;
+        let mut open = lock.lock().unwrap();
+        while !open.contains(&position) {
+            assert!(std::time::Instant::now() < until, "test did not release position {position}");
+            open = wake.wait_timeout(open, Duration::from_millis(5)).unwrap().0;
+        }
+        Ok(value.clone())
+    }
+}
+fn release(gate: &(Mutex<BTreeSet<usize>>, std::sync::Condvar), position: usize) {
+    gate.0.lock().unwrap().insert(position);
+    gate.1.notify_all();
+}
+fn released() -> (
+    Registry,
+    std::sync::mpsc::Receiver<usize>,
+    Arc<(Mutex<BTreeSet<usize>>, std::sync::Condvar)>,
+    Arc<AtomicUsize>,
+) {
+    let (entered, rx) = std::sync::mpsc::channel();
+    let gate = Arc::new((Mutex::new(BTreeSet::new()), std::sync::Condvar::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler = Arc::new(Released { entered, gate: gate.clone(), calls: calls.clone() });
+    (Registry::new(7, "epoch", vec![("write".into(), handler)]).unwrap(), rx, gate, calls)
+}
+#[test]
+fn concurrent_writes_start_together_and_keep_only_declared_order() {
+    let sessions = Sessions::new();
+    let parent = sessions.start("concurrent", "task", 7, "", None).unwrap();
+    // The idle hint stays 1: it must not cap how many writes start at once.
+    let scheduler = Arc::new(Scheduler::concurrent(Budget { workers: 1, ..budget() }).unwrap());
+    let (registry, entered, gate, calls) = released();
+    let worker_scheduler = scheduler.clone();
+    let worker_parent = parent.clone();
+    let worker_sessions = sessions.clone();
+    let thread = std::thread::spawn(move || {
+        let c = catalog();
+        // Position 2 mutates position 0's target; positions 1 and 3 are independent.
+        worker_scheduler
+            .dispatch_in_order(
+                Batch {
+                    owner: 7,
+                    epoch: "epoch",
+                    task_id: "concurrent",
+                    round: 0,
+                    parent: worker_parent,
+                    sessions: &worker_sessions,
+                    handlers: &registry,
+                    authorization: &Allow,
+                    calls: (0..4).map(|p| call(&c, p, "write")).collect(),
+                },
+                &[vec![], vec![], vec![0], vec![]],
+            )
+            .unwrap()
+    });
+    let first: BTreeSet<usize> = (0..3)
+        .map(|_| entered.recv_timeout(Duration::from_secs(2)).unwrap())
+        .collect();
+    assert_eq!(first, BTreeSet::from([0, 1, 3]));
+    assert!(entered.recv_timeout(Duration::from_millis(100)).is_err());
+    release(&gate, 1);
+    release(&gate, 3);
+    assert!(
+        entered.recv_timeout(Duration::from_millis(100)).is_err(),
+        "a same-target successor entered before its predecessor finished"
+    );
+    release(&gate, 0);
+    assert_eq!(entered.recv_timeout(Duration::from_secs(2)).unwrap(), 2);
+    release(&gate, 2);
+    let results = thread.join().unwrap();
+    assert_eq!(results.iter().map(|r| r.position).collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+    assert!(results.iter().all(|r| r.outcome.as_ref().unwrap().error.is_none()));
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(scheduler.snapshot().unwrap().resident_workers, 0);
+    scheduler.close().unwrap();
+    parent.settle(Phase::Completed, "").unwrap();
+    assert_eq!(sessions.active_count().unwrap(), 0);
+}
+#[test]
+fn concurrent_order_skips_undispatched_predecessors_and_refuses_forward_ones() {
+    let sessions = Sessions::new();
+    let parent = sessions.start("order", "task", 7, "", None).unwrap();
+    let scheduler = Scheduler::concurrent(budget()).unwrap();
+    let handler = Arc::new(Ordered {
+        live: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+        order: Mutex::new(vec![]),
+    });
+    let registry = Registry::new(7, "epoch", vec![("write".into(), handler.clone())]).unwrap();
+    let c = catalog();
+    // Position 0 never reached dispatch (for example a denied approval).
+    let results = scheduler
+        .dispatch_in_order(
+            Batch {
+                owner: 7,
+                epoch: "epoch",
+                task_id: "order",
+                round: 0,
+                parent: parent.clone(),
+                sessions: &sessions,
+                handlers: &registry,
+                authorization: &Allow,
+                calls: vec![call(&c, 1, "write")],
+            },
+            &[vec![], vec![0]],
+        )
+        .unwrap();
+    assert!(results[0].outcome.as_ref().unwrap().error.is_none());
+    let forward = scheduler.dispatch_in_order(
+        Batch {
+            owner: 7,
+            epoch: "epoch",
+            task_id: "order",
+            round: 1,
+            parent: parent.clone(),
+            sessions: &sessions,
+            handlers: &registry,
+            authorization: &Allow,
+            calls: vec![call(&c, 0, "write"), call(&c, 1, "write")],
+        },
+        &[vec![1], vec![]],
+    );
+    assert!(matches!(forward, Err(Error::Binding)));
+    assert_eq!(*handler.order.lock().unwrap(), vec![1]);
+    assert_eq!(scheduler.snapshot().unwrap().inflight_calls, 0);
+    scheduler.close().unwrap();
+    parent.settle(Phase::Completed, "").unwrap();
+    assert_eq!(sessions.active_count().unwrap(), 0);
+}
+#[test]
+fn parent_stop_settles_a_waiting_successor_without_entering_it() {
+    let sessions = Sessions::new();
+    let parent = sessions.start("waiting", "task", 7, "", None).unwrap();
+    let scheduler = Arc::new(Scheduler::concurrent(budget()).unwrap());
+    // The running predecessor ignores Stop until released, so only the
+    // successor's own wait can observe it.
+    let (registry, entered, gate, calls) = released();
+    let worker_scheduler = scheduler.clone();
+    let worker_parent = parent.clone();
+    let worker_sessions = sessions.clone();
+    let thread = std::thread::spawn(move || {
+        let c = catalog();
+        worker_scheduler
+            .dispatch_in_order(
+                Batch {
+                    owner: 7,
+                    epoch: "epoch",
+                    task_id: "waiting",
+                    round: 0,
+                    parent: worker_parent,
+                    sessions: &worker_sessions,
+                    handlers: &registry,
+                    authorization: &Allow,
+                    calls: vec![call(&c, 0, "write"), call(&c, 1, "write")],
+                },
+                &[vec![], vec![0]],
+            )
+            .unwrap()
+    });
+    assert_eq!(entered.recv_timeout(Duration::from_secs(2)).unwrap(), 0);
+    assert_eq!(sessions.active_count().unwrap(), 3);
+    parent.request_cancel("user_stop").unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while sessions.active_count().unwrap() != 2 {
+        assert!(std::time::Instant::now() < until, "waiting successor did not settle on Stop");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    release(&gate, 0);
+    let results = thread.join().unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(results.iter().all(|r| r.outcome.as_ref().unwrap().cancellation_requested));
+    assert!(results[1]
+        .outcome
+        .as_ref()
+        .unwrap()
+        .receipt
+        .resource_dispositions
+        .is_empty());
+    scheduler.close().unwrap();
+    parent.settle(Phase::Cancelled, "").unwrap();
+    assert_eq!(sessions.active_count().unwrap(), 0);
+}
+#[test]
+fn parent_deadline_settles_a_waiting_successor_without_entering_it() {
+    let sessions = Sessions::new();
+    let parent = sessions
+        .start("expiring", "task", 7, "", Some(Duration::from_millis(300)))
+        .unwrap();
+    let scheduler = Arc::new(Scheduler::concurrent(budget()).unwrap());
+    let (registry, entered, gate, calls) = released();
+    let worker_scheduler = scheduler.clone();
+    let worker_parent = parent.clone();
+    let worker_sessions = sessions.clone();
+    let thread = std::thread::spawn(move || {
+        let c = catalog();
+        worker_scheduler
+            .dispatch_in_order(
+                Batch {
+                    owner: 7,
+                    epoch: "epoch",
+                    task_id: "expiring",
+                    round: 0,
+                    parent: worker_parent,
+                    sessions: &worker_sessions,
+                    handlers: &registry,
+                    authorization: &Allow,
+                    calls: vec![call(&c, 0, "write"), call(&c, 1, "write")],
+                },
+                &[vec![], vec![0]],
+            )
+            .unwrap()
+    });
+    assert_eq!(entered.recv_timeout(Duration::from_secs(2)).unwrap(), 0);
+    // Only the declared deadline can end the successor's wait: the predecessor
+    // ignores it until released and nobody requests Stop.
+    let until = std::time::Instant::now() + Duration::from_secs(3);
+    while sessions.active_count().unwrap() != 2 {
+        assert!(std::time::Instant::now() < until, "waiting successor outlived the deadline");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    release(&gate, 0);
+    let results = thread.join().unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let successor = results[1].outcome.as_ref().unwrap();
+    assert!(successor.deadline_exceeded && successor.receipt.resource_dispositions.is_empty());
+    scheduler.close().unwrap();
+    parent.settle(Phase::Cancelled, "").unwrap();
+    assert_eq!(sessions.active_count().unwrap(), 0);
+}

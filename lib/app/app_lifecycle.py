@@ -220,7 +220,11 @@ def owned_asgi_http_connection_class():
                 if unfinished:
                     outcomes = await asyncio.gather(*unfinished, return_exceptions=True)
                     for outcome in outcomes:
-                        if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
+                        if isinstance(outcome, PeerDisconnected):
+                            # Shutdown aborts transports before cancelling requests;
+                            # a final frame then finds the peer already gone.
+                            self.app.logger.debug('HTTP peer disconnected during response send')
+                        elif isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
                             self.app.logger.error('HTTP child cleanup failed',
                                 exc_info=(type(outcome), outcome, outcome.__traceback__))
 

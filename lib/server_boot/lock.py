@@ -14,25 +14,7 @@ import os
 import time
 
 from lib.runtime.runtime_paths import data_root as _tofu_data_root
-
-
-def _pid_alive(pid):
-    """Best-effort liveness probe for *pid* (signal 0). Conservative: an
-    ambiguous OSError (other than 'no such process') reports True so we never
-    delete a dump whose owner might still be running."""
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OverflowError:
-        return False  # pid out of representable range → cannot be a live process
-    except PermissionError:
-        return True   # exists but owned by another user
-    except OSError:
-        return True   # ambiguous — err on the side of keeping
-    return True
+from runtime_guards import pid_is_alive as _pid_alive
 
 
 def _read_instance_lock_entry(lock_path):
@@ -60,10 +42,13 @@ def _pid_is_live_server(pid):
     """True iff *pid* is alive AND its ``/proc/<pid>/cmdline`` still looks like
     our ``server.py``.
 
-    A dead pid → False. A live pid whose cmdline is provably NOT ``server.py``
-    (PID reuse) → False. If liveness or the cmdline cannot be established
-    (no /proc, permission denied, empty cmdline) this conservatively returns
-    True so we NEVER reclaim a lock whose owner might still be a running server.
+    A dead pid → False, including an exited one that its parent has not reaped
+    yet: signal 0 still reaches such a zombie and its cmdline reads empty, so
+    an unreaped server would otherwise block every replacement boot. A live
+    pid whose cmdline is provably NOT ``server.py`` (PID reuse) → False. If
+    liveness or the cmdline cannot be established (no /proc, permission denied,
+    empty cmdline) this conservatively returns True so we NEVER reclaim a lock
+    whose owner might still be a running server.
     Mirrors stop.sh's ``kill -0`` + ``ps -o args`` server.py check.
     """
     if not _pid_alive(pid):

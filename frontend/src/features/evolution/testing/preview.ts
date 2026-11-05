@@ -1,7 +1,7 @@
 import '../../../styles/application/00-design-tokens.css';
-import '../ui-components';
 /** Vite-only design entry. Synthetic data, no production API imports or writes. */
 import '../../../styles/application/01-shell-navigation.css';
+import '../../../styles/application/01-message-surfaces.css';
 import '../../../styles/application/10-light-foundation.css';
 import '../../../styles/application/11-tofu-theme-foundation.css';
 import '../../../styles/application/26-evolution.css';
@@ -9,7 +9,6 @@ import '../../../styles/application/26-evolution.css';
 import '../../../styles/application/30-ui-kit.css';
 import { ready } from '../../../i18n';
 import { mountEvolutionWorkspace as mountEvolution } from '../workspace';
-import { mountAgentPod } from '../agent-pod';
 import type { EvolutionApi } from '../controller';
 
 import type { EvolutionRun } from '../../../api/evolution-runs';
@@ -34,6 +33,12 @@ if(scenario==='terminal'){
 }
 if(scenario==='terminal') observedPreview.result += '\n\n```tofu-ui\n'+JSON.stringify({version:1,title:'设计预览 · 实验对比',blocks:[{type:'data_chart',id:'demo-latency',title:'设计预览：相同输入下的耗时对比',kind:'bar',yLabel:'耗时',yUnit:'ms',xLabel:'方案',series:[{id:'preview',label:'合成演示数据',points:[{label:'基线',value:240},{label:'方案 A',value:165},{label:'方案 B',value:128}]}]}]})+'\n```';
 if(scenario==='needs-attention')Object.assign(observedPreview,{status:'needs_attention',error:'stage_handoff_interrupted'});
+// The executor finished its turn and parked on a registered remote compute job.
+if(scenario==='compute'||scenario==='compute-error')Object.assign(observedPreview,{
+  compute_wait:{operation_id:'job-9ec7ad7f7c3ee2a0f1b7052f1872da02',task_id:observedPreview.task_id,parked:true,next_poll_at:0,...(scenario==='compute-error'?{last_error:'ModuleNotFoundError'}:{})},
+  result:'Compute dependency pending; no completion or scientific acceptance.',
+  receipts:[{task_id:observedPreview.task_id,stage:'executing',terminal_verdict:'completed',outcome_available:true,actuals:{tokens:18420,tool_calls:12,wall_clock_seconds:84}}]});
+const previewQuestions=scenario==='question'?[{guidance_id:'preview-question',question:'设计预览：评测集用公开数据还是内部样本？',response_type:'text',options:['公开数据','内部样本'],questions:[]}]:[];
 if(scenario==='missing-limits')delete observedPreview.budget;
 const previewMaterials=[
  {material_id:'paper',kind:'paper',title:'Reflexion: language agents with verbal reinforcement learning',url:'https://arxiv.org/abs/2303.11366',note:'示例：比较基于反馈的记忆与改进方式。'},
@@ -82,7 +87,7 @@ const api = new Proxy({} as EvolutionApi,{get:(_target,key)=>async(...args:unkno
   if(scenario==='failure')throw new Error('预览：模拟连接中断');
   if(key==='getRun'){
     const run=previewRuns.find(r=>r.run_id===args[0])||previewRuns[0];
-    return {run:structuredClone(run),pending_questions:[],workspace:{materials:run.run_id==='memory-review'?previewMaterials:[],stages:[{kind:'界定问题',detail:'明确长期记忆的评测边界与验收要求。'},{kind:'比较与实现',detail:'整理参考资料，实现可复现原型并运行测试。'},{kind:'验证交付',detail:'核验引用和结论，记录测试证据与适用边界。'}],criteria:[{criterion_id:'delivery',requirement:'结论附可追溯来源，并说明适用边界。'}],...(scenario==='missing-limits'?{}:{budget:run.budget||null})}};
+    return {run:structuredClone(run),pending_questions:run===observedPreview?structuredClone(previewQuestions):[],workspace:{materials:run.run_id==='memory-review'?previewMaterials:[],stages:[{kind:'界定问题',detail:'明确长期记忆的评测边界与验收要求。'},{kind:'比较与实现',detail:'整理参考资料，实现可复现原型并运行测试。'},{kind:'验证交付',detail:'核验引用和结论，记录测试证据与适用边界。'}],criteria:[{criterion_id:'delivery',requirement:'结论附可追溯来源，并说明适用边界。'}],...(scenario==='missing-limits'?{}:{budget:run.budget||null})}};
   }
   const result=records[String(key)];
   if(key==='getSwarmStatus'){
@@ -95,8 +100,8 @@ const api = new Proxy({} as EvolutionApi,{get:(_target,key)=>async(...args:unkno
   throw new Error('设计预览不执行命令。请在真实工作区测试提交操作。');
 }});
 await ready();
-// Browser-only fixture seam for status-driven pod choreography checks.
-Object.assign(window,{__mountEvolutionPreviewPod:mountAgentPod,
+// Browser-only fixture seam for status-driven room choreography checks.
+Object.assign(window,{
   __setEvolutionPreviewRoster:(agents:typeof previewRoster,known=true)=>{
     previewRoster=agents;previewRosterKnown=known;
     document.querySelector<HTMLButtonElement>('[data-studio-action=refresh]')?.click();

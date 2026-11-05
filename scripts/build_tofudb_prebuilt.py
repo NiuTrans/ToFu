@@ -38,6 +38,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -51,6 +52,23 @@ SMOKE_TIMEOUT_S = 10
 # Deterministic archive metadata: the same engine bytes must produce the
 # same asset bytes on any build host.
 ARCHIVE_MTIME = 0
+
+# Rust links *-unknown-linux-musl as a static PIE by default (it passes
+# `-static-pie` and musl's rcrt1.o). The musl-gcc wrapper only understands that
+# through its specs file, and Ubuntu 22.04's musl 1.2.2-4 specs predate the
+# static-PIE rule `%{static-pie:-static -pie --no-dynamic-linker}`. The link
+# then keeps the specs' `-dynamic-linker` while still using the static-PIE crt:
+# a hybrid ELF that declares PT_INTERP=/lib/ld-musl-x86_64.so.1 and whose
+# rcrt1.o `_start_c`/`__dls2` self-relocator faults (SIGSEGV, exit -11) as soon
+# as the kernel also maps that interpreter. Ask for the plain non-PIE static
+# link instead: every musl specs version understands `%{static:-static}`, so
+# the asset never depends on the build host's musl loader.
+MUSL_STATIC_LINK_RUSTFLAGS = ('-C', 'target-feature=+crt-static',
+                              '-C', 'relocation-model=static')
+
+# ELF program header type of the interpreter declaration a static binary must
+# not have (System V ABI, ELF: `p_type` at offset 0 of every entry).
+PT_INTERP = 3
 
 LINUX_STATIC_TRIPLES = {
     'x86_64': 'x86_64-unknown-linux-musl',
@@ -125,7 +143,52 @@ def _musl_cross_env(triple: str) -> dict:
     upper = triple.upper().replace('-', '_')
     env[f'CARGO_TARGET_{upper}_LINKER'] = compiler
     env[f'CC_{triple.replace("-", "_")}'] = compiler
+    _pin_static_link(env)
     return env
+
+
+def _pin_static_link(env: dict) -> None:
+    """Add the non-PIE static link to whatever rustflags were inherited."""
+    encoded = env.get('CARGO_ENCODED_RUSTFLAGS')
+    if encoded is not None:
+        # cargo reads only the encoded form when it is set; extend it in place
+        # so an inherited flag set is never silently dropped.
+        env['CARGO_ENCODED_RUSTFLAGS'] = '\x1f'.join(
+            [*encoded.split('\x1f'), *MUSL_STATIC_LINK_RUSTFLAGS])
+        return
+    inherited = env.get('RUSTFLAGS', '').split()
+    env['RUSTFLAGS'] = ' '.join([*inherited, *MUSL_STATIC_LINK_RUSTFLAGS])
+
+
+def _elf_declares_interpreter(binary: Path) -> bool:
+    """Report whether an ELF binary names a program interpreter (PT_INTERP)."""
+    with binary.open('rb') as handle:
+        header = handle.read(64)
+        if header[:4] != b'\x7fELF':
+            raise BuildError(f'{binary} is not an ELF binary; cannot verify its static link')
+        endian = '<' if header[5] == 1 else '>'
+        if header[4] == 2:
+            phoff = struct.unpack_from(endian + 'Q', header, 32)[0]
+            phentsize, phnum = struct.unpack_from(endian + 'HH', header, 54)
+        else:
+            phoff = struct.unpack_from(endian + 'I', header, 28)[0]
+            phentsize, phnum = struct.unpack_from(endian + 'HH', header, 42)
+        handle.seek(phoff)
+        table = handle.read(phentsize * phnum)
+    return any(struct.unpack_from(endian + 'I', table, index * phentsize)[0] == PT_INTERP
+               for index in range(phnum))
+
+
+def _require_static_musl_artifact(binary: Path, triple: str) -> None:
+    """A musl release asset must be self-contained, not loader-dependent."""
+    if not triple.endswith('-unknown-linux-musl') or not _elf_declares_interpreter(binary):
+        return
+    raise BuildError(
+        f'{binary} is not a static executable: its ELF header names a program '
+        'interpreter, so the asset needs the build host\'s musl loader and cannot run '
+        'on a host without it. The pinned non-PIE static link '
+        f'(RUSTFLAGS="{" ".join(MUSL_STATIC_LINK_RUSTFLAGS)}") was lost — check that '
+        'the host musl-gcc and any inherited rustflags do not override it.')
 
 
 def _sha256_file(path: Path) -> str:
@@ -160,6 +223,7 @@ def build_engine(triple: str) -> Path:
     binary = CRATE_TARGET_DIR / triple / 'release' / ('tofu-db.exe' if 'windows' in triple else 'tofu-db')
     if not binary.is_file():
         raise BuildError(f'cargo reported success but {binary} was not produced')
+    _require_static_musl_artifact(binary, triple)
     return binary
 
 

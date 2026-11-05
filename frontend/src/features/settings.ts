@@ -9,6 +9,7 @@ import { modelPricePresentation } from './settings/model-price-localization';
 
 import { manualMatrixProbe } from './settings/manual-matrix-probe';
 import { jumpToSetting } from './settings/setting-jump';
+import { openKnowledgeSettings } from './settings/knowledge-tab';
 
 import { mountRequestNameEditors, planRequestNameFaces, suggestedRequestNames } from './settings/provider-request-names';
 import { openRequestNamePanel, requestNameDraftFrom } from './settings/provider-request-name-panel';
@@ -21,9 +22,11 @@ import type { I18nKey } from '../i18n';
 import './settings/section-requires';
 import './settings/private-hosts';
 import './settings/site-packs';
+import './settings/search-gateway';
 import './settings/browser-access';
 import './settings/devices';
 import './settings/speech';
+import './settings/catpaw-settings';
 import './settings/credentials-vault';
 import './settings/auth-sources';
 import './settings/model-catalog-tab';
@@ -33,8 +36,11 @@ import './settings/visibility-defaults';
 import './settings/save-export';
 import './settings/local-deploy';
 import './settings/database';
+import './settings/dx-channel';
+import './settings/github-channel';
 import './settings/core-panel';
 import './settings/tools-inventory';
+import './settings/knowledge-tab';
 import '../runtime/settings-presenters.generated.js';
 
 const settingsCompatibility = featureRegistry;
@@ -42,6 +48,7 @@ setRuntimeService('modelPricePresentation', modelPricePresentation);
 
 setRuntimeService('manualMatrixProbe', manualMatrixProbe);
 setRuntimeService('jumpToSetting', jumpToSetting);
+setRuntimeService('openKnowledgeBase', openKnowledgeSettings);
 setRuntimeService('mountProviderReasoningEditors', mountProviderReasoningEditors);
 setRuntimeService('mountRequestNameEditors', mountRequestNameEditors);
 // Request-name panel: edits the wire id AND the headers that select its
@@ -64,7 +71,8 @@ setRuntimeService('planProviderRequestNameFaces', async (names: string[], urls: 
 });
 
 let selectProviderTemplate: (key: string) => void = () => undefined;
-let stageProviderTemplate: (bundle: CompiledProviderBundle, key: string) => Promise<boolean> = async () => false;
+let stageProviderTemplate: (bundle: CompiledProviderBundle, key: string,
+  listing?: {listed: number; imported: number}) => Promise<boolean> = async () => false;
 const providerTemplateApi = () => (featureRegistry.Api as { providers: {
   templates(): Promise<unknown>;
   compileTemplate(key: string): Promise<ProviderTemplateCompileResponse>;
@@ -87,7 +95,8 @@ const providerTemplatePicker = createProviderTemplatePicker({
     bundle.provider.name = compiled.provider.name;
     bundle.provider.brand = compiled.provider.brand;
     bundle.provider_access.display_name = compiled.provider_access.display_name;
-    if (!await stageProviderTemplate(bundle, apiKey)) throw new Error('Provider not saved');
+    const listing = {listed: result.listed_model_count ?? result.model_count, imported: result.model_count};
+    if (!await stageProviderTemplate(bundle, apiKey, listing)) throw new Error('Provider not saved');
   },
 });
 setRuntimeService('_toggleProviderTemplatePicker', (trigger: HTMLElement, select: (key: string) => void,

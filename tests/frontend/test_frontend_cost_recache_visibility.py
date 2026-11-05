@@ -30,12 +30,12 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
 
 from tests._runtime_sections import runtime_section_path
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -44,12 +44,6 @@ ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 I18N_ZH = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json')
 FINISH_INFO = runtime_section_path('ui/finish_info.js')
 FINISH_INFO_RICH = runtime_section_path('ui/finish_info_rich.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -164,6 +158,7 @@ console.log(out.join('\n'));
 
 
 def _run(neuter: bool) -> str:
+    require_node_modules('jsdom')
     harness = os.path.join(HERE, '_cost_recache_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
@@ -187,8 +182,6 @@ def _run(neuter: bool) -> str:
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_recache_waste_visible_and_no_double_note():
     output = _run(neuter=False)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -196,8 +189,6 @@ def test_recache_waste_visible_and_no_double_note():
     assert output.count('PASS') >= 6, f'expected >=6 PASS lines, got:\n{output}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NEUTER_without_waste_line_the_guard_fails():
     # Remove the waste-line emission → scenario A's waste check MUST fail,
     # proving it is the new line (not incidental text) that satisfies it.

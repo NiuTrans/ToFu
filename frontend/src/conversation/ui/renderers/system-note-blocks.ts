@@ -1,11 +1,20 @@
 /**
  * System-note and grouped context-note DOM projections. Generated reason
- * taxonomy remains the source of presentation labels.
+ * taxonomy remains the source of presentation labels and glyphs.
  * Entry points: renderSystemNoteBlock, renderSystemNoteGroupBlock.
  * Dependencies: conversation-view-model, system-note-presentation.generated,
- * ports, stable-dom, localized-copy.
+ * context-note-presentation, context-note-grouping, shared icons, ports,
+ * stable-dom, localized-copy.
  */
+import { iconHtml } from '../../../icons';
 import type { ConversationBlockViewModel } from '../../presentation/conversation-view-model';
+import {
+  contextNoteFacet,
+  contextNoteTextRuns,
+  type ContextNoteFacet,
+} from '../../presentation/context-note-presentation';
+import { isContextInjectionNote } from '../../presentation/context-note-grouping';
+import type { ContextProvenanceFact } from '../../presentation/turn-provenance';
 import {
   SYSTEM_NOTE_REASON_PRESENTATION as SYSTEM_NOTE_REASON_CHIP,
 } from '../system-note-presentation.generated';
@@ -100,7 +109,6 @@ function systemNoteHeader(
 ): HTMLElement {
   const presentation = systemNotePresentation(block);
   const header = document.createElement('div');
-  header.className = 'sw-note-group-item-head';
   const icon = document.createElement('span');
   icon.className = 'ptool-icon';
   icon.innerHTML = presentation.icon;
@@ -142,32 +150,187 @@ function systemNoteBodyCard(
   return card;
 }
 
-/* The verbatim wire text alone — the group member card already carries its
- * own header row, so the repeated "介入记录" card head would be pure noise. */
-function systemNoteItemBody(
-  document: Document,
-  block: SystemNoteBlock,
-): HTMLElement {
-  const pre = document.createElement('pre');
-  pre.className = 'sw-card-raw-pre';
-  pre.textContent = block.text;
+/* ── Context notes ─────────────────────────────────────────────────────
+ * A context note reads as one row of a list: a glyph sticker tinted by the
+ * block's authority, its registry label, a quiet size or count, and a
+ * one-line glimpse. The row's title already says what was injected, so the
+ * repeated kind title, raw reason id and "appended" badge stay out of view
+ * (the id remains the title's tooltip). Multi-line text opens in place;
+ * a single line is shown whole and needs no disclosure. */
+
+function element<K extends keyof HTMLElementTagNameMap>(
+  document: Document, tag: K, className: string, text?: string,
+): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function contextNoteLabel(ports: ClassicConversationRendererPorts, facet: ContextNoteFacet): string {
+  return facet.labelKey ? textFor(ports, facet.labelKey, facet.fallbackLabel) : facet.fallbackLabel;
+}
+
+function noteSticker(document: Document, glyph: string): HTMLElement {
+  const sticker = element(document, 'span', 'sw-note-sticker');
+  sticker.dataset.glyph = glyph;
+  sticker.setAttribute('aria-hidden', 'true');
+  sticker.innerHTML = iconHtml(glyph, 14);
+  return sticker;
+}
+
+/* Verbatim text, byte for byte: wrapper-tag lines are quieted and Markdown
+ * headings emphasised by wrapping them, never by rewriting them. */
+function verbatimNoteText(document: Document, text: string, inline: boolean): HTMLElement {
+  const pre = element(document, 'pre', inline ? 'sw-note-text sw-note-text--inline' : 'sw-note-text');
+  for (const run of contextNoteTextRuns(text)) {
+    if (run.kind === 'text') pre.append(run.text);
+    else pre.append(element(document, 'span', `sw-note-text-${run.kind}`, run.text));
+  }
   return pre;
 }
 
-function contextProvenanceBody(
+function pairedProvenance(
+  ports: ClassicConversationRendererPorts, item: SystemNoteBlock,
+): ContextProvenanceFact | undefined {
+  return item.provenance ? ports.contextProvenanceFacts?.(item.provenance)[0] : undefined;
+}
+
+/* The row title already names the kind ("Relevant memories"), so a counted
+ * fact shows only its number. */
+function pairedMeta(
+  ports: ClassicConversationRendererPorts, fact: ContextProvenanceFact | undefined,
+): string {
+  if (!fact) return '';
+  return fact.count > 0
+    ? textFor(ports, 'systemNote.groupItemsTitle', '{n} items', { n: fact.count })
+    : fact.label;
+}
+
+/* Acquisition metadata the note witnesses: its sentence and facts, then the
+ * escaped list. Without structured facts, fall back to the receipt markup or,
+ * port-less, to the raw record so nothing is silently dropped. */
+function pairedProvenanceBody(
+  document: Document, ports: ClassicConversationRendererPorts,
+  item: SystemNoteBlock, fact: ContextProvenanceFact | undefined,
+): HTMLElement {
+  const body = element(document, 'div', 'sw-note-item-body sw-note-provenance');
+  if (fact) {
+    body.dataset.provenanceField = fact.field;
+    const caption = [fact.headline, fact.detail].filter(Boolean).join(' · ');
+    if (caption) body.append(element(document, 'p', 'sw-note-caption', caption));
+    if (fact.bodyHtml) body.insertAdjacentHTML('beforeend', fact.bodyHtml);
+    return body;
+  }
+  const html = ports.renderContextProvenanceHtml?.(item.provenance);
+  if (html) body.innerHTML = html;
+  else body.append(element(document, 'pre', 'sw-note-text', JSON.stringify(item.provenance, null, 2)));
+  return body;
+}
+
+function contextNoteItem(
+  document: Document,
+  ports: ClassicConversationRendererPorts,
+  item: SystemNoteBlock,
+  options: Readonly<{ collapsible: boolean; open: boolean }>,
+): HTMLElement {
+  const facet = contextNoteFacet(item);
+  const fact = pairedProvenance(ports, item);
+  const multiline = Boolean(item.provenance) || facet.readableLines > 1;
+  const disclosure = multiline && options.collapsible;
+  const row = document.createElement(disclosure ? 'details' : 'div');
+  row.className = 'sw-note-group-item';
+  row.dataset.blockId = item.blockId;
+  row.dataset.noteKind = item.noteKind;
+  row.dataset.glyph = facet.glyph;
+  if (item.reason) row.dataset.reason = item.reason;
+  if (facet.authority) row.dataset.authority = facet.authority;
+  if (disclosure) (row as HTMLDetailsElement).open = options.open;
+
+  const head = element(document, disclosure ? 'summary' : 'div', 'sw-note-item-head');
+  const title = element(document, 'span', 'sw-note-item-title', contextNoteLabel(ports, facet));
+  if (facet.reason) {
+    title.title = `${textFor(ports, 'systemNote.reasonLabel', 'Reason')}: ${facet.reason}`;
+  }
+  head.append(noteSticker(document, facet.glyph), title);
+  const meta = item.provenance ? pairedMeta(ports, fact)
+    : facet.readableLines > 1
+      ? textFor(ports, 'systemNote.lineCount', '{n} lines', { n: facet.readableLines }) : '';
+  if (meta) head.append(element(document, 'span', 'sw-note-item-meta', meta));
+  const peek = !disclosure ? '' : item.provenance ? fact?.peek ?? '' : facet.peek;
+  if (peek) head.append(element(document, 'span', 'sw-note-item-peek', peek));
+  if (!multiline && item.text) head.append(verbatimNoteText(document, item.text, true));
+  row.append(head);
+
+  if (item.provenance) {
+    row.append(pairedProvenanceBody(document, ports, item, fact));
+  } else if (multiline) {
+    const body = element(document, 'div', 'sw-note-item-body');
+    body.append(verbatimNoteText(document, item.text, false));
+    row.append(body);
+  }
+  return row;
+}
+
+/* Unmatched acquisition receipts lead the fold, visibly apart from the notes
+ * whose text was injected. */
+function contextReceipts(
   document: Document, ports: ClassicConversationRendererPorts, value: unknown,
 ): HTMLElement {
-  const body = document.createElement('div');
-  body.className = 'sw-note-provenance';
+  const receipts = element(document, 'div', 'sw-note-receipts');
   const html = ports.renderContextProvenanceHtml?.(value);
-  if (html) body.innerHTML = html;
-  else {
-    const pre = document.createElement('pre');
-    pre.className = 'sw-card-raw-pre';
-    pre.textContent = JSON.stringify(value, null, 2);
-    body.appendChild(pre);
+  if (html) receipts.innerHTML = html;
+  else receipts.append(element(document, 'pre', 'sw-note-text', JSON.stringify(value, null, 2)));
+  return receipts;
+}
+
+function contextSummary(
+  document: Document, ports: ClassicConversationRendererPorts,
+  names: readonly string[], count: number | null,
+): HTMLElement {
+  const summary = element(document, 'summary', 'ptool-line sw-inbox-row-header');
+  const icon = element(document, 'span', 'ptool-icon');
+  icon.innerHTML = iconHtml('layers', 14);
+  summary.append(icon, element(document, 'span', 'ptool-text',
+    textFor(ports, 'systemNote.groupLabel', 'Context notes')));
+  if (names.length) {
+    summary.append(element(document, 'span', 'sw-note-group-names', names.join(' · ')));
   }
-  return body;
+  if (count !== null) {
+    summary.append(element(document, 'span', 'sw-note-group-count',
+      textFor(ports, 'systemNote.groupItemsTitle', '{n} items', { n: count })));
+  }
+  return summary;
+}
+
+function openContextItems(node: HTMLElement): ReadonlySet<string> {
+  return new Set(Array.from(
+    node.querySelectorAll<HTMLElement>('details.sw-note-group-item[open]'),
+    (item) => item.dataset.blockId ?? '',
+  ));
+}
+
+function renderContextNoteBlock(
+  node: HTMLElement,
+  block: SystemNoteBlock,
+  ports: ClassicConversationRendererPorts,
+): void {
+  const document = node.ownerDocument;
+  const details = element(document, 'details', 'sw-inbox-row sw-system-note-row sw-note-solo');
+  details.open = preserveDetailsOpen(node, false);
+  details.dataset.noteKind = block.noteKind;
+  details.dataset.contextNote = 'true';
+  if (block.injectionId) details.dataset.injectionId = block.injectionId;
+  if (block.reason) details.dataset.reason = block.reason;
+  const body = element(document, 'div', 'sw-inbox-row-body sw-note-group-body');
+  const list = element(document, 'div', 'sw-note-list');
+  list.append(contextNoteItem(document, ports, block, { collapsible: false, open: true }));
+  body.append(list);
+  details.append(
+    contextSummary(document, ports, [contextNoteLabel(ports, contextNoteFacet(block))], null),
+    body,
+  );
+  node.replaceChildren(details);
 }
 
 export function renderSystemNoteBlock(
@@ -176,6 +339,10 @@ export function renderSystemNoteBlock(
   ports: ClassicConversationRendererPorts,
 ): void {
   node.className = 'conversation-block conversation-block--system-note';
+  if (isContextInjectionNote(block)) {
+    renderContextNoteBlock(node, block, ports);
+    return;
+  }
   const document = node.ownerDocument;
   const details = document.createElement('details');
   details.className = 'sw-inbox-row sw-system-note-row';
@@ -190,48 +357,15 @@ export function renderSystemNoteBlock(
   summary.append(...Array.from(header.childNodes));
   const body = document.createElement('div');
   body.className = 'sw-inbox-row-body';
-  if (block.provenance) {
-    // Same dedup as grouped members: provenance is the readable summary, the
-    // verbose raw body only repeats it.
-    body.appendChild(contextProvenanceBody(document, ports, block.provenance));
-  } else {
-    body.appendChild(systemNoteBodyCard(document, ports, block));
-  }
+  body.appendChild(systemNoteBodyCard(document, ports, block));
   details.append(summary, body);
   node.replaceChildren(details);
 }
 
-/* The card reused to hold one note's content. A single consistent box (the
- * header row + any provenance meta + the verbatim wire text) so an expanded
- * group reads as a stack of uniform cards, not two mismatched sub-boxes. */
-const NOTE_ITEM_CARD = 'sw-note-group-item';
-
-function systemNoteItemCard(
-  document: Document,
-  ports: ClassicConversationRendererPorts,
-  item: SystemNoteBlock,
-): HTMLElement {
-  const card = document.createElement('div');
-  card.className = `sw-card sw-stall-card-item ${NOTE_ITEM_CARD}`;
-  card.dataset.noteKind = item.noteKind;
-  if (item.reason) card.dataset.reason = item.reason;
-  if (item.reason === 'active_checklist') card.dataset.checklist = 'true';
-  card.appendChild(systemNoteHeader(document, ports, item));
-  if (item.provenance) {
-    // The provenance summary is the curated form of this note's content; the
-    // raw injected block (e.g. the full <relevant_memories> dump) repeats the
-    // same memory names/descriptions, so omit it to avoid duplicate noise.
-    card.appendChild(contextProvenanceBody(document, ports, item.provenance));
-  } else {
-    card.appendChild(systemNoteItemBody(document, item));
-  }
-  return card;
-}
-
 /* A merged run of adjacent context-injection notes: ONE disclosure whose
- * summary is the shared "context injections" title + count, and whose body
- * lists each member note as one uniform card (header + provenance meta +
- * verbatim text). Member positions are unchanged. */
+ * summary names what was injected, and whose body lists each member note as
+ * one row (unmatched acquisition receipts first). Member positions are
+ * unchanged; each row keeps the reader's open state across live growth. */
 export function renderSystemNoteGroupBlock(
   node: HTMLElement,
   block: Extract<ConversationBlockViewModel, { kind: 'system-note-group' }>,
@@ -239,35 +373,23 @@ export function renderSystemNoteGroupBlock(
 ): void {
   node.className = 'conversation-block conversation-block--system-note conversation-block--system-note-group';
   const document = node.ownerDocument;
-  const details = document.createElement('details');
-  details.className = 'sw-inbox-row sw-system-note-row sw-note-group';
+  const openItems = openContextItems(node);
+  const details = element(document, 'details', 'sw-inbox-row sw-system-note-row sw-note-group');
   /* A live-growing group defeats the sameBlock short-circuit (items.length
    * changes), so without this read-back a reader's open state would snap
    * back to collapsed every time a new injection lands mid-turn. */
   details.open = preserveDetailsOpen(node, false);
   details.dataset.noteGroup = 'context-injection';
-  const summary = document.createElement('summary');
-  summary.className = 'ptool-line sw-inbox-row-header';
-  const icon = document.createElement('span');
-  icon.className = 'ptool-icon';
-  icon.innerHTML = SYSTEM_NOTE_CONTEXT_ICON_HTML;
-  const label = document.createElement('span');
-  label.className = 'ptool-text';
-  label.textContent = textFor(ports, 'systemNote.groupLabel', 'Context notes');
-  const count = document.createElement('span');
-  count.className = 'sw-note-group-count';
-  count.textContent = textFor(
-    ports, 'systemNote.groupItemsTitle', '{n} items',
-    { n: block.items.length },
-  );
-  summary.append(icon, label, count);
-  const body = document.createElement('div');
-  body.className = 'sw-inbox-row-body sw-note-group-body';
-
-  if (block.provenance) body.appendChild(contextProvenanceBody(document, ports, block.provenance));
+  const body = element(document, 'div', 'sw-inbox-row-body sw-note-group-body');
+  if (block.provenance) body.append(contextReceipts(document, ports, block.provenance));
+  const list = element(document, 'div', 'sw-note-list');
   for (const item of block.items) {
-    body.appendChild(systemNoteItemCard(document, ports, item));
+    list.append(contextNoteItem(document, ports, item, {
+      collapsible: true, open: openItems.has(item.blockId),
+    }));
   }
-  details.append(summary, body);
+  body.append(list);
+  const names = block.items.map((item) => contextNoteLabel(ports, contextNoteFacet(item)));
+  details.append(contextSummary(document, ports, names, block.items.length), body);
   node.replaceChildren(details);
 }

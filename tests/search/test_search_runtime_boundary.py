@@ -45,6 +45,28 @@ def test_server_registration_and_bootstrap_schema_do_not_load_search():
 
 
 @pytest.mark.unit
+def test_readiness_import_validation_keeps_optional_search_dormant():
+    proc = _run_isolated('''
+import importlib.abc
+import sys
+
+class RejectOptionalSearch(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "tofu_search" or fullname.startswith("tofu_search."):
+            raise ImportError("optional search must not participate in readiness")
+
+sys.meta_path.insert(0, RejectOptionalSearch())
+import server
+server._validate_imports()
+assert "tofu_search" not in sys.modules
+assert "lib.search.search_bridge" not in sys.modules
+print("OPTIONAL-SEARCH-DORMANT")
+''')
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert 'OPTIONAL-SEARCH-DORMANT' in proc.stdout
+
+
+@pytest.mark.unit
 def test_server_boot_does_not_load_dormant_v4_validators():
     proc = _run_isolated(
         'import sys; import server; '

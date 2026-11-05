@@ -7,9 +7,12 @@ swarm sub-agents (``spawn_agents``), and tasks in other conversations.
 Design contract (owner ruling):
 
 * ``poll()`` with no id is a snapshot dashboard of everything this user
-  owns; ``poll(id, wait_s)`` blocks (clamped to 60s) until that handle
-  finishes. There is no partial-result spam — a running handle reports a
-  compact status, a finished handle reports its full result once.
+  owns; ``poll(id, wait_s)`` blocks (at most ``POLL_WAIT_CAP_S``) until that
+  handle finishes, new input arrives for the turn, or the task stops. A long
+  wait costs no model request; a short cap only forced extra rounds that
+  re-read the whole prompt (owner decision 2026-10-28). There is no
+  partial-result spam — a running handle reports a compact status, a
+  finished handle reports its full result once.
 * ``kill`` is THE way background work stops. run_command has no timeout:
   commands run to completion unless killed or stopped by the user.
 * The retired per-family surfaces (``check_background_command``,
@@ -17,6 +20,10 @@ Design contract (owner ruling):
   dispatchable for conversation-latched schemas; fresh name mistakes are
   routed here by name repair.
 """
+
+# Below the stuck-task reaper's 30-minute silence threshold with margin; the
+# handler clamps it further when an operator lowers that threshold.
+POLL_WAIT_CAP_S = 1500
 
 POLL_TOOL = {
     "type": "function",
@@ -29,8 +36,12 @@ POLL_TOOL = {
             "conversations. With no id, returns a snapshot of everything "
             "currently running. With an id, returns that handle's status — "
             "and its full result once finished. Set wait_s to block until "
-            "completion (clamped to 60s; on cap returns the running "
-            "snapshot — call again to keep waiting). Background command "
+            "completion: the wait returns as soon as the handle finishes, "
+            "new input arrives for this turn, or the task is stopped, so a "
+            "long wait costs no extra model requests (capped at "
+            f"{POLL_WAIT_CAP_S} s = {POLL_WAIT_CAP_S // 60} minutes; on cap "
+            "returns the running snapshot — call again to keep waiting). "
+            "Background command "
             "completions are also delivered automatically, so only wait "
             "when there is nothing else to do."
         ),
@@ -51,10 +62,11 @@ POLL_TOOL = {
                     "description": "Several handles in one call.",
                 },
                 "wait_s": {
-                    "type": "integer",
+                    "type": "integer", "minimum": 0, "maximum": POLL_WAIT_CAP_S, "default": 0,
                     "description": (
-                        "Seconds to block waiting for completion (clamped to "
-                        "60). Omit for an instant snapshot."
+                        "Seconds to block waiting for completion (at most "
+                        f"{POLL_WAIT_CAP_S}; returns as soon as the handle "
+                        "finishes). Omit for an instant snapshot."
                     )
                 },
                 "mode": {
@@ -106,4 +118,4 @@ KILL_TOOL = {
 
 BACKGROUND_TOOL_NAMES = frozenset({'poll', 'kill'})
 
-__all__ = ['POLL_TOOL', 'KILL_TOOL', 'BACKGROUND_TOOL_NAMES']
+__all__ = ['POLL_TOOL', 'KILL_TOOL', 'BACKGROUND_TOOL_NAMES', 'POLL_WAIT_CAP_S']

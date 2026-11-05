@@ -223,7 +223,7 @@ def test_half_open_socket_force_closes_and_reconnects():
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_half_open_force_close_double_neuter(tmp_path):
-    """DOUBLE-NEUTER: revert the force-close (`_ws.close()` on ping timeout) on a
+    """DOUBLE-NEUTER: revert silence recovery on ping timeout on a
     COPY of push.js → the half-open socket is never closed and no reconnect is
     scheduled, so (A) + (C) FAIL. Proves the assertions discriminate the fix.
     The shipped file is left byte-identical."""
@@ -231,9 +231,9 @@ def test_half_open_force_close_double_neuter(tmp_path):
     with open(push_js, encoding='utf-8') as f:
         src = f.read()
 
-    # Neuter the force-close: drop the try/close so the timeout branch only sets
-    # state (the original buggy behaviour).
-    needle = "      try { _ws.close(); }\n      catch (e) { console.debug('[Push] force-close after ping timeout failed:', e); }\n      return;   // do NOT probe again on a socket we've just declared dead"
+    # Neuter recovery at its call boundary, including both physical close and
+    # logical retirement. The connection must keep its original broken state.
+    needle = "      _recoverSilentSocket();\n      return;   // do NOT probe again on a socket we've just declared dead"
     assert needle in src, 'force-close fragment drifted — update the neuter target'
     neutered = src.replace(
         needle,
@@ -274,10 +274,8 @@ def test_proof_of_life_and_adaptive_timeout_neuters(tmp_path):
         src = f.read()
 
     # ── NEUTER ①b: proof-of-life clear removed ──
-    pol = ("      if (_lastPingSentAt) {\n"
-           "        _lastPingSentAt = 0;\n"
-           "        if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }\n"
-           "      }")
+    pol = ("      _lastPingSentAt = 0;\n"
+           "      if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }")
     assert pol in src, 'proof-of-life fragment drifted — update the neuter target'
     neutered = src.replace(pol, '      /* neutered: data frames no longer reset the probe */', 1)
     copy = tmp_path / 'push_no_pol.js'

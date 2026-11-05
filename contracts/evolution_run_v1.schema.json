@@ -618,6 +618,18 @@
         },
         "executor_schema_budget_tokens": {
           "$ref": "#/$defs/executor_schema_budget_tokens"
+        },
+        "skill_selection": {
+          "$ref": "#/$defs/skill_selection"
+        },
+        "skill_bindings": {
+          "$ref": "#/$defs/skill_bindings"
+        },
+        "research_context": {
+          "$ref": "#/$defs/research_context"
+        },
+        "executor_restrictions": {
+          "$ref": "#/$defs/executor_restrictions"
         }
       },
       "additionalProperties": false,
@@ -670,7 +682,7 @@
         },
         "requirement_results": {
           "type": "array",
-          "maxItems": 32,
+          "maxItems": 64,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -4948,9 +4960,126 @@
         },
         "last_error": {
           "type": "string",
-          "maxLength": 160
+          "maxLength": 160,
+          "description": "Current failure of the status read (exception type and message) or of exit verification; absent while reads succeed."
+        },
+        "last_error_origin": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Innermost source frame that raised last_error, as import-root-relative path:line in function."
+        },
+        "failed_since": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Epoch seconds of the first failed read of the current failure streak."
+        },
+        "watchdog_signal_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Open Router Watchdog fault signal for this streak; absent when no Watchdog was available."
         }
       }
+    },
+    "skill_selection": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,127}$"
+      },
+      "description": "Explicit installed guides, shared with Chat skill discovery. New runs pin SKILL.md hashes; missing guides refuse admission."
+    },
+    "skill_bindings": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "skill_id",
+          "content_hash"
+        ],
+        "properties": {
+          "skill_id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,127}$"
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{16}$"
+          }
+        }
+      },
+      "description": "Guide identities derived by the shared skill loader. Supporting resources retain ordinary read policy; this is not a scientific verdict."
+    },
+    "research_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hypothesis",
+        "protocol",
+        "capability_bindings"
+      ],
+      "properties": {
+        "hypothesis": {
+          "type": "string",
+          "maxLength": 12000
+        },
+        "protocol": {
+          "$ref": "https://tofu.local/contracts/research_program_v1.schema.json#/$defs/protocol"
+        },
+        "capability_bindings": {
+          "type": "array",
+          "maxItems": 24,
+          "items": {
+            "$ref": "https://tofu.local/contracts/research_program_v1.schema.json#/$defs/capabilityBinding"
+          }
+        }
+      },
+      "description": "Owner-selected research workspace inputs. Reuses the workspace protocol and binding contracts; no result, permission or numerical acceptance is inferred."
+    },
+    "executor_restrictions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fetchEnabled": {
+          "const": false
+        },
+        "codeExecEnabled": {
+          "const": false
+        },
+        "humanGuidanceEnabled": {
+          "const": false
+        },
+        "memoryEnabled": {
+          "const": false
+        },
+        "preferencesEnabled": {
+          "const": false
+        },
+        "langCorrectionEnabled": {
+          "const": false
+        },
+        "humanFeedbackEnabled": {
+          "const": false
+        },
+        "searchMode": {
+          "const": "off"
+        },
+        "toolSpecDenylist": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "uniqueItems": true
+        }
+      },
+      "description": "Narrow-only executor settings inherited from an accepted Chat turn. Does not alter independent review permissions."
     }
   },
   "type": "object",
@@ -5291,6 +5420,18 @@
           "maxLength": 160
         }
       }
+    },
+    "skill_selection": {
+      "$ref": "#/$defs/skill_selection"
+    },
+    "skill_bindings": {
+      "$ref": "#/$defs/skill_bindings"
+    },
+    "research_context": {
+      "$ref": "#/$defs/research_context"
+    },
+    "executor_restrictions": {
+      "$ref": "#/$defs/executor_restrictions"
     }
   },
   "additionalProperties": false,

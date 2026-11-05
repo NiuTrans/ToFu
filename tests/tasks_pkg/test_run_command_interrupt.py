@@ -14,10 +14,10 @@ Four seams, one suite:
      kills the process tree, and formats the result as
      ``[Command interrupted by …]`` with the PARTIAL output preserved and
      ``task['aborted']`` untouched.
-  2. The reaper, seeing a wedged task blocked INSIDE a run_command
-     (``_subprocess_pid`` set), plants the watchdog interrupt instead of
-     reaping — escalating to a full reap only when the flag sits unconsumed
-     past the grace window (the read loop itself is wedged).
+  2. The reaper, seeing a live run_command whose own output has been silent
+     past the threshold, plants the watchdog interrupt for that command
+     instead of reaping — escalating to a full reap only when the flag sits
+     unconsumed past the grace window (the read loop itself is wedged).
   3. ``POST /api/v1/chat/interrupt-command/<task_id>`` plants the user
      interrupt; ``_build_run_command`` renders the interrupted badge.
   4. The SubAgent tool proxy (swarm workers AND FlowExecutor leaf workers)
@@ -268,9 +268,14 @@ def reaper_env(monkeypatch):
 @pytest.fixture()
 def put_task(monkeypatch):
     """Insert synthetic tasks into the registry; stub the finalizer (no DB)."""
-    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+    from tests.support.chat_tasks import (
+        chat_task_fixture_guard as tasks_lock,
+        chat_task_registry as tasks,
+        isolated_reaper_registry,
+    )
     from lib.tasks_pkg.manager import _maintenance
 
+    reaper_tasks = isolated_reaper_registry(monkeypatch)
     monkeypatch.setattr(_maintenance, '_finalize_reaped_stuck_task',
                         lambda t: None, raising=True)
     added = []
@@ -278,6 +283,7 @@ def put_task(monkeypatch):
     def _put(task):
         with tasks_lock:
             tasks[task['id']] = task
+            reaper_tasks[task['id']] = task
         added.append(task['id'])
         return task['id']
 
@@ -316,20 +322,31 @@ def _get(task_id):
         return dict(tasks.get(task_id) or {})
 
 
-def test_reaper_interrupts_command_instead_of_killing_task(reaper_env, put_task):
+def _live_command(task, pid):
+    """Publish one foreground command the way a run_command runner does."""
+    from lib.project_mod.foreground_command_slots import command_task_view
+    view = command_task_view(task)
+    view['_subprocess_pid'] = pid
+    view['_subprocess_pgid'] = pid
+    return view
+
+
+def test_reaper_interrupts_command_instead_of_killing_task(monkeypatch, put_task):
     """The incident shape: wedged-looking task blocked INSIDE run_command."""
+    monkeypatch.setenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', '1')
     now = time.time()
     stale = now - 400
-    put_task(_mk_task(
+    task = _mk_task(
         'cmd-blocked-1',
         content='ok',
         events=[{'type': 'delta', 'seq': 0}],
         _t_last_event=stale,
         _dispatch_heartbeat=stale,
         created_at=stale,
-        _subprocess_pid=999999,     # inside a run_command subprocess
-        _subprocess_pgid=999999,
-    ))
+    )
+    put_task(task)
+    _live_command(task, 999999)     # inside a run_command subprocess
+    time.sleep(1.2)                 # the command itself prints nothing
     n = _reap()
     assert n == 0, 'a command-blocked task must NOT be force-failed'
     t = _get('cmd-blocked-1')
@@ -346,12 +363,13 @@ def test_reaper_does_not_replant_fresh_interrupt(reaper_env, put_task):
     now = time.time()
     stale = now - 400
     issued = now - 5  # planted 5s ago, well inside the 120s grace
-    put_task(_mk_task(
+    task = _mk_task(
         'cmd-blocked-2',
         _t_last_event=stale, _dispatch_heartbeat=stale, created_at=stale,
-        _subprocess_pid=999999,
         _cmd_interrupt={'source': 'watchdog', 'ts': issued, 'note': 'x'},
-    ))
+    )
+    put_task(task)
+    _live_command(task, 999999)
     n = _reap()
     assert n == 0
     t = _get('cmd-blocked-2')
@@ -364,12 +382,13 @@ def test_reaper_escalates_when_interrupt_unconsumed(reaper_env, put_task):
     (not just the subprocess) → the full task reap is the only recovery left."""
     now = time.time()
     stale = now - 400
-    put_task(_mk_task(
+    task = _mk_task(
         'cmd-wedged-loop-1',
         _t_last_event=stale, _dispatch_heartbeat=stale, created_at=stale,
-        _subprocess_pid=999999,
         _cmd_interrupt={'source': 'watchdog', 'ts': now - 300, 'note': 'x'},  # > 120s grace
-    ))
+    )
+    put_task(task)
+    _live_command(task, 999999)
     n = _reap()
     assert n == 1, 'an unconsumed interrupt past grace escalates to a full reap'
     t = _get('cmd-wedged-loop-1')
@@ -378,7 +397,7 @@ def test_reaper_escalates_when_interrupt_unconsumed(reaper_env, put_task):
 
 
 def test_reaper_without_subprocess_still_reaps(reaper_env, put_task):
-    """NEUTER guard for the new branch: no ``_subprocess_pid`` → the classic
+    """NEUTER guard for the new branch: no live command → the classic
     force-fail path is untouched (dead socket / hung MCP / stalled browser)."""
     now = time.time()
     stale = now - 400
@@ -601,3 +620,168 @@ def _bare_subagent(parent):
 
 
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# 7. Concurrent foreground commands of one unattended task (swarm, Goal and
+#    Flow workers, headless requests). Every call of a round runs at once
+#    (owner decision 2026-10-28) and these tasks never hand a command off, so
+#    their commands run on the task itself: each must stay individually
+#    interruptible, watched and stoppable.
+# ─────────────────────────────────────────────────────────────────────────
+class _WorkerCommand:
+    """One real foreground command of an unattended worker, on its own thread."""
+
+    def __init__(self, task, workdir, name, script):
+        from lib.project_mod.run_command import tool_run_command
+        from lib.tasks_pkg.handlers._background_command import run_with_steer_handoff
+        self.results = []
+        pid_file = workdir / f'{name}.pid'
+        command = f'echo $$ > {name}.pid; {script}'
+
+        def run():
+            self.results.append(run_with_steer_handoff(
+                task=task, config={}, command=command,
+                execute=lambda command_task: tool_run_command(
+                    str(workdir), command, task=command_task)))
+
+        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread.start()
+        assert _wait_for(lambda: pid_file.exists() and pid_file.read_text().strip())
+        self.pid = int(pid_file.read_text())
+        assert _wait_for(lambda: task.get('_subprocess_pid') == self.pid), (
+            'the newest command must own the task PID mirror')
+
+    def result(self, timeout):
+        self.thread.join(timeout)
+        assert not self.thread.is_alive(), 'the command is still running'
+        return self.results[0]
+
+
+def _worker_task(task_id, **fields):
+    return _mk_task(task_id, _unattended=True, _userId=7, **fields)
+
+
+def _assert_no_command_slots(task):
+    leftovers = {key for key in ('_subprocess_pid', '_subprocess_pgid',
+                                 '_cmd_interrupt', '_foregroundCommands')
+                 if key in task}
+    assert not leftovers, f'command slots outlived their commands: {leftovers}'
+
+
+def test_worker_interrupt_stops_only_the_command_it_names(tmp_path):
+    task = _worker_task('worker-intr-1')
+    older = _WorkerCommand(task, tmp_path, 'older', 'echo older-start; sleep 30')
+    # The chatty sibling's read loop sees the flag long before its silent
+    # target's 0.2 s tick does; it must leave the flag for the target.
+    newer = _WorkerCommand(
+        task, tmp_path, 'newer',
+        'for i in $(seq 1 300); do echo newer-$i; sleep 0.01; done; echo newer-done')
+
+    task['_cmd_interrupt'] = {'source': 'user', 'ts': time.time(), 'note': '',
+                              'pid': older.pid}
+
+    interrupted = older.result(10)
+    assert 'older-start' in interrupted
+    assert '[Command interrupted by user]' in interrupted
+    assert newer.thread.is_alive(), 'interrupting one command stopped its sibling'
+    assert task.get('_subprocess_pid') == newer.pid, (
+        'the live command lost its PID mirror when its sibling exited')
+    finished = newer.result(15)
+    assert 'newer-done' in finished and '[Command interrupted' not in finished
+    assert finished.rstrip().endswith('[exit code: 0]')
+    assert task['aborted'] is False
+    _assert_no_command_slots(task)
+
+
+def test_worker_watchdog_interrupts_a_stalled_command_after_its_sibling_exits(
+        monkeypatch, put_task, tmp_path):
+    monkeypatch.setenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', '1')
+    stale = time.time() - 400
+    task = _worker_task('worker-watchdog-1', created_at=stale,
+                        _t_last_event=stale, _dispatch_heartbeat=stale)
+    put_task(task)
+    stalled = _WorkerCommand(task, tmp_path, 'stalled', 'echo stalled-start; sleep 30')
+    quick = _WorkerCommand(task, tmp_path, 'quick', 'sleep 0.3; echo quick-done')
+    assert 'quick-done' in quick.result(10)
+    assert task.get('_subprocess_pid') == stalled.pid, (
+        'the stalled command vanished from the PID mirror')
+    time.sleep(1.2)
+
+    assert _reap() == 0, 'a stalled command must not fail its worker task'
+
+    result = stalled.result(10)
+    assert '[Command interrupted by stall-watchdog: no output for' in result
+    assert 'stalled-start' in result
+    assert task['status'] == 'running' and task['aborted'] is False
+    _assert_no_command_slots(task)
+
+
+def test_worker_watchdog_interrupts_only_the_silent_command(monkeypatch, put_task, tmp_path):
+    monkeypatch.setenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', '1')
+    stale = time.time() - 400
+    task = _worker_task('worker-watchdog-2', created_at=stale,
+                        _t_last_event=stale, _dispatch_heartbeat=stale)
+    put_task(task)
+    silent = _WorkerCommand(task, tmp_path, 'silent', 'echo silent-start; sleep 30')
+    chatty = _WorkerCommand(
+        task, tmp_path, 'chatty',
+        'for i in $(seq 1 50); do echo chatty-$i; sleep 0.1; done; echo chatty-done')
+    time.sleep(1.5)
+
+    assert _reap() == 0
+
+    assert '[Command interrupted by stall-watchdog' in silent.result(10)
+    assert chatty.thread.is_alive(), 'the watchdog interrupted a command that prints'
+    finished = chatty.result(15)
+    assert 'chatty-done' in finished and '[Command interrupted' not in finished
+    assert task['status'] == 'running' and task['aborted'] is False
+    _assert_no_command_slots(task)
+
+
+def test_worker_stop_kills_every_foreground_command(tmp_path):
+    task = _worker_task('worker-stop-1')
+    commands = [_WorkerCommand(task, tmp_path, name, f'echo {name}-start; sleep 30')
+                for name in ('first', 'second')]
+
+    task['aborted'] = True
+
+    for command in commands:
+        assert '[Command aborted by user]' in command.result(10)
+    _assert_no_command_slots(task)
+
+
+def test_worker_commands_each_run_in_the_background_beside_a_foreground_one(
+        monkeypatch, tmp_path):
+    """A worker never hands a running command off (it has no conversation
+    delivery); each concurrent call chooses ``background=true`` instead and
+    reads its own handle with ``poll``."""
+    from lib.project_mod.run_command import tool_run_command
+    from lib.tasks_pkg import background_commands as bg
+    monkeypatch.setattr(bg, '_records_root', lambda: str(tmp_path / 'records'))
+    task = _worker_task('worker-bg-1', convId='coordinator-conv')
+    task['_parentTaskId'] = 'coordinator-task'
+    foreground = _WorkerCommand(task, tmp_path, 'foreground', 'echo fg-start; sleep 30')
+
+    def start(script):
+        return bg.start_background_command(
+            task=task, command=script,
+            execute=lambda command_task, _context: tool_run_command(
+                str(tmp_path), script, task=command_task))
+
+    killed = start('echo kill-start; sleep 30')
+    kept = start('sleep 0.5; echo kept-done')
+    assert _wait_for(lambda: bg.check_background_command(
+        killed, user_id=7)['status'] == 'running')
+    assert bg.kill_background_command(killed, user_id=7)
+    kept_status = bg.check_background_command(kept, user_id=7, wait_s=10)
+    assert kept_status['status'] == 'completed'
+    assert 'kept-done' in kept_status['result']
+    assert foreground.thread.is_alive()
+    assert task['_subprocess_pid'] == foreground.pid, (
+        'a background command took over the foreground PID mirror')
+
+    task['_cmd_interrupt'] = {'source': 'user', 'ts': time.time(), 'note': '',
+                              'pid': foreground.pid}
+    assert '[Command interrupted by user]' in foreground.result(10)
+    assert bg.check_background_command(killed, user_id=7, wait_s=10)['status'] != 'running'
+    _assert_no_command_slots(task)

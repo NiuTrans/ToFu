@@ -461,7 +461,9 @@ def test_unstarted_verification_keeps_candidate_uninstallable(monkeypatch):
         nonlocal starts
         if thread.name.startswith('skill-online'):
             starts += 1
-            if starts == 2:
+            # The executor retries one transient start fault per provisional
+            # job, so the second candidate's carrier must fail both attempts.
+            if starts in (2, 3):
                 raise RuntimeError('unstarted verification')
         return original(thread)
 

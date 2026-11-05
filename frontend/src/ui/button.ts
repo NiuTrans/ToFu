@@ -61,6 +61,8 @@ export interface IconButtonOptions {
   size?: ButtonSize;
   title?: string;
   disabled?: boolean;
+  /** Toggle buttons expose their on/off state through aria-pressed. */
+  pressed?: boolean;
   onClick?: (event: MouseEvent) => void;
 }
 
@@ -79,6 +81,7 @@ export function createIconButton(options: IconButtonOptions): HTMLButtonElement 
   button.title = options.title ?? options.label;
   button.appendChild(options.icon);
   if (options.disabled) button.disabled = true;
+  if (options.pressed !== undefined) button.setAttribute('aria-pressed', String(options.pressed));
   if (options.onClick) button.addEventListener('click', options.onClick);
   return button;
 }

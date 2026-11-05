@@ -35,6 +35,7 @@ import functools
 import threading
 from typing import Optional
 
+from tofu_search._provider_scope import auth_source_scope, browser_scope, site_search_scope
 from tofu_search.log import get_logger
 
 logger = get_logger(__name__)
@@ -152,7 +153,9 @@ class SiteSearchProvider:
 
     The provider owns browser sessions and site adapters.  tofu-search only
     orchestrates and normalizes returned records; standalone users need not
-    register anything.
+    register anything. Every selected native invocation reaches ``search``;
+    compatibility caches and account backoff cannot replace its live authority
+    decision or retain its results. Native providers own any reuse and pacing.
     """
 
     def list_sources(self) -> list[dict]:
@@ -184,6 +187,16 @@ class AuthSourceProvider:
     (Playwright cookie dicts), optionally ``proxy`` and ``enabled``.
     """
 
+    def bind(self) -> 'AuthSourceProvider':
+        """Capture one source-owner view before work enters other threads.
+
+        A bound view represents one authority scope. Static providers return
+        themselves; hosts that select sources from caller context override
+        this hook. Source reads still obtain current enabled/credential state.
+        Binding does not grant permission or freeze a stale source row.
+        """
+        return self
+
     def match_source(self, url: str) -> Optional[dict]:
         """Return the auth-source row whose domain matches ``url``, or None."""
         return None
@@ -210,79 +223,50 @@ class SiteKnowledgeProvider:
 
 
 _lock = threading.Lock()
-_browser_provider: Optional[BrowserProvider] = None
-_site_search_provider: Optional[SiteSearchProvider] = None
-_auth_source_provider: Optional[AuthSourceProvider] = None
 _site_knowledge_provider: Optional[SiteKnowledgeProvider] = None
 _drift_listeners: list = []
-_UNSET = object()
-_browser_provider_ctx = contextvars.ContextVar(
-    'tofu_search_browser_provider', default=_UNSET)
-_site_search_provider_ctx = contextvars.ContextVar(
-    'tofu_search_site_search_provider', default=_UNSET)
 
 
 def register_browser_provider(provider: Optional[BrowserProvider]) -> None:
     """Install (or clear, with ``None``) the global browser provider."""
-    global _browser_provider
-    with _lock:
-        _browser_provider = provider
+    browser_scope.register(provider)
     logger.info('[Providers] browser provider %s',
                 'registered' if provider else 'cleared')
 
 
 def register_site_search_provider(provider: Optional[SiteSearchProvider]) -> None:
     """Install (or clear) the global read-only site-search provider."""
-    global _site_search_provider
-    with _lock:
-        _site_search_provider = provider
+    site_search_scope.register(provider)
     logger.info('[Providers] site-search provider %s',
                 'registered' if provider else 'cleared')
 
 
 def register_auth_source_provider(provider: Optional[AuthSourceProvider]) -> None:
     """Install (or clear, with ``None``) the global auth-source provider."""
-    global _auth_source_provider
-    with _lock:
-        _auth_source_provider = provider
+    auth_source_scope.register(provider)
     logger.info('[Providers] auth-source provider %s',
                 'registered' if provider else 'cleared')
 
 
 def get_browser_provider() -> Optional[BrowserProvider]:
     """Return the registered browser provider, or None."""
-    scoped = _browser_provider_ctx.get()
-    if scoped is not _UNSET:
-        return scoped
-    with _lock:
-        return _browser_provider
+    return browser_scope.get()
 
 
 def get_site_search_provider() -> Optional[SiteSearchProvider]:
     """Return the registered site-search provider, or None."""
-    scoped = _site_search_provider_ctx.get()
-    if scoped is not _UNSET:
-        return scoped
-    with _lock:
-        return _site_search_provider
+    return site_search_scope.get()
 
 
 @contextlib.contextmanager
 def bound_optional_providers():
     """Bind host providers once and carry them through a public operation."""
-    browser = get_browser_provider()
-    site_search = get_site_search_provider()
-    if browser is not None:
-        browser = browser.bind()
-    if site_search is not None:
-        site_search = site_search.bind()
-    btok = _browser_provider_ctx.set(browser)
-    stok = _site_search_provider_ctx.set(site_search)
-    try:
+    snapshots = [(slot, slot.snapshot()) for slot in (
+        browser_scope, site_search_scope, auth_source_scope)]
+    with contextlib.ExitStack() as scopes:
+        for slot, snapshot in snapshots:
+            scopes.enter_context(slot.activate(snapshot))
         yield
-    finally:
-        _site_search_provider_ctx.reset(stok)
-        _browser_provider_ctx.reset(btok)
 
 
 def with_bound_optional_providers(fn):
@@ -332,8 +316,7 @@ def normalize_site_search_results(items, *, source_id: str,
 
 def get_auth_source_provider() -> Optional[AuthSourceProvider]:
     """Return the registered auth-source provider, or None."""
-    with _lock:
-        return _auth_source_provider
+    return auth_source_scope.get()
 
 
 def register_site_knowledge_provider(

@@ -3,13 +3,11 @@
 The bot keeps a bounded prompt cache in memory, but durable web history is
 append-only turn authority. It never mirrors or replaces a conversation-sized
 message array. External identities are mapped to application owners explicitly
-at the integration boundary.
+at the integration boundary (``lib.feishu.authority``); every persisted input
+carries its sender identity, and only the owner's own input is human.
 """
 
 from __future__ import annotations
-
-import json
-import os
 
 from lib.feishu import _state as feishu_state
 from lib.feishu.user_state import feishu_user_sessions
@@ -42,44 +40,12 @@ def get_conv_id(user_id: str) -> str:
     return feishu_user_sessions.conversation_id(user_id)
 
 
-def resolve_owner_user_id(feishu_user_id: str) -> int | None:
-    """Resolve an external identity to an authenticated application owner.
+def persist_exchange(sender, user_message: dict, assistant_message: dict) -> bool:
+    """Append one completed exchange of ``sender`` (a ``FeishuSender``).
 
-    ``FEISHU_USER_OWNER_MAP`` is a JSON object of ``open_id`` to positive
-    integer owner id. ``FEISHU_DEFAULT_OWNER_USER_ID`` may be used only when a
-    deployment intentionally routes every allowed bot user to one owner.
-    Missing/invalid mappings return ``None``; callers must never guess owner 1.
+    The exchange records the sender identity; only the owner's own input is a
+    human Turn, any other sender's is nonhuman (``virtual_user``).
     """
-    raw_map = os.getenv("FEISHU_USER_OWNER_MAP", "").strip()
-    if raw_map:
-        try:
-            mapping = json.loads(raw_map)
-            value = mapping.get(feishu_user_id) if isinstance(mapping, dict) else None
-            owner_id = int(value) if value is not None else 0
-            if owner_id > 0:
-                return owner_id
-        except (TypeError, ValueError, json.JSONDecodeError):
-            logger.error("[Feishu] FEISHU_USER_OWNER_MAP is invalid")
-            return None
-    default_owner = os.getenv("FEISHU_DEFAULT_OWNER_USER_ID", "").strip()
-    if not default_owner:
-        return None
-    try:
-        owner_id = int(default_owner)
-    except ValueError:
-        logger.error("[Feishu] FEISHU_DEFAULT_OWNER_USER_ID must be an integer")
-        return None
-    return owner_id if owner_id > 0 else None
-
-
-def persist_exchange(
-    feishu_user_id: str,
-    user_message: dict,
-    assistant_message: dict,
-    *,
-    owner_user_id: int,
-) -> bool:
-    """Append one completed Feishu exchange through canonical turn lifecycle."""
     from lib.turn_lifecycle import (
         LifecycleConflict,
         attempt_dispatch_lock,
@@ -91,9 +57,10 @@ def persist_exchange(
         record_task_event,
     )
 
-    owner_id = int(owner_user_id)
+    owner_id = int(sender.owner_user_id)
     if owner_id < 1:
         raise ValueError("Feishu persistence requires a positive owner id")
+    feishu_user_id = sender.open_id
     conversation_id = get_conv_id(feishu_user_id)
     submitted = dict(user_message)
     submitted.pop("role", None)
@@ -111,6 +78,10 @@ def persist_exchange(
         "userId": owner_id,
         "_turnOwnerUserId": owner_id,
         "_externalChannel": "feishu",
+        # The Turn projection's origin vocabulary is a closed contract
+        # (TurnOrigin); the exchange attempt's durable execution config
+        # records who actually sent the input.
+        "_externalSender": sender.identity(),
     }
 
     try:
@@ -121,7 +92,7 @@ def persist_exchange(
             config=config,
             kind="feishu_reply",
             user_id=owner_id,
-            input_actor="human",
+            input_actor="human" if sender.is_owner else "virtual_user",
             input_kind="feishu_input",
             conversation_defaults={
                 "allowCreate": True,
@@ -246,7 +217,6 @@ __all__ = [
     "get_project",
     "new_conv_id",
     "persist_exchange",
-    "resolve_owner_user_id",
     "set_mode",
     "set_model",
     "set_pending",

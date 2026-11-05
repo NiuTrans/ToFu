@@ -1,6 +1,7 @@
 """Wave preparation is detached, lossless and rejected before admission."""
 from copy import deepcopy
 import json
+import logging
 from threading import Event
 
 import pytest
@@ -161,8 +162,15 @@ def test_invalid_wave_has_typed_rejection_without_scheduler_effects(launch, foll
         assert current()._scheduler.running_count == 1
 
 
+def _unconfirmed_launch_records(caplog):
+    return [record for record in caplog.records
+            if record.name == 'lib.swarm.integration._tools'
+            and record.getMessage().endswith('launch outcome unconfirmed')]
+
+
 @pytest.mark.parametrize('after_dispatch', [False, True])
-def test_noncycle_dispatch_value_error_preserves_unknown_launch_state(launch, monkeypatch, after_dispatch):
+def test_noncycle_dispatch_value_error_preserves_unknown_launch_state(
+        launch, monkeypatch, caplog, after_dispatch):
     from lib.swarm.master import MasterOrchestrator
 
     _, spawn, current, running = launch
@@ -172,7 +180,12 @@ def test_noncycle_dispatch_value_error_preserves_unknown_launch_state(launch, mo
             original(self)
         raise ValueError('driver setup failure')
     monkeypatch.setattr(MasterOrchestrator, 'run_in_background', failed_start)
-    result = spawn()
+    with caplog.at_level(logging.ERROR, logger='lib.swarm.integration._tools'):
+        result = spawn()
+    records = _unconfirmed_launch_records(caplog)
+    assert len(records) == 1, 'an ambiguous launch is logged exactly once'
+    assert records[0].levelno == logging.ERROR
+    assert records[0].exc_info[0] is ValueError
     assert result['code'] == 'swarm_launch_unknown'
     assert result['submission_state'] == 'unknown'
     assert result['exception_type'] == 'ValueError'
@@ -185,6 +198,28 @@ def test_noncycle_dispatch_value_error_preserves_unknown_launch_state(launch, mo
     if after_dispatch:
         assert running.wait(3)
         assert current()._scheduler.running_count == 1
+
+
+def test_followup_add_failure_preserves_unknown_launch_state(launch, monkeypatch, caplog):
+    _, spawn, current, running = launch
+    assert spawn()['status'] == 'async_launched'
+    assert running.wait(3)
+    session = current()
+    def failed_add(specs):
+        raise ValueError('scheduler admission failure')
+    monkeypatch.setattr(session._scheduler, 'add_specs', failed_add)
+    with caplog.at_level(logging.ERROR, logger='lib.swarm.integration._tools'):
+        result = spawn([{'id': 'second', 'objective': 'second'}])
+    records = _unconfirmed_launch_records(caplog)
+    assert len(records) == 1, 'an ambiguous follow-up launch is logged exactly once'
+    assert records[0].exc_info[0] is ValueError
+    assert result['code'] == 'swarm_launch_unknown'
+    assert result['submission_state'] == 'unknown'
+    assert result['retryable'] is False
+    assert result['requested_agent_ids'] == ['second']
+    assert result['swarm_run_id'] == session.task_id
+    assert current() is session
+    assert [spec.id for spec in session.specs] == ['first']
 
 
 def test_cycle_rejected_before_session_publication(launch, monkeypatch):

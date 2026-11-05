@@ -40,6 +40,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
 
 from tests.support.llm_replay import (  # noqa: E402
     RECORD_OUTPUT_NAME,
+    REQUEST_STORE_DIRNAME,
     Recorder,
     ReplaySession,
     mode_from_env,
@@ -183,13 +184,19 @@ def _install_replay_route() -> None:
 
 def _install_transport(fixture_dir: Path, monkeypatch, cwd: str,
                        after_event=None, *, record_fixture: bool = True) -> str:
-    """Install recorder (author/record modes) or replayer (default)."""
+    """Install recorder (author/record modes) or replayer (default).
+
+    The request store sits beside the scenario directories, so a scenario
+    copied into ``tmp_path`` never writes into the committed store.
+    """
     script_path = fixture_dir / 'script.jsonl'
+    request_store = fixture_dir.parent / REQUEST_STORE_DIRNAME
     if os.environ.get('TOFU_LLM_REPLAY_AUTHOR') == '1':
         seed = ReplaySession(script_path, cwd=cwd, verify=False,
                              after_event=after_event)
         if record_fixture:
-            Recorder(fixture_dir / RECORD_OUTPUT_NAME, cwd=cwd).install(
+            Recorder(fixture_dir / RECORD_OUTPUT_NAME, cwd=cwd,
+                     request_store=request_store).install(
                 monkeypatch,
                 stream_chat=seed.stream_chat,
                 async_stream_chat=seed.async_stream_chat,
@@ -198,16 +205,17 @@ def _install_transport(fixture_dir: Path, monkeypatch, cwd: str,
             seed.install(monkeypatch)
         return 'author'
     if record_fixture and mode_from_env() == 'record':
-        Recorder(fixture_dir / RECORD_OUTPUT_NAME, cwd=cwd).install(
-            monkeypatch)
+        Recorder(fixture_dir / RECORD_OUTPUT_NAME, cwd=cwd,
+                 request_store=request_store).install(monkeypatch)
         return 'record'
-    session = ReplaySession(script_path, cwd=cwd, after_event=after_event)
+    session = ReplaySession(script_path, cwd=cwd, after_event=after_event,
+                            request_store=request_store)
     session.install(monkeypatch)
     return 'replay'
 
 
 def _make_task(conv_id: str, user_prompt: str,
-               project_path: Path | None):
+               project_path: Path | None, config_overrides=None):
     """Seed one conversation and create one real registered chat task."""
     from tests._seed import seed_conversation
     from lib.tasks_pkg.manager import create_task
@@ -219,6 +227,7 @@ def _make_task(conv_id: str, user_prompt: str,
     # Recorded requests own their tool surface. An earlier application import
     # can load deployment plugin defaults from .env into this test process.
     config = {'model': _REPLAY_MODEL, 'webSearchEnabled': False, 'plugins': []}
+    config.update(config_overrides or {})
     if project_path is not None:
         config['projectPath'] = str(project_path)
         config['projectPaths'] = [str(project_path)]
@@ -233,7 +242,8 @@ def _make_task(conv_id: str, user_prompt: str,
 def _run_loop_scenario(name: str, *, tmp_path: Path, monkeypatch,
                        user_prompt: str, with_project: bool = False,
                        after_event=None,
-                       prepare=None, record_fixture: bool = True) -> dict:
+                       prepare=None, record_fixture: bool = True,
+                       config_overrides=None) -> dict:
     """Drive one replayed scenario through the real root agent loop.
 
     Real prep helpers (model config resolution + tool assembly) build the
@@ -257,7 +267,7 @@ def _run_loop_scenario(name: str, *, tmp_path: Path, monkeypatch,
     project_path = (tmp_path / 'project') if with_project else None
     if project_path is not None:
         project_path.mkdir(parents=True, exist_ok=True)
-    task = _make_task(conv_id, user_prompt, project_path)
+    task = _make_task(conv_id, user_prompt, project_path, config_overrides)
 
     mcfg = resolve_and_seed_model_config(task['config'], task)
     if mcfg['project_enabled']:
@@ -392,6 +402,35 @@ def test_text_reply(tmp_path, monkeypatch):
 #  2. write_file_tool — streamed write_file call, REAL handler on disk
 # ═════════════════════════════════════════════════════════════════════
 
+def test_agent_tool_acceptance_continues_the_human_request(tmp_path, monkeypatch, request):
+    """Real Chat/dispatch/handler/runtime acceptance, then a later tool round.
+
+    Rendering readiness and worker launch are isolated external seams; the
+    production task remains visibly pending, never fabricated as delivered.
+    """
+    from lib.slides import engine, readiness, runtime
+    launched = []
+    request.addfinalizer(lambda: runtime._slides_runtime.discard('slides_replay_agent_tool'))
+    monkeypatch.setattr(readiness, 'ensure_slides_runtime_ready', lambda: None)
+    monkeypatch.setattr(engine, 'slides_root', lambda: str(tmp_path / 'slides'))
+    monkeypatch.setattr(runtime, '_slides_task_id', lambda: 'slides_replay_agent_tool')
+    monkeypatch.setattr(runtime._slides_runtime, 'spawn',
+                        lambda task_id, callback, job: launched.append(job))
+    run = _run_loop_scenario(
+        'agent_tool_continuation', tmp_path=tmp_path, monkeypatch=monkeypatch,
+        user_prompt='Start a deck about scattering, then write a separate reminder file.',
+        with_project=True, config_overrides={'plugins': ['production']})
+    assert len(launched) == 1
+    assert launched[0]['user_id'] == _OWNER_USER_ID
+    assert launched[0]['status'] == 'pending'
+    assert (run['project_path'] / 'reminder.txt').read_text() == 'Review the deck when it is ready.\n'
+    assert run['task']['status'] == 'done'
+    assert 'still running' in run['task']['content']
+    assert len(run['state'].api_rounds) == 3
+    assert not run['task'].get('_toolLoopCleanFinish')
+    _assert_invariants_clean(run['task'])
+
+
 def test_write_file_tool(tmp_path, monkeypatch):
     run = _run_loop_scenario(
         'write_file_tool', tmp_path=tmp_path, monkeypatch=monkeypatch,
@@ -479,6 +518,38 @@ def test_incomplete_tool_stream_exhaustion_closes_announcements_and_round(tmp_pa
     assert len(run['state'].api_rounds) == 1
     assert not _tool_result_messages(run['messages'])
     _assert_invariants_clean(run['task'])
+
+
+def test_partial_stream_cut_resends_the_identical_request(tmp_path, monkeypatch):
+    """A prose cut is recovered by resending the exact interrupted request.
+
+    The recorded digests of the cut attempt and its retry are equal, and
+    replay verifies every real request against them: the retry carries no
+    trailing assistant prefill and no continuation prompt, so the provider's
+    cached prompt is reused. The answer is the retry alone, with no seam.
+    """
+    from lib.tasks_pkg.stream_handler import _budget
+    monkeypatch.setattr(_budget, '_interruptible_sleep', lambda *args: None)
+    run = _run_loop_scenario(
+        'partial_stream_cut', tmp_path=tmp_path, monkeypatch=monkeypatch,
+        user_prompt='Explain why the stream retry is safe.')
+    expected = _expected('partial_stream_cut')
+    task = run['task']
+    assert task['finishReason'] == 'stop'
+    assert not task.get('error')
+    assert task['content'] == expected['content']
+    for needle in expected['content_excludes']:
+        assert not any(needle in str(message.get('content'))
+                       for message in run['messages']), run['messages']
+    script = (FIXTURES_ROOT / 'partial_stream_cut' / 'script.jsonl').read_text(
+        encoding='utf-8')
+    steps = [json.loads(line) for line in script.splitlines() if line.strip()]
+    assert [step['request_digest'] for step in steps].count(
+        steps[0]['request_digest']) == 2
+    assert len(run['state'].api_rounds) == 2  # The paid cut attempt is retained.
+    assert any(event.get('bucket') == 'partial_stream'
+               for event in _durable_events(task))
+    _assert_invariants_clean(task)
 
 
 def test_derived_authoring_preserves_the_canonical_generation(tmp_path, monkeypatch):
@@ -585,6 +656,7 @@ def test_parallel_tools_timeout(tmp_path, monkeypatch):
     authoritative).  The documented per-tool timeout seam under test lives
     in ``_execute_tool_one_in_pool``.
     """
+    import threading
     import time
 
     project_path = tmp_path / 'project'
@@ -596,20 +668,43 @@ def test_parallel_tools_timeout(tmp_path, monkeypatch):
 
     import lib.tasks_pkg.tool_dispatch._heartbeat as heartbeat_mod
     real_execute_one = heartbeat_mod._execute_tool_one
+    armed_timers = {}
+
+    class ScenarioTimer(threading.Timer):
+        """A declared-timeout timer that only the scenario expires."""
+
+        def start(self):
+            armed_timers[threading.get_ident()] = self
+
+        def expire(self):
+            self.function(*self.args, **self.kwargs)
+
+    class ScenarioThreading:
+        Timer = ScenarioTimer
+
+        def __getattr__(self, name):
+            return getattr(threading, name)
 
     def slowed_execute_one(task, tc, fn_name, tc_id, fn_args, rn,
                            round_entry, cfg, pp, pe, all_tools=None):
         if fn_name == 'read_files' and 'slow.dat' in str(fn_args):
-            time.sleep(1.0)
+            # Still in flight when its own declared timeout expires.
+            armed_timers.pop(threading.get_ident()).expire()
+        elif fn_name == 'read_files':
+            # Slower than the nominal timeout: host speed must not decide
+            # which call times out, or the replayed request bytes change.
+            time.sleep(0.5)
         return real_execute_one(task, tc, fn_name, tc_id, fn_args, rn,
                                 round_entry, cfg, pp, pe,
                                 all_tools=all_tools)
 
     monkeypatch.setattr(heartbeat_mod, '_execute_tool_one',
                         slowed_execute_one)
+    monkeypatch.setattr(heartbeat_mod, 'threading', ScenarioThreading())
     monkeypatch.setattr(
         'lib.tools.registry.declared_tool_timeout_ms',
-        lambda tool_name: 200 if tool_name == 'read_files' else None)
+        lambda tool_name, arguments=None, tool_schemas=None: (
+            200 if tool_name == 'read_files' else None))
 
     run = _run_loop_scenario(
         'parallel_tools_timeout', tmp_path=tmp_path, monkeypatch=monkeypatch,

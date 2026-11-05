@@ -1,0 +1,267 @@
+/* ── Reply Quote — in user message ── */
+/* ── Reply Quote Badge — in-message (looks like file upload badge) ── */
+.reply-quote-badge{
+  display:inline-flex;align-items:center;gap:var(--space-2);
+  padding:7px var(--space-3);margin-bottom:var(--space-2);
+  background:var(--thinking-bg);
+  border:1px solid var(--thinking-border);
+  border-radius:var(--radius-sm);
+  max-width:360px;cursor:default;
+  transition:border-color .2s;
+}
+.reply-quote-badge:hover{border-color:var(--accent)}
+.reply-quote-badge-icon{font-size:var(--font-size-2xl);flex-shrink:0}
+.reply-quote-badge-info{display:flex;flex-direction:column;gap:1px;min-width:0;overflow:hidden}
+.reply-quote-badge-name{font-size:12.5px;font-weight:500;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.reply-quote-badge-meta{font-size:var(--font-size-xs);color:var(--text-tertiary)}
+
+/* ── @ button active state in input toolbar ── */
+#convRefBtn.has-refs{
+  color:#c792ea !important;
+  background:rgba(199,146,234,.15);
+}
+#convRefBtn.has-refs span{
+  text-shadow:0 0 6px rgba(199,146,234,.4);
+}
+
+/* ── Conversation Reference @ button (sidebar) ── */
+.conv-ref{
+  color:var(--text-tertiary);transition:color .15s, background .15s;
+  font-weight:700;font-size:var(--font-size-lg);font-family:-apple-system,BlinkMacSystemFont,sans-serif;
+  line-height:1;
+}
+.conv-ref:hover{
+  color:#c792ea;background:rgba(199,146,234,.14);
+}
+
+/* ── Conversation Reference Chip Container ── */
+.conv-ref-container{
+  display:flex;flex-wrap:wrap;gap:6px;
+  padding:6px 14px 2px;
+}
+.conv-ref-container:empty{display:none}
+
+/* ── Conversation Reference Chip ── */
+@keyframes convRefChipIn{
+  from{opacity:0;transform:translateY(6px) scale(.96)}
+  to{opacity:1;transform:translateY(0) scale(1)}
+}
+.conv-ref-chip{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:var(--space-1) 10px;
+  background:rgba(199,146,234,.08);
+  border:1px solid rgba(199,146,234,.45);
+  border-radius:6px;
+  font-size:var(--font-size-sm);line-height:1.3;
+  max-width:280px;min-width:0;
+  animation:convRefChipIn .2s ease-out;
+  transition:border-color .15s, box-shadow .15s;
+}
+.conv-ref-chip:hover{
+  border-color:rgba(199,146,234,.7);
+  box-shadow:0 0 0 2px rgba(199,146,234,.1);
+}
+.conv-ref-chip-icon{
+  font-size:var(--font-size-lg);line-height:1;
+  color:#c792ea;
+  flex-shrink:0;
+}
+.conv-ref-chip-info{
+  display:flex;flex-direction:column;gap:1px;min-width:0;overflow:hidden;
+}
+.conv-ref-chip-title{
+  font-size:var(--font-size-sm);font-weight:500;color:var(--text-primary);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.conv-ref-chip-id{
+  font-size:10px;color:var(--text-tertiary);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.conv-ref-chip-remove{
+  background:none;border:none;color:var(--text-tertiary);cursor:pointer;
+  padding:2px var(--space-1);font-size:var(--font-size-lg);line-height:1;transition:color .15s, background .15s;flex-shrink:0;
+  border-radius:4px;margin-left:auto;
+}
+.conv-ref-chip-remove:hover{color:#c792ea;background:rgba(199,146,234,.15)}
+
+/* ── Conversation Reference badge (in chat messages) ── */
+.conv-ref-badge{
+  border-color:rgba(199,146,234,.35) !important;
+  background:rgba(199,146,234,.06) !important;
+}
+.conv-ref-badge:hover{border-color:#c792ea !important}
+.conv-ref-badge .reply-quote-badge-icon{filter:none}
+
+/* ── Peer-message provenance banner (chat_render.js) ── */
+/* An advisory turn injected by a sibling conversation of the same project. */
+.peer-msg-banner{
+  display:inline-flex;align-items:center;gap:6px;
+  margin:0 0 var(--space-2) 0;padding:var(--space-1) 10px;
+  border:1px solid rgba(130,170,255,.35);
+  background:rgba(130,170,255,.08);
+  border-radius:8px;font-size:var(--font-size-sm);line-height:1.3;
+  color:var(--text-secondary, #9aa4b2);
+}
+.peer-msg-banner .peer-msg-icon{display:inline-flex;color:#82aaff}
+.peer-msg-banner .peer-msg-from{color:#82aaff;font-weight:600}
+/* Operator nudge (from the Team panel) — distinct from an agent peer note. */
+.peer-msg-banner.peer-msg-banner-operator{border-color:rgba(126,231,135,.4);background:rgba(126,231,135,.09)}
+.peer-msg-banner.peer-msg-banner-operator .peer-msg-icon,
+.peer-msg-banner.peer-msg-banner-operator .peer-msg-from{color:#7ee787}
+
+/* ── Brain-dispatch provenance card (chat_render.js _renderBrainDispatchCard)
+   A Project-Brain kickoff turn: the card carries WHICH epic / WHO posted it /
+   HOW+WHY it was routed here, so the raw English instruction wall can stay
+   collapsed behind .brain-kickoff-raw. Brain-purple accent (same family as
+   the conv-ref badge) — distinct from the peer banner's blue. */
+.brain-dispatch-card{
+  margin:0 0 10px 0;padding:10px 14px 11px;
+  border:1px solid rgba(199,146,234,.35);
+  background:linear-gradient(135deg, rgba(199,146,234,.10), rgba(130,170,255,.05));
+  border-radius:10px;font-size:12.5px;line-height:1.5;
+  color:var(--text-secondary, #9aa4b2);
+}
+.brain-dispatch-card .bdc-head{
+  display:flex;align-items:center;gap:6px;margin-bottom:var(--space-1);
+  font-size:11.5px;font-weight:600;letter-spacing:.03em;color:#c792ea;
+}
+.brain-dispatch-card .bdc-icon{display:inline-flex}
+.brain-dispatch-card .bdc-epic-id{
+  margin-left:auto;font-family:var(--font-mono, ui-monospace, monospace);
+  font-size:var(--font-size-xs);font-weight:400;color:var(--text-tertiary, #6b7280);
+}
+.brain-dispatch-card .bdc-answered{
+  display:inline-flex;align-items:center;padding:1px var(--space-2);border-radius:999px;
+  background:rgba(126,231,135,.12);border:1px solid rgba(126,231,135,.35);
+  color:#7ee787;font-size:var(--font-size-xs);font-weight:600;letter-spacing:0;
+}
+.brain-dispatch-card .bdc-epic-title{
+  font-size:var(--font-size-md);font-weight:600;color:var(--text-primary, #e6e9ee);
+  cursor:pointer;line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.brain-dispatch-card .bdc-epic-title:hover{color:#c792ea;text-decoration:underline}
+.brain-dispatch-card .bdc-meta{
+  display:flex;flex-wrap:wrap;gap:3px var(--space-4);margin-top:7px;font-size:var(--font-size-sm);
+}
+.brain-dispatch-card .bdc-meta-label{
+  color:var(--text-tertiary, #6b7280);margin-right:5px;
+}
+.brain-dispatch-card .bdc-conv-link{
+  color:#82aaff;font-weight:600;text-decoration:none;
+}
+.brain-dispatch-card .bdc-conv-link:hover{text-decoration:underline}
+.brain-dispatch-card .bdc-this{font-weight:600;color:var(--text-primary, #e6e9ee)}
+/* The raw engine kickoff text — collapsed by default; the card above is the
+   human-facing summary. Dashed frame reads as "machinery, not prose". */
+.brain-kickoff-raw{
+  margin:0 0 var(--space-2) 0;padding:5px var(--space-3);
+  border:1px dashed var(--border, #333);border-radius:8px;
+}
+.brain-kickoff-raw>summary{
+  cursor:pointer;padding:2px 0;user-select:none;
+  font-size:var(--font-size-sm);color:var(--text-tertiary, #6b7280);
+}
+.brain-kickoff-raw>summary:hover{color:var(--text-secondary, #9aa4b2)}
+.brain-kickoff-raw[open]>summary{margin-bottom:6px}
+.brain-kickoff-raw .user-content{font-size:var(--font-size-sm);opacity:.85;white-space:pre-wrap}
+
+/* ── Conversation Reference Picker Popover ── */
+.conv-ref-picker{
+  position:fixed;z-index:10000;
+  display:flex;flex-direction:column;
+  background:var(--bg-secondary);
+  border:1px solid var(--border);
+  border-radius:var(--radius-md, 12px);
+  box-shadow:0 12px 40px rgba(0,0,0,.5), 0 0 0 1px rgba(199,146,234,.15);
+  overflow:hidden;
+  animation:convRefPickerIn .18s ease-out;
+}
+@keyframes convRefPickerIn{
+  from{opacity:0;transform:translateY(8px) scale(.97)}
+  to{opacity:1;transform:translateY(0) scale(1)}
+}
+.conv-ref-picker-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:var(--space-3) 14px var(--space-2);
+  border-bottom:1px solid var(--border);
+}
+.conv-ref-picker-title{
+  font-size:var(--font-size-md);font-weight:600;color:#c792ea;
+}
+.conv-ref-picker-close{
+  background:none;border:none;color:var(--text-tertiary);
+  font-size:20px;line-height:1;cursor:pointer;padding:0 var(--space-1);
+  transition:color .15s;
+}
+.conv-ref-picker-close:hover{color:var(--text-primary)}
+.conv-ref-picker-search{
+  padding:var(--space-2) var(--space-3);
+}
+.conv-ref-picker-search input{
+  width:100%;box-sizing:border-box;
+  padding:var(--space-2) var(--space-3);
+  background:var(--bg-primary);
+  border:1px solid var(--border);border-radius:var(--radius-sm, 8px);
+  color:var(--text-primary);font-size:var(--font-size-md);
+  outline:none;transition:border-color .2s;
+}
+.conv-ref-picker-search input:focus{
+  border-color:#c792ea;
+  box-shadow:0 0 0 2px rgba(199,146,234,.15);
+}
+.conv-ref-picker-search input::placeholder{color:var(--text-tertiary)}
+.conv-ref-picker-list{
+  flex:1;overflow-y:auto;padding:var(--space-1) 6px var(--space-2);
+  max-height:280px;
+}
+.conv-ref-picker-item{
+  padding:9px 10px;margin:2px 0;
+  border-radius:var(--radius-sm, 8px);
+  cursor:pointer;transition:background .15s;
+}
+.conv-ref-picker-item:hover{background:rgba(199,146,234,.08)}
+.conv-ref-picker-item-main{
+  display:flex;align-items:center;gap:6px;
+}
+.conv-ref-picker-item-title{
+  font-size:var(--font-size-md);font-weight:500;color:var(--text-primary);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  flex:1;min-width:0;
+}
+.conv-ref-picker-item-check{
+  font-size:var(--font-size-md);color:#c792ea;font-weight:700;flex-shrink:0;
+}
+.conv-ref-picker-item-meta{
+  display:flex;gap:var(--space-1);margin-top:3px;
+  font-size:var(--font-size-xs);color:var(--text-tertiary);
+}
+.conv-ref-picker-empty{
+  padding:var(--space-6) var(--space-3);text-align:center;
+  font-size:var(--font-size-md);color:var(--text-tertiary);
+}
+
+/* Scrollbar for picker list */
+.conv-ref-picker-list::-webkit-scrollbar{width:4px}
+.conv-ref-picker-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.conv-ref-picker-list::-webkit-scrollbar-thumb:hover{background:var(--text-tertiary)}
+
+/* old .edit-reply-quote removed — replaced by .edit-rq-chip */
+
+/* ── Inline branch node (anchored inside content) ── */
+.branch-node.inline{
+  display:flex;font-size:var(--font-size-sm);padding:5px var(--space-3);margin:0;
+  width:100%;justify-content:flex-start;box-sizing:border-box;
+  max-width:none;border-radius:var(--radius-sm);
+}
+.branch-anchor-inline{
+  display:flex;flex-direction:column;gap:var(--space-1);
+  margin:var(--space-2) 0;
+  padding:6px 0 6px 10px;
+  border-left:2px solid var(--accent);
+}
+
+/* ── Reply quote inside branch message ── */
+
+[data-theme="light"] .reply-quote-badge{background:rgba(0,0,0,0.03);border-color:rgba(0,0,0,0.08)}
+[data-theme="light"] .reply-quote-chip{background:#f8f8f8;border-color:rgba(0,0,0,0.08)}

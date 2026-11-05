@@ -54,7 +54,11 @@ def require_declared_choice_response(question_round: object, response: str) -> s
         raise ValueError('Human guidance has no valid declared choices')
     if response not in options and not any(
             response.startswith(option + '\nuser_note: ') for option in options):
-        raise ValueError('Human guidance response is not a declared choice')
+        # Only this branch is the caller's fault; the checks above reject
+        # stored question data and stay server faults.
+        from lib.error_envelope import BadRequest
+        raise BadRequest(
+            'Human guidance response is not a declared choice', field='humanResponse')
     return response
 
 

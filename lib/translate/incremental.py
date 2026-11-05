@@ -1,11 +1,16 @@
 """Incrementally translate narration while an authoritative turn runs.
 
 One accumulator belongs to one executor task. During generation it translates
-closed narration/reasoning rounds without count/character admission gates and
-emits live previews.
+every closed narration/reasoning segment without count/character admission
+gates and emits live previews; pending narration is translated before pending
+reasoning.
 Task-local preview policy and completed segment cache survive idle thread
 retirement without retaining a full task or an idle worker. Writes still use
-settled Turn authority; running Turns defer their cache to terminal handoff.
+settled Turn authority; running Turns defer their cache to terminal handoff,
+and ``preview_translations_for_conversation`` lets the owner's browser re-read
+the completed previews of a running Turn after a reload or a missed frame.
+Provider failures pause one preview kind (narration or reasoning) for a
+bounded window; missed blocks retry behind later submissions.
 
 The whole-turn terminal DELIVERABLE does NOT commit through this accumulator.
 Once the turn settles, ``lib.translate.terminal`` spawns a durable
@@ -20,15 +25,17 @@ positional message identity participates.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
 import queue
 import re as re
 import threading
+import time
 import weakref
 from typing import Any
 
 from lib.log import get_logger
-from lib.translate._operation_buffer import IncrementalOperationBuffer
+from lib.translate._operation_buffer import IncrementalOperationBuffer, segment_kind
 from lib.translate._completed_cache import CompletedTranslationCache
 from runtime_guards import resolve_resource_budget
 
@@ -36,32 +43,51 @@ from runtime_guards import resolve_resource_budget
 logger = get_logger(__name__)
 _SOURCE = "English"
 _STOP = object()
+# The knob is the floor of the preview deadline. A flat 30s cut previews in
+# proportion to their size (docs/modules/ingest_media.md, "Preview deadline"),
+# so longer sources earn the generation time they need: one response-header
+# bound plus 1s per 180 source characters, the slowest decile's ~100 output
+# chars/s at the p90 0.55 output/source ratio.
+# The cap bounds what one optional preview may hold its turn's worker for.
 _PREVIEW_DEADLINE_SECONDS = resolve_resource_budget(
     'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS',
     minimum=5,
     maximum=300,
 )
-_PREVIEW_MIN_NARRATION_CHARS = resolve_resource_budget(
-    'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MIN_CHARS',
-    minimum=1,
-    maximum=4096,
-)
+_PREVIEW_SOURCE_CHARS_PER_SECOND = 180.0
+_PREVIEW_DEADLINE_CAP_SECONDS = 120.0
 _PREVIEW_MAX_429_ATTEMPTS = resolve_resource_budget(
     'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MAX_429_ATTEMPTS',
     minimum=1,
     maximum=8,
 )
 _TASK_PREVIEW_STATE = '_incremental_translate_preview_state'
-_PREVIEW_STATE_DISABLED = 'disabled'
 _PREVIEW_STATE_STARTED = 'started'
+# One circuit per preview kind (narration, reasoning) holds the three fields
+# below, so a failing kind never pauses or defers the other.
+_PREVIEW_STATE_CIRCUITS = 'circuits'
 _PREVIEW_STATE_FAILURES = 'failures'
-# Consecutive preview failures that retire the rest of this turn's previews.
+_PREVIEW_STATE_PAUSED_UNTIL = 'pausedUntil'
+_PREVIEW_STATE_PAUSE_SECONDS = 'pauseSeconds'
+_PREVIEW_STATE_ATTEMPTS = 'attempts'
+_PREVIEW_STATE_DEFERRED = 'deferred'
+# Consecutive failures of one preview kind that pause that kind's previews.
 # One transient 429 or read timeout used to disable them permanently, so a long
 # turn kept its opening translation and then silently reverted to the source
-# language for every later round. Retry across rounds instead; three misses in a
-# row means the provider is genuinely unavailable and the terminal deliverable
-# translation (a separate path) should have the capacity.
+# language for every later round. Retry across rounds instead; three misses in
+# a row leave the provider's capacity to the terminal deliverable translation
+# (a separate path) for one pause window.
 _PREVIEW_FAILURE_LIMIT = 3
+# A pause, not retirement for the rest of the turn: in the 2026-10-27/28 logs
+# another task's preview succeeded within 28 s after 5 of 7 trips, while each
+# tripped turn stayed in the source language until it settled. The window
+# doubles per failed probe, so a provider that stays down costs one probe per
+# window (docs/modules/ingest_media.md, "Preview circuit recovery").
+_PREVIEW_PAUSE_BASE_SECONDS = 60.0
+_PREVIEW_PAUSE_CAP_SECONDS = 600.0
+# Missed blocks retry behind later submissions; after this many provider
+# attempts a block waits for the settled-turn enrichment pass instead.
+_PREVIEW_MAX_ATTEMPTS_PER_BLOCK = 3
 
 
 _accumulators: dict[str, "_Accumulator"] = {}
@@ -70,6 +96,17 @@ _worker_threads: weakref.WeakSet[threading.Thread] = weakref.WeakSet()
 _shutdown_started = False
 _retired_stamps: dict[int, int] = {}
 _shutdown_condition = threading.Condition(_accumulators_lock)
+
+
+def _preview_deadline_seconds(source: str) -> float:
+    """Return the wall budget for previewing ``source``; reads no hardware."""
+    from lib.translate.engine import translation_first_byte_timeout_seconds
+
+    chars = len(source)
+    needed = (translation_first_byte_timeout_seconds(chars)
+              + chars / _PREVIEW_SOURCE_CHARS_PER_SECOND)
+    return max(float(_PREVIEW_DEADLINE_SECONDS),
+               min(_PREVIEW_DEADLINE_CAP_SECONDS, needed))
 
 
 def _enabled_for(task: dict[str, Any] | None) -> bool:
@@ -114,25 +151,79 @@ def _task_preview_started(task: dict[str, Any]) -> int:
         return 0
 
 
+def _preview_circuit(state: dict[str, Any], kind: str) -> dict[str, Any]:
+    return state.setdefault(_PREVIEW_STATE_CIRCUITS, {}).setdefault(kind, {})
+
+
+def _preview_paused(state: dict[str, Any], kind: str) -> bool:
+    circuit = (state.get(_PREVIEW_STATE_CIRCUITS) or {}).get(kind) or {}
+    paused_until = circuit.get(_PREVIEW_STATE_PAUSED_UNTIL)
+    return paused_until is not None and time.monotonic() < paused_until
+
+
+def _pause_preview_circuit(circuit: dict[str, Any]) -> float:
+    previous = circuit.get(_PREVIEW_STATE_PAUSE_SECONDS)
+    pause = (_PREVIEW_PAUSE_BASE_SECONDS if previous is None
+             else min(_PREVIEW_PAUSE_CAP_SECONDS, previous * 2))
+    circuit[_PREVIEW_STATE_PAUSE_SECONDS] = pause
+    circuit[_PREVIEW_STATE_PAUSED_UNTIL] = time.monotonic() + pause
+    return pause
+
+
+def _defer_preview(
+    state: dict[str, Any], key: int | str, text: str, *, failed: bool = False,
+) -> bool:
+    """Keep a missed preview's source for a later attempt.
+
+    Sources live in their own lazy anonymous file, like the completed cache,
+    so a long pause never moves backlog text onto the heap. A block whose
+    attempts are spent is left to the settled-turn enrichment pass.
+    """
+    with state.setdefault('cacheLock', threading.Lock()):
+        if state.get('cancelled'):
+            return False
+        attempts = state.setdefault(_PREVIEW_STATE_ATTEMPTS, {})
+        spent = attempts.get(key, 0) + int(failed)
+        if failed:
+            attempts[key] = spent
+        deferred = state.get(_PREVIEW_STATE_DEFERRED)
+        if spent >= _PREVIEW_MAX_ATTEMPTS_PER_BLOCK:
+            if deferred is not None:
+                deferred.pop(key, None)
+            return False
+        if deferred is None:
+            deferred = CompletedTranslationCache().view('originals')
+            state[_PREVIEW_STATE_DEFERRED] = deferred
+        deferred[key] = str(text)
+        return True
+
+
 def _clear_task_preview_state(
     task: dict[str, Any] | None, *, cancelled: bool = False,
 ) -> None:
     if not isinstance(task, dict):
         return
     state = task.pop(_TASK_PREVIEW_STATE, None)
-    if cancelled and isinstance(state, dict):
+    if not isinstance(state, dict):
+        return
+    lock = state.get('cacheLock')
+    with lock if lock is not None else nullcontext():
+        # Missed previews never outlive their turn's handoff: the settled-turn
+        # enrichment pass owns every block still lacking a translation.
+        deferred = state.get(_PREVIEW_STATE_DEFERRED)
+        if deferred is not None:
+            deferred.clear()
+        if not cancelled:
+            return
         # A retiring worker holds the small state, never the full task. Stop
         # invalidates that detached reference even after queue admission closed.
-        lock = state.get('cacheLock')
-        if lock is not None:
-            with lock:
-                state['cancelled'] = True
-                cache = state.get('cache')
-                if cache is not None:
-                    cache.clear()
-                else:
-                    state.get('translations', {}).clear()
-                    state.get('originals', {}).clear()
+        state['cancelled'] = True
+        cache = state.get('cache')
+        if cache is not None:
+            cache.clear()
+        else:
+            state.get('translations', {}).clear()
+            state.get('originals', {}).clear()
 
 
 def _model_batch_segment_key(
@@ -180,10 +271,6 @@ class _Accumulator:
             self.translations = self._preview_state['translations']
         self.model = "unknown"
         self._preview_segments_started = _task_preview_started(task)
-        self._preview_disabled = bool(
-            self._preview_state.get(_PREVIEW_STATE_DISABLED))
-        self._preview_failures = int(
-            self._preview_state.get(_PREVIEW_STATE_FAILURES) or 0)
         self._cancel_event = threading.Event()
         self._startup_gate = threading.Event()
         self._startup_requested = False
@@ -214,8 +301,26 @@ class _Accumulator:
             self._startup_gate.set()
 
     def submit(self, key: int | str, text: str) -> bool:
-        dropped = self._queue.put_segment(key, str(text or ''))
-        return dropped >= 0
+        if self._queue.put_segment(key, str(text or '')) < 0:
+            return False
+        if key != 'thinking:terminal':
+            self._requeue_deferred(key)
+        return True
+
+    def _requeue_deferred(self, submitted: int | str) -> None:
+        """Queue missed previews of unpaused kinds behind an accepted block."""
+        with self._lock:
+            deferred = self._preview_state.get(_PREVIEW_STATE_DEFERRED)
+            if not deferred:
+                return
+            # A newer submission of the same block supersedes its old source.
+            deferred.pop(submitted, None)
+            for key in list(deferred):
+                if _preview_paused(self._preview_state, segment_kind(key)):
+                    continue
+                if self._queue.put_segment(key, deferred[key]) < 0:
+                    return
+                del deferred[key]
 
     def finalize(self, content: str) -> bool:
         # Migration: the whole-turn terminal DELIVERABLE no longer commits
@@ -244,6 +349,9 @@ class _Accumulator:
         with self._lock:
             self._preview_state['cancelled'] = True
             self._cache.clear()
+            deferred = self._preview_state.get(_PREVIEW_STATE_DEFERRED)
+            if deferred is not None:
+                deferred.clear()
         dropped = self._queue.put_terminal(_STOP, replace=True, discard_segments=True)
         if self._thread.ident is None:
             self._queue.close()
@@ -300,18 +408,9 @@ class _Accumulator:
     def _process_preview_segment(self, key: int | str, original: str) -> None:
         """Translate one optional preview without risking terminal delivery."""
         terminal_reasoning = key == 'thinking:terminal'
-        if self._preview_disabled and not terminal_reasoning:
-            return
-        narration = isinstance(key, int) or str(key).startswith('text:')
-        if (not terminal_reasoning and narration
-                and len(str(original or '').strip())
-                < _PREVIEW_MIN_NARRATION_CHARS):
-            logger.debug(
-                '[IncTranslate] task=%s skipped short narration preview '
-                'chars=%d floor=%d; terminal translation remains enabled',
-                self.task_id[:8], len(str(original or '').strip()),
-                _PREVIEW_MIN_NARRATION_CHARS,
-            )
+        kind = segment_kind(key)
+        if not terminal_reasoning and _preview_paused(self._preview_state, kind):
+            _defer_preview(self._preview_state, key, original)
             return
         if not terminal_reasoning:
             self._preview_segments_started += 1
@@ -330,26 +429,41 @@ class _Accumulator:
             # A preview is reconstructible enrichment. Do not tear down the
             # accumulator and lose its final translation because a saturated
             # provider or malformed intermediate segment failed.
+            pause = None
+            failures = 0
             if not terminal_reasoning:
-                self._preview_failures += 1
-                self._preview_state[_PREVIEW_STATE_FAILURES] = (
-                    self._preview_failures)
-                if self._preview_failures >= _PREVIEW_FAILURE_LIMIT:
-                    self._preview_disabled = True
-                    self._preview_state[_PREVIEW_STATE_DISABLED] = True
+                circuit = _preview_circuit(self._preview_state, kind)
+                failures = circuit.get(_PREVIEW_STATE_FAILURES, 0) + 1
+                circuit[_PREVIEW_STATE_FAILURES] = failures
+                if failures >= _PREVIEW_FAILURE_LIMIT:
+                    pause = _pause_preview_circuit(circuit)
+                _defer_preview(self._preview_state, key, original, failed=True)
             logger.warning(
                 '[IncTranslate] task=%s %s segment %s failed '
-                '(consecutive=%d/%d); terminal translation remains enabled: %s',
+                '(%s consecutive=%d/%d); terminal translation remains enabled: %s',
                 self.task_id[:8],
                 ('terminal reasoning' if terminal_reasoning
                  else 'preview retrying after'),
-                key, self._preview_failures, _PREVIEW_FAILURE_LIMIT,
+                key, kind, failures, _PREVIEW_FAILURE_LIMIT,
                 str(exc)[:300],
             )
+            if pause is not None:
+                logger.warning(
+                    '[IncTranslate] task=%s %s previews paused for %.0fs; '
+                    'missed blocks retry after the pause',
+                    self.task_id[:8], kind, pause,
+                )
         else:
-            if self._preview_failures:
-                self._preview_failures = 0
-                self._preview_state[_PREVIEW_STATE_FAILURES] = 0
+            if terminal_reasoning:
+                return
+            self._preview_state.get(_PREVIEW_STATE_ATTEMPTS, {}).pop(key, None)
+            circuit = _preview_circuit(self._preview_state, kind)
+            circuit.pop(_PREVIEW_STATE_FAILURES, None)
+            if circuit.pop(_PREVIEW_STATE_PAUSE_SECONDS, None):
+                circuit.pop(_PREVIEW_STATE_PAUSED_UNTIL, None)
+                logger.info(
+                    '[IncTranslate] task=%s %s previews resumed after a pause',
+                    self.task_id[:8], kind)
 
     def _translate_segment(
         self,
@@ -370,7 +484,7 @@ class _Accumulator:
             progress_cb=lambda partial: self._push_segment_progress(
                 key, partial,
             ),
-            overall_deadline=_PREVIEW_DEADLINE_SECONDS,
+            overall_deadline=_preview_deadline_seconds(original),
             max_429_attempts=max_429_attempts,
             defer_on_shared_contention=defer_on_shared_contention,
         )
@@ -497,12 +611,15 @@ class _Accumulator:
             return
         # The receiver owns a per-block ephemeral index. Do not clone/re-send
         # completed history for every provider chunk or closed segment.
+        # Each partial is cumulative, so a socket that is behind skips to the
+        # block's newest value; the final translation is the last value.
         self._push({
             'type': 'running', 'status': 'running', 'statusKind': 'in_progress',
             'partialByRound': {str(key): partial},
-        })
+        }, latest_value_key=str(key))
 
-    def _push(self, payload: dict[str, Any]) -> None:
+    def _push(self, payload: dict[str, Any], *,
+              latest_value_key: str | None = None) -> None:
         if self._cancel_event.is_set():
             return
         try:
@@ -514,7 +631,7 @@ class _Accumulator:
                 "turnId": self.turn_id,
                 "msgId": self.message_id,
                 "field": "translatedContent",
-            }, user_id=self.user_id)
+            }, user_id=self.user_id, latest_value_key=latest_value_key)
         except Exception as exc:
             logger.debug(
                 "[IncTranslate] task=%s push failed: %s",
@@ -529,9 +646,11 @@ def _submit_keyed(task, key: int | str, text) -> bool:
             return False
         terminal_reasoning = key == 'thinking:terminal'
         preview_state = _task_preview_state(task)
-        if not terminal_reasoning and (
-            preview_state.get(_PREVIEW_STATE_DISABLED)
-        ):
+        if not terminal_reasoning and _preview_paused(
+                preview_state, segment_kind(key)):
+            # The block keeps its claim on a preview: it re-enters the queue
+            # behind the first accepted submission after its kind's pause.
+            _defer_preview(preview_state, key, str(text))
             return False
         task_id = str(task["id"])
         while True:
@@ -728,7 +847,47 @@ def shutdown_incremental_translations() -> None:
             _worker_threads.discard(thread)
 
 
+def preview_translations_for_conversation(
+    conversation_id: str, *, user_id: int,
+) -> list[dict[str, Any]]:
+    """Return completed previews of the owner's live turns in one conversation.
+
+    Previews are push-only while their Turn runs and each block's final
+    preview is published once, so a browser that reloads, reconnects or
+    missed frames re-reads this task-local cache. The result is presentation
+    data: it reads no Turn and stamps nothing.
+    """
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+
+    previews = []
+    for task in chat_task_runtime.snapshot_owned(user_id=user_id):
+        if (str(task.get('convId') or '') != conversation_id
+                or task.get('status') not in ('pending', 'running')
+                or task.get('aborted') or not task.get('_turnId')):
+            continue
+        translations = _completed_preview_translations(task)
+        if translations:
+            previews.append({
+                'turnId': str(task['_turnId']),
+                'partialByRound': translations,
+            })
+    return previews
+
+
+def _completed_preview_translations(task: dict[str, Any]) -> dict[str, str]:
+    state = _task_preview_state(task)
+    lock = state.get('cacheLock')
+    if lock is None:
+        return {}
+    with lock:
+        translations = state.get('translations')
+        if state.get('cancelled') or not translations:
+            return {}
+        return {str(key): translations[key] for key in list(translations)}
+
+
 __all__ = [
+    "preview_translations_for_conversation",
     "submit_round_segment",
     "submit_thinking_segment",
     "finalize_incremental",

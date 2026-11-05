@@ -4,11 +4,14 @@ from pathlib import Path
 
 import pytest
 
+from tests._jsdom import require_node_modules
+
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_conversation_project_restore():
+    require_node_modules('typescript')
     script = r"""
 const ts = require('typescript'), fs = require('fs'), assert = require('assert');
 const m = {exports:{}};

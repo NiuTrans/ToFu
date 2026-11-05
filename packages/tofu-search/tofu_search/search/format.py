@@ -93,6 +93,8 @@ def format_search_for_tool_response(
         if search_diag:
             reason = search_diag.get('reason', 'unknown')
             detail = search_diag.get('reason_detail', '')
+            if reason == 'query_too_long':
+                return quality + 'Shorten the query to its key search terms (keywords) and search again.'
             if reason == 'no_usable_evidence':
                 return quality + ('Search found no usable evidence for this query. '
                     'This does not establish that the subject does not exist. '

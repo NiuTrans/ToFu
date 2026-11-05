@@ -180,16 +180,12 @@ def test_normal_child_completion_waits_for_slow_evidence_in_fifo_order(monkeypat
 
 @pytest.mark.parametrize('stop', ['owner', 'deadline', 'stalled'])
 def test_required_evidence_wait_observes_invocation_control(monkeypatch, stop):
-    from lib.swarm.liveness import ProgressBeacon
+    from lib.tasks_pkg.invocation import stop_stalled_invocation
 
     monkeypatch.setattr(guard, '_CHILD_FLUSH_TIMEOUT_SEC', 0.01)
     entered, release, stopping, finished = (threading.Event() for _ in range(4))
     child = _carrier('controlled-evidence-wait')
     child['_invocationAbortCheck'] = lambda: stop == 'owner' and stopping.is_set()
-    beacon = ProgressBeacon()
-    child['_invocationProgressBeacon'] = beacon
-    monkeypatch.setattr(ProgressBeacon, 'is_making_progress',
-                        lambda self, key: not (stop == 'stalled' and stopping.is_set()))
     observed, receipts, failures = [], [], []
 
     def sink():
@@ -216,6 +212,9 @@ def test_required_evidence_wait_observes_invocation_control(monkeypatch, stop):
         if stop == 'deadline':
             child['_invocationDeadline'] = 0
         stopping.set()
+        if stop == 'stalled':
+            # The shared liveness judge (reaper or swarm backstop) delivers it.
+            assert stop_stalled_invocation(child, silent_seconds=2000, stall_timeout=1800)
         assert finished.wait(2)
         assert failures == []
         assert child['aborted'] and child['abort_event'].is_set()

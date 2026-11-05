@@ -15,6 +15,7 @@ import subprocess
 
 import pytest
 
+from tests._jsdom import require_node_modules
 from tests._runtime_sections import runtime_section_names
 
 
@@ -79,6 +80,7 @@ def test_runtime_manifest_is_complete_safe_and_ordered() -> None:
 
 
 def test_generated_runtime_is_fresh_and_hidden_from_default_discovery() -> None:
+    require_node_modules("typescript")
     result = subprocess.run(
         ["node", "scripts/compose_frontend_runtime.mjs", "--check"],
         cwd=ROOT,
@@ -252,6 +254,7 @@ def test_orchestration_owners_ship_only_in_the_orchestration_lazy_runtime() -> N
 
 
 def test_lazy_runtime_has_no_accidental_browser_global_dependencies() -> None:
+    require_node_modules("typescript")
     result = subprocess.run(
         ["node", "scripts/check_lazy_runtime_bindings.mjs"],
         cwd=ROOT,

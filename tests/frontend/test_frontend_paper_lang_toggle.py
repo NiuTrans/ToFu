@@ -359,8 +359,6 @@ def _run():
     assert output.count('PASS') >= 29, f'expected >=29 PASS lines, got:\n{output}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_paper_language_toggle_report_and_review():
     _run()
 

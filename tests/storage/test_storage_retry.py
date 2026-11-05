@@ -54,6 +54,27 @@ def test_classification_walks_the_cause_chain() -> None:
     assert not is_transient_storage_error(None)
 
 
+@pytest.mark.parametrize('code', ['database_conflict', 'database_forbidden',
+                                  'database_integrity', 'database_invalid_payload'])
+@pytest.mark.parametrize('chain', ['__cause__', '__context__'])
+def test_permanent_verdict_overrides_an_earlier_transport_failure(code, chain):
+    """An append fallback may refuse after a batch timed out; never spin on it."""
+    verdict = StorageError(code, 'permanent authority verdict')
+    setattr(verdict, chain, _timeout())
+    wrapped = RuntimeError('event was not durable')
+    wrapped.__cause__ = verdict
+    assert not is_transient_storage_error(wrapped)
+    calls = []
+
+    def write():
+        calls.append(1)
+        raise wrapped
+
+    with pytest.raises(RuntimeError) as raised:
+        call_with_transient_retry(write, delays=(0, 0))
+    assert raised.value is wrapped and calls == [1]
+
+
 def test_success_without_retry() -> None:
     calls = []
     result = call_with_transient_retry(

@@ -25,7 +25,7 @@ def context(monkeypatch):
     session = SimpleNamespace(task_id='launch', conv_id='conv-a', user_id=7, inbox_key='conv-a',
         _parent_task_proxy=task, specs=[spec], _lock=threading.Lock(), _results_by_id={},
         _aborted=False, _restart_suspended=False, is_terminated=False)
-    binding = binding_for(task, spec, 'conv-a')
+    binding = binding_for(task, spec, 'conv-a', run_id='launch')
     repository = RunMessageRepository(binding)
     child = {'id': 'runtime-child-1', '_userId': 7, 'config': {}, '_swarmMessageBinding': binding}
     return SimpleNamespace(client=client, task=task, session=session, binding=binding, repo=repository, child=child, spec=spec)
@@ -627,7 +627,7 @@ def test_run_snapshot_task_mapping_uses_witness_not_sender_prefix(context, monke
     master = _message_snapshot_master(context)
     saved = context.repo.submit(content='Evidence', kind='reference', key='one', sender_task_id='child-a-guess')
     context.repo.record_injected([saved['id']], child_task_id='prior-random-task', round_num=0)
-    context.child['_parentTaskId'] = 'foreign-run'
+    context.child['_swarmMessageBinding'] = {**context.binding, 'swarmRunId': 'foreign-run'}
     master._agents['child-a'] = SimpleNamespace(_child=context.child)
     snapshot = master._build_agent_snapshot()
     assert snapshot['messageParticipants'][0] == {
@@ -783,3 +783,26 @@ def test_present_batch_does_not_spend_fresh_count_and_only_physical_carrier_acks
     inject_messages(context.child, messages, 2)
     assert messages[-1]['_swarmMessageIds'] == expected[-1:]
     assert context.child['_swarmMessageAttemptIds'] == expected[:batch_size] + expected[-1:]
+def test_team_message_is_visible_in_first_live_turn_projection_without_checkpoint(context):
+    from lib.turn_lifecycle import capture_task_projection_source, _task_projection
+
+    sent = message_service.send(context.task, args(content='Fresh team evidence'), context.session)
+    messages = [{'role': 'user', 'content': 'Objective'}]
+    inject_messages(context.child, messages, 0)
+    carrier = messages[-1]
+    event = {'type': 'llm_round_start', 'round': 1}
+    source = capture_task_projection_source(context.child, event)
+    projection = _task_projection(source, {}, event)
+    note, = [segment for segment in projection['segments'] if segment['type'] == 'system_note']
+    assert note['text'] == carrier['content']
+    assert note['reason'] == 'inbox_delivery' and note['noteKind'] == 'context-injection'
+    assert note['blockId'] == context.child['_contextManifest'][-1]['blockId']
+    assert not projection.get('toolRounds') and not context.child.get('segments')
+    assert not context.child.get('_inboxInjects')
+    assert carrier['_containsHumanSteer'] is False
+    saved, = context.repo.load()[0]['messages']
+    assert saved['id'] == sent['message_id'] and saved['state'] == 'submitted'
+    # A second acquisition of the same queued input must not add a new note.
+    inject_messages(context.child, messages, 1)
+    projected_again = _task_projection(capture_task_projection_source(context.child, event), projection, event)
+    assert [s for s in projected_again['segments'] if s['type'] == 'system_note'] == [note]

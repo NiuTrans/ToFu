@@ -68,6 +68,7 @@ class SubTaskSpec:
       max_retries   — auto-retry on failure (0 = no retry)
       model_override— explicit model slug, '' = auto from role hint
       tools         — explicit per-spawn tool allowlist (empty = role scope)
+      output_schema — validated JSON Schema for the final answer (None = free text)
     """
     role: str = 'general'                        # e.g. 'researcher', 'coder', 'analyst'
     objective: str = ''                          # What this agent should accomplish
@@ -116,6 +117,10 @@ class SubTaskSpec:
     exactly the tools it needs — including MCP tools it has never used
     itself — and nothing else. Empty = role default."""
 
+    # Admitted by lib.swarm.spawn_contracts.validate_output_schema. The worker
+    # answers with one JSON object; the result carries its canonical JSON.
+    output_schema: dict | None = None
+
     # Set only by the server-side manage_agents dispatcher, never by the
     # model's spawn_agents payload. Persisted with the Swarm spec so restart
     # recovery can attach the same durable identity before worker entry.
@@ -133,6 +138,9 @@ class SubTaskSpec:
                                                   metadata={'runtime_only': True})
     retained_assignment_usage: Any = field(default=None, repr=False, compare=False,
                                             metadata={'runtime_only': True})
+    # Native issuer identity captured while the granting caller was live.
+    retained_assignment_native: Any = field(default=None, repr=False, compare=False,
+                                             metadata={'runtime_only': True})
     required_for_completion: bool = True         # False = optional background exploration
 
     def to_dict(self) -> dict:
@@ -188,6 +196,10 @@ class SubAgentResult:
     recovery_reason: str = ''
     checkpoint_phase: str = 'ready'
     actuals_complete: bool = True
+
+    # A completed answer that violates spec.output_schema keeps its raw text and
+    # status; the violation is delivered beside it instead of retrying the work.
+    contract_error: str = ''
 
     def to_dict(self) -> dict:
         """Serialize to a plain dict."""

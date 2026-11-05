@@ -24,7 +24,7 @@ const dom=new JSDOM('<div id="paperPodcastContent"></div>',{url:'http://localhos
 global.window=dom.window;global.document=dom.window.document;global.localStorage=dom.window.localStorage;
 global.AbortController=dom.window.AbortController;
 const w=window;w._paperHash='hash-a';w._activePaperId='a';
-let plays=0,pauses=0,loads=0,asked=[],regens=0,exports=0,videoCleanup=0;
+let plays=0,pauses=0,loads=0,asked=[],regens=0,exports=0;
 w.HTMLMediaElement.prototype.play=function(){plays++;return Promise.resolve()};
 w.HTMLMediaElement.prototype.pause=function(){pauses++};
 w.HTMLMediaElement.prototype.load=function(){loads++};
@@ -62,9 +62,9 @@ state.paperHash='hash-b';delete state.data.meta.timelineV1;owner.renderPodcastAr
 assert(!host.querySelector('.paper-studio-chapter-play'),'legacy estimates never authorize seek');
 assert(!owner.podcastTimings({...state.data,meta:{timelineV1:{format:'paper.podcast.timeline.v1',basis:'measured_pcm',durationSec:30,
  segments:[{index:0,startSec:0,endSec:20},{index:1,startSec:10,endSec:30}]}}}),'overlapping receipt rejected');
-w._destroyPodcastRuntime=()=>owner.destroyPodcastArtifact();w._destroyVideoRuntime=()=>videoCleanup++;
-w.setActivePaperId('b');assert(videoCleanup===0,'same selected paper preserves media');
-w.setActivePaperId('c');assert(videoCleanup===1&&!host.children.length,'paper switch stops both media owners');
+w._pvideo={taskId:'video-current',regenTaskId:'revision-current'};
+w.setActivePaperId('b');assert(w._pvideo.taskId==='video-current','same selected paper preserves media');
+w.setActivePaperId('c');assert(!w._pvideo.taskId&&!w._pvideo.regenTaskId&&!host.children.length,'paper switch stops both media owners');
 state.paperHash='hash-c';w._paperHash='hash-c';state.status='script_only';owner.renderPodcastArtifact(host,state);
 assert(!host.querySelector('audio')&&!host.querySelector('.paper-studio-chapter-play'),'script-only is readable without false playback');
 owner.destroyPodcastArtifact();console.log('ok');

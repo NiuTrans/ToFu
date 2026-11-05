@@ -2,46 +2,54 @@
 /* TurnStore/Surface bridge only; compact UI is owned by turn-navigation.ts. */
 let _turnNavigation = null;
 let _turnNavigationHost = null;
-
-function _scrollTurnNode(turnId) {
-  const inner = document.getElementById('chatInner');
-  const node = inner && Array.from(inner.querySelectorAll('[data-turn-id]'))
-    .find((item) => item.dataset.turnId === turnId);
-  if (!node) return false;
-  node.scrollIntoView({
-    behavior: typeof prefersReducedMotion === 'function' && prefersReducedMotion()
-      ? 'auto' : 'smooth',
-    block: 'start',
-  });
-  return true;
-}
+let _turnNavigationConvId = '';
+let _turnJumpEpoch = 0;
 
 function scrollToTurn(turnId) {
   const stableTurnId = typeof turnId === 'string' ? turnId : '';
   if (!stableTurnId) return;
-  const conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
-  if (!conv) return;
-  // Surface, not a DOM search or nav shadow window, owns revealing older Turns.
+  const epoch = ++_turnJumpEpoch;
+  const conversationId = typeof getActiveConv === 'function' ? getActiveConv()?.id : '';
+  if (typeof conversationId !== 'string' || !conversationId) return;
   const reveal = runtimeScope.ConversationSurfacePresentation?.revealTurn;
-  if (typeof reveal === 'function' && reveal(conv.id, stableTurnId)) {
-    _scrollTurnNode(stableTurnId);
-    return;
-  }
-  if (_scrollTurnNode(stableTurnId)) return;
-  runtimeScope.requestAuthoritativeConversationRender(conv.id, { forceScroll: false });
+  if (reveal?.(conversationId, stableTurnId)) return;
+  runtimeScope.requestAuthoritativeConversationRender(conversationId, { forceScroll: false });
   if (typeof requestAnimationFrame === 'function') {
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (typeof getActiveConv === 'function' && getActiveConv()?.id !== conv.id) return;
-      runtimeScope.ConversationSurfacePresentation?.revealTurn?.(conv.id, stableTurnId);
-      if (!_scrollTurnNode(stableTurnId)) {
+      if (epoch !== _turnJumpEpoch || typeof getActiveConv !== 'function'
+        || getActiveConv()?.id !== conversationId) return;
+      if (!runtimeScope.ConversationSurfacePresentation?.revealTurn?.(conversationId, stableTurnId)) {
         console.warn('[turnNav] Turn node unavailable after convergence:', stableTurnId);
       }
     }));
   }
 }
 
+/* Open a conversation at one Turn (a sidebar search body hit): select it,
+ * page the Turn in by its lane ordinal, then reveal it. A Turn that no longer
+ * exists leaves the conversation open at its ordinary position. */
+async function openConversationAtTurn(conversationId, turn) {
+  const epoch = ++_turnJumpEpoch;
+  await loadConversation(conversationId);
+  const active = () => (epoch === _turnJumpEpoch && typeof getActiveConv === 'function'
+    && getActiveConv()?.id === conversationId ? getActiveConv() : null);
+  const conv = active();
+  if (!conv) return;
+  try {
+    await runtimeScope.ConversationTurnStore.hydrateConversationRound(
+      conv, 'main', { turnId: turn.turnId, ordinal: turn.ordinal });
+  } catch (error) {
+    console.warn('[turnNav] search match Turn unavailable:', error?.message || error);
+    return;
+  }
+  if (active()) scrollToTurn(turn.turnId);
+}
+
 function buildTurnNav(conv) {
   const nav = document.getElementById('turnNav');
+  const conversationId = conv?._localOnly ? '' : conv?.id || '';
+  if (conversationId !== _turnNavigationConvId || nav !== _turnNavigationHost) _turnJumpEpoch++;
+  _turnNavigationConvId = conversationId;
   if (nav !== _turnNavigationHost) {
     _turnNavigation?.destroy();
     _turnNavigationHost = nav;
@@ -68,7 +76,6 @@ function buildTurnNav(conv) {
       },
     }) : null;
   }
-  const conversationId = conv?._localOnly ? '' : conv?.id || '';
   const state = conversationId
     ? runtimeScope.ConversationTurnStore?.ensureRuntimeStore?.(conversationId)?.getState?.()
     : null;

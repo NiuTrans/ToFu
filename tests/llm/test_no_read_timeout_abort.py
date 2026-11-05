@@ -535,9 +535,10 @@ class TestReaperCannotEatAWaitingTask:
         """END-TO-END of criterion 4 against the REAL reaper: a task that has
         been waiting 40 minutes but is still BEATING must survive, while the
         threshold is only 30 minutes."""
+        import lib.tasks_pkg.liveness as liveness
         import lib.tasks_pkg.manager._maintenance as _maintenance
 
-        monkeypatch.setattr(_maintenance, '_stuck_task_max_silent_secs',
+        monkeypatch.setattr(liveness, 'stall_threshold_seconds',
                             lambda: 1800, raising=True)
         monkeypatch.setattr(_maintenance, '_finalize_reaped_stuck_task',
                             lambda t: None, raising=True)
@@ -575,9 +576,10 @@ class TestReaperCannotEatAWaitingTask:
         job. A worker that emits nothing at all (thread died) is still
         force-failed — otherwise we'd have traded a false-kill for a
         permanent zombie."""
+        import lib.tasks_pkg.liveness as liveness
         import lib.tasks_pkg.manager._maintenance as _maintenance
 
-        monkeypatch.setattr(_maintenance, '_stuck_task_max_silent_secs',
+        monkeypatch.setattr(liveness, 'stall_threshold_seconds',
                             lambda: 1800, raising=True)
         monkeypatch.setattr(_maintenance, '_finalize_reaped_stuck_task',
                             lambda t: None, raising=True)

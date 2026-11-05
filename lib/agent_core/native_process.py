@@ -18,7 +18,7 @@ from pathlib import Path
 import sys
 import time
 import threading
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 from lib.identity import PrincipalContext
@@ -263,11 +263,46 @@ class RoundPreparation:
     wire_tools: list[dict]
 
 
+class NativeToolOrder:
+    """Call order of one settled response under concurrent native dispatch.
+
+    Every call of the round starts at once (owner decision 2026-10-28). The
+    response policy binds, once, the earlier model call IDs each call must
+    wait for; the round acknowledgement carries it to the native scheduler.
+    It grants no execution or approval authority.
+    """
+
+    __slots__ = ('_plan',)
+
+    def __init__(self):
+        self._plan: dict[str, list[str]] | None = None
+
+    def bind(self, plan: Mapping[str, Sequence[str]]) -> None:
+        if self._plan is not None:
+            raise ValueError('native tool order is already bound')
+        if not isinstance(plan, Mapping) or any(
+                not isinstance(call, str) or not call
+                or not isinstance(earlier, Sequence) or isinstance(earlier, str)
+                or any(not isinstance(item, str) or not item for item in earlier)
+                or len(set(earlier)) != len(earlier)
+                for call, earlier in plan.items()):
+            raise ValueError('native tool order maps call IDs to unique earlier call IDs')
+        self._plan = {call: list(earlier) for call, earlier in plan.items()}
+
+    @property
+    def plan(self) -> dict[str, list[str]] | None:
+        if self._plan is None:
+            return None
+        return {call: list(earlier) for call, earlier in self._plan.items()}
+
+
 @dataclass(frozen=True, slots=True)
 class RoundSettlement:
     request: RoundRequest
     evidence: Mapping[str, Any]
     cancelled: threading.Event | None = None
+    # Present only for returned evidence under concurrent tool dispatch.
+    tool_order: NativeToolOrder | None = None
 
 
 class RoundPolicy(Protocol):
@@ -626,10 +661,11 @@ class _CheckpointControl:
 
 
 class _RoundControl:
-    def __init__(self, client, policy, task_id, prepare_history=False, preparation_bytes=None, progress_policy=None, checkpoint_policy=None, epoch=None, prepare_tools=False):
+    def __init__(self, client, policy, task_id, prepare_history=False, preparation_bytes=None, progress_policy=None, checkpoint_policy=None, epoch=None, prepare_tools=False, concurrent_tools=False):
         self.client = client
         self.policy = policy
         self.task_id = task_id
+        self.concurrent_tools = concurrent_tools
         self.pending = None
         self.attempted = False
         self.next_round = 0
@@ -643,10 +679,10 @@ class _RoundControl:
         self.prepare_tools = prepare_tools
         self.preparation_bytes = preparation_bytes or client.budget.frame_bytes
 
-    async def acknowledge(self, process, request_id, accepted):
+    async def acknowledge(self, process, request_id, accepted, **values):
         """Bound transport ACK independently of joined policy callback lifetime."""
         async with asyncio.timeout(self.client.budget.shutdown_seconds):
-            await self.send(process, "round_ack", request_id, accepted=accepted)
+            await self.send(process, "round_ack", request_id, accepted=accepted, **values)
 
     async def send(self, process, kind, request_id, **values):
         process.stdin.write(
@@ -799,10 +835,12 @@ class _RoundControl:
         settlement_cancelled = threading.Event()
         if closing:
             settlement_cancelled.set()
+        order = (NativeToolOrder() if self.concurrent_tools and evidence['kind'] == 'returned'
+                 else None)
         try:
             try:
                 settle = asyncio.create_task(
-                    self.policy.settle(RoundSettlement(request, evidence, settlement_cancelled))
+                    self.policy.settle(RoundSettlement(request, evidence, settlement_cancelled, order))
                 )
                 try:
                     result = await asyncio.shield(settle)
@@ -812,6 +850,8 @@ class _RoundControl:
                     result = await _joined(settle)
                 if result is not None:
                     raise TypeError("native settlement callback must return None")
+                if order is not None and order.plan is None:
+                    raise TypeError('concurrent native dispatch requires the settled call order')
             except Exception as error:
                 try:
                     await self.acknowledge(process, value["request_id"], False)
@@ -820,9 +860,9 @@ class _RoundControl:
                 raise NativeRoundError(
                     "native round settlement callback failed"
                 ) from error
-            ack = asyncio.create_task(
-                self.acknowledge(process, value["request_id"], True)
-            )
+            ack = asyncio.create_task(self.acknowledge(
+                process, value["request_id"], True,
+                **({'tool_order': order.plan} if order is not None else {})))
             try:
                 await asyncio.shield(ack)
             except asyncio.CancelledError:
@@ -1530,6 +1570,12 @@ class NativeProcessClient:
             raise NativeConfigurationError(
                 "native round control requires an explicit policy"
             )
+        concurrent = config.get('concurrent_tool_dispatch', False)
+        if type(concurrent) is not bool or (concurrent and (
+                round_policy is None or config.get('tool_sibling_control') is not True
+                or 'parallel_tool_names' in config)):
+            raise NativeConfigurationError(
+                'concurrent native tools require round sibling control without read qualification')
         if progress_policy is not None:
             if round_policy is None or not isinstance(getattr(progress_policy, 'limits', None), ProgressLimits) or not callable(getattr(progress_policy, 'observe', None)):
                 raise NativeConfigurationError('native progress requires explicit round and observation policies')
@@ -1583,7 +1629,7 @@ class NativeProcessClient:
         rounds = (
             _RoundControl(self, round_policy, task_id, config.get("round_preparation") is True,
                           config.get("round_preparation_bytes"), progress_policy, checkpoint_policy, config.get("epoch"),
-                          config.get('wire_tool_preparation') is True)
+                          config.get('wire_tool_preparation') is True, concurrent)
             if round_policy is not None
             else None
         )
@@ -1825,7 +1871,8 @@ class NativeProcessClient:
                     or value.get("name") not in handlers
                     or ("model_call_id" in value and (not isinstance(value["model_call_id"], str)
                         or not value["model_call_id"]))
-                    or (value.get("name") in parallel_names and not value.get("model_call_id"))
+                    or ((concurrent or value.get("name") in parallel_names)
+                        and not value.get("model_call_id"))
                     or ("model_round" in value and (type(value["model_round"]) is not int
                         or value["model_round"] < 0))
                 ):
@@ -1839,6 +1886,8 @@ class NativeProcessClient:
                 try:
                     await _joined(asyncio.create_task(tool_callbacks.close()))
                 except BaseException as error:
+                    logger.debug('native tool callback close failure handled: %s',
+                                 type(error).__name__)
                     callback_cleanup_error = error
                 tool_failed = tool_callbacks.failure is not None
             if stop_watcher is not None:

@@ -86,9 +86,12 @@ def test_sol_subscription_dispatches_private_luna_or_authorized_paid_api(native,
     from lib.llm_dispatch.provider_pin import provider_pin, get_pinned_provider
     from lib.llm.stream_result import ProviderStreamResult
     if paid:
-        native.state.document['offerings'][2]['enabled'] = False
-        # Capacity quote (65536 output) must fit the paid ceiling.
+        # The owner's subscription Luna stays authorized; the organization-billed
+        # paid API still outranks it.
         native.state.document['offerings'][1]['actual_pricing'].update(input=.1, output=.5)
+    else:
+        # Without any paid route the owner's subscription is the fallback.
+        native.state.document['offerings'][1]['enabled'] = False
     original_task, original_source = deepcopy(native.task), deepcopy(native.source)
     calls = []
     def stream(*args, **kwargs):
@@ -110,6 +113,8 @@ def test_sol_subscription_dispatches_private_luna_or_authorized_paid_api(native,
     with provider_pin('model-route:41:task-a'):
         plan = select_summary_route(native.task, 100, 2048, capacity_output_tokens=65536)
         assert plan.get('requestOwned') and plan['modelId'] == 'gpt-6-luna', plan
+        assert plan['selectionBasis']['ranking'] == 'paid_api_then_resource_cost_aa'
+        assert plan['selectionBasis']['resourceTier'] == (0 if paid else 1)
         assert not native.state.resolved
         result = native.summary._generate_query_aware_summary(
             native.source, 'continue', task=native.task, usage_out=usage,
@@ -217,14 +222,69 @@ def test_paid_main_uses_cross_provider_aa_cost_first_without_parent_mutation(nat
     assert not native.state.resolved
 
 
-@pytest.mark.parametrize('ceiling', [0, -1, True, 'invalid'])
-def test_configured_ceiling_blocks_paid_subscription_alternate(native, ceiling):
-    native.state.document['offerings'][2]['enabled'] = False
-    native.task['config']['compaction']['summaryMaxCostUsd'] = ceiling
+@pytest.mark.parametrize('cheaper_paid', [True, False])
+def test_paid_main_that_fits_never_borrows_owner_subscription(native, cheaper_paid):
+    """Owner decision 2026-11-02: paid APIs are organization-billed, the
+    subscription is the owner's own quota. The main has no request-name rate
+    card, so its model price is the paid baseline: a strictly cheaper paid
+    route replaces it, otherwise the main itself summarizes, never the
+    authorized subscription Luna."""
+    native.parent.oauth = ''
+    native.parent.max_output_tokens = 128000
+    if cheaper_paid:
+        native.state.document['offerings'][1]['actual_pricing'].update(input=.1, output=.5)
+    else:
+        native.state.document['offerings'][1]['actual_pricing'].update(input=10, output=40)
+    before = deepcopy(native.task)
     plan = select_summary_route(native.task, 1000, 2048, capacity_output_tokens=65536)
-    assert plan['modelId'] == 'gpt-6.1-sol'
-    assert not plan.get('requestOwned')
-    assert not native.state.resolved
+    if cheaper_paid:
+        assert plan.get('requestOwned') and plan['providerId'] == 'provider-b', plan
+        assert 0 < plan['projectedCostUsd'] < plan['maximumCostUsd']
+        assert plan['selectionBasis']['resourceTier'] == 0
+    else:
+        assert not plan.get('requestOwned'), plan
+        assert plan['modelId'] == 'gpt-6.1-sol'
+        assert plan['reason'] == 'no_eligible_cheaper_aa_route'
+        assert plan['costBasis']['source'] == 'model_table'
+    assert native.task == before and not native.state.resolved
+    assert native.pool.slots == [native.parent]
+
+
+def test_offerings_without_rate_cards_are_priced_and_billed_at_model_price(native, monkeypatch):
+    """Owner decision 2026-11-02: an Offering without its own request-name rate
+    card is priced at its model's maintained price, for the main baseline and
+    the alternate alike. Planning and settlement share that lookup, so the
+    booked summary cost is known instead of unpriced."""
+    import lib.llm_dispatch as dispatch
+    from lib.llm.stream_result import ProviderStreamResult
+    from lib.llm_dispatch.provider_pin import provider_pin
+    from lib.pricing._tables import pricing_for_model
+
+    assert pricing_for_model('gpt-6.1-sol') and pricing_for_model('gpt-6-luna')
+    native.parent.oauth = ''
+    native.parent.max_output_tokens = 128000
+    native.state.document['offerings'][1].pop('actual_pricing')
+    plan = select_summary_route(native.task, 1000, 2048, capacity_output_tokens=65536)
+    assert plan.get('requestOwned') and plan['providerId'] == 'provider-b', plan
+    assert plan['modelId'] == 'gpt-6-luna'
+    assert plan['costBasis']['source'] == 'model_table'
+    assert 0 < plan['projectedCostUsd'] < plan['maximumCostUsd']
+    assert plan['declaredPricing'] is None
+
+    def stream(*args, **kwargs):
+        return ProviderStreamResult.from_legacy(
+            {'role': 'assistant', 'content': '### Objective\nComplete summary.'}, 'stop',
+            {'prompt_tokens': 20, 'completion_tokens': 10,
+             '_dispatch': {'model': 'gpt-6-luna', 'provider_id': 'provider-b'}})
+
+    monkeypatch.setattr(dispatch, 'dispatch_stream', stream)
+    usage = {}
+    with provider_pin('model-route:41:task-a'):
+        assert native.summary._generate_query_aware_summary(
+            native.source, 'continue', task=native.task, usage_out=usage) is not None
+    [call] = usage['_summaryCalls']
+    assert call['cost']['known'] is True
+    assert call['cost']['pricingSource'] == 'model_table'
 
 
 def test_complete_auxiliary_allowance_uses_shared_clamp_above_summary_target(native, monkeypatch):
@@ -255,6 +315,8 @@ def test_declared_selection_receipt_preserves_coherent_bounded_evidence(native):
 def test_subscription_reference_proxy_is_explicit_never_marginal_cash(native, monkeypatch):
     monkeypatch.setattr('lib.pricing._tables.pricing_for_model',
                         lambda model: {'input': .1, 'output': .5})
+    # Only the owner's resource remains, so its reference proxy is reported.
+    native.state.document['offerings'][1]['enabled'] = False
     plan = select_summary_route(native.task, 1000, 2048, capacity_output_tokens=65536)
     assert plan['requestOwned']
     assert plan['projectedCostUsd'] is None

@@ -1,0 +1,29 @@
+[
+ {
+  "content": "You are Tofu, a coding assistant running an LLM replay scenario. Answer the user directly and use the available tools when asked.",
+  "role": "system"
+ },
+ {
+  "content": "Start a deck about scattering, then write a separate reminder file.",
+  "role": "user"
+ },
+ {
+  "content": "I will start the deck.",
+  "role": "assistant",
+  "tool_calls": [
+   {
+    "function": {
+     "arguments": "{\"lang\": \"en\", \"max_pages\": 3, \"topic\": \"Scattering\"}",
+     "name": "produce_slides"
+    },
+    "id": "call_produce_slides",
+    "type": "function"
+   }
+  ]
+ },
+ {
+  "content": "{\"creative_mode\":\"director\",\"deduped\":false,\"download\":\"/api/v4/slides/slides_replay_agent_tool/file\",\"lang\":\"en\",\"max_pages\":3,\"model\":\"\",\"note\":\"Accepted, not yet delivered. Continue other requested work without polling to keep Chat alive. The deck generates in the background. You will get ONE outline to review in the card (approve or request changes), then every page streams in as a thumbnail; download the PPTX when done.\",\"ok\":true,\"poll\":\"/api/v4/tasks/slides_replay_agent_tool\",\"style\":\"\",\"task_id\":\"slides_replay_agent_tool\",\"template_id\":null,\"topic\":\"Scattering\"}",
+  "role": "tool",
+  "tool_call_id": "call_produce_slides"
+ }
+]

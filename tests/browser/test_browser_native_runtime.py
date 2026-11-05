@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from pathlib import Path
 from unittest import mock
 from types import SimpleNamespace
@@ -333,16 +334,12 @@ def test_read_search_health_does_not_depend_on_future_write_capabilities():
     assert whole['missing_capabilities'] == ['upload']
 
 
-def test_chatui_site_provider_binds_the_request_users_browser(monkeypatch):
+def test_chatui_site_provider_binds_the_explicit_owners_browser(monkeypatch):
     import lib.browser.adapters as browser_adapters
-    from lib.search.search_bridge import _ChatuiSiteSearchProvider
-    from routes.api_v1 import auth as auth_routes
+    from lib.search.search_bridge import _ChatuiSiteSearchProvider, bind_search_browser
 
     _register('alice-browser', ALICE, profile='Alice Work')
     _register('bob-browser', BOB, profile='Bob Work')
-    monkeypatch.setattr(
-        auth_routes, 'current_auth',
-        lambda: SimpleNamespace(owner_user_id=ALICE))
     captured = {}
 
     def invoke(adapter_id, command, params, **kwargs):
@@ -350,7 +347,8 @@ def test_chatui_site_provider_binds_the_request_users_browser(monkeypatch):
         return {'ok': True, 'result': []}
 
     monkeypatch.setattr(browser_adapters, 'invoke_adapter', invoke)
-    provider = _ChatuiSiteSearchProvider().bind()
+    with bind_search_browser(user_id=ALICE):
+        provider = _ChatuiSiteSearchProvider().bind()
     assert provider.client_id == 'alice-browser'
     assert provider.profile == 'Alice Work'
     assert provider.list_sources()
@@ -371,6 +369,54 @@ def test_chatui_site_provider_never_uses_a_global_unbound_browser(monkeypatch):
     provider = _ChatuiSiteSearchProvider()
     assert provider.list_sources() == []
     assert provider.search('modelplaza', 'embedding') is None
+
+
+@pytest.mark.parametrize('same_owner', [False, True])
+def test_repeated_xhs_engine_call_rechecks_current_owned_adapter(monkeypatch, request, same_owner):
+    from lib.browser import adapters
+    from lib.search.browser_scope import bind_search_browser
+    from lib.search.search_bridge import _ChatuiSiteSearchProvider
+    from tofu_search import SiteSearchTerminalError, providers
+    from tofu_search.config import SearchConfig
+    from tofu_search.search.engines import xhs
+
+    _register('alice-browser', ALICE)
+    _register('bob-browser', BOB)
+    calls = []
+    rejected = False
+
+    def invoke(adapter_id, command, params, **route):
+        calls.append((adapter_id, command, params, route))
+        if rejected:
+            raise adapters.AdapterExecutionError(
+                'access_denied', 'Current owner no longer grants access')
+        return {'ok': True, 'result': [{
+            'title': route['owner_user_id'], 'url': 'https://example.test/owned'}]}
+
+    for name in ('site_search', 'browser', 'auth_source'):
+        register = getattr(providers, f'register_{name}_provider')
+        previous = getattr(providers, f'get_{name}_provider')()
+        request.addfinalizer(lambda register=register, previous=previous: register(previous))
+    monkeypatch.setattr(adapters, 'invoke_adapter', invoke)
+    providers.register_site_search_provider(_ChatuiSiteSearchProvider())
+    providers.register_browser_provider(None)
+    providers.register_auth_source_provider(None)
+    monkeypatch.setattr(xhs, 'get_config', lambda: SearchConfig(
+        xhs_min_interval_s=0, xhs_cache_ttl_s=600, xhs_backoff_cooldown_s=600))
+    with bind_search_browser(user_id=ALICE), providers.bound_optional_providers():
+        assert xhs.search_xhs('same query')[0]['title'] == ALICE
+    rejected = same_owner
+    owner = ALICE if same_owner else BOB
+    with bind_search_browser(user_id=owner), providers.bound_optional_providers():
+        if rejected:
+            with pytest.raises(SiteSearchTerminalError):
+                xhs.search_xhs('same query')
+        else:
+            assert xhs.search_xhs('same query')[0]['title'] == BOB
+    assert [call[3] for call in calls] == [
+        {'owner_user_id': ALICE, 'client_id': 'alice-browser'},
+        {'owner_user_id': owner, 'client_id': 'alice-browser' if same_owner else 'bob-browser'},
+    ]
 
 
 def test_chatui_browser_provider_never_uses_a_global_unbound_browser(
@@ -444,7 +490,6 @@ def test_extension_v2_advertises_and_implements_native_page_contract():
         'fetch_file_to_server',
     ):
         assert f"case '{command}'" in source
-    assert 'frameIds = [Number(params.frameId)]' in source
     assert {'debugger', 'downloads', 'webRequest'} <= set(
         manifest.get('permissions') or [])
 
@@ -571,3 +616,158 @@ def test_expired_lease_fails_before_page_action_and_cleans_ephemeral_tab():
         BrowserPage(lease, sender=sender).snapshot()
     assert calls == [(
         'close_tab', {'tabId': 12}, 'alice-browser', ALICE)]
+
+
+class _FakeTabsBridge:
+    """Fake extension behind the real queue sender seam; tabs keep their URL."""
+
+    def __init__(self):
+        self.commands = []
+        self.tabs = {}
+        self.lock = threading.Lock()
+
+    def __call__(self, command, params, *, timeout, client_id, owner_user_id,
+                 cancel_event=None):
+        params = params or {}
+        with self.lock:
+            self.commands.append(command)
+            if command == 'create_tab':
+                tab_id = 100 + len(self.tabs)
+                self.tabs[tab_id] = params['url']
+                return {'id': tab_id, 'url': params['url']}, None
+            if command == 'navigate':
+                self.tabs[params['tabId']] = params['url']
+                return {'page': {'tabId': params['tabId'], 'url': params['url']}}, None
+            if command == 'page_state':
+                return {'tabId': params['tabId'], 'url': self.tabs[params['tabId']]}, None
+            if command == 'close_tab':
+                self.tabs.pop(params['tabId'], None)
+            return {'ok': True}, None
+
+
+def _workflow_adapter(adapter_id, *, after_detail=None):
+    from lib.browser.adapters import AdapterCommand, SiteAdapter
+
+    def search(page, params):
+        page.new_tab('https://example.com/search')
+        return [{'url': 'https://example.com/a'}, {'url': 'https://example.com/b'}]
+
+    def detail(page, params):
+        page.new_tab(params['url'])
+        if after_detail is not None:
+            after_detail(params['url'])
+        return {'title': params['url']}
+
+    return SiteAdapter(id=adapter_id, name='Workflow', domains=('example.com',), commands=(
+        AdapterCommand('search', 'Search', output_schema={'type': 'array'}, handler=search),
+        AdapterCommand('detail', 'Detail', input_schema={
+            'type': 'object', 'additionalProperties': False, 'required': ['url'],
+            'properties': {'url': {'type': 'string'}}}, handler=detail),
+    ))
+
+
+def _search_then_details(parallelism):
+    return {'steps': [
+        {'id': 'hits', 'operation': 'search'},
+        {'id': 'details', 'operation': 'detail', 'foreach': {
+            'step': 'hits', 'field': 'url', 'parameter': 'url',
+            'parallelism': parallelism}},
+    ]}
+
+
+def _run_real_workflow(monkeypatch, adapter, workflow, cancel_event):
+    from lib.browser import queue
+    from lib.browser.adapters import register_adapter, unregister_adapter
+    from lib.browser.workflows import execute_workflow
+
+    _register('c1')
+    bridge = _FakeTabsBridge()
+    monkeypatch.setattr(queue, 'send_browser_command', bridge)
+    register_adapter(adapter)
+    try:
+        runtime = SimpleNamespace(
+            owner_user_id=ALICE, client_id='c1', cancel_event=cancel_event)
+        return execute_workflow(adapter, workflow, runtime), bridge
+    finally:
+        unregister_adapter(adapter.id)
+
+
+def test_workflow_on_real_pages_reuses_its_tab_and_releases_the_lease(monkeypatch):
+    from lib.browser.sessions import lease_status
+
+    receipt, bridge = _run_real_workflow(
+        monkeypatch, _workflow_adapter('wf-real-sequential'),
+        _search_then_details(1), threading.Event())
+
+    assert receipt['error'] is None and receipt['status'] == 'ok'
+    assert receipt['steps'][1]['result'] == [
+        {'title': 'https://example.com/a'}, {'title': 'https://example.com/b'}]
+    # Sequential reads navigate the workflow's own tab instead of opening more.
+    assert bridge.commands.count('create_tab') == 1
+    assert bridge.commands.count('navigate') == 2
+    assert bridge.commands[-1] == 'close_tab'
+    assert bridge.tabs == {}
+    assert lease_status(owner_user_id=ALICE) == []
+
+
+def test_parallel_workflow_reads_release_every_real_page(monkeypatch):
+    from lib.browser.sessions import lease_status
+
+    receipt, bridge = _run_real_workflow(
+        monkeypatch, _workflow_adapter('wf-real-parallel'),
+        _search_then_details(2), threading.Event())
+
+    assert receipt['error'] is None and receipt['status'] == 'ok'
+    assert bridge.commands.count('create_tab') == 3
+    assert bridge.tabs == {}, 'every page closed its own tab'
+    assert lease_status(owner_user_id=ALICE) == []
+
+
+def test_workflow_cancellation_stops_reads_but_still_closes_the_tab(monkeypatch):
+    from lib.browser.sessions import lease_status
+
+    cancel = threading.Event()
+    receipt, bridge = _run_real_workflow(
+        monkeypatch, _workflow_adapter('wf-real-cancel', after_detail=lambda _url: cancel.set()),
+        _search_then_details(1), cancel)
+
+    assert receipt['status'] == 'partial'
+    assert receipt['error']['code'] == 'cancelled'
+    assert receipt['steps'][1]['completed_items'] == [0]
+    assert bridge.commands.count('navigate') == 1
+    assert bridge.commands[-1] == 'close_tab'
+    assert bridge.tabs == {}
+    assert lease_status(owner_user_id=ALICE) == []
+
+
+def test_a_page_that_cannot_be_built_releases_its_workflow_lease(monkeypatch):
+    from lib.browser import workflows
+    from lib.browser.sessions import lease_status
+
+    class _BrokenPage:
+        def __init__(self, lease, **_options):
+            raise RuntimeError('page construction failed')
+
+    monkeypatch.setattr(workflows, 'BrowserPage', _BrokenPage)
+    receipt, bridge = _run_real_workflow(
+        monkeypatch, _workflow_adapter('wf-broken-page'),
+        _search_then_details(1), threading.Event())
+
+    assert receipt['status'] == 'unavailable'
+    assert receipt['error']['code'] == 'execution_failed'
+    assert lease_status(owner_user_id=ALICE) == []
+
+
+def test_browser_tools_carry_the_task_abort_event_to_their_runtime(monkeypatch):
+    from lib.browser import dispatch
+
+    _register('c1')
+    seen = []
+    monkeypatch.setitem(dispatch.BROWSER_HANDLERS, 'browser_site',
+                        lambda args, runtime: seen.append(runtime) or 'ok')
+    abort = threading.Event()
+
+    assert dispatch.execute_browser_tool(
+        'browser_site', {'site': 'any'}, owner_user_id=ALICE, client_id='c1',
+        cancellation=abort) == 'ok'
+    assert seen[0].cancel_event is abort

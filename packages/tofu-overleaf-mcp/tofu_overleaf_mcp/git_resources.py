@@ -61,7 +61,9 @@ def probe_budget(environment=None):
         free = shutil.disk_usage(tempfile.gettempdir()).free
     except OSError:
         pass
-    memory = max(128 * MIB, min(256 * MIB, capacity // 32, available // 8))
+    # Fixed sandbox bound for untrusted Git; host memory never sizes it
+    # (docs/RESOURCE_CONTROL.md, "Hardware never limits work").
+    memory = 256 * MIB
     disk = min(limits['overleaf_git_workspace_bytes'], free // 64) if free is not None else 64 * MIB
     for key, minimum, maximum in [('MEMORY', 128 * MIB, limits['overleaf_git_memory_bytes']),
                                   ('WORKSPACE', MIB, limits['overleaf_git_workspace_bytes'])]:

@@ -96,7 +96,7 @@ fn state(database: &AuthorityDatabase) -> Value {
     let sync = parse(sync_changes(database,&mut tx,CONVERSATION,0,1000,&mut ||false).unwrap().unwrap());
     let header = parse(crate::conversation_header::get(database,&mut tx,CONVERSATION,false,0,None,&mut ||false).unwrap().unwrap());
     let raw = parse(crate::indexed_stream::list(database,&mut tx,&crate::indexed_stream::ListRequest {
-        task_id:TASK.into(), after_sequence:None, limit:1000, types:Vec::new(),type_prefixes:Vec::new(),payload_types:None }).unwrap());
+        task_id:TASK.into(), after_sequence:None, limit:1000, types:Vec::new(),type_prefixes:Vec::new(),payload_types:None,inspector_projection:false }).unwrap());
     json!({"turn":turn,"attempt":attempt,"events":events,"hydrated":hydrated,"sync":sync,"header":header,"raw":raw})
 }
 

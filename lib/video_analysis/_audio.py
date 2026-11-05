@@ -70,23 +70,35 @@ def transcribe_track(video_path: str, scratch_dir: str, duration_s: float, *,
     """Extract + transcribe the audio track.
 
     Returns ``{text, status, model}`` — see the module docstring for statuses.
+    A non-``ok`` result also carries ``detail``: a caller-safe reason.
     Never raises.
     """
     from lib import transcription as stt
 
-    available = (
-        stt.transcription_available()
-        if owner_user_id is None
-        else stt.transcription_available(
-            owner_user_id=owner_user_id, tenant_id=tenant_id)
-    )
+    try:
+        available = (
+            stt.transcription_available()
+            if owner_user_id is None
+            else stt.transcription_available(
+                owner_user_id=owner_user_id, tenant_id=tenant_id)
+        )
+    except Exception as e:
+        # Availability reads the model-routing store; its outage is a
+        # transcript status like every other failure, never a raise.
+        logger.warning('[VideoAudio] transcription availability check failed: %s', e)
+        from lib.model_routing import ModelRoutingError
+        reason = str(e) if isinstance(e, ModelRoutingError) else type(e).__name__
+        return {'text': '', 'status': 'unavailable', 'model': '',
+                'detail': f'transcription availability could not be checked: {reason}'}
     if not available:
         logger.info('[VideoAudio] no transcription slot configured — skipping')
-        return {'text': '', 'status': 'unavailable', 'model': ''}
+        return {'text': '', 'status': 'unavailable', 'model': '',
+                'detail': 'no transcription model is configured'}
 
     extracted = _extract_audio(video_path, scratch_dir, duration_s)
     if not extracted:
-        return {'text': '', 'status': 'failed', 'model': ''}
+        return {'text': '', 'status': 'failed', 'model': '',
+                'detail': 'the audio track could not be extracted'}
     audio_bytes, ext = extracted
 
     try:
@@ -107,10 +119,12 @@ def transcribe_track(video_path: str, scratch_dir: str, duration_s: float, *,
             'text': '',
             'status': 'unavailable' if e.status == 503 else 'failed',
             'model': '',
+            'detail': e.detail,
         }
     except Exception as e:
         logger.error('[VideoAudio] transcription unexpected error: %s', e, exc_info=True)
-        return {'text': '', 'status': 'failed', 'model': ''}
+        return {'text': '', 'status': 'failed', 'model': '',
+                'detail': 'unexpected transcription error (see server log)'}
 
     logger.info('[VideoAudio] transcript: %d chars via %s', len(result.text), result.model)
     return {'text': result.text, 'status': 'ok', 'model': result.model}

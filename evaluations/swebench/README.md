@@ -39,6 +39,39 @@ verifier 语义和契约测试；非 Harbor harness 应单独实现执行适配�
 不扩充 TB 专用条件分支。需要 GPU 或不同评分规则的题集不得被静默降为 CPU/二元任务。
 现有 `compare` 是 TB 2.1 的专用配对统计，不冒充通用评分器。
 
+### Pi Coding Agent 对照入口
+
+`--agent pi` 复用当前锁定 Harbor 的原生 Pi installed-agent 适配器。
+`evaluations/pi_contract.py` 固定 Pi `1.4.0`，将显式
+`--reasoning-effort` 转成该适配器实际接受的 `thinking` 参数；未指定等级、
+不支持的等级和其他 Pi 版本在创建 run 前拒绝。模型必须写成
+`provider/model`。通用 run manifest 与 job config 记录同一有效版本和推理意图。
+
+只准备配置、不安装 Pi、不调用模型的示例：
+
+```bash
+python -m evaluations harbor run --agent pi --backend docker \
+  --benchmark terminal-bench-2.1 --model anthropic/your-model \
+  --reasoning-effort high --limit 1 --attempts 1 --concurrency 1 --dry-run
+```
+
+真实执行使用已配置的 Docker/cloud 环境和显式 `--secret-env NAME`；这里只把
+变量名写入配置，凭据由执行环境提供。原 rootless QEMU 的凭据边界保持拒绝：
+这个上游 installed-agent 入口没有 host-only 代理，不能套用 OpenCode/Codex 的
+白名单。Pi 的 JSONL 日志和 usage 由 Harbor 收集，不宣称已转换为 Tofu ATIF。
+
+**问题：** 通用参数名会把 Pi 的推理意图写成另一个适配器的字段，未指定版本
+又会安装 latest，导致对照条件漂移。**决定：** 在现有配置编译器中校验和翻译
+Pi 的启动意图，继续使用原 Harbor 执行与证据路径。**替代方案：** 复制 Pi 的
+循环会改变被测对象；新增代理/安装器扩大本轮边界；静默映射未知等级会改变模型
+预算，均不采用。验证 `tests/evaluations/test_pi_benchmark_contract.py` 及现有
+framework/readiness 契约。
+
+Dry-run 只证明配置生成，不能作为任务成绩或恢复能力证据。正式配对须固定双方
+模型/Provider、任务 lock、推理配置、环境与重复次数，保留失败和原始轨迹；
+Harbor 的 npm 安装只固定 Pi 包版本，传递依赖仍须记录实际安装环境。
+Pi Durable 是独立的实验性持久化框架，不使用这个 CLI 入口冒充其恢复测试。
+
 ### DeepSWE 与 Frontier-Bench 后续版本
 
 问题：把新任务交给旧 parser 或单环境 image store，可能丢弃独立 verifier、补丁收集
@@ -182,7 +215,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest --noconftest --capture=sys -o 
 
 高吞吐运行先用 `capacity.plan_rootless_pair` 根据统一硬件探针、全部任务的 CPU/内存
 请求和已有 VM 占用，计算两方相同的最大并发。它按最重活动题组校验预算，不减少题集，
-不改变题内资源。`TOFU_RESOURCE_PROFILE=throughput` 启用生产运行时的硬件并发策略。
+不改变题内资源。生产运行时的执行并发从不由硬件决定（`docs/RESOURCE_CONTROL.md`“Hardware never limits work”），没有资源配置档。
 每次准备将资源环境写入 `manifest.runtime_resource_environment`；恢复运行注入登记值，
 配对注册拒绝两方资源环境不同。提高并发使用新 run ID，旧轮次及未完成题仍保留在其全域报告中。
 

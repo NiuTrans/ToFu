@@ -77,17 +77,9 @@ def _tofu_maybe_reexec_into_env():
     # realpath(sys.executable) while the venv's site-packages are NOT active.
     # Comparing sys.prefix to env_prefix catches that (falls back to the
     # interpreter-path compare when env_prefix is absent, e.g. conda markers).
-    same = False
-    if env_prefix:
-        try:
-            same = (os.path.realpath(sys.prefix) == os.path.realpath(env_prefix))
-        except OSError:
-            same = (sys.prefix == env_prefix)
-    else:
-        try:
-            same = os.path.realpath(target_py) == os.path.realpath(sys.executable)
-        except OSError:
-            same = (target_py == sys.executable)
+    # A verified local replica of the marked environment is that environment.
+    from serverctl_pkg.runtime_replica import runs_marked_environment
+    same = runs_marked_environment(target_py, env_prefix)
     # Export BEFORE the early return — see server.py's twin helper. A direct
     # `python bootstrap.py` with the env interpreter takes this return, and
     # every Chromium it later spawns would otherwise miss $env_prefix/lib.

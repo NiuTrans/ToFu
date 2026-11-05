@@ -266,48 +266,93 @@ def _alias_slug(tool_name, display) -> str:
     return 'result'
 
 
-def _register_task_alias(task, alias, digest_ref) -> None:
-    """Same-turn fast path for resolve; loss degrades to the durable store."""
+def _remember_bounded(task, key, alias, value) -> None:
+    entries = task.setdefault(key, {})
+    if alias not in entries and len(entries) >= _ALIAS_MAX_ENTRIES:
+        entries.pop(next(iter(entries)))
+    entries[alias] = value
+
+
+def _register_task_alias(task, alias, digest_ref, expires_at_ms) -> None:
+    """Same-turn fast path for resolve; loss degrades to the durable store.
+
+    The claim map records this task's own durable row expiry, so a re-mint in
+    the same turn (per-result settle, then the round-aggregate budget) skips
+    storage while that claim still has at least half its TTL left.
+    """
     if not isinstance(task, dict):
         return
-    aliases = task.setdefault('_artifactAliases', {})
-    if alias not in aliases and len(aliases) >= _ALIAS_MAX_ENTRIES:
-        aliases.pop(next(iter(aliases)))
-    aliases[alias] = digest_ref
+    _remember_bounded(task, '_artifactAliases', alias, digest_ref)
+    _remember_bounded(task, '_artifactAliasClaims', alias, (digest_ref, expires_at_ms))
+
+
+def _claimed_by_task(task, alias, digest_ref, *, now_ms, ttl_ms) -> bool:
+    claims = task.get('_artifactAliasClaims') if isinstance(task, dict) else None
+    claim = claims.get(alias) if isinstance(claims, dict) else None
+    return (isinstance(claim, tuple) and claim[0] == digest_ref
+            and isinstance(claim[1], int) and claim[1] - now_ms >= ttl_ms // 2)
+
+
+#: Version-guarded writes per claim: create-if-absent, then at most two
+#: replacements of an observed own/expired row that a concurrent mint moved.
+_ALIAS_CLAIM_ATTEMPTS = 3
+
+
+def _put_alias_version(client, owner, alias, value, *, expected_version,
+                       now_ms) -> bool:
+    """One ``record.put`` guarded by ``expected_version``; False on conflict."""
+    from lib.agent_core.storage_errors import StorageError
+    try:
+        client.command(
+            'record.put',
+            {'namespace': _ALIAS_NAMESPACE, 'key': alias, 'value': value,
+             'expected_version': expected_version},
+            f'tool-result-alias:{owner}:{alias}:{now_ms}:{expected_version}')
+    except StorageError as exc:
+        if exc.code == 'database_conflict':
+            return False
+        raise
+    return True
 
 
 def _claim_alias_record(owner, alias, digest_ref, *, now_ms, ttl_ms) -> bool:
     """Persist ``alias -> digest_ref`` unless a live row maps it elsewhere.
 
-    Advisory: store hiccups return False (caller keeps the digest). A live
-    row for different content — or another owner's handle — is never
-    overwritten; the caller lengthens the suffix instead. The read-after-write
-    verify closes the concurrent-mint race: a lane that lost the write race
-    sees the foreign digest here and lengthens rather than silently aliasing
-    to the wrong evidence.
+    Advisory: store hiccups return False (caller keeps the digest). A fresh
+    alias costs one atomic create-if-absent (``expected_version`` 0) on the
+    settle path. An existing row is read: a live row for different content —
+    or another owner's handle — is never overwritten and the caller lengthens
+    the suffix; our own row (re-spill refresh) or an expired one is replaced
+    only at the version just observed. The version guard closes the
+    concurrent-mint race that a read-after-write verify used to close, so a
+    lane that loses the race re-reads instead of aliasing the wrong evidence.
     """
+    value = {'v': 1, 'user_id': owner, 'digest': digest_ref,
+             'expiresAtMs': now_ms + ttl_ms}
     try:
         client = get_storage_client(write=True)
-        row = client.query(
-            'record.get', {'namespace': _ALIAS_NAMESPACE, 'key': alias})
-        value = row.get('value') if isinstance(row, dict) else None
-        if isinstance(value, dict):
-            expires = value.get('expiresAtMs')
-            live = not (isinstance(expires, int) and expires <= now_ms)
-            if live and (value.get('user_id') != owner
-                         or value.get('digest') != digest_ref):
+        expected_version = 0
+        for _attempt in range(_ALIAS_CLAIM_ATTEMPTS):
+            if _put_alias_version(client, owner, alias, value,
+                                  expected_version=expected_version,
+                                  now_ms=now_ms):
+                return True
+            row = client.query(
+                'record.get', {'namespace': _ALIAS_NAMESPACE, 'key': alias})
+            if not isinstance(row, dict):
+                expected_version = 0
+                continue
+            current = row.get('value')
+            if isinstance(current, dict):
+                expires = current.get('expiresAtMs')
+                live = not (isinstance(expires, int) and expires <= now_ms)
+                if live and (current.get('user_id') != owner
+                             or current.get('digest') != digest_ref):
+                    return False
+            expected_version = row.get('version')
+            if isinstance(expected_version, bool) or not isinstance(expected_version, int):
                 return False
-        client.command(
-            'record.put',
-            {'namespace': _ALIAS_NAMESPACE, 'key': alias, 'value': {
-                'v': 1, 'user_id': owner, 'digest': digest_ref,
-                'expiresAtMs': now_ms + ttl_ms}},
-            f'tool-result-alias:{owner}:{alias}:{now_ms}')
-        row = client.query(
-            'record.get', {'namespace': _ALIAS_NAMESPACE, 'key': alias})
-        value = row.get('value') if isinstance(row, dict) else None
-        return (isinstance(value, dict) and value.get('user_id') == owner
-                and value.get('digest') == digest_ref)
+        return False
     except Exception as exc:  # advisory: never let a store hiccup break settle
         _origin_logger().debug('[artifact_alias] claim failed for %s: %s',
                                alias, exc)
@@ -340,8 +385,10 @@ def mint_artifact_alias(task, artifact_ref, *, tool_name, display,
     digest_hex = ref[len('tool-result:'):]
     for length in _ALIAS_SUFFIX_LENGTHS:
         alias = f'tr:{slug}:{digest_hex[:length]}'
+        if _claimed_by_task(task, alias, ref, now_ms=now, ttl_ms=ttl):
+            return alias
         if _claim_alias_record(owner, alias, ref, now_ms=now, ttl_ms=ttl):
-            _register_task_alias(task, alias, ref)
+            _register_task_alias(task, alias, ref, now + ttl)
             return alias
     return None
 

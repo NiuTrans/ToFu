@@ -1093,29 +1093,28 @@ def _project_brain_list_active(session: Session, payload: Mapping[str, Any]) -> 
 def _project_brain_recovery_snapshot(
     session: Session, payload: Mapping[str, Any],
 ) -> Any:
-    """Page restart recovery by index key, unaffected by settling earlier work."""
+    """Page restart recovery in primary-key order, one row per project.
+
+    Settlement rewrites a row in place, so no project moves across the
+    continuation and a complete walk reads each projection exactly once.
+    """
     cursor = payload.get('cursor')
     where = ''
     params = ()
     if cursor is not None:
         if (not isinstance(cursor, Mapping)
-                or set(cursor) != {'updatedAt', 'ownerUserId', 'projectKey'}
-                or type(cursor.get('updatedAt')) is not int
-                or cursor['updatedAt'] < 0
+                or set(cursor) != {'ownerUserId', 'projectKey'}
                 or type(cursor.get('ownerUserId')) is not int
                 or cursor['ownerUserId'] <= 0
                 or not isinstance(cursor.get('projectKey'), str)
                 or not 1 <= len(cursor['projectKey']) <= 4096):
             raise StorageError('database_protocol_error', 'Invalid recovery cursor')
-        where = (
-            'WHERE updated_at_ms < ? OR (updated_at_ms = ? AND '
-            '(owner_user_id > ? OR (owner_user_id = ? AND project_key > ?))) ')
-        params = (cursor['updatedAt'], cursor['updatedAt'],
-                  cursor['ownerUserId'], cursor['ownerUserId'], cursor['projectKey'])
+        where = 'WHERE owner_user_id > ? OR (owner_user_id = ? AND project_key > ?) '
+        params = (cursor['ownerUserId'], cursor['ownerUserId'], cursor['projectKey'])
     rows = session.fetch_all(
-        'SELECT owner_user_id,project_key,projection_json,updated_at_ms '
+        'SELECT owner_user_id,project_key,projection_json '
         'FROM storage_project_brain_projects ' + where +
-        'ORDER BY updated_at_ms DESC,owner_user_id,project_key LIMIT 1001', params)
+        'ORDER BY owner_user_id,project_key LIMIT 1001', params)
     capped = len(rows) > 1000
     rows = rows[:1000]
     projects = []
@@ -1138,7 +1137,6 @@ def _project_brain_recovery_snapshot(
     if capped:
         last = rows[-1]
         result['nextCursor'] = {
-            'updatedAt': int(last['updated_at_ms']),
             'ownerUserId': int(last['owner_user_id']),
             'projectKey': str(last['project_key']),
         }

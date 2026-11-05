@@ -403,8 +403,16 @@ def load_record(task_id, *, user_id, internal=False):
 
 
 def load_completed_idea_source(task_id, *, user_id, idea_id):
-    """One owned snapshot validates completed metadata and the exact selection."""
+    """One owned snapshot validates completed metadata and the exact selection.
+
+    No owned record (deleted, never saved, or another owner's) is the typed
+    ``LifecycleNotFound``; a record that exists but is invalid is a ValueError.
+    """
     source = load_record(task_id, user_id=user_id, internal=True)
+    if source is None:
+        from lib.turn_lifecycle import LifecycleNotFound
+        raise LifecycleNotFound(
+            'Saved research source not found; select an idea from an existing research run')
     if (not isinstance(source, dict) or source.get('task_id') != task_id
             or source.get('status') not in ('done', 'degraded')
             or not isinstance(source.get('direction'),str) or not source['direction']

@@ -36,7 +36,8 @@ submodules so the facade is byte-identical to the former single-file module.
 Submodules:
   • ``_frontmatter`` — frontmatter parse/build + str-list/metadata helpers
   • ``_dirs``        — constants, path resolution, per-root globals migration
-                       and the SHARED ``_lock`` / ``_migrated_roots`` state
+                       and the SHARED migration lock / ``_migrated_roots``
+                       latch state
   • ``_files``       — per-file read/write, eligibility, dir listing, id gen
   • ``_crud``        — list / query / create / update / delete / merge / toggle
 """
@@ -56,7 +57,6 @@ from ._dirs import (
     SERVER_GLOBAL_MEMORY_SUBPATH,
     SERVER_GLOBAL_SKILLS_SUBPATH,
     _PROJECT_ROOT,
-    _lock,
     _migrated_roots,
     _ensure_dir,
     _server_data_dir,
@@ -99,6 +99,7 @@ from ._crud import (
     get_memory,
     get_enabled_memories,
     get_eligible_memories,
+    has_eligible_memories,
     iter_eligible_memories,
     load_eligible_memories,
     create_memory,
@@ -116,7 +117,7 @@ __all__ = [
     'SERVER_GLOBAL_MEMORY_SUBPATH',
     'LEGACY_PROJECT_MEMORY_SUBDIR', 'PROJECT_SKILLS_SUBDIR', 'SERVER_GLOBAL_SKILLS_SUBPATH',
     'list_all_memories', 'list_memories', 'get_memory', 'get_enabled_memories',
-    'get_eligible_memories',
+    'get_eligible_memories', 'has_eligible_memories',
     'iter_eligible_memories', 'load_eligible_memories',
     'MemoryRevisionConflict',
     'create_memory', 'update_memory', 'delete_memory', 'clear_memories', 'merge_memories',

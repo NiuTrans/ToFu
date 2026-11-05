@@ -127,6 +127,26 @@ def _reject_undispatched(tc, display_name, tc_id, receipt_msg, rejected_meta,
             tool_round_num)
 
 
+def _tool_round_arguments(raw_arguments: Any, fn_args: dict, *,
+                          json_repaired: bool, repair_log) -> str:
+    """Keep untouched JSON-object bytes; serialize actual argument repairs.
+
+    The current call, never a native replay sidecar or provisional display row,
+    owns the arguments. A name-only alias is not an argument edit. Validate the
+    original root and decoded value so blank/non-object/failed decode carriers
+    cannot masquerade as an untouched object merely because ``fn_args == {}``.
+    """
+    if isinstance(raw_arguments, str) and not json_repaired and not repair_log:
+        try:
+            original_args = json.loads(raw_arguments)
+        except (ValueError, TypeError, RecursionError):
+            pass
+        else:
+            if isinstance(original_args, dict) and original_args == fn_args:
+                return raw_arguments
+    return json.dumps(fn_args, ensure_ascii=False) if fn_args else '{}'
+
+
 def publish_tool_call_entry(task, round_entry, event_payload, name, number):
     """Announce one prepared occurrence only when its execution owner enters."""
     task['toolRounds'].append(round_entry)
@@ -583,6 +603,14 @@ def parse_tool_calls(
                 parsed_tcs.append(_receipt)
             continue
 
+        # Persist exact provider bytes only when argument ingestion left the
+        # object untouched. JSON/schema/default repairs still record the value
+        # actually dispatched. All final round entries share this decision,
+        # including provisional streaming rows serialized before this pass.
+        tc_args_str = _tool_round_arguments(
+            fn_obj.get('arguments'), fn_args,
+            json_repaired=_json_repaired, repair_log=_repair_log)
+
         # ── Check if this tool was already announced during streaming ──
         if _early_entry is not None:
             rn, round_entry = _early_entry
@@ -616,6 +644,9 @@ def parse_tool_calls(
                     _emit_ev(task, EventType.TOOL_PROGRESS,
                              roundNum=rn, toolCallId=tc_id, toolName=fn_name,
                              query=_patched, _repaired=_repair_summary)
+            # Early presentation is provisional. Use the same current-call
+            # argument carrier as a newly prepared row, not its early encoding.
+            round_entry['toolArgs'] = tc_args_str
             # A refused tool announced during streaming is restyled by the
             # typed descriptor on its later terminal event.
             if _rejection_meta:
@@ -664,9 +695,6 @@ def parse_tool_calls(
                 task['_swarmRoundNum'] = rn
             parsed_tcs.append((tc, fn_name, tc_id, fn_args, rn, round_entry, _args_parse_error))
             continue
-
-        # ── Serialize args for continue context ──
-        tc_args_str = json.dumps(fn_args, ensure_ascii=False) if fn_args else '{}'
 
         # ── Build round entry + event via dispatch-dict helper ──
         tool_round_num, round_entry, event_payload = _build_tool_round_entry(
@@ -755,22 +783,31 @@ def parse_tool_calls(
 
         parsed_tcs.append((tc, fn_name, tc_id, fn_args, rn, round_entry, _args_parse_error))
 
-    # Heal the at-rest segment mirror after the pre-tool prose stamp. The
-    # prelude's _discard_pretool_prose has already zeroed the accumulators
-    # (DELTA_RESET), but the persisted mirror still carries the pre-parse
-    # assembly — its terminal prose was blanked by that reset, so until the
-    # round_end checkpoint re-assembles, the narration the model just emitted
-    # is invisible on refresh. Rebuild now: the stamp above put this batch's
-    # prose on its first round entry, so the mirror immediately renders the
-    # narration ahead of these tool cards. Skipped while the accumulators
-    # still hold prose (no discard ran ⇒ the live terminal blocks own the
-    # narration and the mirror is already correct).
-    if not (task.get('content') or task.get('thinking')):
-        try:
-            from lib.tasks_pkg.segments import assemble_segments
-            task['segments'] = assemble_segments(task)
-        except Exception:
-            logger.debug('[Task %s] post-parse segment mirror refresh failed',
-                         tid, exc_info=True)
-
+    _heal_segment_mirror(task, tid)
     return parsed_tcs, tool_round_num
+
+
+def _heal_segment_mirror(task, tid):
+    """Heal the at-rest segment mirror after the pre-tool prose stamp.
+
+    The prelude's _discard_pretool_prose has already zeroed the accumulators
+    (DELTA_RESET), but the persisted mirror still carries the pre-parse
+    assembly — its terminal prose was blanked by that reset, so until the
+    round_end checkpoint re-assembles, the narration the model just emitted
+    is invisible on refresh. Rebuild now: the stamp put this batch's prose on
+    its first round entry, so the mirror immediately renders the narration
+    ahead of these tool cards. Skipped while the accumulators still hold
+    prose (no discard ran ⇒ the live terminal blocks own the narration and
+    the mirror is already correct).
+    """
+    if task.get('content') or task.get('thinking'):
+        return
+    try:
+        from lib.conversation_sync.settled_rows import settle_items
+        from lib.tasks_pkg.segments import assemble_segments
+        # The mirror is replaced wholesale, never edited: share it.
+        task['segments'] = settle_items(
+            assemble_segments(task), previous=task.get('segments'))
+    except Exception:
+        logger.debug('[Task %s] post-parse segment mirror refresh failed',
+                     tid, exc_info=True)

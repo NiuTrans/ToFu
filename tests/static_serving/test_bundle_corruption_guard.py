@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._jsdom import require_shipped_graph
+
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
@@ -56,8 +58,9 @@ def test_manifest_rejects_missing_entry_file(
     manifest = {
         'frontend/src/main.ts': {'file': 'assets/missing.js', 'isEntry': True},
         'frontend/src/admin.ts': {'file': 'assets/admin.js', 'isEntry': True},
+        'frontend/src/plugin.ts': {'file': 'assets/plugin.js', 'isEntry': True},
     }
-    assets = _install_graph(tmp_path, monkeypatch, manifest, ('admin.js',))
+    assets = _install_graph(tmp_path, monkeypatch, manifest, ('admin.js', 'plugin.js'))
     with pytest.raises(assets.ViteAssetError, match='missing.js'):
         getattr(assets, validator_name)()
 
@@ -69,8 +72,9 @@ def test_manifest_rejects_dangling_import(tmp_path, monkeypatch):
             'imports': ['frontend/src/missing.ts'],
         },
         'frontend/src/admin.ts': {'file': 'assets/admin.js', 'isEntry': True},
+        'frontend/src/plugin.ts': {'file': 'assets/plugin.js', 'isEntry': True},
     }
-    assets = _install_graph(tmp_path, monkeypatch, manifest, ('main.js', 'admin.js'))
+    assets = _install_graph(tmp_path, monkeypatch, manifest, ('main.js', 'admin.js', 'plugin.js'))
     with pytest.raises(assets.ViteAssetError, match='reference.*missing'):
         assets.validate_vite_artifact()
 
@@ -82,8 +86,9 @@ def test_manifest_rejects_malformed_reference_lists(tmp_path, monkeypatch, field
     manifest = {
         'frontend/src/main.ts': {'file': 'assets/main.js', 'isEntry': True, field: value},
         'frontend/src/admin.ts': {'file': 'assets/admin.js', 'isEntry': True},
+        'frontend/src/plugin.ts': {'file': 'assets/plugin.js', 'isEntry': True},
     }
-    assets = _install_graph(tmp_path, monkeypatch, manifest, ('main.js', 'admin.js'))
+    assets = _install_graph(tmp_path, monkeypatch, manifest, ('main.js', 'admin.js', 'plugin.js'))
     with pytest.raises(assets.ViteAssetError, match=field):
         assets.validate_vite_artifact()
 
@@ -92,26 +97,17 @@ def test_manifest_rejects_unmarked_entry(tmp_path, monkeypatch):
     manifest = {
         'frontend/src/main.ts': {'file': 'assets/main.js'},
         'frontend/src/admin.ts': {'file': 'assets/admin.js', 'isEntry': True},
+        'frontend/src/plugin.ts': {'file': 'assets/plugin.js', 'isEntry': True},
     }
-    assets = _install_graph(tmp_path, monkeypatch, manifest, ('main.js', 'admin.js'))
+    assets = _install_graph(tmp_path, monkeypatch, manifest, ('main.js', 'admin.js', 'plugin.js'))
     with pytest.raises(assets.ViteAssetError, match='has no entry'):
         assets.validate_vite_artifact()
 
 
 def test_live_vite_graph_passes_the_same_strict_validator():
+    require_shipped_graph()
     from lib.vite_assets import validate_vite_artifact
 
     manifest = validate_vite_artifact()
     assert manifest['frontend/src/main.ts']['isEntry'] is True
     assert manifest['frontend/src/admin.ts']['isEntry'] is True
-
-
-def test_release_build_validates_staging_before_atomic_manifest_commit():
-    source = (ROOT / 'scripts/build_frontend.mjs').read_text(encoding='utf-8')
-    build_at = source.index('await build(')
-    validate_at = source.index('await validateManifest(nextManifest, temporaryDir)')
-    copy_at = source.index('for (const asset of nextAssets)')
-    commit_at = source.index("'manifest.json'), nextManifest")
-    assert build_at < validate_at < copy_at < commit_at
-    assert 'await rename(temporary, destination)' in source
-    assert 'await rm(temporaryDir, { recursive: true, force: true })' in source

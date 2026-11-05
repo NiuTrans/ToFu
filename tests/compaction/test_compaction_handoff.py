@@ -1,4 +1,6 @@
 """Executable automatic-handoff contract at compaction and real wire boundaries."""
+
+import lib.tasks_pkg.llm_fallback._recovery as _fallback_recovery
 from copy import deepcopy
 import json
 
@@ -485,9 +487,8 @@ def test_final_admission_counts_restored_state_and_preserves_phase(compact, monk
                                               if is_human_message(m))
 
 
-@pytest.mark.parametrize('memory_pressure', [False, True])
-def test_reactive_retry_keeps_required_policy_and_handoff_boundary(compact, monkeypatch, memory_pressure):  # noqa: F811
-    from lib.cgroup_guard import MemoryPressureError
+@pytest.mark.parametrize('already_compacted', [False, True])
+def test_reactive_retry_keeps_required_policy_and_handoff_boundary(compact, monkeypatch, already_compacted):  # noqa: F811
     from lib.llm.llm_errors import PromptTooLongError
     from lib.tasks_pkg.compaction import _reactive as reactive
     from lib.tasks_pkg.context_composer import _providers
@@ -506,16 +507,15 @@ def test_reactive_retry_keeps_required_policy_and_handoff_boundary(compact, monk
     monkeypatch.setattr(composer, 'collect_context_blocks', lambda *a: required)
     monkeypatch.setattr(reactive, '_archive_transcript', lambda *a, **k: None)
     monkeypatch.setattr(reactive, 'micro_compact', lambda *a, **k: None)
-    if memory_pressure:
+    if already_compacted:
         compact(messages, budget=1)
         # Remove reconstructible old prose, not required project context.
         messages.insert(1, {'role': 'assistant', 'content': 'cold history ' * 100000})
-        cause = MemoryPressureError('memory headroom')
     else:
         monkeypatch.setattr(reactive, '_get_context_limit', lambda *a: 1000)
-        cause = PromptTooLongError('too long')
-    body = fallback._prepare_reactive_retry_body(
-        task, {}, 'test-model', messages, [], 'medium', False, cause, 'test')
+    body = _fallback_recovery._prepare_reactive_retry_body(
+        task, {}, 'test-model', messages, [], 'medium', False,
+        PromptTooLongError('too long'), 'test')
     assert body is not None
     _assert_current(body['messages'], task)
     assert 'Never deploy without scoped authorization.' in _text(body['messages'])

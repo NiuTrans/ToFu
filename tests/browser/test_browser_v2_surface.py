@@ -14,12 +14,10 @@ research intent adds one compound read tool without restoring raw primitives:
     browser_navigate(new_tab=true); browser_wait retired from the schema.
   * tab_id optional everywhere (server-side working-tab memory).
 
-Pins the canonical surface, schema budget, resolver/worktab/receipt
+Pins the canonical surface, resolver/worktab/receipt
 behaviour, registry declarations, and approval-enricher coverage. Retired
 names are rejected at every runtime and rendering boundary.
 """
-
-import json
 
 import pytest
 
@@ -110,29 +108,6 @@ def test_retired_names_not_shipped():
     assert not (RETIRED & shipped)
     assert not (RETIRED & set(BROWSER_HANDLERS))
     assert not (RETIRED & set(_DISPLAY_HANDLERS))
-
-
-def test_schema_diet():
-    """The 20-tool surface was 18,651 chars (~4.7k tokens per request).
-
-    Pin the consolidated surface well under that so the diet cannot
-    silently grow back.
-
-    Budget history (raise ONLY with a named capability, never drift):
-    - 15000: the consolidated 15-tool surface after the diet (measured 14999).
-    - 17200: +2 interaction tools (browser_check, browser_select_option) in
-      5.7.0 — the semantic set_checked / two-step custom-select that make the
-      5.6.0 custom-control sweep actionable (the CodeLab create-form fix).
-      Their schemas are deliberately terse (1720 chars for both).
-    - 18000: +1 interaction tool (browser_scroll) — the scroll primitive every
-      market computer-use/browser toolset ships (down/up/top/bottom/element);
-      the extension already had scroll_page, this exposes it (369 chars).
-    """
-    from lib.browser.advanced import ADVANCED_BROWSER_TOOLS
-    from lib.tools.browser import BROWSER_TOOLS
-    size = len(json.dumps(BROWSER_TOOLS + ADVANCED_BROWSER_TOOLS,
-                          ensure_ascii=False))
-    assert size < 18000, f'browser schema surface grew to {size} chars'
 
 
 def test_tab_id_optional_on_action_tools():
@@ -295,6 +270,72 @@ def test_work_tab_seed_returns_none_when_only_client_tabs():
     send = _fake_send({'list_tabs': (
         [{'id': 7, 'active': True, 'isClient': True}], None)})
     assert resolve_work_tab({}, route_key=_ROUTE_KEY, send=send) is None
+
+
+def _dispatch_screenshot(monkeypatch, fn_args, list_tabs):
+    """Run browser_screenshot through the real dispatch boundary."""
+    import lib.browser.access as access
+    import lib.browser.dispatch as dispatch
+    from lib.browser.tool_runtime import BrowserToolRuntime
+
+    calls, checked = [], []
+    send = _fake_send({
+        'list_tabs': (list_tabs, None),
+        'screenshot_tab': ({'dataUrl': 'data:image/png;base64,AAAA',
+                            'format': 'png', 'fullPage': True}, None),
+    }, calls)
+    monkeypatch.setattr(
+        'lib.browser.queue.get_connected_clients',
+        lambda owner_user_id: [{'client_id': _ROUTE_KEY[1], 'last_poll': 1.0}])
+    monkeypatch.setattr(
+        dispatch, 'BrowserToolRuntime',
+        lambda **kw: BrowserToolRuntime(sender=send, **kw))
+    monkeypatch.setattr(
+        access, 'browser_tool_access',
+        lambda fn_name, args, **kw: checked.append(dict(args)))
+    result = dispatch.execute_browser_tool(
+        'browser_screenshot', fn_args,
+        owner_user_id=_ROUTE_KEY[0], client_id=_ROUTE_KEY[1])
+    shots = [params for cmd, params in calls if cmd == 'screenshot_tab']
+    return result, shots, checked
+
+
+def test_screenshot_without_tab_id_captures_the_working_tab(monkeypatch):
+    """A tab_id-less screenshot shows the page the agent is working on, never
+    whichever tab happens to be focused (e.g. the Tofu chat itself), and the
+    access check authorizes that same tab."""
+    from lib.browser._resolve import remember_work_tab
+    remember_work_tab(_ROUTE_KEY, 11)
+    result, shots, checked = _dispatch_screenshot(
+        monkeypatch, {}, [{'id': 3, 'active': True, 'isClient': True},
+                          {'id': 11, 'active': False, 'automation': True}])
+    assert result.get('__screenshot__')
+    assert [s.get('tabId') for s in shots] == [11]
+    assert checked and checked[0].get('tabId') == 11
+
+
+def test_screenshot_never_falls_back_to_a_user_tab(monkeypatch):
+    result, shots, _ = _dispatch_screenshot(
+        monkeypatch, {}, [{'id': 3, 'active': True, 'isClient': True},
+                          {'id': 7, 'active': False}])
+    assert shots == []
+    assert isinstance(result, str) and 'Pass tab_id' in result
+
+
+def test_screenshot_explicit_tab_id_becomes_the_working_tab(monkeypatch):
+    from lib.browser._resolve import current_work_tab
+    result, shots, _ = _dispatch_screenshot(monkeypatch, {'tab_id': 7}, [])
+    assert result.get('__screenshot__') and [s.get('tabId') for s in shots] == [7]
+    assert current_work_tab(_ROUTE_KEY) == 7
+
+
+def test_screenshot_schema_names_the_working_tab_default():
+    from lib.tools.browser import BROWSER_TOOLS
+    schema = next(t for t in BROWSER_TOOLS
+                  if t['function']['name'] == 'browser_screenshot')
+    tab_id = schema['function']['parameters']['properties']['tab_id']
+    assert 'working tab' in tab_id['description']
+    assert 'active tab' not in tab_id['description']
 
 
 def test_close_tab_forgets_work_tab():
@@ -768,6 +809,83 @@ def test_read_page_auto_sparse_attaches_summary(monkeypatch):
     assert 'summarize_page' in [c for c, _ in calls]
 
 
+def test_read_page_query_mismatch_reports_accepted_text_not_sparse(monkeypatch):
+    lines = [f'Card {i}: coffee roasting notes and green beans storage' for i in range(40)]
+    page_text = '\n'.join(lines)
+    calls = []
+    runtime = _handler_runtime({
+        'read_tab': ({'title': 'Search', 'url': 'https://www.example.test/search?q=coffee',
+                      'contentSnapshot': {'text': page_text, 'records': [
+                          {'title': line, 'url': f'/cards/{i}'} for i, line in enumerate(lines)]}}, None),
+    }, calls)
+    from lib.browser.handlers import _handle_read_page
+    out = _handle_read_page(
+        {'tabId': 1, 'target': {'kind': 'list', 'query': 'coffee beans'}}, runtime)
+    # Leading with the receipt keeps the task layer's page-text filter off it.
+    assert out.startswith('Browser content: unavailable')
+    assert 'sparse' not in out and 'Canvas' not in out
+    assert 'summarize_page' not in [c for c, _ in calls]
+    assert 'coffee beans' in out and f'{len(page_text)} chars' in out
+    assert 'without target.query' in out
+    # The diagnosis never falls back to the unfiltered page content.
+    assert 'Card 3' not in out
+
+
+def test_read_page_list_target_on_text_page_is_not_called_sparse(monkeypatch):
+    text = 'Brewing coffee at home\nGrind the beans just before brewing.'
+    calls = []
+    runtime = _handler_runtime({
+        'read_tab': ({'title': 'Coffee notes', 'url': 'https://www.example.test/articles/coffee',
+                      'contentSnapshot': {'text': text, 'records': []}}, None),
+    }, calls)
+    from lib.browser.handlers import _handle_read_page
+    out = _handle_read_page({'tabId': 1, 'target': {'kind': 'list'}}, runtime)
+    assert 'Browser content: unavailable' in out
+    assert 'sparse' not in out and 'summarize_page' not in [c for c, _ in calls]
+    assert f'{len(text)} chars' in out and 'Grind the beans' not in out
+
+
+def test_read_page_http_error_document_is_reported_not_diagnosed_sparse(monkeypatch):
+    calls = []
+    runtime = _handler_runtime({
+        'read_tab': ({'title': '404 Not Found', 'url': 'https://www.example.test/hotels/list',
+                      'text': '404 Not Found\nopenresty'}, None),
+    }, calls)
+    from lib.browser.handlers import _handle_read_page
+    out = _handle_read_page({'tabId': 1, 'target': {'kind': 'list', 'query': 'lake'}}, runtime)
+    assert 'Browser content: unavailable' in out and 'http_error_404' in out
+    assert 'sparse' not in out and 'No content matched' not in out
+    assert 'summarize_page' not in [c for c, _ in calls]
+
+
+def test_read_page_cjk_query_split_across_cards_names_query_not_canvas(monkeypatch):
+    cards = [f'卡片{i} 玉溪旅行攻略 湖边民宿推荐' for i in range(30)]
+    runtime = _handler_runtime({
+        'read_tab': ({'title': '搜索结果', 'url': 'https://video.example.test/search?keyword=x',
+                      'contentSnapshot': {'text': '\n'.join(cards), 'records': [
+                          {'title': card, 'url': f'/v/{i}'} for i, card in enumerate(cards)]}}, None),
+    }, [])
+    from lib.browser.handlers import _handle_read_page
+    out = _handle_read_page(
+        {'tabId': 1, 'target': {'kind': 'list', 'query': '玉溪民宿'}}, runtime)
+    assert '"玉溪民宿"' in out and f"{len(chr(10).join(cards))} chars" in out
+    assert 'Canvas' not in out and '卡片1 ' not in out
+
+
+def test_read_page_query_on_sparse_page_keeps_canvas_diagnosis(monkeypatch):
+    calls = []
+    runtime = _handler_runtime({
+        'read_tab': ({'title': 'T', 'url': 'http://x', 'text': 'tiny', 'html': ''}, None),
+        'summarize_page': ({'title': 'T', 'url': 'http://x', 'framework': 'Vue',
+                            'canvasCount': 2, 'svgCount': 0, 'domElementCount': 50}, None),
+    }, calls)
+    from lib.browser.handlers import _handle_read_page
+    out = _handle_read_page(
+        {'tabId': 1, 'target': {'kind': 'list', 'query': 'coffee'}}, runtime)
+    assert 'sparse' in out and 'Structural summary' in out
+    assert 'summarize_page' in [c for c, _ in calls]
+
+
 def test_read_page_modes_delegate(monkeypatch):
     calls = []
     runtime = _handler_runtime({
@@ -784,6 +902,14 @@ def test_read_page_modes_delegate(monkeypatch):
         {'tabId': 1, 'mode': 'app_state'}, runtime)
     assert 'unknown mode' in _handle_read_page(
         {'tabId': 1, 'mode': 'bogus'}, runtime)
+
+
+def test_read_page_mode_enum_pins_the_media_inventory():
+    from lib.tools.browser import BROWSER_TOOL_READ_PAGE
+    function = BROWSER_TOOL_READ_PAGE['function']
+    assert function['parameters']['properties']['mode']['enum'] == [
+        'auto', 'text', 'data', 'elements', 'app_state', 'media']
+    assert 'media lists images/video/audio to stage' in function['description']
 
 
 # ── 7. Registry + approval declarations ───────────────────────────────

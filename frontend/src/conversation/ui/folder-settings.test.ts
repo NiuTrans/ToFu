@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 /** Behavior specifications for the typed folder editor; only native dialog
- * methods are shimmed because jsdom has no top-layer implementation. */
+ * methods are shimmed because jsdom has no top-layer implementation. The
+ * shared browser's own contract lives in features/project/folder-browser.test.ts. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openFolderDeleteConfirmation, openFolderSettings } from './folder-settings';
 import type { FolderSettingsHandle, FolderSettingsPorts, FolderSettingsRecord } from './folder-settings';
@@ -8,7 +9,7 @@ import { mountFolderConfigControls } from './folder-config-control';
 
 const handles: FolderSettingsHandle[] = [];
 const t = (key: string, values?: Record<string, string | number>) => `${key}${values ? JSON.stringify(values) : ''}`;
-const flush = async () => { for (let index = 0; index < 8; index++) await Promise.resolve(); };
+const flush = async () => { for (let index = 0; index < 10; index++) await Promise.resolve(); };
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (cause: Error) => void;
@@ -41,6 +42,9 @@ function add(el: Element, path: string) {
 }
 function rootPaths(el: Element) { return [...el.querySelectorAll<HTMLElement>('.folder-settings-root')].map(row => row.dataset.path); }
 function row(el: Element, path: string) { return [...el.querySelectorAll<HTMLElement>('.folder-settings-root')].find(row => row.dataset.path === path)!; }
+function action(el: Element, name: string) { return el.querySelector<HTMLButtonElement>(`[data-action="${name}"]`)!; }
+function recentEntry(el: Element, path: string) { return el.querySelector<HTMLButtonElement>(`.folder-settings-recent-list button[data-path="${path}"]`)!; }
+const response = (ok: boolean, body: unknown) => ({ ok, json: async () => body });
 
 beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: function(this: HTMLDialogElement) { this.open = true; } });
@@ -52,12 +56,13 @@ beforeEach(() => {
 afterEach(() => { handles.splice(0).forEach(handle => handle.dispose()); document.body.replaceChildren(); vi.restoreAllMocks(); });
 
 describe('folder settings commands and root editing', () => {
-  it('creates with only a name, accessible dialog naming and no startup requests', async () => {
+  it('creates with only a name and accessible naming; opening only reads folders and recents', async () => {
     const p = ports(); const { el } = open(p);
     expect(el.open).toBe(true);
     expect(document.getElementById(el.getAttribute('aria-labelledby')!)?.textContent).toBe('folder.createTitle');
-    expect(el.querySelector('details')?.open).toBe(false);
-    expect(p.browse).not.toHaveBeenCalled(); expect(p.recent).not.toHaveBeenCalled();
+    expect(p.browse).toHaveBeenCalledTimes(1); expect(p.browse).toHaveBeenCalledWith('~', false, expect.any(AbortSignal));
+    expect(p.recent).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(input(el, 'folder.settings.name'));
     input(el, 'folder.settings.name').value = '  Name only  ';
     submit(el); await flush();
     expect(p.create).toHaveBeenCalledWith({ name: 'Name only', color: '', projectPaths: [], readOnlyPaths: [] });
@@ -103,17 +108,20 @@ describe('folder settings commands and root editing', () => {
   it('shows full ambiguous paths, reorders with native buttons, preserves focus and primary/read-only flags', async () => {
     const p = ports(); const { el } = open(p, folder);
     expect(rootPaths(el)).toEqual(['/one/shared', '/two/shared']);
-    const up = row(el, '/two/shared').querySelector<HTMLButtonElement>('[data-action="up"]')!;
+    expect([...el.querySelectorAll('.folder-settings-root-path')].map(path => path.textContent)).toEqual(['/one/shared', '/two/shared']);
+    const up = action(row(el, '/two/shared'), 'up');
     up.focus(); up.click();
     expect(rootPaths(el)).toEqual(['/two/shared', '/one/shared']);
-    expect(document.activeElement).toBe(row(el, '/two/shared').querySelector('input[type=radio]'));
-    expect(row(el, '/two/shared').querySelector<HTMLInputElement>('input[type=radio]')?.checked).toBe(true);
-    expect(row(el, '/two/shared').querySelector<HTMLInputElement>('input[type=checkbox]')?.checked).toBe(true);
-    const down = row(el, '/two/shared').querySelector<HTMLButtonElement>('[data-action="down"]')!;
-    down.click();
-    const primary = row(el, '/two/shared').querySelector<HTMLInputElement>('input[type=radio]')!;
-    primary.click(); expect(rootPaths(el)[0]).toBe('/two/shared');
-    button(row(el, '/two/shared'), 'folder.settings.removeRoot').click();
+    // Reaching the top disables Up; focus stays on the same root.
+    expect(document.activeElement).toBe(action(row(el, '/two/shared'), 'primary'));
+    expect(action(row(el, '/two/shared'), 'primary').getAttribute('aria-pressed')).toBe('true');
+    expect(action(row(el, '/two/shared'), 'readonly').getAttribute('aria-pressed')).toBe('true');
+    expect(el.textContent).toContain('folder.settings.reordered{"path":"/two/shared","n":1}');
+    action(row(el, '/two/shared'), 'down').click();
+    expect(rootPaths(el)).toEqual(['/one/shared', '/two/shared']);
+    action(row(el, '/two/shared'), 'primary').click(); expect(rootPaths(el)[0]).toBe('/two/shared');
+    expect(document.activeElement).toBe(action(row(el, '/two/shared'), 'primary'));
+    action(row(el, '/two/shared'), 'remove').click();
     submit(el); await flush();
     expect(p.update).toHaveBeenCalledWith('project', expect.objectContaining({ projectPaths: ['/one/shared'], readOnlyPaths: [] }));
   });
@@ -123,7 +131,11 @@ describe('folder settings commands and root editing', () => {
     const path = input(el, 'folder.settings.path'); path.value = '/manual';
     path.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
     expect(p.create).not.toHaveBeenCalled(); expect(rootPaths(el)).toEqual(['/manual']);
-    row(el, '/manual').querySelector<HTMLInputElement>('input[type=checkbox]')!.click();
+    const lock = action(row(el, '/manual'), 'readonly');
+    expect(lock.getAttribute('aria-pressed')).toBe('false');
+    lock.click();
+    expect(action(row(el, '/manual'), 'readonly').getAttribute('aria-pressed')).toBe('true');
+    expect(document.activeElement).toBe(action(row(el, '/manual'), 'readonly'));
     submit(el); await flush(); expect(p.create).toHaveBeenCalledWith(expect.objectContaining({ readOnlyPaths: ['/manual'] }));
   });
   it('awaits save, prevents duplicate submit, and retains edited entries on failure for retry', async () => {
@@ -184,73 +196,130 @@ describe('folder settings commands and root editing', () => {
   });
 });
 
-describe('read-only directory and recent ports', () => {
-
-  it('does not overwrite user-typed location with a pending home response before Go', async () => {
-    const home = deferred<unknown>();
-    const p = ports({ browse: vi.fn().mockReturnValueOnce(home.promise).mockResolvedValueOnce({ path: '/typed', parent: '/', dirs: [] }) });
-    const { el } = open(p); button(el, 'folder.projectPathBrowse').click();
-    const location = input(el, 'folder.settings.browseLocation');
-    location.value = '/typed'; location.dispatchEvent(new Event('input', { bubbles: true }));
-    home.resolve({ path: '/home', parent: '/', dirs: [] }); await flush();
-    expect(location.value).toBe('/typed');
-    expect(button(el, 'folder.settings.useDirectory').disabled).toBe(true);
-    button(el, 'folder.settings.go').click(); await flush();
-    expect(p.browse).toHaveBeenLastCalledWith('/typed', false, expect.any(AbortSignal));
-    expect(button(el, 'folder.settings.useDirectory').disabled).toBe(false);
+describe('shared folder browser and recent ports', () => {
+  it('opens on the primary root and stages browsed folders without writing until Save', async () => {
+    const p = ports(); const { el } = open(p, folder); await flush();
+    expect(p.browse).toHaveBeenCalledWith('/one/shared', false, expect.any(AbortSignal));
+    const browser = el.querySelector('.folder-browser')!;
+    browser.querySelector<HTMLButtonElement>('.folder-browser-row[data-dir-path="/home/project"] [data-action="add"]')!.click();
+    expect(rootPaths(el)).toEqual(['/one/shared', '/two/shared', '/home/project']);
+    expect(browser.querySelector<HTMLElement>('.folder-browser-row[data-dir-path="/home/project"]')?.dataset.added).toBe('true');
+    action(row(el, '/home/project'), 'remove').click();
+    expect(browser.querySelector<HTMLElement>('.folder-browser-row[data-dir-path="/home/project"]')?.dataset.added).toBe('false');
+    expect(p.create).not.toHaveBeenCalled(); expect(p.update).not.toHaveBeenCalled();
   });
-  it('browses real dirs response and only stages selected path, without writing until Save', async () => {
-    const p = ports(); const { el } = open(p); button(el, 'folder.projectPathBrowse').click(); await flush();
-    expect(p.browse).toHaveBeenCalledWith('~', false, expect.any(AbortSignal));
-    button(el, 'project').click(); await flush();
+  it('explains a browsed root refused at the limit inside the browser, not on the manual path field', async () => {
+    const initial = { ...folder, projectPaths: Array.from({ length: 32 }, (_, index) => `/root/${index}`) };
+    const { el } = open(ports(), initial); await flush();
+    el.querySelector<HTMLButtonElement>('.folder-browser-row[data-dir-path="/home/project"] [data-action="add"]')!.click();
+    expect(rootPaths(el)).toHaveLength(32);
+    expect(el.querySelector('.folder-browser-alert')?.textContent).toBe('folder.settings.pathLimit');
+    expect(input(el, 'folder.settings.path').hasAttribute('aria-invalid')).toBe(false);
+  });
+  it('browses into a directory and adds the open folder from the footer', async () => {
+    const p = ports(); const { el } = open(p); await flush();
+    el.querySelector<HTMLButtonElement>('.folder-browser-row[data-dir-path="/home/project"] .folder-browser-open')!.click(); await flush();
     expect(p.browse).toHaveBeenLastCalledWith('/home/project', false, expect.any(AbortSignal));
-    button(el, 'folder.settings.useDirectory').click();
+    button(el, 'pm.addThisFolder').click();
     expect(rootPaths(el)).toEqual(['/home']); // mock's acknowledged absolute directory
     expect(p.create).not.toHaveBeenCalled(); expect(p.update).not.toHaveBeenCalled();
   });
-  it('shows browse errors rather than an empty list and fences stale navigation results', async () => {
-    const first = deferred<unknown>(); const second = deferred<unknown>();
-    const p = ports({ browse: vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise).mockResolvedValueOnce({ error: 'Permission denied' }) });
-    const { el } = open(p); button(el, 'folder.projectPathBrowse').click();
-    const firstSignal = vi.mocked(p.browse).mock.calls[0][2];
-    input(el, 'folder.settings.browseLocation').value = '/new'; button(el, 'folder.settings.go').click();
-    expect(firstSignal.aborted).toBe(true);
-    second.resolve({ path: '/new', parent: '/', dirs: [], truncated: true }); await flush();
-    first.resolve({ path: '/stale', parent: '/', dirs: [{ name: 'stale', path: '/stale/child' }] }); await flush();
-    expect(input(el, 'folder.settings.browseLocation').value).toBe('/new');
-    expect(el.textContent).not.toContain('stale'); expect(el.textContent).toContain('folder.settings.browseTruncated');
-    button(el, 'folder.settings.go').click(); await flush();
-    expect(el.textContent).toContain('Permission denied'); expect(button(el, 'folder.settings.useDirectory').disabled).toBe(true);
+  it('shows browse failures rather than an empty list and supports hidden directory intent', async () => {
+    const p = ports({ browse: vi.fn().mockResolvedValueOnce({ error: 'Permission denied' }).mockResolvedValue({ path: '/home', parent: '/', dirs: [] }) });
+    const { el } = open(p); await flush();
+    expect(el.querySelector('.folder-browser-alert')?.textContent).toContain('Permission denied');
+    button(el, 'pm.showHidden').click(); await flush();
+    expect(p.browse).toHaveBeenLastCalledWith('~', true, expect.any(AbortSignal));
   });
-  it('displays malformed browse responses as failures and supports hidden directory intent', async () => {
-    const p = ports({ browse: vi.fn().mockResolvedValue(null) }); const { el } = open(p);
-    button(el, 'folder.projectPathBrowse').click(); await flush();
-    expect(el.textContent).toContain('folder.settings.browseFailed');
-    const hidden = [...el.querySelectorAll<HTMLInputElement>('input[type=checkbox]')].find(control => control.parentElement?.textContent === 'folder.settings.showHidden')!;
-    hidden.click(); await flush(); expect(p.browse).toHaveBeenLastCalledWith('~', true, expect.any(AbortSignal));
+  it('creates and deletes server directories, keeping default roots consistent with the server', async () => {
+    const rmdir = vi.fn().mockResolvedValueOnce(response(false, { detail: 'Refused by server' })).mockResolvedValueOnce(response(true, { ok: true }));
+    const mkdir = vi.fn().mockResolvedValue(response(true, { ok: true, path: '/home/new' }));
+    let removed = false;
+    const browse = vi.fn(async (path: string) => ({ path, parent: '/', dirs: path === '/home' && !removed ? [{ name: 'project', path: '/home/project' }] : [] }));
+    const p = ports({ browse, mkdir, rmdir }); const { el } = open(p, { ...folder, projectPaths: ['/home', '/home/project'], readOnlyPaths: ['/home/project'] });
+    await flush();
+    const deleteRow = () => {
+      el.querySelector<HTMLButtonElement>('.folder-browser-row[data-dir-path="/home/project"] [data-action="delete"]')!.click();
+      button(el, 'common.delete').click();
+    };
+    deleteRow();
+    expect(rootPaths(el)).toEqual(['/home']);
+    await flush();
+    expect(rootPaths(el)).toEqual(['/home', '/home/project']);
+    expect(action(row(el, '/home/project'), 'readonly').getAttribute('aria-pressed')).toBe('true');
+    expect(el.querySelector('.folder-browser-alert')?.textContent).toContain('Refused by server');
+    removed = true; deleteRow(); await flush();
+    expect(rootPaths(el)).toEqual(['/home']);
+    expect(el.textContent).toContain('folder.deleted');
+    button(el, 'pm.newFolderHere').click();
+    const name = el.querySelector<HTMLInputElement>('.folder-browser-create-input')!;
+    name.value = 'new';
+    name.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); await flush();
+    expect(mkdir).toHaveBeenCalledWith('/home', 'new');
+    expect(p.update).not.toHaveBeenCalled();
+    expect(el.querySelector('[aria-current="location"]')?.textContent).toBe('new');
+  });
+  it('saving while a directory delete is pending waits for the server and keeps a refused root', async () => {
+    const deletion = deferred<unknown>();
+    const rmdir = vi.fn(() => deletion.promise);
+    const browse = vi.fn(async (path: string) => ({ path, parent: '/', dirs: path === '/home' ? [{ name: 'project', path: '/home/project' }] : [] }));
+    const p = ports({ browse, rmdir }); const { el } = open(p, { ...folder, projectPaths: ['/home', '/home/project'], readOnlyPaths: [] });
+    await flush();
+    el.querySelector<HTMLButtonElement>('.folder-browser-row[data-dir-path="/home/project"] [data-action="delete"]')!.click();
+    button(el, 'common.delete').click();
+    expect(rootPaths(el)).toEqual(['/home']);
+    submit(el); await flush();
+    expect(p.update).not.toHaveBeenCalled();
+    deletion.resolve(response(false, { detail: 'Refused by server' })); await flush();
+    expect(p.update).toHaveBeenCalledWith('project', expect.objectContaining({ projectPaths: ['/home', '/home/project'] }));
+  });
+  it('does not add a typed path on an input-method Enter', () => {
+    const { el } = open(ports());
+    const path = input(el, 'folder.settings.path'); path.value = '/ime';
+    path.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true }));
+    expect(rootPaths(el)).toEqual([]);
   });
   it('renders recent names separately with exact accessible paths and no HTML interpretation', async () => {
     const path = '/workspace/<img src=x onerror=alert(1)>/project';
-    const p = ports({ recent: vi.fn().mockResolvedValue([{ path }]) });
-    const { el } = open(p); const details = el.querySelector('details')!;
-    details.open = true; details.dispatchEvent(new Event('toggle')); await flush();
-    const entry = el.querySelector<HTMLButtonElement>('.folder-settings-recent-list button')!;
+    const p = ports({ recent: vi.fn().mockResolvedValue([{ path, count: 3 }]) });
+    const { el } = open(p); await flush();
+    const entry = recentEntry(el, path);
     expect(entry.querySelector('.folder-settings-recent-name')?.textContent).toBe('project');
     expect(entry.querySelector('.folder-settings-recent-path')?.textContent).toBe(path);
     expect(entry.getAttribute('aria-label')).toBe(path); expect(entry.title).toBe(path);
-    expect(entry.querySelector('img')).toBeNull(); entry.click();
+    expect(entry.textContent).toContain('×3');
+    expect(el.querySelector('.folder-settings-recents img')).toBeNull(); entry.click();
     expect(rootPaths(el)).toEqual([path]); expect(entry.disabled).toBe(true);
+    expect(document.activeElement).toBe(input(el, 'folder.settings.path'));
     expect(p.create).not.toHaveBeenCalled();
   });
-  it('loads recents only on disclosure, exposes null failures and retries successfully', async () => {
+  it('searches recents, adds the first match on Enter and locates a recent in the browser', async () => {
+    const p = ports({ recent: vi.fn().mockResolvedValue({ projects: [{ path: '/srv/alpha' }, { path: '/srv/beta', exists: false }, { path: '/srv/gamma' }] }) });
+    const { el } = open(p); await flush();
+    expect(recentEntry(el, '/srv/beta').disabled).toBe(true);
+    expect(recentEntry(el, '/srv/beta').textContent).toContain('pm.recentMissing');
+    const search = el.querySelector<HTMLInputElement>('.folder-settings-recent-filter')!;
+    search.value = 'GAM'; search.dispatchEvent(new Event('input', { bubbles: true }));
+    expect([...el.querySelectorAll<HTMLButtonElement>('.folder-settings-recent-list button[data-path]')].map(entry => entry.dataset.path)).toEqual(['/srv/gamma']);
+    expect(el.querySelector('.folder-settings-recents .folder-settings-count')?.textContent).toBe('1/3');
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    search.dispatchEvent(enter);
+    expect(enter.defaultPrevented).toBe(true);
+    expect(rootPaths(el)).toEqual(['/srv/gamma']); expect(p.create).not.toHaveBeenCalled();
+    search.value = 'nothing'; search.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(el.textContent).toContain('pm.recentNoMatch');
+    search.value = ''; search.dispatchEvent(new Event('input', { bubbles: true }));
+    button(el, 'pm.openTitle{"name":"/srv/alpha"}').click(); await flush();
+    expect(p.browse).toHaveBeenLastCalledWith('/srv/alpha', false, expect.any(AbortSignal));
+  });
+  it('exposes null recent failures and retries successfully', async () => {
     const p = ports({ recent: vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce({ projects: [{ path: '/recent' }] }) });
-    const { el } = open(p); const details = el.querySelector('details')!;
-    expect(p.recent).not.toHaveBeenCalled(); details.open = true; details.dispatchEvent(new Event('toggle')); await flush();
+    const { el } = open(p); await flush();
     expect(el.textContent).toContain('folder.settings.recentFailed');
     button(el, 'folder.settings.retry').click(); await flush(); button(el, '/recent').click();
     expect(rootPaths(el)).toEqual(['/recent']); expect(p.create).not.toHaveBeenCalled();
 
-    button(row(el, '/recent'), 'folder.settings.removeRoot').click();
+    action(row(el, '/recent'), 'remove').click();
     expect(button(el, '/recent').disabled).toBe(false);
     button(el, '/recent').click(); expect(rootPaths(el)).toEqual(['/recent']);
   });
@@ -258,12 +327,11 @@ describe('read-only directory and recent ports', () => {
     const browse = deferred<unknown>(); const recent = deferred<unknown>(); const save = deferred<unknown>();
     const p = ports({ browse: vi.fn().mockReturnValue(browse.promise), recent: vi.fn().mockReturnValue(recent.promise), create: vi.fn().mockReturnValue(save.promise) });
     const opener = document.createElement('button'); document.body.append(opener); opener.focus();
-    const { el } = open(p); button(el, 'folder.projectPathBrowse').click();
-    const details = el.querySelector('details')!; details.open = true; details.dispatchEvent(new Event('toggle'));
+    const { el } = open(p);
     input(el, 'folder.settings.name').value = 'Pending'; submit(el);
     el.close(); expect(document.activeElement).toBe(opener);
-    expect(vi.mocked(p.browse).mock.calls[0][2].aborted).toBe(true);
-    browse.resolve({ path: '/late', dirs: [] }); recent.resolve([{ path: '/late' }]); save.reject(new Error('late failure'));
+    expect(vi.mocked(p.browse).mock.calls[0][2]?.aborted).toBe(true);
+    browse.resolve({ path: '/late', dirs: [{ name: 'late', path: '/late/late' }] }); recent.resolve([{ path: '/late' }]); save.reject(new Error('late failure'));
     await flush(); expect(document.querySelector('dialog')).toBeNull(); expect(el.textContent).not.toContain('/late');
   });
 });

@@ -62,6 +62,35 @@ def test_incremental_storage_budget(monkeypatch):
     assert stored < 160_000  # full repeated history exceeds 2.5 MB
 
 
+def test_snapshots_share_settled_twins_of_unchanged_messages(monkeypatch):
+    from lib.conversation_sync.settled_rows import SettledDict
+    from lib.tasks_pkg.round_evidence import begin_round_evidence, build_round_evidence
+    from lib.tasks_pkg.manager._persist import _HEAVY_TERMINAL_FIELDS
+    from lib.tasks_pkg.manager._events import _strip_base64_for_snapshot
+    task = {}
+    history = [{'role': 'system', 'content': 'system'},
+               {'role': 'user', 'content': [{'type': 'image_url', 'image_url': {
+                   'url': 'data:image/png;base64,' + 'A' * 64}}]},
+               {'role': 'assistant', 'content': '', 'tool_calls': [{
+                   'id': 'c1', 'type': 'function',
+                   'function': {'name': 'read_file', 'arguments': '{"path": "a"}'}}]}]
+    snapshots = []
+    for number, extra in enumerate(([], [{'role': 'tool', 'tool_call_id': 'c1',
+                                          'content': '结果'}]), start=1):
+        ref = begin_round_evidence(task, 'isolated-settled', number)
+        # The request builder hands over a fresh deep copy every round.
+        prepared = json.loads(json.dumps(history + extra))
+        snapshots.append(build_round_evidence(task, [], ref=ref, kind='request',
+                                              model='m', prepared_messages=prepared))
+        assert json.dumps(snapshots[-1]['messages']) == json.dumps(
+            _strip_base64_for_snapshot(prepared))
+    first, second = (snapshot['messages'] for snapshot in snapshots)
+    assert all(type(message) is SettledDict for message in second)
+    assert all(old is new for old, new in zip(first, second[:len(first)]))
+    assert task['_snapshotMessages'] is second
+    assert '_snapshotMessages' in _HEAVY_TERMINAL_FIELDS
+
+
 def test_explicit_turn_never_selects_other_invocation(monkeypatch):
     import lib.tasks_pkg.request_inspector as inspector
     events = [{'type': 'messages_snapshot', 'ts_ms': 1, 'payload': {

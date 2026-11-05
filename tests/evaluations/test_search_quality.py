@@ -41,6 +41,7 @@ def test_worker_identity_describes_loaded_source_not_stale_distribution_metadata
 
     assert report['tofu-search'] == (project_version or '1.2.3')
     assert report['requests'] == '1.2.3'
+    assert report['pypdf'] == '1.2.3'
     assert report['tofu_source_sha256'] == worker.python_tree_digest(package)
 
 
@@ -262,7 +263,7 @@ def test_callback_policy_refuses_unknown_tools_and_unobserved_urls_before_networ
     with pytest.raises(ValueError, match='budget'):
         execute_tool(worker, 'tofu', task, 'custom__search', {'query': 'x'}, [{}] * 8, 10)
     assert execute_tool(worker, 'tofu', task, 'custom__fetch',
-                        {'url': 'http://127.0.0.1/'}, [], 10)['error'] == 'url_not_returned_by_search'
+                        {'url': 'http://127.0.0.1/'}, [], 10)['error'] == 'url_not_observed'
     assert execute_tool(worker, 'ddgs', task, 'custom__search',
                         {'query': 'x', 'key': 'untrusted'}, [], 10)['error'] == 'invalid_arguments'
     with pytest.raises(TimeoutError):

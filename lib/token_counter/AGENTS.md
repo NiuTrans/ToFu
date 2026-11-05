@@ -2,7 +2,12 @@
 
 `api.py` owns resolution/fallback and public CountResult metadata; `base.py`
 owns request text, structural and image charges. `tiktoken_counter.py` owns
-content-free text caches, multiplicity and call-local identity receipts.
+content-free text caches (the shared digest LRU and the owner-held
+`RequestTextCounts` memo with its per-projection views, round-scoped identity
+ledger, settled-row slots and estimate scope), multiplicity and call-local
+identity receipts. Memoized counts must equal a stateless count of the same
+request; verify `test_round_text_count_reuse.py` and the request-path neighbors
+it names (compaction, body admission, root loop).
 `native.py` borrows the current app NativeHost count-only encoder, preserving
 tiktoken surrogate repair; it never owns model/account/storage authority.
 

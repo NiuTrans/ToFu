@@ -210,6 +210,15 @@ export {
   createClassicConversationRenderers,
 } from './ui/classic-conversation-renderers';
 export {
+  projectTurnContextRail,
+  renderTurnContextChecklistRowHtml,
+  renderTurnContextRailHtml,
+  renderTurnContextRootBranchHtml,
+  type TurnContextRailHost,
+  type TurnContextRailModel,
+  type TurnContextRailParts,
+} from './ui/turn-context-rail';
+export {
   openTurnInlineEditor,
   reconcileTurnInlineEditors,
   type TurnInlineEditorOptions,

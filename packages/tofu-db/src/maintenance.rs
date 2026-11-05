@@ -2,14 +2,18 @@
 //!
 //! The scheduler owns one worker, admits an explicit bounded set of
 //! tenant/owner scopes, and attempts at most one already-bounded authority
-//! transaction per interval for restored mounts, history, and expired
-//! reconstructible tool results. Scope rounds never wait for the foreground
+//! transaction per job for restored mounts, history, and expired
+//! reconstructible tool results. Logical jobs prepare on pinned snapshots
+//! outside the writer; each commit validates the original OCC witnesses.
+//! Scope rounds never wait for the foreground
 //! authority mutex: contention always defers them to a later round. The
 //! overlay background drain is the one exception to the no-wait rule: on
 //! its own fast poll cadence it takes the mutex in single-chunk slices
 //! (`drain_overlay_in_background`), because deferring under continuous load
 //! pushed every overlay merge into the foreground commit path (2026-09-21
 //! measurement: ~46-58 µs/append amortized; with slices it is ~0.1).
+//! A committed search invalidation rings the worker's condvar, ending idle
+//! backoff for that scope at the base cadence (`search_dirty::SearchInvalidations`).
 
 use std::collections::BTreeSet;
 use std::io;
@@ -27,6 +31,9 @@ use crate::generated_tofudb_ir::{
 };
 use crate::resource_probe::DaemonResourceBudget;
 use crate::turn_search_projection::TurnSearchProjection;
+
+#[path = "maintenance_preparation.rs"]
+mod prepared;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct MaintenanceScope {
@@ -52,6 +59,30 @@ pub struct MaintenanceSchedulerConfig {
     idle_interval: Duration,
     worker_stack_bytes: usize,
     history_retained_segments: usize,
+    search_admission: SearchAdmission,
+}
+
+/// Foreground evidence consulted before a search rebuild.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SearchAdmission {
+    /// The worker's long-lived process-wide sampler; its two-second progress
+    /// permit bounds each deferral.
+    ForegroundPressure,
+    /// Specifications declare an idle foreground. Concurrent tests in one
+    /// process commit on foreground threads, which the sampler cannot tell
+    /// apart from user load.
+    #[cfg(test)]
+    IdleForeground,
+}
+
+impl SearchAdmission {
+    fn defer(self, sampler: &mut crate::fsync_stats::ForegroundSampler) -> bool {
+        match self {
+            Self::ForegroundPressure => crate::fsync_stats::defer_search_projection(sampler),
+            #[cfg(test)]
+            Self::IdleForeground => false,
+        }
+    }
 }
 
 impl MaintenanceSchedulerConfig {
@@ -74,6 +105,7 @@ impl MaintenanceSchedulerConfig {
             idle_interval: Duration::from_millis(interval_milliseconds),
             worker_stack_bytes: MAINTENANCE_WORKER_STACK_BYTES,
             history_retained_segments,
+            search_admission: SearchAdmission::ForegroundPressure,
         }
     }
 
@@ -121,6 +153,7 @@ impl MaintenanceSchedulerConfig {
             idle_interval,
             worker_stack_bytes: MAINTENANCE_WORKER_STACK_BYTES,
             history_retained_segments: MAX_HISTORY_RETAINED_SEGMENTS,
+            search_admission: SearchAdmission::IdleForeground,
         }
     }
 
@@ -135,6 +168,7 @@ impl MaintenanceSchedulerConfig {
             idle_interval,
             worker_stack_bytes: MAINTENANCE_WORKER_STACK_BYTES,
             history_retained_segments,
+            search_admission: SearchAdmission::IdleForeground,
         }
     }
 }
@@ -315,6 +349,38 @@ struct SchedulerState {
     metrics: MaintenanceMetrics,
     next_idle_interval: Duration,
     terminal_error: Option<ErrorSnapshot>,
+    /// Scope-round timer, re-armed from the idle backoff after every round.
+    round_deadline: Instant,
+    round_completed_at: Instant,
+    /// One bit per admitted scope whose committed search invalidation has not
+    /// started a round yet.
+    search_wakes: u64,
+}
+
+const _: () = assert!(MAX_MAINTENANCE_SCOPES <= u64::BITS as usize);
+
+impl SchedulerState {
+    /// A committed search invalidation ends idle backoff, but a woken round
+    /// still waits one base interval after the previous round: the cadence
+    /// that continuous maintenance work already uses.
+    fn round_due(&self, base_interval: Duration) -> Instant {
+        if self.search_wakes == 0 {
+            self.round_deadline
+        } else {
+            self.round_deadline.min(self.round_completed_at + base_interval)
+        }
+    }
+
+    /// Woken scopes go first, in round-robin order; selection consumes the wake.
+    fn take_round_scope(&mut self, scopes: usize) -> usize {
+        let index = (0..scopes)
+            .map(|offset| (self.next_scope + offset) % scopes)
+            .find(|index| self.search_wakes & (1 << index) != 0)
+            .unwrap_or(self.next_scope);
+        self.search_wakes &= !(1 << index);
+        self.next_scope = (index + 1) % scopes;
+        index
+    }
 }
 
 struct Shared {
@@ -393,6 +459,7 @@ impl MaintenanceScheduler {
         if scopes.is_empty() || scopes.len() > config.maximum_scopes {
             return Err(invalid_input("maintenance scopes exceed admission bounds"));
         }
+        let started = Instant::now();
         let shared = Arc::new(Shared {
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scopes: scopes.into_iter().collect(),
@@ -406,6 +473,16 @@ impl MaintenanceScheduler {
                 },
                 next_idle_interval: config.idle_interval,
                 terminal_error: None,
+                // Deferred search activation starts on this already-owned
+                // worker, after readiness, without waiting for an unrelated
+                // retention idle interval.
+                round_deadline: if search_projection.is_some() {
+                    started
+                } else {
+                    started + config.idle_interval
+                },
+                round_completed_at: started,
+                search_wakes: 0,
             }),
             wake: Condvar::new(),
             overlay_trigger: std::sync::OnceLock::new(),
@@ -419,11 +496,20 @@ impl MaintenanceScheduler {
                 .set(guard.entity_overlay_soft_trigger());
         }
         if let Some(projection) = &search_projection {
-            // Install only cancellation metadata, retaining poison as the
-            // worker's retryable index failure. Optional search health must
-            // not prevent source maintenance or service startup.
-            projection.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-                .install_stop(Arc::clone(&shared.stop));
+            // Scopes are already sorted and unique, so each sequence index is
+            // the scope index. The worker attaches it to the authority.
+            let scheduler = Arc::downgrade(&shared);
+            let invalidations = Arc::new(crate::search_dirty::SearchInvalidations::new(
+                shared.scopes.iter().map(|scope| (scope.tenant_id, scope.owner_user_id)),
+                move |index| wake_search_scope(&scheduler, index),
+            ));
+            // Install only cancellation and coverage metadata, retaining poison
+            // as the worker's retryable index failure. Optional search health
+            // must not prevent source maintenance or service startup.
+            let mut projection =
+                projection.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            projection.install_stop(Arc::clone(&shared.stop));
+            projection.install_search_invalidations(invalidations);
         }
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
@@ -481,6 +567,18 @@ impl Drop for MaintenanceScheduler {
     }
 }
 
+/// Commit-side doorbell; runs under the committing caller's authority hold,
+/// which the worker never waits for while holding the scheduler state.
+fn wake_search_scope(shared: &std::sync::Weak<Shared>, index: usize) {
+    let Some(shared) = shared.upgrade() else {
+        return;
+    };
+    if let Ok(mut state) = shared.state.lock() {
+        state.search_wakes |= 1 << index;
+    }
+    shared.wake.notify_all();
+}
+
 /// Per-scope failure feedback for the reconstructible search projection only.
 /// The existing launch-derived idle interval and maintenance ceiling bound
 /// retries; foreground writes, retention, and overlay drain never wait here.
@@ -528,9 +626,6 @@ fn run_worker(
     let mut search_pressure = crate::fsync_stats::foreground_hotness_sampler();
     // Exactly one bounded entry per admitted scope; dropped with this worker.
     let mut search_retries = vec![SearchRetryState::default(); shared.scopes.len()];
-    // Deferred search activation starts on this already-owned worker, after
-    // readiness, without waiting for an unrelated retention idle interval.
-    let mut round_deadline = search_projection.map(|_| Instant::now());
     let mut next_overlay_poll = Instant::now();
     loop {
         enum Wake {
@@ -542,8 +637,6 @@ fn run_worker(
                 Ok(state) => state,
                 Err(_) => return,
             };
-            let round_deadline =
-                *round_deadline.get_or_insert_with(|| Instant::now() + state.next_idle_interval);
             loop {
                 if state.stopping {
                     return;
@@ -552,14 +645,13 @@ fn run_worker(
                 if now >= next_overlay_poll {
                     break Wake::OverlayPoll;
                 }
-                if now >= round_deadline {
-                    let index = state.next_scope;
-                    let scope = shared.scopes[index];
-                    state.next_scope = (state.next_scope + 1) % shared.scopes.len();
+                let round_due = state.round_due(shared.config.idle_interval);
+                if now >= round_due {
+                    let index = state.take_round_scope(shared.scopes.len());
                     state.metrics.rounds = state.metrics.rounds.saturating_add(1);
-                    break Wake::ScopeRound { index, scope };
+                    break Wake::ScopeRound { index, scope: shared.scopes[index] };
                 }
-                let deadline = round_deadline.min(next_overlay_poll);
+                let deadline = round_due.min(next_overlay_poll);
                 let remaining = deadline.saturating_duration_since(now);
                 if remaining.is_zero() {
                     // One of the two branches above fires on the re-check.
@@ -616,11 +708,11 @@ fn run_worker(
                     metrics.search_retry_deferrals = metrics.search_retry_deferrals.saturating_add(1);
                 }, Backoff::Keep);
             } else {
-                match crate::turn_search_worker::process_turn_search_batch_with_pressure_and_stop(
+                match crate::turn_search_worker::process_turn_search_batch_with_admission_and_stop(
                     database,
                     search_projection,
                     scope,
-                    &mut search_pressure,
+                    || shared.config.search_admission.defer(&mut search_pressure),
                     || shared.state.lock().map(|state| state.stopping).unwrap_or(true),
                 ) {
                     Ok(search) => {
@@ -738,11 +830,15 @@ fn run_worker(
                 attempt_events_pruned,
                 attempt_event_prune_attempts,
                 attempt_event_prune_has_more,
+                deferred,
             } => update_metrics(
                 shared,
                 |metrics| {
                     metrics.committed_transactions =
                         metrics.committed_transactions.saturating_add(1);
+                    if deferred {
+                        metrics.conflict_deferrals = metrics.conflict_deferrals.saturating_add(1);
+                    }
                     metrics.materialized_rows =
                         metrics.materialized_rows.saturating_add(rows as u64);
                     metrics.materialized_bytes = metrics.materialized_bytes.saturating_add(bytes);
@@ -830,11 +926,16 @@ fn run_worker(
         }
         // Re-arm the scope-round deadline from the interval the round's
         // backoff updates just selected; overlay polls never touch it.
-        round_deadline = shared
-            .state
-            .lock()
-            .map(|state| Instant::now() + state.next_idle_interval)
-            .ok();
+        match shared.state.lock() {
+            Ok(mut state) => {
+                state.round_completed_at = Instant::now();
+                state.round_deadline = state.round_completed_at + state.next_idle_interval;
+            }
+            Err(_) => return,
+        }
+        // Specifications wait on completed rounds instead of sleeping.
+        #[cfg(test)]
+        shared.wake.notify_all();
     }
 }
 
@@ -853,6 +954,7 @@ enum RoundOutcome {
         attempt_events_pruned: usize,
         attempt_event_prune_attempts: usize,
         attempt_event_prune_has_more: bool,
+        deferred: bool,
     },
     TombstoneCompacted {
         pages: u32,
@@ -998,204 +1100,61 @@ fn run_round(
             ));
         }
     };
-    let result: io::Result<
-        Option<(
-            crate::artifact::ToolPruneProgress,
-            Option<crate::entity::EntityMountConsolidationProgress>,
-            ScheduledPruneOutcome,
-            Option<(u32, u32)>,
-        )>,
-    > = (|| {
-        // Tombstone compaction (L2): vacuum one scan-reported dense window
-        // per round, bounded so catch-up never wedges the authority.
-        if let Some((pages, entries)) = run_tombstone_compaction(&mut database, scope)? {
-            return Ok(Some((
-                crate::artifact::ToolPruneProgress {
-                    deleted: 0,
-                    has_more: false,
-                },
-                None,
-                ScheduledPruneOutcome::default(),
-                Some((pages, entries)),
-            )));
-        }
-        let mut transaction = database.begin(scope.tenant_id, scope.owner_user_id)?;
-        let mount = database.consolidate_one_entity_range_mount(&mut transaction)?;
-        if mount.is_some() {
-            database.commit(transaction)?;
-            return Ok(Some((
-                crate::artifact::ToolPruneProgress {
-                    deleted: 0,
-                    has_more: false,
-                },
-                mount,
-                ScheduledPruneOutcome::default(),
-                None,
-            )));
-        }
-        let tool_prune = crate::artifact::tool_prune(
-            &database,
-            &mut transaction,
-            now_ms,
-            TOOL_RESULT_PRUNE_ROWS_PER_MAINTENANCE_ROUND,
-        )?;
-        if tool_prune.deleted > 0 {
-            database.commit(transaction)?;
-        }
-        // Cold-tier retention, scheduled through the certified operator
-        // prune operations: settled attempts' raw streaming chunks and aged
-        // conversation sync events expire after PRUNE_RETENTION_MS. Each
-        // prune runs in its own bounded transaction so a large round cannot
-        // couple with the tool-result prune above. Sync-referenced attempts
-        // are skipped inside events_prune; replay degrades to the snapshot
-        // fallback for cursors older than the horizon.
-        let event_prune = {
-            let mut txn =
-                database.begin_with_identity_claim_scopes(scope.tenant_id, scope.owner_user_id)?;
-            let outcome = crate::turn::events_prune(
-                &database,
-                &mut txn,
-                &crate::turn::EventPruneRequest {
-                    settled_before_ms: now_ms.saturating_sub(PRUNE_RETENTION_MS),
-                    max_attempts: 64,
-                    max_rows: MAX_ATTEMPT_EVENT_PRUNE_ROWS_PER_ROUND,
-                },
-            );
-            let outcome = match outcome {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == io::ErrorKind::InvalidInput
-                    && error.to_string().contains("no durable semantic mutation") =>
-                {
-                    br#"{"deleted_rows":0,"deleted_attempts":0,"remaining":0}"#.to_vec()
-                }
-                Err(error) => return Err(error),
-            };
-            // Cursor-only progress and stale-index removal are durable work
-            // even when this bounded slice contains no event payload rows.
-            if txn.has_business_mutation() {
-                database.commit(txn)?;
-            }
-            {
-                let (events, attempts, has_more) = parse_prune_outcome(&outcome);
-                (events, attempts, has_more)
-            }
-        };
-        let sync_prune = {
-            let mut txn =
-                database.begin_with_identity_claim_scopes(scope.tenant_id, scope.owner_user_id)?;
-            let outcome = crate::turn::sync_prune(
-                &database,
-                &mut txn,
-                &crate::turn::SyncPruneRequest {
-                    created_before_ms: now_ms.saturating_sub(PRUNE_RETENTION_MS),
-                    max_rows: MAX_SYNC_PRUNE_ROWS_PER_ROUND,
-                },
-            );
-            let outcome = match outcome {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == io::ErrorKind::InvalidInput
-                    && error.to_string().contains("no durable semantic mutation") =>
-                {
-                    br#"{"deletedRows":0,"remaining":false}"#.to_vec()
-                }
-                Err(error) => return Err(error),
-            };
-            if serde_json::from_slice::<serde_json::Value>(&outcome)
-                .ok()
-                .and_then(|value| value.get("deletedRows")?.as_u64())
-                .unwrap_or(0)
-                > 0
-            {
-                database.commit(txn)?;
-            }
-            let deleted = serde_json::from_slice::<serde_json::Value>(&outcome)
-                .ok()
-                .and_then(|value| value.get("deletedRows")?.as_u64())
-                .unwrap_or(0) as usize;
-            let remaining = serde_json::from_slice::<serde_json::Value>(&outcome)
-                .ok()
-                .and_then(|value| value.get("remaining")?.as_bool())
-                .unwrap_or(false);
-            (deleted, remaining)
-        };
-        if tool_prune.deleted == 0 && event_prune.0 == 0 && sync_prune.0 == 0 {
-            return Ok(None);
-        }
-        Ok(Some((tool_prune, None, ScheduledPruneOutcome {
-            events: event_prune.0,
-            attempts: event_prune.1,
-            events_has_more: event_prune.2,
-            sync_rows: sync_prune.0,
-            sync_has_more: sync_prune.1,
-        }, None)))
-    })();
-    match result {
-        Ok(None) => {
-            let preparation = match database.try_prepare_pack_adoption() {
-                Ok(preparation) => preparation,
-                Err(error) => return round_engine_error(error),
-            };
-            match preparation {
-                crate::engine::PackAdoptionPreparation::Empty => RoundOutcome::NoWork,
-                crate::engine::PackAdoptionPreparation::Busy => RoundOutcome::Conflict,
-                crate::engine::PackAdoptionPreparation::Ready(mut prepared) => {
-                    // The fsync chain (manifest block, WAL cover, CONTROL
-                    // chain) runs WITHOUT the authority mutex held; only the
-                    // cheap prepare/finish phases hold it, so foreground
-                    // commits never wait on a catalog fsync.
-                    drop(round_hold);
-                    drop(database);
-                    let outcome = crate::engine::publish_prepared_pack_adoption(&mut prepared);
-                    let mut database = match database_arc.try_lock() {
-                        Ok(database) => database,
-                        Err(TryLockError::WouldBlock) => match database_arc.lock() {
-                            Ok(database) => database,
-                            Err(_) => {
-                                return RoundOutcome::Terminal(io::Error::other(
-                                    "maintenance authority mutex is poisoned",
-                                ))
-                            }
-                        },
-                        Err(TryLockError::Poisoned(_)) => {
-                            return RoundOutcome::Terminal(io::Error::other(
-                                "maintenance authority mutex is poisoned",
-                            ))
-                        }
-                    };
-                    let _hold = crate::authority_watch::AuthorityHoldTimer::probe("pack.install");
-                    match database.finish_pack_adoption(prepared, outcome) {
-                        Ok(true) => RoundOutcome::PayloadPackPublished,
-                        Ok(false) => RoundOutcome::NoWork,
-                        Err(error) => RoundOutcome::Terminal(error),
+    match run_tombstone_compaction(&mut database, scope) {
+        Ok(Some((pages, entries))) => return RoundOutcome::TombstoneCompacted { pages, entries },
+        Ok(None) => {}
+        Err(error) => return round_engine_error(error),
+    }
+    drop(round_hold);
+    drop(database);
+    match prepared::run(database_arc, scope, now_ms) {
+        RoundOutcome::NoWork => {}
+        outcome => return outcome,
+    }
+    let mut database = match database_arc.try_lock() {
+        Ok(database) => database,
+        Err(TryLockError::WouldBlock) => return RoundOutcome::ForegroundBusy,
+        Err(TryLockError::Poisoned(_)) => return RoundOutcome::Terminal(io::Error::other("maintenance authority mutex is poisoned")),
+    };
+    let round_hold = crate::authority_watch::AuthorityHoldTimer::probe("maintenance.round");
+    let preparation = match database.try_prepare_pack_adoption() {
+        Ok(preparation) => preparation,
+        Err(error) => return round_engine_error(error),
+    };
+    match preparation {
+        crate::engine::PackAdoptionPreparation::Empty => RoundOutcome::NoWork,
+        crate::engine::PackAdoptionPreparation::Busy => RoundOutcome::Conflict,
+        crate::engine::PackAdoptionPreparation::Ready(mut prepared) => {
+            // The fsync chain (manifest block, WAL cover, CONTROL
+            // chain) runs WITHOUT the authority mutex held; only the
+            // cheap prepare/finish phases hold it, so foreground
+            // commits never wait on a catalog fsync.
+            drop(round_hold);
+            drop(database);
+            let outcome = crate::engine::publish_prepared_pack_adoption(&mut prepared);
+            let mut database = match database_arc.try_lock() {
+                Ok(database) => database,
+                Err(TryLockError::WouldBlock) => match database_arc.lock() {
+                    Ok(database) => database,
+                    Err(_) => {
+                        return RoundOutcome::Terminal(io::Error::other(
+                            "maintenance authority mutex is poisoned",
+                        ))
                     }
+                },
+                Err(TryLockError::Poisoned(_)) => {
+                    return RoundOutcome::Terminal(io::Error::other(
+                        "maintenance authority mutex is poisoned",
+                    ))
                 }
-            }
-        }
-        Ok(Some((tool_prune, mount, event_prune, tombstone_compaction))) => {
-            if let Some((pages, entries)) = tombstone_compaction {
-                return RoundOutcome::TombstoneCompacted { pages, entries };
-            }
-            let (rows, bytes, mount_completed) = match mount {
-                Some(progress) => (
-                    progress.rows_materialized,
-                    progress.materialized_bytes,
-                    progress.mount_completed,
-                ),
-                None => (0, 0, false),
             };
-            RoundOutcome::Committed {
-                rows,
-                bytes,
-                mount_completed,
-                tool_result_artifacts_pruned: tool_prune.deleted,
-                tool_result_prune_has_more: tool_prune.has_more,
-                attempt_events_pruned: event_prune.events + event_prune.sync_rows,
-                attempt_event_prune_attempts: event_prune.attempts,
-                attempt_event_prune_has_more: event_prune.events_has_more
-                    || event_prune.sync_has_more,
+            let _hold = crate::authority_watch::AuthorityHoldTimer::probe("pack.install");
+            match database.finish_pack_adoption(prepared, outcome) {
+                Ok(true) => RoundOutcome::PayloadPackPublished,
+                Ok(false) => RoundOutcome::NoWork,
+                Err(error) => RoundOutcome::Terminal(error),
             }
         }
-        Err(error) => round_engine_error(error),
     }
 }
 
@@ -1251,6 +1210,7 @@ fn invalid_input(message: &str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    include!("maintenance_preparation_tests.rs");
     use super::*;
     use crate::entity::EntityKey;
     use std::time::Instant;
@@ -1667,7 +1627,11 @@ mod tests {
             let mut tx = db.begin(7, 11).unwrap();
             assert_eq!(db.entity_scan(&mut tx, &first, &end, 1).unwrap().len(), 1);
         }
-        run_round(&database, MaintenanceScope::new(7, 11).unwrap(), 64);
+        match run_round(&database, MaintenanceScope::new(7, 11).unwrap(), 64) {
+            RoundOutcome::Committed { attempt_events_pruned: 0, .. } => {}
+            RoundOutcome::Terminal(error) => panic!("metadata retirement failed: {error}"),
+            _ => panic!("metadata-only retirement must count as committed work"),
+        }
         drop(database);
         let db = AuthorityDatabase::open(directory.path()).unwrap();
         let mut tx = db.begin(7, 11).unwrap();
@@ -1686,7 +1650,10 @@ mod tests {
         observer: &MaintenanceObserver,
         predicate: impl Fn(MaintenanceMetrics) -> bool,
     ) -> MaintenanceMetrics {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // These functional checks wait for real fsync-backed work. Keep a
+        // fixed failure watchdog without treating host I/O speed as the
+        // scheduler contract; pure-clock tests above verify retry cadence.
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let metrics = observer.metrics().unwrap();
             if predicate(metrics) {
@@ -1760,6 +1727,158 @@ mod tests {
         assert!(crate::search_dirty::list(&database.lock().unwrap(), 7, 11)
             .unwrap()
             .is_empty());
+    }
+
+    /// Search is admitted on an empty owner and the worker is idle behind the
+    /// 60 s backoff ceiling: inside the 20 s wait bound, only a commit-side
+    /// wake can start another round.
+    fn backed_off_search_scheduler(
+        database: &Arc<Mutex<AuthorityDatabase>>,
+        projection: &Arc<Mutex<TurnSearchProjection>>,
+    ) -> (MaintenanceScheduler, MaintenanceMetrics) {
+        let scheduler = MaintenanceScheduler::start_with_search(
+            Arc::clone(database),
+            Some(Arc::clone(projection)),
+            vec![MaintenanceScope::new(7, 11).unwrap()],
+            MaintenanceSchedulerConfig::for_test(Duration::from_millis(10), 1),
+        )
+        .unwrap();
+        let idle = {
+            // The state lock excludes every scheduling decision, so a re-arm
+            // still in flight also selects the ceiling.
+            let mut state = wait_for_round(&scheduler, |metrics| metrics.no_work_rounds >= 1);
+            let ceiling = Duration::from_millis(MAX_MAINTENANCE_IDLE_INTERVAL_MILLISECONDS);
+            state.next_idle_interval = ceiling;
+            state.round_deadline = Instant::now() + ceiling;
+            state.metrics
+        };
+        assert!(!projection.lock().unwrap().owner_indexing(7, 11).unwrap());
+        (scheduler, idle)
+    }
+
+    /// Completed rounds notify the scheduler condvar in specifications; the
+    /// bound only reports a missed wake and stays below the idle ceiling.
+    fn wait_for_round(
+        scheduler: &MaintenanceScheduler,
+        predicate: impl Fn(&MaintenanceMetrics) -> bool,
+    ) -> std::sync::MutexGuard<'_, SchedulerState> {
+        let state = scheduler.shared.state.lock().unwrap();
+        let (state, waited) = scheduler
+            .shared
+            .wake
+            .wait_timeout_while(state, Duration::from_secs(20), |state| {
+                !predicate(&state.metrics)
+            })
+            .unwrap();
+        assert!(!waited.timed_out(), "maintenance round never started: {:?}", state.metrics);
+        state
+    }
+
+    fn create_searchable_conversation(database: &Arc<Mutex<AuthorityDatabase>>, title: &str) {
+        let mut database = database.lock().unwrap();
+        let mut transaction = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        crate::conversation_header::create(
+            &database,
+            &mut transaction,
+            &crate::conversation_header::CreateRequest {
+                conversation_id: "woken".into(),
+                title: title.into(),
+                settings_json: b"{}".to_vec(),
+                created_at_ms: 100,
+                updated_at_ms: 100,
+                committed_at_ms: 100,
+            },
+        )
+        .unwrap();
+        database.commit(transaction).unwrap();
+    }
+
+    #[test]
+    fn search_wake_ends_idle_backoff_at_the_base_cadence_and_goes_first() {
+        let completed = Instant::now();
+        let ceiling = Duration::from_millis(MAX_MAINTENANCE_IDLE_INTERVAL_MILLISECONDS);
+        let base = Duration::from_millis(250);
+        let mut state = SchedulerState {
+            stopping: false,
+            next_scope: 1,
+            metrics: MaintenanceMetrics::default(),
+            next_idle_interval: ceiling,
+            terminal_error: None,
+            round_deadline: completed + ceiling,
+            round_completed_at: completed,
+            search_wakes: 0,
+        };
+        assert_eq!(state.round_due(base), completed + ceiling);
+        state.search_wakes = 1 << 2;
+        assert_eq!(state.round_due(base), completed + base);
+        state.round_deadline = completed + base / 2;
+        assert_eq!(state.round_due(base), completed + base / 2, "a wake never delays a due round");
+        assert_eq!(state.take_round_scope(3), 2);
+        assert_eq!((state.search_wakes, state.next_scope), (0, 0));
+        assert_eq!(state.round_due(base), completed + base / 2);
+        assert_eq!(state.take_round_scope(3), 0, "without wakes the round robin resumes");
+        assert_eq!(state.next_scope, 1);
+    }
+
+    #[test]
+    fn committed_search_invalidation_wakes_a_backed_off_worker() {
+        let authority_directory = tempfile::tempdir().unwrap();
+        let projection_directory = tempfile::tempdir().unwrap();
+        let database = Arc::new(Mutex::new(
+            AuthorityDatabase::initialize(authority_directory.path()).unwrap(),
+        ));
+        let projection = Arc::new(Mutex::new(
+            TurnSearchProjection::initialize(projection_directory.path(), 16 * 1024 * 1024).unwrap(),
+        ));
+        let (scheduler, idle) = backed_off_search_scheduler(&database, &projection);
+        create_searchable_conversation(&database, "wakeneedle");
+        let woken = wait_for_round(&scheduler, |metrics| metrics.search_acknowledged_tokens == 1)
+            .metrics;
+        assert!(woken.rounds > idle.rounds);
+        assert_eq!(woken.search_rebuilt_conversations, 1);
+        assert_eq!(woken.search_failed_rounds, 0);
+        scheduler.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn acknowledged_search_invalidation_is_not_ready_until_consumed() {
+        let authority_directory = tempfile::tempdir().unwrap();
+        let projection_directory = tempfile::tempdir().unwrap();
+        let database = Arc::new(Mutex::new(
+            AuthorityDatabase::initialize(authority_directory.path()).unwrap(),
+        ));
+        let projection = Arc::new(Mutex::new(
+            TurnSearchProjection::initialize(projection_directory.path(), 16 * 1024 * 1024).unwrap(),
+        ));
+        let (scheduler, _) = backed_off_search_scheduler(&database, &projection);
+        {
+            // Every round first takes the index lock, so the woken worker
+            // cannot consume the token before this coverage read.
+            let index = projection.lock().unwrap();
+            create_searchable_conversation(&database, "fenceneedle");
+            assert!(
+                index.owner_indexing(7, 11).unwrap(),
+                "an acknowledged invalidation was reported ready before consumption"
+            );
+        }
+        let woken = wait_for_round(&scheduler, |metrics| metrics.search_acknowledged_tokens == 1)
+            .metrics;
+        // Rounds are sequential: once the second later round starts, the round
+        // after the ACK has observed the empty dirty queue and published READY.
+        drop(wait_for_round(&scheduler, |metrics| metrics.rounds >= woken.rounds + 2));
+        scheduler.stop_and_join().unwrap();
+        let index = projection.lock().unwrap();
+        assert!(!index.owner_indexing(7, 11).unwrap());
+        let hits = index
+            .search(&crate::turn_search_projection::ConversationSearchRequest {
+                tenant_id: 7,
+                owner_user_id: 11,
+                query: "fenceneedle".into(),
+                limit: 10,
+                snippet_radius: 10,
+            })
+            .unwrap();
+        assert_eq!(hits.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(), ["woken"]);
     }
 
     #[test]
@@ -1911,6 +2030,9 @@ mod tests {
             }),
         );
         assert_eq!(observed.history_retained_segments(), 64);
+        for production in [lean, observed] {
+            assert_eq!(production.search_admission, SearchAdmission::ForegroundPressure);
+        }
         let scopes = (1..=MAX_MAINTENANCE_SCOPES + 1)
             .map(|owner| MaintenanceScope::new(7, owner as u64).unwrap())
             .collect();
@@ -1921,6 +2043,26 @@ mod tests {
         )
         .is_err());
         assert_eq!(MAX_MAINTENANCE_WORKERS, 1);
+    }
+
+    #[test]
+    fn search_admission_defers_only_for_sampled_foreground_pressure() {
+        let created = Instant::now();
+        let mut pressured = crate::fsync_stats::foreground_hotness_sampler();
+        {
+            let _foreground_wait = crate::fsync_stats::ForegroundWait::start();
+            thread::sleep(Duration::from_millis(300));
+        }
+        let deferred = SearchAdmission::ForegroundPressure.defer(&mut pressured);
+        // Past two seconds the fairness permit legitimately admits the batch.
+        if created.elapsed() < Duration::from_secs(2) {
+            assert!(deferred);
+        }
+        assert!(!SearchAdmission::IdleForeground.defer(&mut pressured));
+        assert_eq!(
+            MaintenanceSchedulerConfig::for_test(Duration::from_millis(10), 1).search_admission,
+            SearchAdmission::IdleForeground
+        );
     }
 
     #[test]

@@ -591,6 +591,55 @@ def test_timer_domain_is_transactional_and_idempotent(storage):
         'user_id': payload['user_id']})['status'] == 'cancelled'
 
 
+def test_timer_poll_commit_after_settlement_keeps_the_receipt_and_budget(storage):
+    """A poll in flight when its watcher settles must not overwrite the
+    delivery receipt, spend budget or add a ledger row."""
+    client = storage.client
+    owner = 41
+
+    def commit(timer_id, poll_id, command_id):
+        return client.command('timer.poll.commit', {
+            'timer_id': timer_id, 'user_id': owner, 'poll_id': poll_id,
+            'poll_time': '2026-11-03T02:00:00', 'decision': 'wait',
+            'reason': 'Timer no longer active',
+        }, command_id)
+
+    for timer_id in ('tmr_settled_trigger', 'tmr_settled_cancel'):
+        client.command('timer.create', {
+            'timer_id': timer_id, 'user_id': owner, 'conv_id': 'conv_settled',
+            'check_instruction': 'wait for done', 'continuation_message': 'continue',
+            'poll_interval': 10, 'max_polls': 3, 'created_at': 'now',
+            'updated_at': 'now', 'tools_config': {},
+        }, f'{timer_id}-create')
+    early = commit('tmr_settled_trigger', 'tmr_settled_trigger.p1', 'commit-early')
+    assert early['advanced'] is True
+    assert client.command('timer.update', {
+        'timer_id': 'tmr_settled_trigger', 'user_id': owner,
+        'status': 'triggered', 'last_poll_decision': 'started',
+        'updated_at': 'settled', 'expected_status': 'active',
+    }, 'settle-trigger')['changed'] is True
+    assert client.command('timer.cancel', {
+        'timer_id': 'tmr_settled_cancel', 'user_id': owner, 'now': 'settled',
+    }, 'settle-cancel')['changed'] is True
+
+    for timer_id, status in (('tmr_settled_trigger', 'triggered'),
+                             ('tmr_settled_cancel', 'cancelled')):
+        refused = commit(timer_id, f'{timer_id}.p2', f'{timer_id}-late')
+        assert refused == {'inserted': False, 'id': None, 'advanced': False,
+                           'status': status}
+        assert commit(timer_id, f'{timer_id}.p2', f'{timer_id}-late') == refused
+    # A replayed pre-settlement poll ID still answers with its own row.
+    assert commit('tmr_settled_trigger', 'tmr_settled_trigger.p1',
+                  'commit-replayed') == {'inserted': False, 'id': early['id'],
+                                         'advanced': False}
+
+    triggered = client.query('timer.get', {
+        'timer_id': 'tmr_settled_trigger', 'user_id': owner})
+    assert triggered['last_poll_decision'] == 'started'
+    assert triggered['poll_count'] == 1
+    assert client.query('timer.poll.log', {
+        'timer_id': 'tmr_settled_cancel', 'user_id': owner, 'limit': 10}) == []
+
 
 def test_timer_code_only_admission_and_unlimited_budget(storage):
     payload = {'timer_id':'tmr_code_contract', 'user_id':41, 'conv_id':'conv_code',
@@ -1209,6 +1258,65 @@ def test_turn_lifecycle_sidecar_projection_branch_and_delete(storage, monkeypatc
     assert turn['turnId'] in deleted['deletedTurnIds']
 
 
+
+def test_turn_deletes_replay_their_recorded_outcome_after_a_lost_ack(
+        storage, monkeypatch):
+    """A delete whose ACK was lost is reissued under the same identity.
+
+    Re-executing a committed delete finds no rows and answered
+    database_not_found, so a delete that had succeeded reached the user as a
+    failure. The replay must return the recorded outcome instead.
+    """
+    from lib.turn_lifecycle import (
+        LifecycleNotFound, create_branch_lane, create_turn_pair,
+        delete_branch_lane, delete_turns, get_turn, record_task_event,
+    )
+    monkeypatch.setattr('lib.storage.get_storage_client',
+                        lambda write=False: storage.client)
+    conv = 'turn-delete-replay'
+    rounds = []
+    for index in range(4):
+        created = create_turn_pair(
+            conv, command_id=f'turn-delete-replay-{index}',
+            input_projection={'content': f'user {index}'}, config={},
+            parent_turn_id=rounds[-1]['turn']['turnId'] if rounds else None,
+            user_id=1,
+            conversation_defaults=(
+                {'allowCreate': True, 'title': 'Delete replay',
+                 'createdAt': 1, 'settings': {}}
+                if index == 0 else None))
+        record_task_event(
+            {'_attemptId': created['attempt']['attemptId'], '_userId': 1,
+             'content': f'assistant {index}', 'thinking': '',
+             'toolRounds': [], 'segments': [], 'status': 'done'},
+            {'type': 'done', 'finishReason': 'stop'})
+        rounds.append(created)
+
+    parent = get_turn(conv, rounds[0]['turn']['turnId'], user_id=1)
+    lane = create_branch_lane(
+        conv, parent['turnId'], title='Branch',
+        expected_projection_revision=parent['projectionRevision'], user_id=1)
+    lane_id = lane['lane']['laneId']
+    deleted_lane = delete_branch_lane(conv, parent['turnId'], lane_id, user_id=1)
+    assert delete_branch_lane(
+        conv, parent['turnId'], lane_id, user_id=1) == deleted_lane
+
+    # Six turns: one request may name many turns, and its receipt identity
+    # must stay within every authority's command-ID bound.
+    tail = [created[key]['turnId'] for created in rounds[1:]
+            for key in ('turn', 'submittedTurn')]
+    deleted = delete_turns(conv, tail, user_id=1)
+    assert sorted(deleted['deletedTurnIds']) == sorted(tail)
+    assert delete_turns(conv, tail, user_id=1) == deleted
+    # The same set in another order is the same delete, not a reused identity.
+    assert delete_turns(conv, list(reversed(tail)), user_id=1) == deleted
+
+    with pytest.raises(LifecycleNotFound):
+        delete_turns(conv, ['turn-that-never-existed'], user_id=1)
+    remaining = delete_turns(conv, [rounds[0]['turn']['turnId']], user_id=1)
+    # Replays recorded no further mutation: exactly one revision follows.
+    assert remaining['conversationRevision'] == deleted['conversationRevision'] + 1
+
 def test_manual_compaction_commits_through_real_sidecar_turn_authority(
         storage, monkeypatch):
     """DefaultConversationStore → receipt → turn.compact → derived v1 view."""
@@ -1305,14 +1413,14 @@ def test_turn_lifecycle_sidecar_recovery_settles_pending_attempt(storage, monkey
     # (test_terminal_transaction_and_restart_recovery_preserve_projection in
     # tests/test_turn_lifecycle_v2.py): the recovered settlement must COMPUTE
     # its resume options from the durable projection, not hardcode
-    # regenerate-only — the user can honestly continue from the tool-call
-    # checkpoint (and losslessly, when the model supports assistant prefill).
+    # regenerate-only. A prose tail rewinds to the tool-call checkpoint;
+    # assistant prefill is not a valid resume boundary.
     turn = get_turn('turn-recovery-sidecar', created['turn']['turnId'], user_id=1)
     assert turn['status'] == 'interrupted'
     assert turn['settlement']['cause'] == 'server_restart'
     operations = {item['operation']
                   for item in turn['settlement']['resumeOptions']}
-    assert 'continue' in operations
+    assert 'continue' not in operations
     assert 'checkpoint_resume' in operations
     assert 'regenerate' in operations
     assert recover_running_attempts() == 0
@@ -2931,6 +3039,107 @@ def test_conversation_get_turn_window_is_bounded_and_cursor_addressable(storage)
     }
 
 
+def test_conversation_get_windows_around_a_main_lane_turn_anchor(storage):
+    """An anchor ends the window at S + 1 + W // 2 (native parity)."""
+    messages = [
+        {'role': 'user' if index % 2 == 0 else 'assistant',
+         'content': f'message-{index}'}
+        for index in range(7)
+    ]
+    _import_conversation(
+        storage.client, 'anchor-conv', messages=messages, title='Anchor')
+    full = storage.client.query('conversation.get', {
+        'conv_id': 'anchor-conv', 'user_id': 1})
+    turn_ids = [message['_turnId'] for message in full['messages']]
+
+    def read(**payload):
+        return storage.client.query('conversation.get', {
+            'conv_id': 'anchor-conv', 'user_id': 1, **payload})
+
+    for anchor, window, selected, page in [
+        (3, 3, [2, 3, 4], {'total_count': 7, 'start': 2, 'end': 5, 'anchor_sequence': 3}),
+        (6, 4, [3, 4, 5, 6], {'total_count': 7, 'start': 3, 'end': 7, 'anchor_sequence': 6}),
+        (0, 5, [0, 1, 2], {'total_count': 7, 'start': 0, 'end': 3, 'anchor_sequence': 0}),
+    ]:
+        document = read(message_window=window, anchor_turn_id=turn_ids[anchor])
+        assert document['message_page'] == page
+        assert [message['_turnId'] for message in document['messages']] == [
+            turn_ids[index] for index in selected]
+    missing = read(message_window=3, anchor_turn_id='missing-turn')
+    assert missing['messages'] == []
+    assert missing['message_page'] == {
+        'total_count': 7, 'start': 0, 'end': 0, 'anchor_sequence': None}
+    assert 'anchor_sequence' not in read(message_window=2)['message_page']
+    for invalid in (
+        {'anchor_turn_id': turn_ids[1]},
+        {'message_window': 2, 'before_sequence': 4, 'anchor_turn_id': turn_ids[1]},
+        {'message_window': 2, 'anchor_turn_id': ''},
+        {'message_window': 2, 'anchor_turn_id': 'x' * 129},
+        {'message_window': 2, 'anchor_turn_id': 7},
+    ):
+        with pytest.raises(StorageError) as error:
+            read(**invalid)
+        assert error.value.code == 'database_protocol_error'
+    # Another owner cannot locate the Turn: the conversation is not theirs.
+    assert storage.client.query('conversation.get', {
+        'conv_id': 'anchor-conv', 'user_id': 2, 'message_window': 3,
+        'anchor_turn_id': turn_ids[3]}) is None
+
+    from lib.conversations.repository import ConversationRepository
+    repository = ConversationRepository(lambda write=False: storage.client)
+    window = repository.get_anchored_window(
+        'anchor-conv', user_id=1, turn_id=turn_ids[5], message_window=4)
+    assert (window.anchor_sequence, window.total_count, window.snapshot.message_start) == (5, 7, 3)
+    assert [m['content'] for m in window.snapshot.messages] == [
+        'message-3', 'message-4', 'message-5', 'message-6']
+    absent = repository.get_anchored_window(
+        'anchor-conv', user_id=1, turn_id='missing-turn', message_window=4)
+    assert absent.anchor_sequence is None and absent.snapshot.messages == []
+    assert repository.get_anchored_window(
+        'anchor-conv', user_id=2, turn_id=turn_ids[5], message_window=4) is None
+
+
+
+def test_bounded_scan_windows_refused_transcript_back_to_its_time_bound(storage):
+    """The scan's windowed fallback follows the real authority's cursors."""
+    from lib.conversations.repository import ConversationRepository
+
+    messages = [
+        {'role': 'user' if index % 2 == 0 else 'assistant',
+         'content': f'message-{index}', 'timestamp': 1_000 + index}
+        for index in range(7)
+    ]
+    _import_conversation(
+        storage.client, 'oversized-conv', messages=messages,
+        created_at=1_000, updated_at=1_006)
+    _import_conversation(
+        storage.client, 'ordinary-conv', messages=messages[:1],
+        created_at=1_000, updated_at=1_000)
+
+    class WholeTranscriptRefused:
+        """Answers like the Sidecar does when a response exceeds its frame."""
+
+        def query(self, operation, payload):
+            if (operation == 'conversation.list'
+                    and 'oversized-conv' in (payload.get('ids') or ())):
+                raise StorageError(
+                    'database_protocol_error',
+                    'Storage frame exceeds the size limit')
+            return storage.client.query(operation, payload)
+
+    repository = ConversationRepository(
+        lambda *, write=False: WholeTranscriptRefused())
+    _, rows = repository.scan_bounded(
+        user_id=1, oversized_messages_since_ms=1_003)
+    snapshots = {row['id']: row for row in rows}
+
+    assert [message['content'] for message
+            in snapshots['oversized-conv'].messages] == [
+        'message-3', 'message-4', 'message-5', 'message-6']
+    assert snapshots['oversized-conv']['msg_count'] == 7
+    assert [message['content'] for message
+            in snapshots['ordinary-conv'].messages] == ['message-0']
+
 def test_conversation_list_settings_keys_projection_bounds_sidebar_payload():
     """The 37.6 MB ?meta=1 regression: the metadata-only ``conversation.list``
     projected the WHOLE ``settings_json`` blob per row, and per-conversation
@@ -4440,10 +4649,15 @@ def test_sidecar_task_result_transient_write_failure_is_not_a_fence(storage, mon
     callers still cannot mistake pressure for the False stale-owner verdict
     that suppresses downstream terminal work (2026-08-20 incident)."""
     import lib.storage
+    from lib.storage.deadline_policy import reset_storage_service_observations
     monkeypatch.setattr(lib.storage, 'get_storage_client',
                         lambda write=False: storage.client)
-    from lib.tasks_pkg.manager._persist import _upsert_task_row
+    from lib.tasks_pkg.manager._persist import (
+        _CHECKPOINT_WRITE_FLOOR_SECONDS, _upsert_task_row)
 
+    # Earlier calls in this worker leave service-time samples that would
+    # scale the nonterminal budget with host load.
+    reset_storage_service_observations()
     real_command = storage.client.command
     attempts = {'n': 0}
 
@@ -4479,9 +4693,10 @@ def test_sidecar_task_result_transient_write_failure_is_not_a_fence(storage, mon
     assert len(running_attempts) == 1
     assert set(running_attempts[0]) == {'priority', 'deadline'}
     assert running_attempts[0]['priority'] == 'maintenance'
-    # Preparation consumes part of the shared half-second budget. The
-    # dispatched remainder must stay positive and cannot extend that budget.
-    assert 0 < running_attempts[0]['deadline'] <= 0.5
+    # Without observed service time the write budget is its fixed cold-start
+    # floor. Preparation consumes part of the shared read+write budget; the
+    # dispatched remainder stays positive and never exceeds the write's own.
+    assert 0 < running_attempts[0]['deadline'] <= _CHECKPOINT_WRITE_FLOOR_SECONDS
 
 
 def test_sidecar_startup_recovery_keeps_task_and_turn_authorities_separate(
@@ -4732,9 +4947,36 @@ def test_swarm_checkpoint_aggregate_semantics(storage):
             'status': 'running', 'messages': [], 'result': {},
             'rounds_used': 2, 'delivered': None, 'now_ms': 500,
         }, 'swarm-agent-running')
-    resumable = client.query('swarm.resumable.list', {})
-    assert [item['swarm_key'] for item in resumable] == ['swarm-contract']
-    assert resumable[0]['agents'][0]['status'] == 'running'
+    assert client.query('swarm.resumable.list', {}) == [
+        {'swarm_key': 'swarm-contract', 'updated_at': 200}]
+    header = client.query(
+        'swarm.session.get', {'swarm_key': 'swarm-contract', 'include_agents': False})
+    assert 'agents' not in header
+    assert header['specs'] == [{'id': 'a1'}]
+    assert header['updated_at'] == 200
+    page = client.query('swarm.agents.page', {'swarm_key': 'swarm-contract'})
+    assert page['next_after_agent_id'] is None
+    assert [agent['status'] for agent in page['agents']] == ['running']
+    assert page['agents'][0]['updated_at'] == 500
+    assert client.query('swarm.agents.page', {
+        'swarm_key': 'swarm-contract', 'after_agent_id': 'a1'}) == {
+        'agents': [], 'next_after_agent_id': None}
+    state = client.query('swarm.agent.state.get', {
+        'swarm_key': 'swarm-contract', 'agent_id': 'a1'})
+    assert state == {
+        'swarm_key': 'swarm-contract', 'conv_id': header['conv_id'],
+        'task_id': header['task_id'], 'status': header['status'],
+        'created_at': header['created_at'], 'updated_at': 200,
+        'agent': {'agent_id': 'a1', 'status': 'running', 'rounds_used': 2,
+                  'delivered': True, 'updated_at': 500}}
+    assert client.query('swarm.agent.state.get', {
+        'swarm_key': 'swarm-contract', 'agent_id': 'absent'})['agent'] is None
+    assert client.query('swarm.agent.state.get', {
+        'swarm_key': 'missing-swarm', 'agent_id': 'a1'}) is None
+    with pytest.raises(StorageError) as invalid_flag:
+        client.query('swarm.session.get', {
+            'swarm_key': 'swarm-contract', 'include_agents': 'no'})
+    assert invalid_flag.value.code == 'database_protocol_error'
 
     assert client.command(
         'swarm.session.quarantine_ownerless', {
@@ -4789,6 +5031,141 @@ def test_swarm_checkpoint_aggregate_semantics(storage):
         'swarm-session-delete') == {'deleted': True}
     assert client.query(
         'swarm.session.get', {'swarm_key': 'swarm-contract'}) is None
+
+
+def test_swarm_checkpoint_marker_overlays_until_the_next_full_save(storage):
+    """A compact marker reads like a full save of its fields and never outlives a later one."""
+    client = storage.client
+    client.command('swarm.session.save', {
+        'swarm_key': 'swarm-marker', 'conv_id': 'conv', 'task_id': 'task',
+        'status': 'running', 'specs': [{'id': 'a1'}], 'config': {'user_id': 1},
+        'now_ms': 100}, 'marker-session')
+    in_flight = {'checkpoint_phase': 'model_in_flight', 'actuals_complete': False,
+                 'total_tokens': 140, 'cost_usd': 0.25}
+
+    def mark(command_id, result, now, **extra):
+        return client.command('swarm.agent.checkpoint.mark', {
+            'swarm_key': 'swarm-marker', 'agent_id': 'a1', 'rounds_used': 3,
+            'result': result, 'now_ms': now, **extra}, command_id)
+
+    messages = [{'role': 'tool', 'content': 'x' * 4096}]
+    settled = {'checkpoint_phase': 'ready', 'actuals_complete': True,
+               'total_tokens': 100, 'tool_log': [{'tool': 'read_files'}]}
+
+    def save(command_id, now):
+        client.command('swarm.agent.save', {
+            'swarm_key': 'swarm-marker', 'agent_id': 'a1', 'role': 'coder',
+            'objective': 'o', 'status': 'running', 'messages': messages,
+            'result': settled, 'rounds_used': 2, 'delivered': None, 'now_ms': now},
+            command_id)
+
+    assert mark('marker-before-save', in_flight, 150) == {'marked': False}
+    assert client.query('swarm.agent.state.get', {
+        'swarm_key': 'swarm-marker', 'agent_id': 'a1'})['agent'] is None
+    save('marker-save-1', 200)
+    assert mark('marker-1', in_flight, 300) == {'marked': True}
+    assert mark('marker-2', {'elapsed_seconds': 7.5}, 310) == {'marked': True}
+    assert client.command('swarm.agents.acknowledge_results', {
+        'swarm_key': 'swarm-marker', 'task_id': 'task', 'agent_ids': ['a1']},
+        'marker-ack') == {'acknowledged': True, 'changed': 1}
+    agent = client.query('swarm.session.get', {'swarm_key': 'swarm-marker'})['agents'][0]
+    assert agent['result'] == {**settled, **in_flight, 'elapsed_seconds': 7.5}
+    assert (agent['rounds_used'], agent['updated_at'], agent['delivered']) == (3, 310, True)
+    assert agent['messages'] == messages
+    assert client.query('swarm.agents.page', {'swarm_key': 'swarm-marker'})['agents'] == [agent]
+    compact = client.query('swarm.agent.state.get', {
+        'swarm_key': 'swarm-marker', 'agent_id': 'a1'})['agent']
+    assert (compact['rounds_used'], compact['updated_at']) == (3, 310)
+
+    # A later full save retires the marker; an ambiguous replay of the older
+    # marker command returns its receipt and cannot resurrect it.
+    save('marker-save-2', 400)
+    assert mark('marker-1', in_flight, 300) == {'marked': True}
+    agent = client.query('swarm.session.get', {'swarm_key': 'swarm-marker'})['agents'][0]
+    assert (agent['result'], agent['rounds_used'], agent['updated_at']) == (settled, 2, 400)
+
+    for index, invalid in enumerate([{}, {'messages': []}, {'total_tokens': [1]},
+                                     {'checkpoint_phase': 'p' * 65}, 'ready']):
+        with pytest.raises(StorageError) as error:
+            mark(f'marker-invalid-{index}', invalid, 500)
+        assert error.value.code == 'database_protocol_error'
+    with pytest.raises(StorageError) as negative_rounds:
+        mark('marker-negative-rounds', in_flight, 500, rounds_used=-1)
+    assert negative_rounds.value.code == 'database_protocol_error'
+    assert mark('marker-3', in_flight, 600) == {'marked': True}
+    assert client.command('swarm.session.delete', {'swarm_key': 'swarm-marker'},
+                          'marker-delete') == {'deleted': True}
+    assert mark('marker-after-delete', in_flight, 700) == {'marked': False}
+
+
+def test_swarm_agent_append_equals_a_full_save_and_refuses_any_other_base(storage):
+    """An append extends only the exact checkpoint its writer last saved."""
+    client = storage.client
+    for swarm_key in ('swarm-append', 'swarm-full'):
+        client.command('swarm.session.save', {
+            'swarm_key': swarm_key, 'conv_id': 'conv', 'task_id': 'task',
+            'status': 'running', 'specs': [{'id': 'a1'}], 'config': {'user_id': 1},
+            'now_ms': 100}, f'{swarm_key}-session')
+    rows = [{'role': 'tool', 'content': f'{index}:' + 'x' * 4096} for index in range(4)]
+
+    def save(command_id, swarm_key, messages, result, now, checkpoint_id=None, status='running'):
+        payload = {'swarm_key': swarm_key, 'agent_id': 'a1', 'role': 'coder', 'objective': 'o',
+                   'status': status, 'messages': messages, 'result': result,
+                   'rounds_used': now // 100, 'delivered': None, 'now_ms': now}
+        if checkpoint_id is not None:
+            payload['checkpoint_id'] = checkpoint_id
+        return client.command('swarm.agent.save', payload, command_id)
+
+    def append(command_id, base, count, messages, result, checkpoint_id, now, status='running'):
+        return client.command('swarm.agent.append', {
+            'swarm_key': 'swarm-append', 'agent_id': 'a1', 'base_checkpoint_id': base,
+            'base_message_count': count, 'checkpoint_id': checkpoint_id,
+            'messages': messages, 'result': result, 'status': status,
+            'rounds_used': now // 100, 'now_ms': now}, command_id)
+
+    assert append('append-before-save', 'c0', 0, [], {}, 'c1', 150) == {'appended': False}
+    assert save('append-save', 'swarm-append', rows[:1], {'step': 0}, 200, 'c0') == {
+        'saved': True, 'checkpoint_id': 'c0'}
+    assert client.command('swarm.agent.checkpoint.mark', {
+        'swarm_key': 'swarm-append', 'agent_id': 'a1', 'rounds_used': 2,
+        'result': {'checkpoint_phase': 'model_in_flight'}, 'now_ms': 250},
+        'append-marker') == {'marked': True}
+    assert append('append-1', 'c0', 1, rows[1:3], {'step': 1}, 'c1', 300) == {'appended': True}
+    # A stale base or a wrong count changes nothing.
+    for index, (base, count) in enumerate([('c0', 3), ('c1', 2), ('c1', 4)]):
+        assert append(f'append-stale-{index}', base, count, rows[:1], {'step': 9}, 'c9',
+                      350, status='failed') == {'appended': False}
+    assert append('append-2', 'c1', 3, rows[3:], {'step': 3, 'final_answer': 'done'}, 'c2',
+                  400, status='completed') == {'appended': True}
+    # An ambiguous replay returns its receipt and cannot append twice.
+    assert append('append-2', 'c1', 3, rows[3:], {'step': 3, 'final_answer': 'done'}, 'c2',
+                  400, status='completed') == {'appended': True}
+    assert save('full-save', 'swarm-full', rows, {'step': 3, 'final_answer': 'done'}, 400,
+                status='completed') == {'saved': True}
+    appended, full = (client.query('swarm.session.get', {'swarm_key': key})['agents'][0]
+                      for key in ('swarm-append', 'swarm-full'))
+    assert appended == full and appended['messages'] == rows
+    assert (appended['status'], appended['rounds_used'], appended['updated_at']) == (
+        'completed', 4, 400)
+    assert client.query('swarm.agents.page', {'swarm_key': 'swarm-append'})['agents'] == [
+        appended]
+
+    # A writer without a checkpoint id replaces the base; later appends refuse.
+    assert save('legacy-save', 'swarm-append', rows[:1], {}, 500) == {'saved': True}
+    assert append('append-after-legacy', 'c2', 4, rows[:1], {}, 'c3', 600) == {
+        'appended': False}
+    for index, invalid in enumerate([{'base_checkpoint_id': ''}, {'checkpoint_id': None},
+                                     {'base_message_count': -1}, {'messages': {}},
+                                     {'result': []}, {'rounds_used': 1_000_001}]):
+        with pytest.raises(StorageError) as error:
+            client.command('swarm.agent.append', {
+                'swarm_key': 'swarm-append', 'agent_id': 'a1', 'base_checkpoint_id': 'c2',
+                'base_message_count': 1, 'checkpoint_id': 'c3', 'messages': [], 'result': {},
+                'now_ms': 700, **invalid}, f'append-invalid-{index}')
+        assert error.value.code == 'database_protocol_error'
+    assert client.command('swarm.session.delete', {'swarm_key': 'swarm-append'},
+                          'append-delete') == {'deleted': True}
+    assert append('append-after-delete', 'c2', 1, [], {}, 'c3', 800) == {'appended': False}
 
 
 def test_research_artifact_aggregate_semantics(storage):
@@ -5866,24 +6243,27 @@ def test_private_test_backend_selector_is_strict_and_personal_defaults_sqlite(
     monkeypatch.delenv('TOFU_STORAGE_RPC_CAPACITY', raising=False)
     monkeypatch.delenv(
         'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB', raising=False)
-    expected = {
-        'TOFU_STORAGE_SQLITE_READ_POOL': 8,
-        'TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY': 16,
+    # Probe-sized retention budgets are pinned here; the fixed read pool, RPC
+    # capacity and writer queue come from the real contract, whose values must
+    # fall inside the ranges this config validates.
+    retention = {
         'TOFU_STORAGE_SQLITE_WRITER_CACHE_MIB': 64,
         'TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB': 32,
         'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB': 1024,
         'TOFU_TURN_SEARCH_PROJECTION_MAX_MIB': 512,
-        'TOFU_STORAGE_RPC_CAPACITY': 8,
         'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB': 128,
         'TOFU_LOG_TOTAL_BUDGET_MB': 128,
     }
+    contract_default = sidecar_config.deployment_resource_default
     monkeypatch.setattr(
         sidecar_config, 'deployment_resource_default',
-        lambda name, _environment: expected[name])
+        lambda name, environment: (
+            retention[name] if name in retention
+            else contract_default(name, environment)))
     config = SidecarConfig.from_environment()
     assert config.backend == 'sqlite'
-    assert config.read_pool_size == 8
-    assert config.sqlite_writer_queue_capacity == 16
+    assert config.read_pool_size == 16
+    assert config.sqlite_writer_queue_capacity == 128
     assert config.sqlite_writer_cache_mib == 64
     assert config.turn_projection_cache_mib == 32
     assert config.fastpath_wal_rebase_max_mib == 1024
@@ -5892,7 +6272,7 @@ def test_private_test_backend_selector_is_strict_and_personal_defaults_sqlite(
     assert config.turn_search_projection_max_mib == 0
     assert config.turn_search_projection_dir == (
         tmp_path / 'data' / 'projections').resolve()
-    assert config.rpc_capacity == 8
+    assert config.rpc_capacity == 64
     assert config.rpc_inflight_max_mib == 128
     monkeypatch.setenv(
         'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB', '999999')
@@ -6271,26 +6651,37 @@ def test_goal_phases_stream_and_settle_on_their_own_turn(storage, monkeypatch, s
     }, 'goal-live-bind')
     sink = OrchestrationChatTaskEventSink(task, lambda owner, event: record_task_event(owner, event))
     sink({'type': 'flow_iteration', 'flowProjection': 'autopilot', 'iteration': 1, 'phase': 'working', 'turnRole': 'worker', 'emits': 'assistant'})
-    sink({'type': 'delta', 'content': 'First worker answer'})
+    # Each phase's running child owns its live output, as in production.
+    with task['_flowLiveOutputPort']({'content': 'First worker answer'}):
+        sink({'type': 'delta', 'content': 'First worker answer'})
     messages = [{'role': 'assistant', 'content': 'First worker answer'}]
     task['_flow_turns'] = messages
     sync_visible_run_turns(task, messages)
     sink({'type': 'flow_iteration', 'flowProjection': 'autopilot', 'iteration': 1, 'phase': 'reviewing', 'turnRole': 'virtual_user', 'emits': 'user'})
     child_id = task['_flowLiveTurn']['turnId']
     child_attempt = task['_flowLiveTurn']['attemptId']
+    verifier = {'content': 'Checking the actual files', 'thinking': 'Verify carefully',
+                'toolRounds': []}
+    verifier_output = task['_flowLiveOutputPort'](verifier)
+    verifier_output.__enter__()
     sink({'type': 'delta', 'content': 'Checking the actual files', 'thinking': 'Verify carefully'})
     inspector_ref = {'taskId': 'goal-live-task#agent:verifier', 'roundNum': 1,
                      'turn': 'swarm-agent:original'}
-    sink({'type': 'tool_start', 'roundNum': 1, 'llmRound': 1,
-          'inspectorRef': inspector_ref,
-          'toolCallId': 'goal-verify-tool', 'toolName': 'run_command',
-          'toolArgs': {'command': 'pytest -q'}, 'query': 'pytest -q',
-          'status': 'running', 'tStart': 100})
+    verify_row = {'roundNum': 1, 'llmRound': 1, 'inspectorRef': inspector_ref,
+                  'toolCallId': 'goal-verify-tool', 'toolName': 'run_command',
+                  'toolArgs': {'command': 'pytest -q'}, 'query': 'pytest -q',
+                  'status': 'running', 'tStart': 100}
+    verifier['toolRounds'] = [verify_row]
+    sink({'type': 'tool_start', **verify_row})
+    verify_row['results'] = [{'toolName': 'run_command', 'source': 'Project',
+                              'command': 'pytest -q', 'exitCode': 0}]
     sink({'type': 'tool_result', 'roundNum': 1, 'toolCallId': 'goal-verify-tool',
           'results': [{'toolName': 'run_command', 'source': 'Project',
                        'command': 'pytest -q', 'exitCode': 0}]})
+    verify_row.update(toolContent='2 passed', status='done', tEnd=200)
     sink({'type': 'tool_complete', 'roundNum': 1, 'toolCallId': 'goal-verify-tool',
           'toolContent': '2 passed', 'status': 'done', 'tEnd': 200})
+    verifier_output.__exit__(None, None, None)
     child = get_turn(conv_id, child_id, user_id=1)
     assert child['status'] == 'running'
     assert child['actor'] == 'virtual_user'
@@ -6337,7 +6728,8 @@ def test_goal_phases_stream_and_settle_on_their_own_turn(storage, monkeypatch, s
     sink({'type': 'flow_iteration', 'flowProjection': 'autopilot', 'iteration': 2, 'phase': 'working', 'turnRole': 'worker', 'emits': 'assistant'})
     worker_id = task['_flowLiveTurn']['turnId']
     worker_attempt = task['_flowLiveTurn']['attemptId']
-    sink({'type': 'delta', 'content': 'Partial correction'})
+    with task['_flowLiveOutputPort']({'content': 'Partial correction'}):
+        sink({'type': 'delta', 'content': 'Partial correction'})
     if stop_source == 'completion':
         messages.append({'role': 'assistant', 'content': 'Partial correction',
                          'finishReason': 'aborted'})

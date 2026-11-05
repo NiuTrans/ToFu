@@ -85,8 +85,14 @@ def _assert_canonical(body, controls=(POLL_TOOL, KILL_TOOL)):
         assert not actual.get('defer_loading', False)
         assert actual['description'] == expected['description']
         parameters = actual.get('parameters', actual.get('input_schema'))
+        expected_parameters = expected['parameters']
+        if actual.get('parameters', actual.get('input_schema')) == expected_parameters:
+            continue
+        from lib.tools.moonshot_schema import project_mfjs_schema
+        projected, _, error = project_mfjs_schema(expected_parameters)
+        assert error == ''
         assert json.dumps(parameters, ensure_ascii=False) == json.dumps(
-            expected['parameters'], ensure_ascii=False)
+            projected, ensure_ascii=False)
     assert 'await_agents' not in functions
     assert 'spawn_agent' not in functions
 
@@ -94,8 +100,8 @@ def _assert_canonical(body, controls=(POLL_TOOL, KILL_TOOL)):
 @pytest.mark.parametrize('search_mode', ['local', 'off'])
 @pytest.mark.parametrize('programmatic_mode,exposure,tier,expected_gateway', [
     ('off', 'additive', 'program', None),
-    ('auto', 'additive', 'program', 'execute_tools'),
-    ('auto', 'gateway_only', 'program', 'execute_tools'),
+    ('auto', 'additive', 'program', 'execute_program'),
+    ('auto', 'gateway_only', 'program', 'execute_program'),
     ('auto', 'gateway_only', 'batch', 'execute_tools'),
     ('on', 'additive', 'program', 'execute_program'),
     ('on', 'gateway_only', 'program', 'execute_program'),
@@ -127,12 +133,6 @@ def test_wire_controls_survive_routing_ptc_and_tiny_budget(
         assert 'lookup_17' not in names
     else:
         assert 'lookup_17' in names  # Search-off has no schema cost target.
-    for canonical in (POLL_TOOL, KILL_TOOL):
-        actual = next(tool for tool in plan.body['tools']
-                      if tool.get('function', {}).get('name')
-                      == canonical['function']['name'])
-        assert json.dumps(actual, ensure_ascii=False) == json.dumps(
-            canonical, ensure_ascii=False)
 
 
 @pytest.mark.parametrize('protocol,model', [
@@ -193,7 +193,7 @@ def test_legacy_direct_request_and_empty_authority_are_distinct():
 @pytest.mark.parametrize('native_exposure', ['routed', 'full'])
 @pytest.mark.parametrize('lean', [False, True])
 @pytest.mark.parametrize('programmatic_mode,expected_gateways', [
-    ('auto', {'execute_tools'}),
+    ('auto', {'execute_tools', 'execute_program'}),
     ('on', {'execute_tools', 'execute_program'}),
 ])
 def test_real_assembly_reaches_gateway_only_wire_with_canonical_controls(
@@ -228,7 +228,7 @@ def test_real_assembly_reaches_gateway_only_wire_with_canonical_controls(
 
 
 @pytest.mark.parametrize('programmatic_mode,expected_gateways', [
-    ('auto', {'execute_tools'}),
+    ('auto', {'execute_tools', 'execute_program'}),
     ('on', {'execute_tools', 'execute_program'}),
 ])
 def test_read_only_worker_authority_cannot_regain_stale_lifecycle_controls(
@@ -249,7 +249,7 @@ def test_read_only_worker_authority_cannot_regain_stale_lifecycle_controls(
 
 
 @pytest.mark.parametrize('programmatic_mode,expected_gateway', [
-    ('auto', 'execute_tools'),
+    ('auto', 'execute_program'),
     ('on', 'execute_program'),
 ])
 def test_gateway_only_hidden_count_does_not_count_persistent_controls(
@@ -317,7 +317,9 @@ def test_runtime_gate_survives_local_swarm_projection_and_budget(storage_free):
     assert 'maxItems' not in functions['spawn_agents']['input_schema']['properties']['agents']
     assert 'await_agents' not in functions
     if storage_free:
-        assert not {'poll', 'kill'}.intersection(functions)
+        assert {'poll', 'kill'}.issubset(functions)
+        text = ' '.join(json.dumps(functions[name]) for name in ('poll', 'kill'))
+        assert 'delivered automatically' not in text
     else:
         _assert_canonical(plan.body)
         assert 'get_agent_result' in functions

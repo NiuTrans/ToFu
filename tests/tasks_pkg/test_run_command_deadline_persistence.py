@@ -42,7 +42,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -51,6 +50,7 @@ import time
 import pytest
 
 from tests._runtime_sections import runtime_section_path
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -239,40 +239,52 @@ def test_project_mode_long_command_publishes_and_checkpoints(monkeypatch):
     assert any(checkpoints), 'long command has no recoverable running snapshot'
 
 
-def test_every_run_command_dispatch_point_wires_the_spawn_callback():
-    """Structural ratchet for the NEXT entrance.
+def _progress_calls_without_lifecycle(source):
+    """Find factory calls that omit a deliberate clock ownership choice."""
+    import ast
 
-    The suite above proves the two known dispatch points work today. This
-    guard answers "what if someone adds a third dispatch point and forgets":
-    every callsite that passes on_chunk into a run_command execution must
-    also pass on_spawn — the two callbacks are one contract, never half.
+    return [node.lineno for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call)
+            and ((isinstance(node.func, ast.Name)
+                  and node.func.id == '_make_run_command_progress_cb')
+                 or (isinstance(node.func, ast.Attribute)
+                     and node.func.attr == '_make_run_command_progress_cb'))
+            and not any(keyword.arg == 'lifecycle' for keyword in node.keywords)]
 
-    Implemented as a FILE-LEVEL co-occurrence rule over lib/tasks_pkg: any
-    module that drives run_command's live output through
-    ``_make_run_command_progress_cb`` must ALSO wire the spawn clock through
-    ``_make_run_command_spawn_cb``. File level (not callsite level) because
-    the two call shapes differ — project mode builds a kwargs DICT
-    (``'on_chunk': _progress_cb``) while the standalone handler passes plain
-    keywords (``on_chunk=progress_cb``); a callsite regex would silently
-    cover only one. A new dispatch point in ANY file that wires the first
-    factory but not the second turns this red.
+
+@pytest.mark.parametrize('source, missing', [
+    ('_make_run_command_progress_cb(task)', True),
+    ('_make_run_command_progress_cb(task, lifecycle=spawn)', False),
+    ('_make_run_command_progress_cb(task, lifecycle=None)', False),
+    ('module._make_run_command_progress_cb(task)', True),
+    ('_make_run_command_progress_cb(task)\n_make_run_command_spawn_cb(task)', True),
+    ('text = "_make_run_command_progress_cb(task)"', False),
+    ('# _make_run_command_progress_cb(task)', False),
+])
+def test_progress_lifecycle_guard_follows_calls_not_file_cooccurrence(source, missing):
+    assert bool(_progress_calls_without_lifecycle(source)) is missing
+
+
+def test_every_command_progress_call_declares_lifecycle_ownership():
+    """Require an explicit spawn owner, or deliberate None for remote clocks.
+
+    A neighboring factory call cannot supply another call's clock. Runtime tests
+    above verify actual local deadline propagation; the remote bridge deliberately
+    has no server-side process deadline and declares lifecycle=None.
     """
-    import glob
+    import subprocess
 
-    from tests._source_scan import strip_comments
-
+    paths = subprocess.check_output(
+        ['git', 'ls-files', '--cached', '--others', '--exclude-standard',
+         '--', 'lib/tasks_pkg'], cwd=ROOT, text=True).splitlines()
     offenders = []
-    pattern = os.path.join(ROOT, 'lib', 'tasks_pkg', '**', '*.py')
-    for path in glob.glob(pattern, recursive=True):
-        with open(path, encoding='utf-8') as fh:
-            live = strip_comments(fh.read(), lang='python', inline=True)
-        if '_make_run_command_progress_cb(' in live and \
-                '_make_run_command_spawn_cb(' not in live:
-            offenders.append(os.path.relpath(path, ROOT))
-    assert not offenders, (
-        'these modules stream run_command output but publish no spawn clock '
-        '— a countdown would silently never appear on their path (the exact '
-        'project-mode gap the owner caught):\n  ' + '\n  '.join(offenders))
+    for path in paths:
+        if not path.endswith('.py'):
+            continue
+        with open(os.path.join(ROOT, path), encoding='utf-8') as fh:
+            offenders.extend(f'{path}:{line}' for line in
+                             _progress_calls_without_lifecycle(fh.read()))
+    assert not offenders, 'Command progress calls omit lifecycle ownership: ' + ', '.join(offenders)
 
 
 def test_remote_path_deliberately_publishes_no_deadline():
@@ -361,8 +373,7 @@ def test_running_round_deadline_is_in_the_authoritative_turn_projection():
 # ══════════════════════════════════════════════════════════════════
 
 def _node(script: str) -> dict:
-    if shutil.which('node') is None:
-        pytest.skip('node is required for the reducer projection gate')
+    require_node_modules('vite')
     with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False) as fh:
         fh.write(script)
         path = fh.name
@@ -376,6 +387,7 @@ def _node(script: str) -> dict:
 
 
 def test_timer_chip_formats_backend_samples_without_a_client_clock(tmp_path):
+    require_node_modules('vite')
     bundle = tmp_path / 'command-timing.cjs'
     proc = subprocess.run(['node', os.path.join(ROOT, 'scripts/vite_test_bundle.mjs'),
         os.path.join(ROOT, 'frontend/src/conversation/presentation/tool-command-execution-presentation.ts'),

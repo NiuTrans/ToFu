@@ -489,9 +489,9 @@ def test_atomic_batch_refuses_when_gate_check_raises(tmp_path, monkeypatch, gate
     monkeypatch.setattr(handler, gate, unavailable)
     monkeypatch.setattr(project_tools, 'execute_tool', execute)
     entry = {}
-    _, result, failed = handler._handle_project_tool(task, {}, tool, 'blocked-check', args,
-                                                    2, entry, None, root, True)
-    assert failed and entry['status'] == 'error'
+    _, result, is_search = handler._handle_project_tool(task, {}, tool, 'blocked-check', args,
+                                                       2, entry, None, root, True)
+    assert is_search is False and entry['status'] == 'error'
     assert 'safety check unavailable' in result
     assert not invoked and path.read_text() == 'before\n'
     assert args == original_args

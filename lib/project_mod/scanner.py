@@ -1,12 +1,13 @@
 """Project path registration and utility functions.
 
 Background scanning has been removed — the LLM relies entirely on
-grep_search, find_files, read_files, and bounded ``ls`` routing through
+search_files, find_files, read_files, and bounded ``ls`` routing through
 run_command to explore projects.
 """
 import os
 import time
 
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 from lib.project_mod.config import (
     BINARY_EXTENSIONS,
@@ -27,7 +28,7 @@ def _warm_tree_indexes(*paths):
     """Kick background tree-index builds for freshly registered roots.
 
     The persistent file index (lib/project_mod/tree_index.py) is what keeps
-    grep_search / find_files off the live directory walk on FUSE / cross-DC
+    search_files / find_files off the live directory walk on FUSE / cross-DC
     mounts.  Warming here means the index usually exists before the model's
     first search query lands.  Non-blocking and best-effort.
     """
@@ -187,7 +188,7 @@ def set_project(path_str, readonly_paths=None):
     """Validate path and register it as the active project.
 
     No background scan is performed — the LLM relies entirely on tools
-    (grep_search, find_files, read_files, and run_command) to explore the project.
+    (search_files, find_files, read_files, and run_command) to explore the project.
 
     ``readonly_paths`` (optional): abspath'd set of roots to mark read-only;
     if the primary is in it, its root_state gets ``access='ro'``.
@@ -195,7 +196,7 @@ def set_project(path_str, readonly_paths=None):
     from lib.project_mod.config import _normalise_readonly_set
     abs_path = os.path.abspath(os.path.expanduser(path_str))
     if not os.path.isdir(abs_path):
-        raise ValueError(f'Directory not found: {abs_path}')
+        raise BadRequest(f'Directory not found: {abs_path}', field='path')
     _ro_set = _normalise_readonly_set(readonly_paths)
     _primary_access = 'ro' if abs_path in _ro_set else 'rw'
 
@@ -273,7 +274,7 @@ def set_project_paths(paths, readonly_paths=None):
         dict with combined state (primary + roots).
     """
     if not paths:
-        raise ValueError("At least one path is required")
+        raise BadRequest("At least one path is required", field='paths')
     from lib.project_mod.config import _normalise_readonly_set
     _ro_set = _normalise_readonly_set(readonly_paths)
 
@@ -282,7 +283,7 @@ def set_project_paths(paths, readonly_paths=None):
     for p in paths:
         ap = os.path.abspath(os.path.expanduser(p))
         if not os.path.isdir(ap):
-            raise ValueError(f"Directory not found: {ap}")
+            raise BadRequest(f"Directory not found: {ap}", field='paths')
         if ap not in abs_paths:          # deduplicate
             abs_paths.append(ap)
 
@@ -430,7 +431,7 @@ def _get_roots_info():
 
 
 # _scan_root_worker and _scan_worker removed — scanning is no longer performed.
-# The LLM uses tools (list_dir, grep_search, etc.) to explore projects on demand.
+# The LLM uses tools (list_dir, search_files, etc.) to explore projects on demand.
 
 
 def clear_project():
@@ -539,8 +540,13 @@ def _safe_path(base, rel):
     # to climb out via '../').
     expanded = os.path.expanduser(rel)
     if os.path.isabs(expanded):
-        return os.path.abspath(expanded)
-    resolved = os.path.abspath(os.path.join(base, rel))
-    if resolved != base and not resolved.startswith(base + os.sep):
-        raise ValueError(f'Path traversal blocked: {rel}')
+        resolved = os.path.abspath(expanded)
+    else:
+        resolved = os.path.abspath(os.path.join(base, rel))
+        if resolved != base and not resolved.startswith(base + os.sep):
+            raise ValueError(f'Path traversal blocked: {rel}')
+    # A restricted principal stays inside its registered roots after symlinks,
+    # exactly as read_files enforces for absolute paths (no-op otherwise).
+    from lib.project_mod.abs_path_guard import enforce_abs_read
+    enforce_abs_read(resolved)
     return resolved

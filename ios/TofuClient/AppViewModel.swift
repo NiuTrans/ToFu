@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import TofuClientCore
 
 /// What the host UI is currently showing — port of Screen.kt.
@@ -55,13 +56,6 @@ final class AppViewModel: ObservableObject {
         profiles = await store.getAllOnce()
     }
 
-    /// One-time upgrade migration, run once at app open: fix persisted proxy
-    /// profiles stuck on the stale NONE default (see
-    /// ``SessionController/migrateProxyAuthDefaults``). Idempotent.
-    func migrateOnLaunch() async {
-        _ = await controller.migrateProxyAuthDefaults()
-        await reload()
-    }
 
     func startAdd() {
         editing = nil
@@ -148,18 +142,18 @@ final class AppViewModel: ObservableObject {
         // SSO must NAVIGATE, not just set a status — its whole design is "the
         // WebView completes the sign-in once, then we persist the jar".
         if InteractiveSso.shouldOpenWebView(result) {
-            screen = .web(profile)
+            screen = .web(InteractiveSso.profileForWebView(profile, result: result))
             status = .idle
             return
         }
         switch result {
-        case .badCredentials, .noCredential:
+        case .badCredentials:
             status = .badCredentials(profile)
         case .error(let message), .incompatible(let message):
             status = .error(message: message)
         case .success:
             // Session established (or none needed) — open the server.
-            screen = .web(profile)
+            screen = .web(InteractiveSso.profileForWebView(profile, result: result))
             status = .idle
         case .needsInteractiveSso:
             status = .idle // navigated above

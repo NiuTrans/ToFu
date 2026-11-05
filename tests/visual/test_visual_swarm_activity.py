@@ -17,7 +17,8 @@ pytestmark = pytest.mark.visual
 
 @pytest.mark.parametrize('width', [1100, 390])
 @pytest.mark.parametrize('language', ['en', 'zh'])
-def test_live_swarm_activity_is_readable_and_consistent(frontend_visual_page, tmp_path, width, language):
+@pytest.mark.parametrize('theme', ['dark', 'light', 'tofu'])
+def test_live_swarm_activity_is_readable_and_consistent(frontend_visual_page, tmp_path, width, language, theme):
     page = frontend_visual_page
     page.set_viewport_size({'width': width, 'height': 900})
     page.evaluate("""() => {
@@ -31,6 +32,7 @@ def test_live_swarm_activity_is_readable_and_consistent(frontend_visual_page, tm
       <main id="chat" style="padding:12px"></main>
       <div id="convStatusStrip" style="position:fixed;bottom:12px;left:12px;right:12px"><div id="turnNav"></div></div>
       </body></html>''')
+    frame.evaluate('theme=>document.documentElement.dataset.theme=theme', theme)
     frame.add_style_tag(path=str(ROOT / 'static/styles.css'))
     locale = json.loads((ROOT / f'frontend/src/i18n/locales/{language}.json').read_text())
     frame.evaluate(r"""locale => {
@@ -111,6 +113,24 @@ def test_live_swarm_activity_is_readable_and_consistent(frontend_visual_page, tm
     frame.evaluate("sendSwarm({type:'swarm_agent_phase',agentId:'rust_port',phase:'running'})")
     assert 'sw-a-running' in agent.get_attribute('class')
     assert frame.locator('.sw-a-body').is_visible(), 'physical start automatically opens the card'
+    assert frame.locator('.sw-header').evaluate('(el)=>getComputedStyle(el).borderBottomWidth') == '0px'
+    progress = frame.locator('.sw-progress')
+    assert progress.get_attribute('role') == 'progressbar'
+    assert (progress.get_attribute('aria-valuenow'), progress.get_attribute('aria-valuemax')) == ('0', '1')
+    assert progress.get_attribute('aria-label') == (
+        locale['swarm.summary.finished'].replace('{finished}', '0').replace('{total}', '1'))
+    assert frame.locator('.sw-progress-fill').evaluate('(el)=>el.getBoundingClientRect().width') == 0
+    # One summary line: localized title, live counts, ONE verdict and ONE
+    # clock. The shared row decoration neither repeats the tool name nor
+    # appends a second state beside the card's own verdict chip.
+    header = frame.locator('.sw-header')
+    assert frame.locator('.sw-header-title').inner_text() == locale['swarm.title']
+    assert frame.locator('.sw-panel .sw-status-pill').count() == 1
+    assert frame.locator('.sw-panel :is(.sw-header-timer, .sw-progress-label, .sw-footer)').count() == 1
+    assert header.locator('.conversation-action-state').count() == 0
+    assert not any(node.is_visible() for node in header.locator('.conversation-tool-identity').all())
+    if width > 600:
+        assert header.evaluate('(el)=>el.getBoundingClientRect().height') <= 44, 'header stays one line'
     assert frame.locator('.sw-header-subtitle').inner_text() == locale['bgActivity.summaryRunning'].replace('{count}', '1')
     assert 'queued' not in frame.locator('.sw-header-subtitle').inner_text()
     task_details = frame.locator('.sw-a-task')
@@ -144,7 +164,7 @@ def test_live_swarm_activity_is_readable_and_consistent(frontend_visual_page, tm
     bounds = frame.locator('.sw-panel').bounding_box()
     assert bounds and bounds['width'] <= width
     assert frame.locator('.sw-agent').evaluate('(el)=>el.scrollWidth <= el.clientWidth+1')
-    screenshot = tmp_path / f'swarm-activity-{language}-{width}.png'
+    screenshot = tmp_path / f'swarm-activity-{theme}-{language}-{width}.png'
     page.locator('#swarm-activity-fixture').screenshot(path=str(screenshot))
     print(f'Swarm screenshot: {screenshot}')
     # Reader collapse is not undone by the next actual push.
@@ -158,6 +178,20 @@ def test_live_swarm_activity_is_readable_and_consistent(frontend_visual_page, tm
     frame.locator('.sw-a-tool-history > summary').click()
     frame.locator('details.sw-tl-row > summary').click()
     assert 'Verified live file result' in frame.locator('details.sw-tl-row .sw-tl-detail').inner_text()
+    history = frame.locator('.sw-a-tool-history')
+    assert history.evaluate('(el)=>getComputedStyle(el).overflowX') == 'hidden'
+    assert history.evaluate('(el)=>getComputedStyle(el).overflowY') == 'auto'
+    frame.evaluate("""() => {
+      for (let index=0;index<14;index++) sendSwarm({type:'swarm_agent_tool_call',
+        agentId:'rust_port',callId:'history-'+index,toolName:'read_files',callStatus:'done',
+        argsBrief:'artifact-'+index+'.rs',preview:'History result '+index,callElapsed:0.2});
+    }""")
+    assert history.evaluate('(el)=>el.scrollHeight > el.clientHeight')
+    history.evaluate('(el)=>{el.scrollTop=el.scrollHeight}')
+    assert history.evaluate('(el)=>el.scrollTop > 0')
+    screenshot = tmp_path / f'swarm-history-{theme}-{language}-{width}.png'
+    page.locator('#swarm-activity-fixture').screenshot(path=str(screenshot))
+    print(f'Swarm history screenshot: {screenshot}')
     frame.evaluate("window.beforeRetryAdmission = Date.now()")
     frame.evaluate("""sendSwarm({type:'swarm_agent_phase',agentId:'rust_port',
       phase:'pending',status:'pending',waitReason:'capacity'})""")
@@ -220,7 +254,44 @@ def test_live_swarm_activity_is_readable_and_consistent(frontend_visual_page, tm
     failure.locator('.sw-a-err-details > summary').click()
     assert 'observed_usage_totals' in failure.locator('.sw-a-err-reason').inner_text()
     assert failure.locator('script').count() == 0
-    frame.evaluate('fixtureSurface.dispose(); window.dispatchEvent(new Event("pagehide"))')
+    frame.evaluate('fixtureSurface.dispose()')
+    # Rendered completion geometry and color must agree with the count, including
+    # fractional work and unsuccessful endings. Reduced motion lets us observe
+    # the real final width without waiting for an animation clock.
+    page.emulate_media(reduced_motion='reduce')
+    for statuses, finished, success_percent in [
+        (['running', 'running', 'running'], 0, None),
+        (['done', 'running', 'pending'], 1, None),
+        (['done', 'failed', 'running'], 2, 50),
+        (['done', 'completed', 'done'], 3, None),
+        (['failed', 'cancelled', 'aborted'], 3, 0),
+        (['interrupted', 'stalled', 'unknown'], 0, None),
+    ]:
+        frame.evaluate('''statuses => {
+          const round={toolName:'spawn_agents',_swarm:true,_swarmSnapshot:{settled:false,
+            agents:statuses.map((status,index)=>({id:'progress-'+index,role:'reviewer',status}))}};
+          document.getElementById('chat').innerHTML=_buildSwarmPanelHTML(round,[round]);
+        }''', statuses)
+        frame.wait_for_function('''fraction => {
+          const track=document.querySelector('.sw-progress-track').getBoundingClientRect();
+          const fill=document.querySelector('.sw-progress-fill').getBoundingClientRect();
+          return Math.abs(fill.width-track.width*fraction)<1;
+        }''', arg=finished / len(statuses))
+        progress = frame.locator('.sw-progress')
+        assert progress.get_attribute('aria-valuenow') == str(finished)
+        assert progress.get_attribute('aria-valuemax') == str(len(statuses))
+        assert frame.locator('.sw-header').evaluate('(el)=>getComputedStyle(el).borderBottomWidth') == '0px'
+        fill = frame.locator('.sw-progress-fill')
+        if success_percent is not None:
+            assert fill.evaluate('(el)=>parseFloat(getComputedStyle(el).getPropertyValue("--ok-pct"))') == success_percent
+            assert 'has-errors' in fill.get_attribute('class')
+            assert 'sw-pill-done' not in frame.locator('.sw-status-pill').get_attribute('class')
+            assert 'gradient' in fill.evaluate('(el)=>getComputedStyle(el).backgroundImage')
+        frame.locator('.sw-header').click()
+        assert frame.locator('.sw-progress').is_hidden()
+        frame.locator('.sw-header').click()
+        assert frame.locator('.sw-progress').is_visible()
+    frame.evaluate('window.dispatchEvent(new Event("pagehide"))')
 
 
 @pytest.mark.parametrize('live_parent', [True, False])

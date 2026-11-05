@@ -5,7 +5,7 @@ runtime state beyond explicit arguments — these are the cache-stable
 fragments assembled by ``_build.build_static_prompt``.
 
 Prose references tools by Tofu's own names only: read_files,
-apply_diff/insert_content, write_file, find_files, grep_search,
+apply_diff/insert_content, write_file, find_files, search_files,
 run_command, todo_write, ask_human, spawn_agents.
 """
 from __future__ import annotations
@@ -497,7 +497,7 @@ def section_using_tools(tool_names: set[str] | None = None, *,
             turn. When provided, the "prefer the dedicated tool" sub-bullets
             are filtered so we only ever name a tool that exists — otherwise
             the model is told (e.g.) ``write_file`` / ``edit_file`` /
-            ``grep_search`` exist when project mode is off, and tries to call
+            ``search_files`` exist when project mode is off, and tries to call
             a tool that isn't in the schema. When ``None`` (back-compat for
             callers that don't pass it), all sub-bullets ship.
         tool_search_available: Whether this turn has a live discovery path for
@@ -509,9 +509,8 @@ def section_using_tools(tool_names: set[str] | None = None, *,
     _candidate_subitems: list[tuple[str, tuple[str, ...]]] = [
         ("To read files use read_files instead of cat, head, tail, or sed",
          ('read_files',)),
-        ("To edit files use edit_file instead of sed or awk. To add content in "
-         "the middle of a file use insert_before/insert_after and do not repeat "
-         "the anchor",
+        ("To edit files use edit_file instead of sed or awk; follow its "
+         "operation/content contract and examples",
          ('edit_file',)),
         ("To create files or append at end-of-file use write_file instead of "
          "cat with heredoc or echo redirection (append=true appends without "
@@ -519,9 +518,9 @@ def section_using_tools(tool_names: set[str] | None = None, *,
          ('write_file',)),
         ("To search for files use find_files instead of find or ls",
          ('find_files',)),
-        ("To search the content of files, use grep_search instead of grep "
+        ("To search the content of files, use search_files instead of grep "
          "or rg",
-         ('grep_search',)),
+         ('search_files',)),
         ("Reserve using run_command exclusively for system commands and "
          "terminal operations that require shell execution. If you are "
          "unsure and there is a relevant dedicated tool, default to using "

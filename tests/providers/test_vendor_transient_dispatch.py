@@ -17,8 +17,9 @@ pinned FIXED here:
      classes (401/403 auth death, endpoint-unreachable), which still
      record failures.
   2. A deterministic HTTP 400 (BadRequestError) is PAYLOAD-level: dispatch
-     releases the slot (no consecutive_errors → no 300s lockout) and only
-     pair-excludes, so sibling keys each get one try.
+     releases the slot (no consecutive_errors → no 300s lockout) and durably
+     excludes the rejecting provider endpoint + wire model, so sibling keys
+     on that route do not replay the unchanged body.
   3. The retry HUD tells the truth: gateway-class errors surface as
      'Upstream error' (+ the real status), and an all-slots-cooling wait
      labels itself by the ACTUAL cooldown cause — never the hardcoded
@@ -213,34 +214,33 @@ def _no_real_sleep(monkeypatch):
 @pytest.mark.unit
 class TestDispatchStreamVendorStorm:
 
-    def test_bad_request_releases_slot_and_pair_excludes(
+    def test_bad_request_releases_slot_without_credential_retry(
             self, monkeypatch, key_stats_recorders):
-        """Deterministic 400: NO consecutive_errors feed (no 300s lockout),
-        NO key_stats call — the sibling key still gets its one try."""
+        """Deterministic 400: neutral release, no replay or health penalty."""
         from lib.llm_dispatch import api
         from lib.llm.llm_errors import BadRequestError
 
         sick = _make_slot(model='opus-x', key='kA')
-        healthy = _make_slot(model='opus-x', key='kB')
-        disp = _FakeDispatcher([sick, healthy])
+        unused = _make_slot(model='opus-x', key='kB')
+        from tests.llm_dispatch.test_nonstream_dispatch_failures import _ExclusionAwareDispatcher
+        disp = _ExclusionAwareDispatcher([sick, unused])
         monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
 
         calls = {'n': 0}
 
         def _fake_stream(body, **kwargs):
             calls['n'] += 1
-            if calls['n'] == 1:
-                raise BadRequestError('API HTTP 400: signature: Field required')
-            return 'ok', 'stop', {}
+            raise BadRequestError('API HTTP 400: signature: Field required')
 
         import lib.llm as llm_mod
         monkeypatch.setattr(llm_mod, 'stream_chat', _fake_stream)
 
-        msg, finish, usage = api.dispatch_stream(
-            [{'role': 'user', 'content': 'hi'}], log_prefix='[t]', max_retries=2)
+        with pytest.raises(BadRequestError):
+            api.dispatch_stream(
+                [{'role': 'user', 'content': 'hi'}], log_prefix='[t]', max_retries=2)
 
-        assert msg == 'ok'
-        assert calls['n'] == 2
+        assert calls['n'] == 1
+        assert unused.total_requests == 0
         assert sick.consecutive_errors == 0, (
             'a deterministic 400 is PAYLOAD-level — feeding slot health is '
             'the 300s-lockout poisoning from the incident')
@@ -250,7 +250,6 @@ class TestDispatchStreamVendorStorm:
         assert _failures == [], (
             'release() — not record_error — is the ContentFilter precedent '
             '(success bookkeeping for kB is legitimate and unrelated)')
-        # pair-exclusion is proven by the failover itself: kB got tried.
 
     def test_gateway_ratelimit_reports_upstream_error_not_429(
             self, monkeypatch, key_stats_recorders):

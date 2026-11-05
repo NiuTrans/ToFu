@@ -29,6 +29,7 @@ from typing import Any
 from lib.log import get_logger
 from lib.tasks_pkg.attachments import compute_turn_attachments, inject_attachments
 from lib.tasks_pkg.compaction.api import run_compaction_pipeline
+from lib.tasks_pkg.round_prep_timing import round_prep_step
 
 logger = get_logger(__name__)
 
@@ -109,12 +110,13 @@ def run_round_message_hygiene(
     # Context compaction: two-layer pipeline
     #   L1: micro-compact cold tool results (every round, zero LLM cost)
     #   L2: smart summary as synthetic tool result (on context overflow)
-    run_compaction_pipeline(
-        messages,
-        round_num,
-        task=task,
-        remaining_api_rounds=remaining_api_rounds,
-    )
+    with round_prep_step(task, 'compaction'):
+        run_compaction_pipeline(
+            messages,
+            round_num,
+            task=task,
+            remaining_api_rounds=remaining_api_rounds,
+        )
 
     # Per-turn attachments: dynamic context injection
     #   Injects session memory, file reminders, tool discovery deltas

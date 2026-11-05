@@ -58,6 +58,9 @@ _UNKNOWN = ContextProfile(None, 'unknown', False)
 _EXACT_RULES: tuple[tuple[str, int, str], ...] = (
     # DeepSeek generations are NOT spelled here — the flash/pro lines resolve
     # by tier + generation in _LINE_RULES.
+    # Kimi K3.1 Pro (2026-10-23): flat 1,048,576-token window (kimi.ai K3.1
+    # Pro pricing page; OpenRouter agrees). Must precede the kimi-k3 needle.
+    ('kimi-k3.1', 1_048_576, 'vendor_official'),
     ('kimi-k3', 1_000_000, 'repository_verified'),
     # ChatGPT/Codex subscription ids: the oauth_codex provider's model rows
     # are rebuilt from the remote catalogue every refresh, so vendor-documented
@@ -67,7 +70,7 @@ _EXACT_RULES: tuple[tuple[str, int, str], ...] = (
     ('gpt-5.4-mini', 400_000, 'vendor_official'),
     ('gpt-5.4', 1_000_000, 'vendor_official'),
     ('gpt-5.3-codex-spark', 128_000, 'vendor_official'),
-    # Sankuai/Meituan gateway catalogue ids (2026-08-14 research, owner-
+    # Sankuai/YourProvider gateway catalogue ids (2026-08-14 research, owner-
     # reviewed): vendor-documented windows promoted from the runtime-data
     # backfill into static knowledge so fresh installs and template setups
     # resolve them too. Substring order matters in two places:
@@ -93,6 +96,8 @@ _EXACT_RULES: tuple[tuple[str, int, str], ...] = (
     # line rules below (sonnet >=4.6, haiku >=5.5) — 1M ctx, 128K max out.
     # Mistral Large 4 (Public Preview 2026-10-06): 1M ctx (docs model page).
     ('mistral-large-4-0', 1_000_000, 'vendor_official'),
+    # Step 5 Preview (2026-09-20): 1M ctx / 64K max output (StepFun model page).
+    ('step-5-preview', 1_000_000, 'vendor_official'),
     # xAI Grok 4.7 (GA 2026-09-21): 500k context, text+image→text, no text output
     # limit (docs.x.ai release notes / grok-4-7 overview). 4.6 shares the 500k window.
     ('grok-4.7', 500_000, 'vendor_official'),
@@ -104,6 +109,8 @@ _EXACT_RULES: tuple[tuple[str, int, str], ...] = (
     ('longcat-2.0', 1_000_000, 'vendor_official'),
     # Qwen3.8-Omni-Flash (2026-09-18): 1M ctx / 131K max output (qwencloud model page).
     ('qwen3.8-omni-flash', 1_000_000, 'vendor_official'),
+    # Qwen3.8-27B (2026-08-17): 1,000,000 ctx / 131,072 max output (Model Studio page).
+    ('qwen3.8-27b', 1_000_000, 'vendor_official'),
     # Xiaomi MiMo V2.6 (2026-09-22): 1M ctx / 128K max output (mimo.mi.com models page).
     ('mimo-v2.6', 1_000_000, 'vendor_official'),
     # Meta Muse Spark (dev.meta.ai/docs/models, 2026-09): 1,048,576
@@ -260,7 +267,7 @@ def resolved_context_profile(model: str, provider_id: str = '') -> dict:
     an *expand* entry is a FLOOR-only corroboration — ``max(static, learned)``
     — because an expand observation is "at least this much worked", never a
     ceiling. Treating a stale expand as absolute pins the window below the
-    vendor-documented one forever (live instance: sankuai::kimi-k3 expand
+    vendor-documented one forever (live instance: example-corp::kimi-k3 expand
     383,727 masking the real 1M window, 2026-07-26). When static knowledge
     wins, the static profile is returned unchanged so provenance (verified /
     exact) survives to the UI.

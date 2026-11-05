@@ -15,6 +15,7 @@ remain cooperative: this adapter is not an all-tool filesystem sandbox.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 import re
@@ -35,6 +36,25 @@ _SCHEMA = 'tofu.workspace-delivery/v1'
 
 class WorkspaceBindingError(RuntimeError):
     """The requested execution root could not be safely bound."""
+
+    def __init__(self, message: str, *, user_hint: str | None = None):
+        super().__init__(message)
+        # Bilingual recovery rendered verbatim by the task-start failure lane.
+        self.user_hint = user_hint
+
+
+@dataclass(frozen=True)
+class IsolationRefusal:
+    """Why a dispatched worker cannot own an isolated checkout, and the human remedy."""
+    reason: str
+    remedy: str
+    remedy_zh: str
+
+    def message(self) -> str:
+        return f'{self.reason} {self.remedy}'
+
+    def hint(self) -> str:
+        return f'解决办法 / How to fix:\n• {self.remedy_zh}\n\n• {self.remedy}'
 
 
 def _check_workspace_cancelled(task: dict) -> None:
@@ -101,6 +121,93 @@ def _checkout(path: str) -> tuple[str, str] | None:
     if Path(common).name != '.git':
         raise WorkspaceBindingError('Unsupported canonical Git directory layout')
     return root, str(Path(common).parent)
+
+
+def _has_commit(root: str) -> bool:
+    result = subprocess.run(
+        [git_executable(), '-c', 'core.fsmonitor=false', '-C', root,
+         'rev-parse', '--verify', '--quiet', 'HEAD^{commit}'],
+        capture_output=True, text=True, timeout=10, check=False,
+        env=git_policy_environment())
+    return result.returncode == 0
+
+
+def isolated_workspace_refusal(project_path: str) -> IsolationRefusal | None:
+    """Prepare this root for isolated workers, or explain what Tofu cannot fix.
+
+    People never run Git for this: managed_repository turns a plain folder or an
+    empty repository into a Tofu-managed repository and extends an existing
+    one's shared-data policy. Repositories with their own history are left as
+    they are. Then this mirrors binding and ownership admission: workspaces
+    register under the real top level of a primary checkout and snapshot/publish
+    against a commit, so the accepted project path must be exactly that.
+    Delegation calls this before any worker exists; binding calls it before a
+    worker's first model request.
+    """
+    local = _local_path(project_path)
+    if not local or not os.path.isdir(local):
+        return IsolationRefusal(
+            f'Project root {project_path} is not an existing local directory.',
+            'Open an existing local folder as the project, then delegate again.',
+            '请将一个存在的本地文件夹作为项目打开，然后重新委派。')
+    from lib.project_mod.managed_repository import (
+        ManagedRepositoryUnavailable, prepare_managed_repository,
+    )
+    try:
+        prepare_managed_repository(project_path)
+    except ManagedRepositoryUnavailable as error:
+        return IsolationRefusal(error.reason, error.remedy, error.remedy_zh)
+    try:
+        source = _checkout(local)
+    except WorkspaceBindingError as error:
+        return IsolationRefusal(
+            f'Project root {project_path} has an unsupported Git layout ({error}).',
+            'Use a standard checkout whose Git directory is .git at the repository top level.',
+            '请改用 .git 目录位于仓库根目录的标准 Git 检出。')
+    if source is None:
+        # Preparation just made it one; only a concurrent removal reaches this.
+        return IsolationRefusal(
+            f'Project root {project_path} stopped being a Git repository while Tofu prepared '
+            'it for isolated workers.',
+            'Delegate the work again; Tofu prepares the folder automatically.',
+            '请重新委派，Tofu 会自动准备该文件夹。')
+    toplevel, canonical = source
+    if toplevel != canonical:
+        return IsolationRefusal(
+            f'Project root {project_path} is a linked Git worktree of {canonical}; workers are '
+            'isolated only from a primary checkout.',
+            f'Open the primary checkout {canonical} as the project.',
+            f'请将主检出 {canonical} 作为项目打开。')
+    if project_path != toplevel:
+        if local == toplevel:
+            return IsolationRefusal(
+                f'Project root {project_path} reaches the Git repository {toplevel} through a '
+                'symlink; worker workspaces are registered under its real path.',
+                f'Open {toplevel} as the project.',
+                f'请将 {toplevel} 作为项目打开。')
+        return IsolationRefusal(
+            f'Project root {project_path} is a subdirectory of the Git repository {toplevel}; '
+            'worker workspaces are registered per repository.',
+            f'Open {toplevel} as the project, or make {project_path} its own Git repository.',
+            f'请将 {toplevel} 作为项目打开，或把 {project_path} 初始化为独立的 Git 仓库。')
+    if not _has_commit(toplevel):
+        # Preparation records the first commit; only a concurrent change reaches this.
+        return IsolationRefusal(
+            f'The Git repository {toplevel} has no commits yet, so workers have no baseline '
+            'to start from or publish onto.',
+            'Delegate the work again; Tofu records the first commit automatically.',
+            '请重新委派，Tofu 会自动创建第一次提交。')
+    return None
+
+
+def _refuse_unisolatable_dispatch_root(task: dict) -> None:
+    """Prepare a file/project worker's root, or fail before its first model request."""
+    from lib.project_dispatch.admission import KEY, requires_isolated_workspace
+    if not requires_isolated_workspace(task):
+        return
+    refusal = isolated_workspace_refusal(task['config'][KEY]['projectPath'])
+    if refusal is not None:
+        raise WorkspaceBindingError(refusal.message(), user_hint=refusal.hint())
 
 
 def _read_only(path: str, task: dict) -> bool:
@@ -210,6 +317,10 @@ def _binding(path: str, task: dict, *, create=False) -> dict | None:
         raise WorkspaceBindingError('Registered workspace is missing or mismatched')
     if source[0] != source[1] and source[0] != actual[0]:
         raise WorkspaceBindingError('Task already owns a different linked workspace')
+    # Every binding, not only creation: a retried start or a later policy
+    # refresh must still find the canonical folder's shared data in place.
+    from lib.project_mod.managed_repository import link_shared_paths
+    link_shared_paths(source[1], workspace)
     # Pass the canonical root: even a disappearing registration must not fall
     # through integration's linked-checkout adoption path.
     from lib.integration_control import bind_task_workspace
@@ -296,6 +407,9 @@ def bind_worker_workspace(task: dict) -> dict | None:
         config.get('projectPaths'), config.get('readOnlyPaths')) if config.get('projectPath') else None
     with measure_task_startup('workspace_roots', identity=identity):
         writable_roots = [] if managed else _roots(task)
+    if writable_roots:
+        # Consult roots are readonly and never reach this check or workspace creation.
+        _refuse_unisolatable_dispatch_root(task)
     for path in writable_roots:
 
         _check_workspace_cancelled(task)
@@ -747,7 +861,7 @@ def command_workspace_refusal(task: dict, command: str, cwd: str) -> str:
         return ''
     from lib.project_mod.command_analysis import (
         _command_checkout_mutation, command_segment_literal_targets, _split_pipeline,
-        _shell_words, _unwrap_command_parts, _ENV_ASSIGNMENT_GUARD_RE,
+        _shell_words, git_command_words, unwrap_process_wrappers, _ENV_ASSIGNMENT_GUARD_RE,
     )
     active = _local_path(cwd)
     def forbidden(path):
@@ -760,7 +874,8 @@ def command_workspace_refusal(task: dict, command: str, cwd: str) -> str:
         words = [word.text for word in _shell_words(segment)]
         while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
             words = words[1:]
-        words = _unwrap_command_parts(words)
+        # `timeout 60 git -C <checkout> reset --hard` targets <checkout>.
+        words = git_command_words(words) or unwrap_process_wrappers(words)
         if not words:
             continue
         if words[0] == 'cd' and len(words) == 2:
@@ -795,12 +910,53 @@ def rebind_project_tool_arguments(task: dict, arguments: dict) -> dict:
     return route_project_tool_args(task, '', arguments)
 
 
-def prepare_worker_command_runtime(task: dict) -> None:
-    """Load ignored dependencies without excluding unrelated source file edits."""
-    from lib.project_mod.workspace_lease import workspace_runtime_setup_lease
-    from lib.project_mod.tool_admission import Cancellation
+def _prepare_repository_runtime(task: dict, row: dict, inherited: bool, prior_setup: bool) -> bool:
+    """Distinguish refused lease entry from failures after setup may write."""
+    from contextlib import ExitStack
+    from lib.project_mod.workspace_lease import (
+        WorkspaceBusyError, WorkspaceLeaseCancelled, workspace_runtime_setup_lease,
+    )
+    from lib.project_mod.tool_admission import Cancellation, admission_timeout, cancellation
+    from lib.project_mod.run_command import CommandAdmissionCancelled, CommandAdmissionRefusal
     from lib.project_mod.workspace_runtime import prepare_workspace_runtime
     from lib.project_mod.abs_path_guard import task_is_remote
+
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(workspace_runtime_setup_lease(
+                row['workspacePath'], timeout=admission_timeout(),
+                cancel_event=cancellation() or Cancellation(task)))
+        except WorkspaceLeaseCancelled as error:
+            if prior_setup:
+                from lib.tasks_pkg.tool_runtime import ToolCancelled
+                raise ToolCancelled('Workspace dependency preparation cancelled after earlier setup') from error
+            raise CommandAdmissionCancelled(
+                'Workspace dependency admission cancelled. Command was not started.') from error
+        except WorkspaceBusyError as error:
+            if prior_setup:
+                raise
+            raise CommandAdmissionRefusal(
+                f'Error [workspace-busy]: {error}. Command was not started; '
+                'retry after the conflicting lease finishes.') from error
+        # Do not catch preparation/persistence failures as admission refusals:
+        # dependency files may already exist when those operations fail.
+        if row.get('runtimePrepared'):
+            return False
+        paths = prepare_workspace_runtime(row['canonicalRoot'], row['workspacePath'],
+                                          restricted=task_is_remote(task))
+        task.setdefault('_workspaceRuntimePrepared', []).append(row['workspacePath'])
+        if paths and not inherited:
+            row['runtimePaths'] = paths
+            row['runtimePrepared'] = True
+            _persist(task, row)
+        return True
+
+
+def prepare_worker_command_runtime(task: dict, command: str = '') -> None:
+    """Load ignored dependencies without excluding unrelated source file edits."""
+    from lib.project_mod.command_analysis import command_requires_workspace_runtime
+    if not command_requires_workspace_runtime(command):
+        return
     owned_rows = (task.get('_workspaceDelivery') or {}).get('repositories') or []
     rows = execution_repositories(task)
     inherited = bool(rows and not owned_rows)
@@ -813,22 +969,13 @@ def prepare_worker_command_runtime(task: dict) -> None:
             if source and selected and source[1] == selected[1] and source[0] != selected[0]:
                 inherited = True
                 rows = [{'canonicalRoot': source[0], 'workspacePath': selected[0]}]
+    prior_setup = False
     for row in rows:
         if row['workspacePath'] in (task.get('_workspaceRuntimePrepared') or []):
             continue
         if row.get('runtimePrepared'):
             continue
-        with workspace_runtime_setup_lease(row['workspacePath'], timeout=5.0,
-                                           cancel_event=Cancellation(task)):
-            if row.get('runtimePrepared'):
-                continue
-            paths = prepare_workspace_runtime(row['canonicalRoot'], row['workspacePath'],
-                                              restricted=task_is_remote(task))
-            task.setdefault('_workspaceRuntimePrepared', []).append(row['workspacePath'])
-            if paths and not inherited:
-                row['runtimePaths'] = paths
-                row['runtimePrepared'] = True
-                _persist(task, row)
+        prior_setup = _prepare_repository_runtime(task, row, inherited, prior_setup) or prior_setup
 
 
 

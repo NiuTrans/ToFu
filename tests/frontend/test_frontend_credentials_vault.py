@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._jsdom import run_harness
+from tests._jsdom import require_node_modules, run_harness
 from tests._runtime_sections import runtime_section_path
 
 pytestmark = pytest.mark.unit
@@ -231,6 +231,7 @@ const flush = async () => { for (let i = 0; i < 6; i++) await new Promise((r) =>
 
 
 def _compile_credentials_vault(tmp_path):
+    require_node_modules('vite')
     built = tmp_path / 'credentials-vault.js'
     compiled = subprocess.run(
         [str(ESBUILD), str(MODULE_TS), '--bundle', '--format=iife',
@@ -243,7 +244,6 @@ def _compile_credentials_vault(tmp_path):
     return built
 
 
-@pytest.mark.skipif(not ESBUILD.is_file(), reason='vite test bundler not installed')
 def test_credentials_vault_frontend(tmp_path):
     built = _compile_credentials_vault(tmp_path)
     run_harness(
@@ -254,7 +254,6 @@ def test_credentials_vault_frontend(tmp_path):
     )
 
 
-@pytest.mark.skipif(not ESBUILD.is_file(), reason='vite test bundler not installed')
 def test_vite_credentials_vault_matches_privacy_contract(tmp_path):
     built = _compile_credentials_vault(tmp_path)
     run_harness(

@@ -58,10 +58,6 @@ fn conflict(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, message)
 }
 
-fn resource_exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
-
 fn owner_key(
     transaction: &AuthorityTransaction,
     namespace: &str,
@@ -562,7 +558,7 @@ fn push_requested_row(
     *retained_bytes = retained_bytes
         .checked_add(row_bytes)
         .and_then(|bytes| bytes.checked_add(usize::from(!rows.is_empty())))
-        .ok_or_else(|| resource_exhausted("optimizer response byte count overflow"))?;
+        .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("optimizer response byte count overflow"))?;
     rows.push(row);
     Ok(())
 }

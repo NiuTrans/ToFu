@@ -23,7 +23,7 @@ import html as _html
 import re
 
 from lib.log import get_logger
-from lib.slides.pptd import (Deck, Page, cell_content, resolve_color,
+from lib.slides.pptd import (Deck, Page, cell_content, chart_font_family, resolve_color,
                              resolve_media, table_style, text_style)
 
 logger = get_logger(__name__)
@@ -643,17 +643,24 @@ def _chart_div(el: dict, deck: Deck, theme: dict) -> str:
     fs_cat = max(10.0, h * 0.042)
     fs_val = max(9.0, h * 0.036)
     top_pad = 30.0 if legend else 12.0
-    svg = [f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}">']
+    family = _html.escape(chart_font_family(theme), quote=True)
+    svg = [f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
+           f'font-family="{family}">']
     if legend:
+        from unicodedata import east_asian_width
+
         lx = w - 8
         for i, s in reversed(list(enumerate(series))):
-            name = _html.escape(str(s.get('name') or f'S{i + 1}'))
-            tw = len(name) * fs_cat * 0.62 + 26
+            raw_name = str(s.get('name') or f'S{i + 1}')
+            name = _html.escape(raw_name)
+            tw = sum(1.0 if east_asian_width(c) in ('W', 'F') else 0.65
+                     for c in raw_name) * fs_cat + 26
             lx -= tw
             svg.append(
                 f'<rect x="{lx:.1f}" y="8" width="12" height="12" '
                 f'fill="{colors[i]}"/>'
-                f'<text x="{lx + 17:.1f}" y="18" font-size="{fs_cat:.0f}" '
+                f'<text x="{lx + tw:.1f}" y="18" text-anchor="end" '
+                f'font-size="{fs_cat:.0f}" '
                 f'fill="{muted}">{name}</text>')
             lx -= 18
     if ctype in ('pie', 'doughnut'):
@@ -699,7 +706,7 @@ def _chart_div(el: dict, deck: Deck, theme: dict) -> str:
         plot_bot = h - fs_cat * 2.2
         plot_h = max(10.0, plot_bot - plot_top)
         n = len(cats)
-        slot = w / n
+        slot = plot_h / n if ctype == 'bar' else w / n
         svg.append(f'<line x1="0" y1="{plot_bot:.1f}" x2="{w}" '
                    f'y2="{plot_bot:.1f}" stroke="{hair}" stroke-width="1"/>')
         if ctype == 'radar':
@@ -773,7 +780,7 @@ def _chart_div(el: dict, deck: Deck, theme: dict) -> str:
                     v = vals[i] if i < len(vals) else 0.0
                     if horizontal:
                         bh = min(26.0, slot * 0.72 / ns)
-                        y0 = slot * i + slot * 0.14 + bh * ns * 0 + si * bh
+                        y0 = plot_top + slot * i + (slot - bh * ns) / 2 + si * bh
                         bw = (v / vmax) * (w - 90)
                         svg.append(
                             f'<rect x="0" y="{y0:.1f}" width="{bw:.1f}" '
@@ -809,7 +816,8 @@ def _chart_div(el: dict, deck: Deck, theme: dict) -> str:
                 for i, c in enumerate(cats):
                     svg.append(
                         f'<text x="{w - 4:.1f}" '
-                        f'y="{slot * i + slot * 0.14:.0f}" '
+                        f'y="{plot_top + slot * (i + 0.5):.1f}" '
+                        f'dominant-baseline="middle" '
                         f'font-size="{fs_cat:.0f}" fill="{muted}" '
                         f'text-anchor="end">{_html.escape(c)}</text>')
     svg.append('</svg>')

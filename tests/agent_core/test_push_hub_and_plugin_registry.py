@@ -7,7 +7,7 @@ coverage:
     per-channel/per-task and wildcard subscription routing, in-process listener
     fan-out + exception isolation, and the bounded slow-client policy.
 
-  * ``routes/plugin_registry.py`` — the Blueprint / startup-hook / TaskRuntime
+  * ``lib/app/plugin_registry.py`` — the Blueprint / startup-hook / TaskRuntime
     discovery seam added when the trading subsystem was extracted. We assert it
     is fail-soft: a broken entry point is logged and skipped (never raised),
     and discovery returns an empty list when no plugin is installed.
@@ -317,8 +317,49 @@ def test_push_hub_accepts_same_owner_and_independent_owner_connection_demand():
 
 @pytest.mark.unit
 class TestPluginRegistry:
+    @pytest.mark.parametrize('legacy', [False, True])
+    def test_metadata_lookup_failure_is_isolated_for_every_contribution(
+            self, monkeypatch, legacy):
+        import importlib.metadata as md
+        import lib.app.plugin_registry as registry
+
+        def unavailable(**kwargs):
+            if legacy and kwargs:
+                raise TypeError('old metadata interface')
+            raise RuntimeError('distribution metadata unavailable')
+
+        monkeypatch.setattr(md, 'entry_points', unavailable)
+        assert registry.discover_blueprint_plugins() == []
+        assert registry.discover_task_runtime_plugins() == []
+        assert registry.run_startup_hooks(object()) == 0
+        assert registry.run_shutdown_hooks(object()) == 0
+
+    def test_failed_metadata_lookup_is_not_cached(self, monkeypatch):
+        import importlib.metadata as md
+        import lib.app.plugin_registry as registry
+
+        attempts = []
+
+        class Entry:
+            name = 'recovered'
+
+            def load(self):
+                return lambda: ['runtime']
+
+        def recovering_loader(**kwargs):
+            attempts.append(kwargs)
+            if len(attempts) == 1:
+                raise RuntimeError('transient metadata failure')
+            return [Entry()]
+
+        monkeypatch.setattr(md, 'entry_points', recovering_loader)
+        assert registry.discover_task_runtime_plugins() == []
+        assert registry.discover_task_runtime_plugins() == ['runtime']
+        assert registry.discover_task_runtime_plugins() == ['runtime']
+        assert len(attempts) == 2
+
     def test_discover_blueprints_returns_list(self):
-        from routes.plugin_registry import discover_blueprint_plugins
+        from lib.app.plugin_registry import discover_blueprint_plugins
         # Contract: discovery always returns a list (possibly empty on a
         # vanilla install, non-empty when plugins are installed) and never
         # raises. We assert the fail-soft return type rather than emptiness,
@@ -327,7 +368,7 @@ class TestPluginRegistry:
         assert isinstance(discover_blueprint_plugins(), list)
 
     def test_broken_blueprint_plugin_is_logged_and_skipped(self, monkeypatch, caplog):
-        import routes.plugin_registry as pr
+        import lib.app.plugin_registry as pr
 
         class _FakeEP:
             name = 'boom'
@@ -350,7 +391,7 @@ class TestPluginRegistry:
             'broken plugin should be logged at WARNING'
 
     def test_good_blueprint_plugin_contributes_blueprints(self, monkeypatch):
-        import routes.plugin_registry as pr
+        import lib.app.plugin_registry as pr
 
         sentinel_bps = ['bp-a', 'bp-b']
 
@@ -366,7 +407,7 @@ class TestPluginRegistry:
         assert pr.discover_blueprint_plugins() == sentinel_bps
 
     def test_startup_hook_failure_is_isolated(self, monkeypatch):
-        import routes.plugin_registry as pr
+        import lib.app.plugin_registry as pr
 
         ran = {'good': False}
 
@@ -394,7 +435,7 @@ class TestPluginRegistry:
         assert n == 1
 
     def test_shutdown_hook_failure_is_isolated(self, monkeypatch):
-        import routes.plugin_registry as pr
+        import lib.app.plugin_registry as pr
 
         calls = []
 
@@ -421,7 +462,7 @@ class TestPluginRegistry:
         assert calls == [app]
 
     def test_task_runtime_plugin_flattens_list_and_skips_none(self, monkeypatch):
-        import routes.plugin_registry as pr
+        import lib.app.plugin_registry as pr
 
         class _ListEP:
             name = 'multi'
@@ -451,7 +492,7 @@ class TestPluginRegistry:
     def test_task_runtime_discovery_is_cached_per_loader(self, monkeypatch):
         """The hot generic-task endpoint must not rescan site-packages."""
         import importlib.metadata as md
-        import routes.plugin_registry as pr
+        import lib.app.plugin_registry as pr
 
         calls = {'entry_points': 0, 'load': 0}
 

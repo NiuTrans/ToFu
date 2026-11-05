@@ -27,6 +27,8 @@ Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest \
 
 from __future__ import annotations
 
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+
 import json as _json
 import os
 import sys
@@ -74,7 +76,7 @@ def _run_failing_task(monkeypatch, conv_id):
     def _stub_raise(task, body, tag='', on_tool_call_ready=None):
         raise _DispatchDead('OAuth access token has been revoked')
 
-    monkeypatch.setattr(llm_fb, 'stream_llm_response', _stub_raise)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', _stub_raise)
 
     from lib.tasks_pkg.manager import create_task
     from lib.tasks_pkg.orchestrator.api import run_task
@@ -131,7 +133,7 @@ def test_successful_round_still_stamps_model(monkeypatch):
                 'stop',
                 {'prompt_tokens': 5, 'completion_tokens': 1, 'total_tokens': 6})
 
-    monkeypatch.setattr(llm_fb, 'stream_llm_response', _stub_ok)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', _stub_ok)
 
     from lib.tasks_pkg.manager import create_task
     from lib.tasks_pkg.orchestrator.api import run_task

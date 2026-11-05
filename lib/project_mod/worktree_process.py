@@ -3,7 +3,8 @@
 Entry: run_worktree_add. The integration owner supplies sanitized environment,
 lease FDs and an unowned destination. Git file-count progress renews an idle
 budget; output noise cannot extend it. One bounded reader drains the child,
-and teardown retires the process group before the caller can clean up.
+and teardown retires the process group before the caller can clean up. Pipe
+closure is then proven by a non-blocking drain, never by a join deadline.
 """
 from __future__ import annotations
 
@@ -22,10 +23,36 @@ logger = get_logger(__name__)
 
 _PROGRESS = re.compile(rb'(?:Updating|Checking out) files:\s*\d+%\s*\((\d+)/(\d+)\)')
 _OUTPUT_LIMIT = 8192
+# Linux's default pipe-max-size: once the owned group is retired, a pipe can
+# hold at most this much. Bytes beyond it come from a live escaped writer.
+_RETIRED_PIPE_BYTES = 1 << 20
 
 
 class WorktreeRetirementUnproven(RuntimeError):
     """Caller must preserve the destination: a writer may still be alive."""
+
+
+def _drain_retired_output(fd: int, tail: bytearray, lock: threading.Lock) -> bool:
+    """True when every writer has closed the stopped reader's pipe.
+
+    A non-blocking read answers at once: buffered bytes, then EOF once no
+    writer is left, or EAGAIN while one outside the retired group still holds
+    the write end. The decision never depends on how soon a thread was
+    scheduled, and a writer that keeps producing cannot extend teardown.
+    """
+    drained = 0
+    while drained <= _RETIRED_PIPE_BYTES:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            return False
+        if not chunk:
+            return True
+        drained += len(chunk)
+        with lock:
+            tail.extend(chunk)
+            del tail[:-_OUTPUT_LIMIT]
+    return False
 
 
 def run_worktree_add(argv: list[str], *, cwd: Path, env: dict[str, str],
@@ -124,9 +151,14 @@ def run_worktree_add(argv: list[str], *, cwd: Path, env: dict[str, str],
             retirement_error = error
         finally:
             if reader.ident is not None:
-                reader.join(timeout=0.2)
+                # The reader only makes non-blocking reads, so it leaves within
+                # one iteration however late it is scheduled; EOF is then
+                # established by the drain below, not by a join deadline.
                 stop_reader.set()
-                reader.join(timeout=0.5)
+                reader.join()
+                if not eof.is_set() and _drain_retired_output(
+                        process.stdout.fileno(), tail, lock):
+                    eof.set()
             process.stdout.close()
         if retirement_error is not None or (reader.ident is not None and not eof.is_set()):
             # An escaped pipe holder is not in our owned group. Do not hang or

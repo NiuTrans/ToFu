@@ -92,6 +92,24 @@ agent submissions on transport failures, 429, and 5xx responses with bounded
 backoff. `TofuError` exposes `status`, stable `kind`, `retryable`, and
 `retry_after`.
 
+## Client and response ownership
+
+Use `with Tofu(...) as tofu:` or call `tofu.close()` to release the synchronous
+client's connection pool. `async with AsyncTofu(...)` / `await tofu.aclose()`
+releases an internally created HTTPX client. When passing `client=shared_http`,
+the caller owns and closes that client. SDK requests apply their own API key,
+user agent and timeout without modifying its default headers; an explicit SDK
+API key also overrides the borrowed client's HTTPX authentication handler.
+TLS verification and proxy settings on a borrowed client remain caller-owned.
+
+SSE readers emit JSON objects only after a complete blank-line-delimited frame;
+multiple `data:` lines form one event, and incomplete final frames are discarded.
+Only valid integer sequences advance a task's resume cursor. Missing or malformed
+sequences never fabricate progress; named `done` / `error` / `aborted` events
+terminate replay without another status request. Readers release their response
+on completion, generator close, cancellation and parse failure. Python timeouts
+retain Requests/HTTPX semantics; they are not an absolute duration limit on a task.
+
 ## CLI
 
 ```bash

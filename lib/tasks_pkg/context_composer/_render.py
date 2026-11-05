@@ -23,10 +23,9 @@ from lib.tasks_pkg.context_composer.registry import INJECTION_REGISTRY
 
 logger = get_logger(__name__)
 
-# Registry-declared system-prefix blocks (currently platform_static and
-# ui_nav_directory). Each occupies its own dedicated system carrier; only a
-# system-role witness may satisfy their content-addressed reuse — a quoted
-# envelope in a user/tool message is data, never installed policy.
+# Registry-declared system-prefix blocks. Each occupies its own dedicated
+# system carrier; only a system-role witness may satisfy content-addressed
+# reuse — a quoted envelope in a user/tool message is data, never policy.
 _SYSTEM_PLACEMENT_IDS = frozenset(
     spec.id for spec in INJECTION_REGISTRY.values() if spec.placement == 'system')
 
@@ -35,7 +34,8 @@ _SYSTEM_PLACEMENT_IDS = frozenset(
 # block was explicitly ablated, or the surface no longer qualifies. Transient
 # acquisition failure is never here — it retains the previous carrier.
 _SYSTEM_WITHDRAWAL_REASONS = frozenset({
-    'replace_mode', 'disabled', 'non_browser_surface',
+    'replace_mode', 'disabled', 'non_browser_surface', 'not_applicable',
+    'superseded_by_delegate_mode', 'delegate_mode_off',
 })
 
 _AUTHORITY_ORDER = {
@@ -76,6 +76,8 @@ _AUTHORITATIVE_RETRACTION_REASONS = frozenset({
     'not_a_goal_worker',
     'ordinary_agent_role',
     'plan_mode_off',
+    'delegate_mode_off',
+    'superseded_by_delegate_mode',
     'preferences_disabled',
     'profile_empty',
     'programmatic_disabled',
@@ -220,9 +222,7 @@ def _apply_global_budget(manifest: list[dict[str, Any]],
         row['_rendered'] = rendered
         row['chars'] = len(rendered)
         row['tokens'] = tokens
-        row['hash'] = hashlib.sha256(
-            _canonical_section(block.id, fitted_text).encode('utf-8')
-        ).hexdigest()[:16]
+        row['hash'] = block_content_hash(block.id, fitted_text)
         if global_truncated:
             row['reason'] = 'global_budget_truncated'
             row['_global_truncated'] = True
@@ -279,6 +279,12 @@ def _apply_global_budget(manifest: list[dict[str, Any]],
     )
 
 
+def block_content_hash(block_id: str, text: str) -> str:
+    """The content-addressed identity render_context assigns to one block body."""
+    return hashlib.sha256(
+        _canonical_section(block_id, text).encode('utf-8')).hexdigest()[:16]
+
+
 def _managed_block_hashes(
     messages: list[dict[str, Any]],
 ) -> dict[str, str]:
@@ -313,9 +319,8 @@ def _managed_block_hashes(
                 # Hash the wrapper-independent body section so a block hashes
                 # identically whether it rode a standalone reminder envelope
                 # or an amalgamated same-authority wrapper on-wire.
-                latest[block_id] = hashlib.sha256(
-                    _canonical_section(block_id, _strip_to_body(match.group(0)))
-                    .encode('utf-8')).hexdigest()[:16]
+                latest[block_id] = block_content_hash(
+                    block_id, _strip_to_body(match.group(0)))
     return latest
 
 
@@ -331,6 +336,11 @@ def verified_block_hash(messages, block_id, *, wire=False):
     if wire:
         messages = [{**message, '_contextComposer': True} for message in messages if isinstance(message, dict)]
     return _managed_block_hashes(messages).get(block_id)
+
+
+def verified_block_hashes(messages) -> dict[str, str]:
+    """Latest verified envelope hash of every managed block in one history pass."""
+    return _managed_block_hashes(messages) if isinstance(messages, list) else {}
 
 
 def _envelope(block: ContextBlock, text: str) -> str:
@@ -501,12 +511,19 @@ def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
     existing_hashes = _managed_block_hashes(messages)
     from dataclasses import replace
     from .registry import block_spec
-    # One optional-context switch by registry ID. Required policy and
-    # continuity cannot be turned off through an advisory ablation.
+    from lib.tasks_pkg.execution_profile import THIRD_PARTY_CONTEXT_BLOCKS, is_third_party_text
+    third_party = is_third_party_text(request.task)
+
+    def _suppressed(block: ContextBlock) -> bool:
+        spec = block_spec(block.id)
+        if third_party:
+            # A profile, not an ablation: required owner sources are withheld too.
+            return spec is None or spec.id not in THIRD_PARTY_CONTEXT_BLOCKS
+        # One optional-context switch by registry ID. Required policy and
+        # continuity cannot be turned off through an advisory ablation.
+        return spec is not None and not spec.required and spec.id in request.disabled_blocks
     blocks = [replace(block, content='', suppressed_reason='disabled')
-              if (spec := block_spec(block.id)) is not None
-              and not spec.required and spec.id in request.disabled_blocks
-              else block for block in blocks]
+              if _suppressed(block) else block for block in blocks]
     manifest: list[dict[str, Any]] = []
     winners: dict[str, ContextBlock] = {}
     ordered = sorted(
@@ -578,9 +595,7 @@ def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
             'authority': block.authority, 'placement': block.placement,
             'stability': block.stability, 'lifecycle': block.lifecycle,
             'injected': True, 'chars': len(rendered), 'tokens': block_tokens,
-            'hash': hashlib.sha256(
-                _canonical_section(block.id, text).encode('utf-8')
-            ).hexdigest()[:16],
+            'hash': block_content_hash(block.id, text),
             'reason': 'truncated' if truncated else '',
             'provenance': dict(block.provenance),
             '_block': block, '_raw_text': text,
@@ -625,9 +640,7 @@ def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
             row['injected'] = True
             row['chars'] = len(rendered)
             row['tokens'] = _count_tokens(rendered, request.model)
-            row['hash'] = hashlib.sha256(
-                _canonical_section(row['id'], text).encode('utf-8')
-            ).hexdigest()[:16]
+            row['hash'] = block_content_hash(row['id'], text)
             row['reason'] = f'retracted:{reason}'
             row['_required_override'] = True
             continue

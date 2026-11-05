@@ -10,7 +10,7 @@ from tests._runtime_sections import runtime_section_path
 ROOT = Path(__file__).resolve().parent.parent.parent
 SOURCE = Path(runtime_section_path('local-control.js'))
 API_SOURCE = ROOT / 'frontend/src/api/endpoint-registry/desktop.ts'
-MAIN_ENTRY = ROOT / 'frontend' / 'src' / 'main.ts'
+MAIN_ENTRY = ROOT / 'frontend' / 'src' / 'application.ts'
 FEATURE_ENTRY = ROOT / 'frontend' / 'src' / 'features' / 'local-control.ts'
 
 pytestmark = pytest.mark.unit

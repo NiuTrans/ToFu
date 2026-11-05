@@ -13,8 +13,8 @@ warned).
     fallback — the empty feeds the risk-control backoff instead;
   * availability: enabled + (cookies OR live browser) — a connected browser
     alone (no stored cookies) is enough, since the browser IS logged in;
-  * the account-risk guard (pacing / cache / empty-backoff) applies to BOTH
-    paths — it protects the account, not a transport.
+  * pacing and empty backoff belong to the captured transport; only current
+    replay credentials may reuse content. Browser reads reenter their provider.
 
 All offline: the pool method and both provider seams are fakes.
 
@@ -24,7 +24,9 @@ Run: python -m pytest tests/test_xhs_browser_reroute.py -q
 import pytest
 
 import tofu_search
+from tofu_search._provider_scope import browser_scope
 from tofu_search.search.engines import xhs
+from tofu_search.search.engines._xhs_sessions import browser_guard
 
 
 def _cookies():
@@ -75,7 +77,6 @@ def rig(monkeypatch):
     """Fresh guard + pool spy; each test installs its own providers."""
     import tofu_search.fetch.playwright_pool as pp
 
-    xhs._GUARD.reset()
     pool_calls = []
 
     def fake_pool(url, cookies, proxy='', timeout=20, extractor_js='', wait_selector=''):
@@ -177,7 +178,7 @@ class TestAvailability:
 
 @pytest.mark.unit
 class TestGuardAppliesToBothPaths:
-    def test_browser_results_feed_the_query_cache(self, rig):
+    def test_browser_queries_reenter_current_read_authority(self, rig):
         tofu_search.register_auth_source_provider(_FakeAuthProvider(_cookies()))
         browser = _FakeBrowserProvider(result=_items())
         tofu_search.register_browser_provider(browser)
@@ -187,7 +188,8 @@ class TestGuardAppliesToBothPaths:
         second = xhs.search_xhs('  RAMEN ')
 
         assert second == first
-        assert len(browser.calls) == 1, 'cache must shield the account on BOTH paths'
+        assert len(browser.calls) == 2, 'browser reads must reach their current authority'
+        assert rig == [], 'a successful browser read never replays cookies'
 
     def test_browser_empties_trip_the_backoff(self, rig):
         tofu_search.register_auth_source_provider(_FakeAuthProvider(_cookies()))
@@ -197,6 +199,6 @@ class TestGuardAppliesToBothPaths:
         for q in ('q1', 'q2', 'q3'):
             xhs.search_xhs(q)
 
-        assert xhs._GUARD.in_cooldown() is True, (
+        assert browser_guard(browser_scope.current_binding()).in_cooldown() is True, (
             'zero-card scrapes via the browser are indistinguishable from a '
             'risk wall — the same backoff must trip')

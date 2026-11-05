@@ -10,12 +10,6 @@ import type {
 } from './surface-contracts';
 import { positiveInteger } from './surface-windowing';
 
-/** Inner historical evidence owns its gestures, even though wheel/touch bubble. */
-export function isConversationViewportEvent(event: Event): boolean {
-  const target = event.target as Element | null;
-  return !target?.closest?.('.conversation-history-process__body');
-}
-
 /** All geometry corrections must finish synchronously, including under themes. */
 function writeInstantly(viewport: HTMLElement, write: () => void): void {
   const value = viewport.style.getPropertyValue('scroll-behavior');
@@ -46,6 +40,7 @@ export function createConversationViewportPort(
   });
   let following = true;
   let lastScrollTop = viewport.scrollTop;
+  let lastClientHeight = viewport.clientHeight;
   let touchY: number | null = null;
   let cancelScheduled: (() => void) | null = null;
   let disposed = false;
@@ -63,13 +58,18 @@ export function createConversationViewportPort(
   };
   const suspendFollow = (): void => { following = false; cancelLayout(); };
   const onWheel = (event: WheelEvent): void => {
-    if (isConversationViewportEvent(event) && event.deltaY < 0) suspendFollow();
+    /* The context card scrolls itself and stays pinned beside the reading, so
+     * a wheel over it is no intent to leave the transcript's end. Once the
+     * card cannot scroll further the wheel moves the transcript, which the
+     * scroll handler judges like any other movement. */
+    if ((event.target as Element | null)?.closest?.('[data-conversation-part="turn-context-card"]')) return;
+    if (event.deltaY < 0 || (!following && event.deltaY !== 0)) suspendFollow();
   };
   const onTouchStart = (event: TouchEvent): void => {
-    touchY = isConversationViewportEvent(event) ? event.touches.item(0)?.clientY ?? null : null;
+    touchY = event.touches.item(0)?.clientY ?? null;
+    if (!following && touchY !== null) cancelLayout();
   };
   const onTouchMove = (event: TouchEvent): void => {
-    if (!isConversationViewportEvent(event)) return;
     const nextY = event.touches.item(0)?.clientY;
     if (touchY !== null && nextY !== undefined && nextY > touchY + 4) {
       suspendFollow();
@@ -80,17 +80,29 @@ export function createConversationViewportPort(
     const nextTop = viewport.scrollTop;
     // Intent wins even within the near-bottom slack. An upward wheel followed
     // by a 2px scroll must not rearm the latch and fight the next stream paint.
-    if (nextTop < lastScrollTop - 0.5) suspendFollow();
-    else if (nextTop > lastScrollTop + 0.5 && nearBottom()
+    const delta = nextTop - lastScrollTop;
+    // Retire a jump correction without suppressing a reader's single drag
+    // back to the logical tail. Physical bottom alone cannot rearm follow.
+    if (!following && cancelScheduled && Math.abs(delta) > 0.5) cancelLayout();
+    /* Layout clamps a pinned tail when the pane grows or the transcript reflows
+     * shorter, and that scroll can precede the resize observation. A clamp ends
+     * at the physical bottom, which no upward reader movement does, unless the
+     * pane also shrank in that layout (chrome above it grew): then the observed
+     * pane height changed, which no reader movement does either. */
+    const paneResized = viewport.clientHeight !== lastClientHeight;
+    lastClientHeight = viewport.clientHeight;
+    if (delta < -0.5 && !(following && (nearBottom(1) || paneResized))) suspendFollow();
+    else if (delta > 0.5 && nearBottom()
       && (options.canFollowLatest?.() ?? true)) following = true;
     lastScrollTop = nextTop;
   };
   const onKeyDown = (event: KeyboardEvent): void => {
-    if (!isConversationViewportEvent(event) || event.defaultPrevented) return;
+    if (event.defaultPrevented) return;
     const target = event.target as Element | null;
     if (target?.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
     if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)
-      || (event.key === ' ' && event.shiftKey)) suspendFollow();
+      || (event.key === ' ' && event.shiftKey)
+      || (!following && ['ArrowDown', 'PageDown', 'End', ' '].includes(event.key))) suspendFollow();
   };
   viewport.addEventListener('wheel', onWheel, { passive: true });
   viewport.addEventListener('touchstart', onTouchStart, { passive: true });
@@ -103,8 +115,21 @@ export function createConversationViewportPort(
     writeInstantly(viewport, () => { viewport.scrollTop = viewport.scrollHeight; });
     lastScrollTop = viewport.scrollTop;
   };
+  /* Chrome around the pane (a composer notice rendered after the commit, the
+   * project strip above it, the window) resizes it without a Surface write.
+   * Observations arrive after layout and before paint, so a followed tail is
+   * re-pinned in the frame that first shows the new geometry; the next-frame
+   * correction painted one frame with the tail clipped. Pinning here also
+   * records the offset a growing pane clamps, which is not reader intent. */
+  const Resize = viewport.ownerDocument.defaultView?.ResizeObserver;
+  const paneResize = Resize ? new Resize(() => {
+    lastClientHeight = viewport.clientHeight;
+    if (options.canFollowLatest?.() ?? true) writeBottom();
+  }) : null;
+  paneResize?.observe(viewport);
   const followLatest = (force = true): void => {
     if (disposed || (!force && (!following || !(options.canFollowLatest?.() ?? true)))) return;
+    if (!following) cancelLayout();
     following = true;
     writeBottom();
     // One deferred layout write per frame, regardless of stream burst size.
@@ -122,6 +147,42 @@ export function createConversationViewportPort(
   return {
     get following() { return following; },
     isNearBottom: nearBottom,
+    scrollToTurn(root, turnId, onScroll) {
+      if (disposed || !viewport.contains(root)) return false;
+      const findTarget = (): HTMLElement | undefined => {
+        for (const node of root.querySelectorAll<HTMLElement>('[data-turn-id]')) {
+          if (node.dataset.turnId === turnId) return node;
+        }
+        return undefined;
+      };
+      if (!findTarget()) return false;
+      suspendFollow();
+      const align = (): void => {
+        const target = findTarget();
+        if (!target || !viewport.contains(root)) return;
+        // Exact navigation must not race instant anchor corrections with a
+        // native smooth animator. Only this viewport moves, never the page.
+        writeInstantly(viewport, () => {
+          viewport.scrollTop += target.getBoundingClientRect().top
+            - viewport.getBoundingClientRect().top - viewport.clientTop;
+        });
+        lastScrollTop = viewport.scrollTop;
+        onScroll?.();
+      };
+      align();
+      // Content-visibility and newly mounted leaves settle at the next layout.
+      // Reuse the sole layout slot: reader intent, Latest, another jump and
+      // disposal all retire this delivery, even if cancellation is best-effort.
+      const epoch = ++layoutEpoch;
+      const cancel = scheduleAfterLayout(() => {
+        if (disposed || epoch !== layoutEpoch) return;
+        cancelScheduled = null;
+        layoutEpoch += 1;
+        align();
+      });
+      if (epoch === layoutEpoch) cancelScheduled = cancel;
+      return true;
+    },
     capture(root) {
       /* While following the tail, restore() always re-pins to the bottom and
        * never reads the anchor, so the visible-content geometry scan is skipped for
@@ -192,8 +253,16 @@ export function createConversationViewportPort(
       }
       const nextOffset = anchor.getBoundingClientRect().top
         - viewport.getBoundingClientRect().top;
-      writeInstantly(viewport, () => {
-        viewport.scrollTop += nextOffset - previousOffset;
+      const correction = nextOffset - previousOffset;
+      // Native scroll anchoring adjusts during the layout just forced. When it
+      // moved the viewport, it holds the reader: its anchor may differ from
+      // this leaf by a few pixels, and any write here (even a no-op) cancels
+      // in-flight smooth or momentum scrolling. Correct fully only where the
+      // browser could not anchor: scroll offset 0, opted out or unsupported.
+      const nativelyAnchored = Math.abs(viewport.scrollTop - snapshot.scrollTop) > 0.5;
+      const tolerance = nativelyAnchored ? viewport.clientHeight / 2 : 0.5;
+      if (Math.abs(correction) > tolerance) writeInstantly(viewport, () => {
+        viewport.scrollTop += correction;
       });
       lastScrollTop = viewport.scrollTop;
     },
@@ -202,6 +271,7 @@ export function createConversationViewportPort(
     dispose() {
       if (disposed) return;
       disposed = true;
+      paneResize?.disconnect();
       cancelLayout();
       viewport.removeEventListener('wheel', onWheel);
       viewport.removeEventListener('touchstart', onTouchStart);

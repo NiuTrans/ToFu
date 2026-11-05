@@ -8,12 +8,14 @@ from threading import Thread
 
 import pytest
 from tests._runtime_sections import ROOT
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 
 
 @pytest.fixture(scope='module')
 def paper_style_origin(tmp_path_factory):
+    require_node_modules('vite')
     directory = tmp_path_factory.mktemp('lazy-paper-css')
     output = directory / 'site'
     entry = directory / 'entry.ts'

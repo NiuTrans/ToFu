@@ -1,0 +1,16 @@
+/* Settings keeps its paper surface across chat themes. Resolve shared status
+   roles at that surface boundary so feedback never inherits dark-page ink. */
+.settings-panel {
+  --success-text: var(--s-ink-soft);
+  --success-bg: transparent;
+  --success-border: var(--s-line-strong);
+  --warning-text: color-mix(in srgb, var(--s-gold) 50%, var(--s-ink));
+  --warning-bg: var(--s-gold-glow);
+  --warning-border: var(--s-gold);
+  --error-text: color-mix(in srgb, var(--s-danger) 80%, var(--s-ink));
+  --error-bg: color-mix(in srgb, var(--error-text) 8%, transparent);
+  --error-border: color-mix(in srgb, var(--error-text) 35%, transparent);
+  --info-text: var(--s-ink-soft);
+  --info-bg: var(--s-cream);
+  --info-border: var(--s-line-strong);
+}

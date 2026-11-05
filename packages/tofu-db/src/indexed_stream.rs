@@ -69,11 +69,10 @@ pub(crate) fn event_batch_composition_budget() -> serde_json::Value {
     // For a nonempty object, stamping replaces neither producer fields nor
     // bytes: add comma plus the interior of {"v":N}. Empty/scalar costs less.
     let envelope_bytes = envelope.len() - 1;
-    let cap = crate::transaction::MAX_CARRIED_PAYLOAD_BYTES;
     serde_json::json!({
         "contract": crate::generated_storage_v2::NATIVE_EVENT_BATCH_COMPOSITION_CONTRACT,
-        "maximumCarriedPayloadBytes": cap,
-        "transactionHeadroomBytes": cap / 4,
+        "maximumCarriedPayloadBytes": crate::transaction::MAX_CARRIED_PAYLOAD_BYTES,
+        "transactionHeadroomBytes": crate::transaction::CARRIED_TRANSACTION_HEADROOM_BYTES,
         "streamSegmentHeaderBytes": segment_header,
         "streamEventHeaderBytes": event_header,
         "eventEnvelopeBytes": envelope_bytes,
@@ -181,6 +180,7 @@ pub(crate) struct ListRequest {
     pub types: Vec<String>,
     pub type_prefixes: Vec<String>,
     pub payload_types: Option<Vec<String>>,
+    pub inspector_projection: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -796,8 +796,15 @@ fn materialize_event_payload<'a>(
 }
 
 fn project_event(entry: IndexEntry, payload: &[u8]) -> io::Result<Vec<u8>> {
-    let value: Value = serde_json::from_slice(payload)
+    project_event_with_view(entry, payload, false)
+}
+
+fn project_event_with_view(entry: IndexEntry, payload: &[u8], inspector: bool) -> io::Result<Vec<u8>> {
+    let mut value: Value = serde_json::from_slice(payload)
         .map_err(|_| invalid_data("indexed event JSON is invalid"))?;
+    if inspector {
+        value = crate::request_inspector_projection::project(value);
+    }
     serde_json::to_vec(&json!({"sequence": entry.application_sequence, "event": value, "created_at_ms": entry.created_at_ms}))
         .map_err(|_| invalid_data("indexed event projection failed"))
 }
@@ -1170,14 +1177,14 @@ pub(crate) fn prune(
                     }
                 }
                 Err(error)
-                    if error.kind() == io::ErrorKind::OutOfMemory
+                    if crate::resource_exhaustion::is_refusal(&error)
                         && slice_ms > RETENTION_SWEEP_MIN_SLICE_MS
                         && shrink_attempts < RETENTION_SWEEP_MAX_SHRINK_ATTEMPTS =>
                 {
                     shrink_attempts += 1;
                     slice_ms = (slice_ms / 2).max(RETENTION_SWEEP_MIN_SLICE_MS);
                 }
-                Err(error) if error.kind() == io::ErrorKind::OutOfMemory => {
+                Err(error) if crate::resource_exhaustion::is_refusal(&error) => {
                     if selected.is_empty() && swept_through_ms == sweep_start_ms {
                         return Err(error);
                     }
@@ -1630,7 +1637,7 @@ pub(crate) fn list(
             if filtered && logical_event_type_from_json(&payload)? != indexed_type {
                 return Err(invalid_data("event type index witness mismatch"));
             }
-            project_event(entry, &payload)?
+            project_event_with_view(entry, &payload, request.inspector_projection)?
         } else {
             if filtered && event.event_type != indexed_type {
                 return Err(invalid_data("event type index witness mismatch"));
@@ -1643,7 +1650,7 @@ pub(crate) fn list(
         output.len().checked_add(additional)
             .ok_or_else(|| invalid_input("event page length overflow"))?;
         output.try_reserve(additional)
-            .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory,"cannot allocate complete event page"))?;
+            .map_err(|_| crate::resource_exhaustion::reservation_failure("cannot allocate complete event page"))?;
         if offset > 0 {
             output.push(b',');
         }

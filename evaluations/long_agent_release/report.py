@@ -13,6 +13,7 @@ from typing import Any, Iterable
 
 from lib.benchmark_contract import (
     BenchmarkContractError,
+    RELEASE_ACCEPTANCE_POLICY,
     acceptance_decision_v2,
     paired_quality_interval,
     validate_release_task_matrix_v2,
@@ -28,7 +29,7 @@ from .run_store import (
 )
 
 
-RELEASE_REPORT_CONTRACT = "tofu-long-agent-release-report/v1"
+RELEASE_REPORT_CONTRACT = "tofu-long-agent-release-report/v2"
 _REQUIRED_JUDGES = ("claude-opus-5", "glm-5.3")
 _JUDGED_FAMILIES = frozenset({"frozen_research", "long_writing"})
 _CRITICAL_INCIDENT_CODES = frozenset({
@@ -397,6 +398,7 @@ def build_release_pair_report(
     else:
         decision = {
             "contractVersion": "tofu-benchmark/v2",
+            "acceptancePolicy": RELEASE_ACCEPTANCE_POLICY,
             "releaseEligible": False,
             "claim": "not demonstrated; full frozen 1,845-task matrix required",
             "quality": quality,
@@ -405,6 +407,7 @@ def build_release_pair_report(
         }
     return {
         "contractVersion": RELEASE_REPORT_CONTRACT,
+        "acceptancePolicy": RELEASE_ACCEPTANCE_POLICY,
         "pairId": baseline_manifest.get("pairId"),
         "baselineRunId": baseline_manifest.get("runId"),
         "candidateRunId": candidate_manifest.get("runId"),

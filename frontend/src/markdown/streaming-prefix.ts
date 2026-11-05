@@ -1,14 +1,12 @@
 /**
  * Prefix reuse for the streaming Markdown hot path.
  *
- * A streaming frame appends to the accumulated source. Every completed leading
- * block — all lines up to the last blank-line boundary that sits outside any
- * open code fence and before which there is no math placeholder — is
- * idempotent under the whole prepare → parse → sanitize → project pipeline:
- * its output is a byte-identical prefix of the full frame. A frame can
- * therefore reuse the PRIOR frame's already-computed output for that stable
- * prefix and run the pipeline only over the grown tail, turning an O(source²)
- * stream into O(source).
+ * A streaming frame appends to the accumulated source. Reusable leading blocks
+ * end at a blank-line boundary outside open code fences, before reference-capable
+ * brackets or globally indexed math. Reference uses and definitions must parse
+ * together: a later definition can change an earlier paragraph or supply a
+ * later reference image. Plain leading prose can reuse the PRIOR frame's HTML
+ * while the remaining document passes through the full pipeline.
  *
  * Reuse is strictly verified, never assumed: a snapshot seeds a frame only
  * when the raw/escaped variant matches, the new source still starts with the
@@ -23,8 +21,9 @@
 /**
  * Byte length of the stable leading run of ``text``: every line ending at or
  * before the last blank-line boundary that is outside any fenced code block.
- * Returns 0 when the prefix contains a math placeholder (``\x02MATH``) — those
- * are globally indexed and unsafe to split — or when no safe boundary exists.
+ * Stop before the first reference-capable bracket outside fenced code; a blank
+ * line alone does not isolate document-scoped link definitions. Returns 0 when
+ * no safe boundary exists. The caller separately rejects math-bearing prefixes.
  */
 export function findStreamingPrefixEnd(text: string): number {
   let inFence = false;
@@ -51,6 +50,9 @@ export function findStreamingPrefixEnd(text: string): number {
       }
     }
     if (!inFence) {
+      // Conservative: inline links, escaped brackets and code spans may opt
+      // out too. Never reuse a possible reference without its definitions.
+      if (line.includes('[')) return boundary;
       if (line.includes('MATH')) lastMathLineEnd = end;
       if (!line.trim()) boundary = end;
     }

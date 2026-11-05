@@ -67,8 +67,15 @@ def test_catalog_rejects_foreign_or_nonadvancing_storage_rows(runtime):
             programs.program_page(user_id=OWNER)
 
 
-@pytest.mark.parametrize('error_message', ['versioned document page exceeds 8 MiB', 'database_resource_exhausted'])
-def test_catalog_byte_overflow_reduces_page_at_same_cursor_without_losing_projects(runtime, error_message):
+# Current native engines refuse an oversized page once with the non-retryable
+# bound code and its literal; older engines shed it as database_unavailable.
+@pytest.mark.parametrize(('error_code', 'error_message'), [
+    ('database_unavailable', 'versioned document page exceeds 8 MiB'),
+    ('database_unavailable', 'database_resource_exhausted'),
+    ('database_resource_exhausted', 'versioned document page exceeds requested projection bytes'),
+])
+def test_catalog_byte_overflow_reduces_page_at_same_cursor_without_losing_projects(
+        runtime, error_code, error_message):
     programs, store, _ = runtime
     ids = sorted(programs.create_program({'objective': f'Large original {index}'},
         user_id=OWNER, idempotency_key=f'large-catalog-{index}')['program_id'] for index in range(7))
@@ -77,7 +84,7 @@ def test_catalog_byte_overflow_reduces_page_at_same_cursor_without_losing_projec
     def bounded(operation, payload):
         reads.append(deepcopy(payload))
         if payload['limit'] > 3:
-            raise StorageError('database_unavailable', error_message)
+            raise StorageError(error_code, error_message)
         return query(operation, payload)
     store.query = bounded
     after = ''; seen = []
@@ -1577,7 +1584,9 @@ def test_failed_worker_start_does_not_enter_program_or_suppress_sibling(runtime,
     original = threading.Thread.start
     failed = []
     def start(thread):
-        if thread.name.startswith('tofu-evolution-program') and not failed:
+        # The first program's start and its one startup recovery both fail
+        # (tests/agent_core/test_worker_start_recovery.py).
+        if thread.name.startswith('tofu-evolution-program') and len(failed) < 2:
             failed.append(thread.name)
             raise RuntimeError('synthetic worker start failure')
         return original(thread)
@@ -1587,7 +1596,7 @@ def test_failed_worker_start_does_not_enter_program_or_suppress_sibling(runtime,
         seen.append(program_id) or {'status': 'active', 'current': {'run_id': program_id}})
     outcomes = programs.sweep_programs(user_id=OWNER, batch_size=1)
     assert outcomes[0]['status'] == 'deferred' and outcomes[1]['status'] == 'active'
-    assert seen == ids[1:]
+    assert seen == ids[1:] and len(failed) == 2
     assert programs.records.get_record(programs.REGISTRY, key)['program_ids'] == ids
     assert not any(thread.name.startswith('tofu-evolution-program') for thread in threading.enumerate())
 

@@ -195,6 +195,9 @@ fn payload_object(payload: &[u8]) -> Result<JsonMap<String, JsonValue>, Semantic
 }
 
 fn storage_error(error: io::Error) -> SemanticExecutionError {
+    if let Some(refusal) = crate::resource_exhaustion::semantic_refusal(&error) {
+        return refusal;
+    }
     match error.kind() {
         io::ErrorKind::InvalidInput => SemanticExecutionError::InvalidPayload,
         io::ErrorKind::NotFound => SemanticExecutionError::NotFound,
@@ -203,7 +206,6 @@ fn storage_error(error: io::Error) -> SemanticExecutionError {
         io::ErrorKind::WouldBlock | io::ErrorKind::AlreadyExists => {
             SemanticExecutionError::Conflict
         }
-        io::ErrorKind::OutOfMemory => SemanticExecutionError::ResourceExhausted,
         io::ErrorKind::TimedOut => SemanticExecutionError::DeadlineElapsed,
         _ => SemanticExecutionError::StorageUnavailable,
     }
@@ -219,7 +221,9 @@ fn sql_error(error: RusqliteError) -> SemanticExecutionError {
             rusqlite::ErrorCode::AuthorizationForStatementDenied => {
                 SemanticExecutionError::InvalidPayload
             }
-            rusqlite::ErrorCode::TooBig => SemanticExecutionError::ResourceExhausted,
+            rusqlite::ErrorCode::TooBig => {
+                crate::resource_exhaustion::semantic_bound("TofuSQL value exceeds its length ceiling")
+            }
             _ => SemanticExecutionError::InvalidPayload,
         },
         RusqliteError::ModuleError(_) => SemanticExecutionError::InvalidPayload,
@@ -386,7 +390,9 @@ fn run_statement(
         let mut output_rows = Vec::new();
         while let Some(row) = rows.next().map_err(sql_error)? {
             if output_rows.len() >= TOFUSQL_MAXIMUM_RESULT_ROWS {
-                return Err(SemanticExecutionError::ResourceExhausted);
+                return Err(crate::resource_exhaustion::semantic_bound(
+                    "TofuSQL result exceeds its row ceiling",
+                ));
             }
             let mut object = JsonMap::with_capacity(column_count);
             for (index, name) in column_names.iter().enumerate() {
@@ -416,7 +422,9 @@ fn run_statement(
     let body = serde_json::to_vec(&payload)
         .map_err(|_| integrity_failure("failed to serialize the TofuSQL catalog response"))?;
     if body.len() > TOFUSQL_MAXIMUM_RESPONSE_BYTES.min(MAX_LEGACY_DOCUMENT_BYTES) {
-        return Err(SemanticExecutionError::ResourceExhausted);
+        return Err(crate::resource_exhaustion::semantic_bound(
+            "TofuSQL response exceeds its byte ceiling",
+        ));
     }
     Ok(body)
 }

@@ -1,4 +1,4 @@
-"""Static product-contract guards for Settings → My Context."""
+"""Settings → My Context presentation, client requests and undo behavior."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import subprocess
 import pytest
 
 from tests._jsdom import run_harness
+from tests.frontend.test_frontend_endpoint_registry import registry_bundle as registry_bundle, run_registry
 from tests._runtime_sections import (
     native_module_path,
     runtime_section,
@@ -43,17 +44,26 @@ def test_panel_explains_always_on_context_and_separate_memory():
     assert 'id="prefsList"' in panel
     assert 'data-i18n="context.memoryTitle"' in panel
     assert 'clearLegacyMemories(this)' in panel
-def test_context_and_clear_api_wiring_is_complete():
-    api = _read('static/js/api.js')
-    route = _read('routes/api_v1/memory.py')
-    for endpoint in (
-        '/api/v4/context',
-        '/api/v4/context/changes/${encodeURIComponent(changeId)}/undo',
-        '/api/v4/memory/actions/clear',
-    ):
-        assert endpoint in api
-    assert "data.get('confirm') is not True" in route
-    assert 'Bulk memory clearing is disabled in multi-user mode' in route
+
+
+def test_context_and_clear_api_wiring_is_complete(registry_bundle):
+    run_registry(registry_bundle, r"""
+const calls=[];
+global.fetch=async(url,options)=>{
+ calls.push({url:String(url),method:options.method||'GET',body:options.body?JSON.parse(options.body):null});
+ return new Response(JSON.stringify({data:{},meta:{}}),{headers:{'content-type':'application/json'}});
+};
+const items=[{type:'identity',text:'synthetic context'}];
+await api.userContext.get();await api.userContext.replace(items);
+await api.userContext.undo('change/42');await api.memory.clearPreview();await api.memory.clearAll();
+assert.deepEqual(calls,[
+ {url:'/api/v4/context',method:'GET',body:null},
+ {url:'/api/v4/context',method:'PUT',body:{items}},
+ {url:'/api/v4/context/changes/change%2F42/undo',method:'POST',body:{}},
+ {url:'/api/v4/memory/actions/clear',method:'GET',body:null},
+ {url:'/api/v4/memory/actions/clear',method:'POST',body:{confirm:true}},
+]);
+""")
 
 
 def test_context_layout_has_mobile_contract():
@@ -178,7 +188,7 @@ const panel = fs.readFileSync(
 const saved = [];
 let cleared = 0;
 const sample = [
-  { id: 'ctx_a', type: 'identity', text: 'Works at Meituan', source: 'manual' },
+  { id: 'ctx_a', type: 'identity', text: 'Works at YourProvider', source: 'manual' },
   { id: 'ctx_b', type: 'work_rule', condition: 'submitting cluster jobs',
     action: 'use hope MCP', source: 'assistant' },
   { id: 'ctx_c', type: 'response_preference', text: 'Reply in Chinese',
@@ -213,14 +223,14 @@ const { document, check, report } = setup({
   try {
     await refreshPreferences();
     check('three_category_cards', document.querySelectorAll('.ctx-group').length === 3);
-    check('identity_rendered', document.body.textContent.includes('Works at Meituan'));
+    check('identity_rendered', document.body.textContent.includes('Works at YourProvider'));
     check('rule_condition_rendered', document.body.textContent.includes('submitting cluster jobs'));
     check('rule_action_rendered', document.body.textContent.includes('use hope MCP'));
     check('response_preference_rendered', document.body.textContent.includes('Reply in Chinese'));
     check('category_icons_visible', document.querySelectorAll('.ctx-group-icon svg').length === 3);
     check('initially_clean', document.getElementById('ctxSaveBtn').disabled === true);
 
-    _contextUpdateField(0, 'text', 'Works at Meituan as an engineer');
+    _contextUpdateField(0, 'text', 'Works at YourProvider as an engineer');
     check('edit_marks_dirty', document.getElementById('ctxDirtyState').textContent.length > 0);
     check('valid_edit_enables_save', document.getElementById('ctxSaveBtn').disabled === false);
     await savePreferences(document.getElementById('ctxSaveBtn'));

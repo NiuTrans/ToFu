@@ -16,6 +16,7 @@ from evaluations.codex_kimi_proxy.supervisor import (
 )
 from evaluations.opencode_contract import OPENCODE_VERSION
 from evaluations.opencode_proxy.supervisor import OpenCodeProxySupervisor
+from evaluations.pi_contract import PI_AGENT, PI_VERSION, pi_agent_kwargs
 from evaluations.paths import storage_record, validate_output_path, validate_storage_record
 
 from .artifacts import (
@@ -93,6 +94,10 @@ class HarborRunSpec:
     opencode: OpenCodeBaselineSettings | None = None
     release_run_root: Path | None = None
     source_receipt: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.agent == PI_AGENT and self.agent_version is None:
+            object.__setattr__(self, 'agent_version', PI_VERSION)
 
     @property
     def definition(self) -> BenchmarkDefinition:
@@ -174,6 +179,9 @@ class HarborRunSpec:
             raise ValueError("reasoning effort must not be empty")
         if self.agent_version is not None and not self.agent_version.strip():
             raise ValueError("agent version must not be empty")
+        if self.agent == PI_AGENT:
+            pi_agent_kwargs(version=self.agent_version,
+                            thinking=self.reasoning_effort, models=self.models)
         if self.agent == CODEX_KIMI_AGENT:
             if self.codex_kimi is None:
                 raise ValueError("Codex Kimi baseline requires its pinned runtime settings")
@@ -357,6 +365,10 @@ def build_job_config(
             agent_kwargs["reasoning_effort"] = spec.reasoning_effort
         if spec.agent_version is not None:
             agent_kwargs["version"] = spec.agent_version
+        if spec.agent == PI_AGENT:
+            agent_kwargs = pi_agent_kwargs(
+                version=spec.agent_version, thinking=spec.reasoning_effort,
+                models=spec.models)
         if spec.codex_kimi is not None:
             agent_kwargs.update(spec.codex_kimi.agent_kwargs(run_dir))
         if spec.tofu_kimi is not None:

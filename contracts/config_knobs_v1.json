@@ -10,10 +10,9 @@
     },
     "compaction.summaryMaxCostUsd": {
       "scope": "task.config",
-      "type": "number",
-      "default": 0.05,
+      "status": "retired",
       "owner": "lib/tasks_pkg/compaction/_auxiliary_route.py",
-      "description": "Finite nonnegative estimated paid-API quote ceiling per physical auxiliary attempt, including its admitted output allowance. This is not a cumulative retry-spend limit or subscription marginal cost. Unknown prices fail closed; explicit main/disableModelFallback prohibit substitution. Invalid values prohibit paid auxiliaries."
+      "description": "Owner decision 2026-11-02: summaries have no cost ceiling, because a fixed dollar bound grows wrong as context grows and silently returns large summaries to the owner's subscription. Legacy values, including zero and invalid values, are ignored. Spend stays bounded by known prices: a paid main that can serve the summary admits only strictly cheaper paid routes."
     },
     "compaction.summaryPolicy": {
       "scope": "task.config",
@@ -29,36 +28,37 @@
       },
       "owner": "lib/tasks_pkg/compaction/_summary_routing.py",
       "rationale": {
-        "problem": "Auxiliary summaries may be cheaper without changing the main task model or granting new route permissions.",
-        "decision": "Compression considers every compiler-authorized enabled same-owner/tenant text route, independently of the main provider/family or optional AA/profile coverage. Already-authorized subscription/local resources rank before paid APIs; maintained resource-reference cost or paid cost ranks within each class, then exact AA, declared lightness and stable identity. Paid-to-paid substitution requires strict savings. All evidence is proxy evidence, never measured fidelity, speed or subscription cash cost. Explicit main and disableModelFallback retain main.",
+        "problem": "Auxiliary summaries may be cheaper without changing the main task model or granting new route permissions, and must not spend the owner's personal subscription quota while organization-billed API routes can serve.",
+        "decision": "Compression considers every compiler-authorized enabled same-owner/tenant text route, independently of the main provider/family or optional AA/profile coverage. Owner decision 2026-11-02: known-price organization-billed paid APIs rank before the owner's subscription/OAuth/local resources, which remain a fallback and are skipped for a paid main that fits the summary. A route without its own request-name rate card is priced at its model's maintained price, and summaries have no cost ceiling. Projected paid cost or maintained resource-reference cost ranks within each class, then exact AA, declared lightness and stable identity. A paid main that can serve the summary admits only paid routes strictly cheaper than its known price, and none when its price stays unknown; other mains admit the cheapest known-price paid route. All evidence is proxy evidence, never measured fidelity, speed or subscription cash cost. Explicit main and disableModelFallback retain main.",
         "alternativesRejected": [
           "A hidden near-cheapest price band",
           "AA-first ranking that pays more",
           "Requiring the main model's ordinal quality tier despite exact AA evidence",
-          "Unqualified or unpriced subscription-to-paid-API fallback"
+          "Unqualified or unpriced subscription-to-paid-API fallback",
+          "Owner subscription/local resources before organization-billed paid APIs",
+          "Treating Offerings without a request-name rate card as unpriced when their model has a maintained price",
+          "Any fixed or configurable summary cost ceiling, which grows wrong with context size",
+          "Requiring subscription-main paid alternates to beat the subscription model's list price",
+          "Unbounded paid alternates for a fitting main whose price stays unknown",
+          "A per-owner billing-preference setting"
         ]
       },
       "qualification": {
         "executionScope": "All native main routes consider enabled authorized same-owner/tenant text Offerings and every usable deployment/credential witness through the shared candidate compiler. Main provider/family, execution-slot membership and optional benchmark/profile coverage never restrict native eligibility. Mint only the selected witness in a private request-owned group; no main-model mutation. Legacy callers without native authority retain same-pin API compatibility.",
         "qualityProxy": "Confirmed identity and compiler-authorized text capability establish eligibility. Fresh exact-model AA and maintained declarations are optional ranking evidence, not allowlists. Missing evidence stays unknown (routing_admission, null score), never invented AA or variant inheritance. Cached routing scores own freshness with no inline fetch. Text capability is not a measured summary-fidelity guarantee; complete-output adoption checks remain mandatory.",
         "capacity": "Every picker-reachable slot must have declared context/output capacity including full input plus requested output, intersected with learned context limits.",
-        "pricing": "Paid candidates use token-weighted declared Offering USD/CNY per-million input/output/cache rates at the selected prompt tier, zero speculative cache reads and conservative cold-cache write reserve. API-main alternates require strictly lower projected cost. Subscription-main paid alternates require an affordable maximum quote; subscription resource/reference proxies never establish marginal cash cost. Unknown, invalid or time-dependent prices never mean free.",
-        "ranking": "Parent-independent resource classes: authorized subscription/local resources first, affordable paid API second. Within a class prefer known resource-reference proxy or projected paid cost, then known exact AA descending, declared lightness and stable provider/offering/deployment/credential identity. Missing proxies and scores do not disqualify resource candidates. Paid-to-paid requires strict savings against the best reachable main price. Resource preference is policy, not free subscription cash. Legacy groups retain worst reachable cost and weakest AA. No price-band tolerance.",
-        "safety": "Explicit main and disableModelFallback prohibit auxiliary discovery. Credential kinds oauth, subscription and local_identity express resource access; subscription may carry an API-key envelope. Plain api_key is not proof of either subscription entitlement or free usage, and provider names never establish billing. Paid quotes need admitted Offering prices and compaction.summaryMaxCostUsd (default 0.05 USD) at the admitted transport allowance; unknown paid prices fail closed. Resource marginal cash cost remains unknown. Mint only at dispatch; bind stable owner/tenant/revision and provider/access/offering/deployment/connection/credential identity, revalidate quote, restore parent pin and dispose credentials on every exit.",
-        "caller": "Existing API receipts return an execution providerId; requestOwned receipts instead carry stable routeIdentity and a billing providerId, minted into a private execution pin at dispatch. Use strict_model=True and at most two 429 attempts; verify complete output and existing adoption checks. Bounded selectionBasis records optional exact AA, maintained declared evidence, or routing admission with a null score; never invented measured capability or cash savings. Main task model/config is never mutated."
+        "pricing": "Paid candidates use token-weighted per-million input/output/cache rates from the Offering's own declared USD/CNY rate card at the selected prompt tier, else the model's maintained price through the verified lookup shared with summary settlement and main-route economics; zero speculative cache reads and a conservative cold-cache write reserve. A fitting paid main's known price (same resolution) requires strictly lower projected alternate cost, and an unknown fitting main price admits no paid alternate; subscription mains and paid mains that cannot fit compare no price. There is no cost ceiling. Subscription resource/reference proxies never establish marginal cash cost. Unknown, invalid or time-dependent prices never mean free, and an invalid declared card never falls back to the model price.",
+        "ranking": "Parent-independent billing classes: known-price organization-billed paid API first, authorized subscription/OAuth/local owner resources second. A paid main whose declared capacity fits the summary is itself the paid baseline, so owner resources are skipped for it; they stay eligible for subscription mains and paid mains that cannot fit. Within a class prefer projected paid cost or known resource-reference proxy, then known exact AA descending, declared lightness and stable provider/offering/deployment/credential identity. Missing proxies and scores do not disqualify resource candidates. Paid-to-paid requires strict savings against a known best reachable main price when that main can serve the summary. Class order is billing policy, not free subscription cash. Legacy groups retain worst reachable cost and weakest AA. No price-band tolerance.",
+        "safety": "Explicit main and disableModelFallback prohibit auxiliary discovery. Credential kinds oauth, subscription and local_identity express resource access; subscription may carry an API-key envelope. Plain api_key is not proof of either subscription entitlement or free usage, and provider names never establish billing. Paid quotes need a known price (Offering rate card, else maintained model price); unknown paid prices fail closed and no cost ceiling applies. Resource marginal cash cost remains unknown. Mint only at dispatch; bind stable owner/tenant/revision and provider/access/offering/deployment/connection/credential identity, revalidate quote, restore parent pin and dispose credentials on every exit.",
+        "caller": "Existing API receipts return an execution providerId; requestOwned receipts instead carry stable routeIdentity and a billing providerId, minted into a private execution pin at dispatch. Use strict_model=True and at most two 429 attempts; verify complete output and existing adoption checks. Bounded selectionBasis records optional exact AA, maintained declared evidence, or routing admission with a null score; never invented measured capability or cash savings. Under ranking paid_api_then_resource_cost_aa, resourceTier 0 is paid API and 1 is owner resource. Main task model/config is never mutated."
       }
     }
   },
   "knobs": {
-    "CDPATH": {
-      "status": "documented",
-      "owner": "lib/project_mod/run_command.py",
-      "description": "Inherited shell cd search paths; when set, relative cd destinations are ambiguous and command-writer admission retains fallback cwd claims. Absolute and explicit ./ or ../ paths remain resolvable. Tofu does not change this host setting."
-    },
     "TOFU_WORKSPACE_TOOL_WAIT_SECONDS": {
       "status": "documented",
       "owner": "lib/project_mod/tool_admission.py",
-      "description": "Optional explicit cancellable workspace-lock wait for task file/shell mutations and MCP file preparation. Unset or empty waits until acquisition; nonnegative finite values are exact, zero is fail-fast, with no 600-second clamp. Low-level omitted lease timeouts remain fail-fast. Path bindings and read fingerprints are rechecked after acquisition."
+      "description": "Optional explicit cancellable wait for Tofu's own task-bound workspace lease acquisitions (dependency setup, stable integration snapshots); model tool calls take no workspace lease. Unset or empty waits until acquisition; nonnegative finite values are exact, zero is fail-fast, with no 600-second clamp. Low-level omitted lease timeouts remain fail-fast."
     },
     "TOFU_AGENT_WORKERS": {
       "status": "documented",
@@ -101,11 +101,6 @@
       "description": "Cataloged process resource budget (seconds); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
     },
     "TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MAX_429_ATTEMPTS": {
-      "status": "documented",
-      "owner": "runtime_guards.py",
-      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
-    },
-    "TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MIN_CHARS": {
       "status": "documented",
       "owner": "runtime_guards.py",
       "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
@@ -181,11 +176,6 @@
       "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
     },
     "TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS": {
-      "status": "documented",
-      "owner": "runtime_guards.py",
-      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
-    },
-    "TOFU_PRODUCTION_LLM_FANOUT": {
       "status": "documented",
       "owner": "runtime_guards.py",
       "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
@@ -495,32 +485,7 @@
       "owner": "",
       "description": ""
     },
-    "FETCH_FILTER_GATE_MAX_CHARS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "FETCH_FILTER_MIN_CHARS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "FETCH_FILTER_MODE": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
     "FETCH_FILTER_MODEL": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "FETCH_FILTER_TIMEOUT": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "FETCH_LLM_FILTER": {
       "status": "legacy",
       "owner": "",
       "description": ""
@@ -1270,16 +1235,6 @@
       "owner": "",
       "description": ""
     },
-    "TOFU_CGROUP_REQUEST_GUARD": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_CGROUP_REQUEST_MIN_BYTES": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
     "TOFU_CLIENT_LOG_RELAY": {
       "status": "legacy",
       "owner": "",
@@ -1291,9 +1246,9 @@
       "description": ""
     },
     "TOFU_CMD_INTERRUPT_GRACE_SECS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/tasks_pkg/liveness.py",
+      "description": "Seconds the shared liveness judge lets a watchdog interrupt of one silent foreground run_command wait for that command's read loop before the agent (root or child) counts as wedged. Default 120."
     },
     "TOFU_CODEX_01491_SHA256": {
       "status": "legacy",
@@ -2130,21 +2085,6 @@
       "owner": "",
       "description": ""
     },
-    "TOFU_PROCESS_RSS_COOLDOWN_SEC": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_PROCESS_RSS_RECYCLE_MB": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_PROCESS_RSS_RELIEF_MB": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
     "TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS": {
       "status": "legacy",
       "owner": "",
@@ -2510,11 +2450,6 @@
       "owner": "",
       "description": ""
     },
-    "TOFU_STORAGE_PREFLIGHT_MAX_MS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
     "TOFU_STORAGE_PROJECT_ROOT": {
       "status": "legacy",
       "owner": "",
@@ -2541,9 +2476,9 @@
       "description": ""
     },
     "TOFU_STUCK_TASK_MAX_SILENT_SECS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/tasks_pkg/liveness.py",
+      "description": "The one unexplained-silence threshold for every running agent, root or child: the stuck-task reaper, the Swarm beacon's default window and the running-work projection all judge with it. Explained waits (storage, writer admission, a live child, a stale filesystem mount) never count. Default 1800; zero or less disables the verdict."
     },
     "TOFU_SUBSCRIPTION_TRUST_CONFIGURED_PROXY": {
       "status": "legacy",
@@ -2570,16 +2505,6 @@
       "owner": "",
       "description": ""
     },
-    "TOFU_SWARM_AUTOCONTINUE_MAX": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_SWARM_GLOBAL_WORKERS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
     "TOFU_SWARM_MAX_RETRIES": {
       "status": "legacy",
       "owner": "",
@@ -2596,11 +2521,6 @@
       "description": ""
     },
     "TOFU_SYNC_BODY_TIMEOUT": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_TASK_RSS_RESERVE_MB": {
       "status": "legacy",
       "owner": "",
       "description": ""
@@ -2896,34 +2816,34 @@
       "description": ""
     },
     "TOFU_CONTENT_SHADOW_GLOBAL_MAX_BYTES": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/project_mod/content_shadow.py",
+      "description": "Aggregate content-cache retention bytes, default 4 GiB; leased readers and source data are protected."
     },
     "TOFU_CONTENT_SHADOW_DIR": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/project_mod/content_shadow.py",
+      "description": "Optional absolute private POSIX directory for reconstructible search bytes; empty uses measured local index placement."
     },
     "TOFU_CONTENT_SHADOW_ROOT_MAX_FILES": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/project_mod/content_shadow.py",
+      "description": "Per-project retained content-copy count, default 200000; eviction only, never search admission."
     },
     "TOFU_CONTENT_SHADOW_MAX_FILE_BYTES": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/project_mod/content_shadow.py",
+      "description": "Maximum disposable content copy per file, default 8 MiB. Oversized source files remain live search candidates."
     },
     "TOFU_CONTENT_SHADOW": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/project_mod/content_shadow.py",
+      "description": "Disable demand-filled indexed-search content copies with 0/false/off; source searches remain complete. See docs/INDEX_FASTPATH.md."
     },
     "TOFU_CONTENT_SHADOW_ROOT_MAX_BYTES": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/project_mod/content_shadow.py",
+      "description": "Per-project content-cache retention bytes including allocation and metadata, default 1 GiB; source data is never evicted."
     },
     "TOFU_STORAGE_CERTIFICATION_EVIDENCE": {
       "status": "legacy",
@@ -3286,14 +3206,14 @@
       "description": ""
     },
     "TOFU_DB_FASTPATH_SYNC_INTERVAL_MS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/native_launch.py",
+      "description": "Explicit shadow replication cadence in milliseconds (1000..3600000) for the native fastpath; requires TOFU_DB_FASTPATH_DIR. The default derives from twice the measured initial snapshot cost."
     },
     "TOFU_DB_FASTPATH_DIR": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/native_fastpath_settings.py",
+      "description": "Explicit persistent-local base for the native whole-authority fastpath; implies required engine admission and daemon transport. Setup, capacity governance and the planned exit are in docs/TOFUDB_FASTPATH.md."
     },
     "TOFU_STORAGE_SQLITE_READ_POOL": {
       "status": "legacy",
@@ -3545,11 +3465,6 @@
       "owner": "",
       "description": ""
     },
-    "TOFU_E2E_BASE_URL": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
     "TOFU_INPLACE_SANITIZER_CHECK_OUTPUT": {
       "status": "legacy",
       "owner": "",
@@ -3655,11 +3570,6 @@
       "owner": "tests/storage/test_direct_request_settlement_sigkill.py",
       "description": "Test-only path to the private source-matched tofu-db executable; never selects the application service."
     },
-    "TOFU_MAX_SSE_PER_PRINCIPAL": {
-      "status": "documented",
-      "owner": "lib/agent_core/sse_limit.py",
-      "description": "Optional per-principal resident SSE connection cap, resolved from the launch-time resource probe when omitted; environment overrides are bounded to 1..128. Connection ownership and release remain with the authenticated stream lifecycle."
-    },
     "TOFU_WORKSPACE_MODE": {
       "status": "documented",
       "owner": "lib/project_mod/workspace_policy.py",
@@ -3709,7 +3619,792 @@
       "status": "documented",
       "owner": "tests/tofudb/test_harness_frontier_runtime.py",
       "description": "Optional frozen pre-frontier executable for the explicit old-writer downgrade regression. Unset skips that test; never selects the application storage engine."
+    },
+    "TOFU_CODEX_NATIVE_STARTUP_MAX_SECONDS": {
+      "status": "documented",
+      "owner": "lib/oauth/codex_command_login.py",
+      "description": "Ceiling for the learned native Codex app-server cold startup (spawn+initialize) budget; default 30 seconds, accepted 4-300 seconds; invalid values warn once and keep the default."
+    },
+    "TOFU_SEARCH_TEST_BROWSER": {
+      "status": "documented",
+      "owner": "packages/tofu-search/tests/",
+      "description": "Opt-in gate (exactly \"1\") for tofu-search browser integration tests that launch the Playwright browser runtime (rendered DOM extraction and browser proxy); any other value skips them."
+    },
+    "SCROLL_STABILITY_OUT": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_conversation_scroll_stability.py",
+      "description": "Optional output directory for conversation scroll-stability browser evidence (sampled frames and summaries); defaults to the test tmp_path."
+    },
+    "TOFU_SYNC_WORKERS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource setting (count), class fixed in contracts/resource_policy_v1.json: the idle thread reuse hint for short blocking jobs (default executor; Push, direct-relay and webhook JSON frame workers). It never caps running jobs. Explicit overrides resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_TEST_TOFUDB_BIN": {
+      "status": "documented",
+      "owner": "tests/conftest.py",
+      "description": "Test-only path to a source-certified tofu-db artifact (docs/STORAGE_OPERATIONS.md, \"Isolated native test preparation\"). pytest verifies it against the checkout before project imports and pins TOFUDB_BIN/TOFUDB_EXPECTED_SHA256 to it in-process; a refusal is fatal. Unset, an inherited engine built from other source skips the shared app fixtures instead."
+    },
+    "TOFU_LOCAL_DIR": {
+      "status": "documented",
+      "owner": "serverctl_pkg/local_placement.py",
+      "description": "One private local directory for both local placements (runtime-replicas/, workspaces/). When set it is the only candidate; otherwise XDG_CACHE_HOME/XDG_STATE_HOME, then the home directory, are tried. Temporary, age-cleaned, network, memory and noexec targets are still refused."
+    },
+    "TOFU_RUNTIME_REPLICA": {
+      "status": "documented",
+      "owner": "serverctl_pkg/local_placement.py",
+      "description": "auto (default), on or off. Runs the managed worker from a verified read-only local copy of its Python environment when that environment lives on a network/FUSE volume; auto requires a local root at least 3x faster, on skips the speed comparison. Copies build in the background after the worker is ready and are never install targets."
+    },
+    "TOFU_LOCAL_WORKSPACES": {
+      "status": "documented",
+      "owner": "serverctl_pkg/local_placement.py",
+      "description": "off (default), auto or on. Opts managed task checkouts into a local disk: auto only onto provably persistent local disks at least 3x faster, on also onto container overlays. Unset keeps checkouts under the data root because they hold uncommitted work."
+    },
+    "TOFU_AGENT_RUN_DELEGATE_MODE": {
+      "status": "documented",
+      "owner": "tofu_agent/cli.py",
+      "description": "Default for `tofu-agent run --delegate-mode`: 1, true or yes runs the headless agent in Delegate Mode, where the root only orchestrates and spawn_agents workers do every read, search, command and edit (lib/tasks_pkg/delegate_mode.py; docs/TASK_EXECUTION_MODES.md, \"Delegate Mode\"). Requires swarm tools; unset or any other value keeps the ordinary surface."
+    },
+    "TOFU_TEST_BUNDLE_CACHE": {
+      "status": "documented",
+      "owner": "tests/_runtime_sections.py",
+      "description": "Test-only location of the content-addressed Vite test bundle cache (docs/TESTING_STRATEGY.md). Unset uses a per-user directory under the system temporary directory; a path relocates it; 0, off, false or no disables caching so every owner bundle compiles fresh."
+    },
+    "TOFU_TREE_INDEX_DISK_MAX_MIB": {
+      "status": "documented",
+      "owner": "lib/project_mod/tree_index_storage.py",
+      "description": "Evict-only complete project-index disk cache retention, in MiB per installation. Defaults 256 personal / 1024 distributed; 1..4096. Least-recently-published blobs and seven-day-old blobs are reclaimed; oversized indexes stay complete in memory and live scans remain available. Never limits tasks or file traversal."
+    },
+    "TOFU_STORAGE_SERVICE_STATE": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/native_launch.py",
+      "description": "Private managed native-storage handoff identity inherited from the service supervisor. The state path and service ID bind project lease verification to the serving Web owner; not a user configuration or an authorization grant."
+    },
+    "TOFU_STORAGE_SERVICE_ID": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/native_launch.py",
+      "description": "Private managed native-storage handoff identity inherited from the service supervisor. The state path and service ID bind project lease verification to the serving Web owner; not a user configuration or an authorization grant."
+    },
+    "TOFU_INDEX_FASTPATH": {
+      "status": "documented",
+      "owner": "serverctl_pkg/local_placement.py",
+      "description": "Reconstructible file and native search index placement: auto (default) selects a private local volume only after a measured metadata speedup of at least 3x; off retains data-volume indexes; on skips speed comparison. Nonempty custom search directories retain priority; an empty reset follows automatic placement. Never moves database authority or user work. TOFU_LOCAL_DIR overrides candidates; restart applies placement changes."
+    },
+    "TOFU_DB_FASTPATH": {
+      "status": "documented",
+      "owner": "serverctl_pkg/local_placement.py",
+      "description": "off, auto (default) or on. Automatic native fastpath selection for the whole-authority local front: auto nominates a proven-persistent local base that fits the measured corpus (bytes and inodes) with growth room and twice its per-block publication cost inside half the seed budget, then the engine admits it on a 3x fsync or 3x metadata win within a 2x fsync bound; on skips the Python speed prediction and leaves admission to the engine probe. off never relocates."
+    },
+    "TOFU_DB_FASTPATH_ADMISSION": {
+      "status": "documented",
+      "owner": "lib/storage/supervisor.py",
+      "description": "required or auto. Set by the supervisor for an automatic selection only: a typed pre-relocation refusal (volume, memory, speedup, capacity, inode, corpus size, stale preparation) then serves the classic authority and records the reason, while a fenced, lineage or integrity error still fails the launch. An explicit TOFU_DB_FASTPATH_DIR always runs required."
+    },
+    "TOFU_SEARCH_GATEWAY_URL": {
+      "status": "documented",
+      "owner": "packages/tofu-search/tofu_search/config.py",
+      "description": "Keyed search-gateway endpoint (universal-search v1 wire format); with a key and sources set, each source id becomes an API:<id> engine. The Tofu host passes gateway settings explicitly from Settings > Search > Search API, so this variable only configures standalone tofu-search."
+    },
+    "TOFU_SEARCH_GATEWAY_API_KEY": {
+      "status": "documented",
+      "owner": "packages/tofu-search/tofu_search/config.py",
+      "description": "Bearer key for the keyed search gateway; excluded from SearchConfig repr and never logged. The Tofu host reads it from the credentials vault entry search_gateway_key instead."
+    },
+    "TOFU_SEARCH_GATEWAY_SOURCES": {
+      "status": "documented",
+      "owner": "packages/tofu-search/tofu_search/config.py",
+      "description": "Comma or space separated gateway source ids, queried with one request per source so rank fusion keeps per-source evidence. The Tofu host passes gateway settings explicitly from Settings > Search > Search API, so this variable only configures standalone tofu-search."
+    },
+    "ARTIFACTS_ENABLED": {
+      "status": "documented",
+      "owner": "lib/__init__.py",
+      "description": "Existing artifacts enabled environment override, read through the local configuration adapter in lib/__init__.py; defaults and validation remain owned there."
+    },
+    "DEBUG_MODE": {
+      "status": "documented",
+      "owner": "lib/__init__.py",
+      "description": "Existing debug mode environment override, read through the local configuration adapter in lib/__init__.py; defaults and validation remain owned there."
+    },
+    "DOUBAO_MODEL": {
+      "status": "documented",
+      "owner": "lib/__init__.py",
+      "description": "Existing doubao model environment override, read through the local configuration adapter in lib/__init__.py; defaults and validation remain owned there."
+    },
+    "FALLBACK_MODEL": {
+      "status": "documented",
+      "owner": "lib/__init__.py",
+      "description": "Existing fallback model environment override, read through the local configuration adapter in lib/__init__.py; defaults and validation remain owned there."
+    },
+    "GEMINI_FLASH_PREVIEW_MODEL": {
+      "status": "documented",
+      "owner": "lib/__init__.py",
+      "description": "Existing gemini flash preview model environment override, read through the local configuration adapter in lib/__init__.py; defaults and validation remain owned there."
+    },
+    "GEMINI_MODEL": {
+      "status": "documented",
+      "owner": "lib/__init__.py",
+      "description": "Existing gemini model environment override, read through the local configuration adapter in lib/__init__.py; defaults and validation remain owned there."
+    },
+    "IMAGE_GEN_MODEL": {
+      "status": "documented",
+      "owner": "lib/__init__.py",
+      "description": "Existing image gen model environment override, read through the local configuration adapter in lib/__init__.py; defaults and validation remain owned there."
+    },
+    "MINIMAX_MODEL": {
+      "status": "documented",
+      "owner": "lib/__init__.py",
+      "description": "Existing minimax model environment override, read through the local configuration adapter in lib/__init__.py; defaults and validation remain owned there."
+    },
+    "OPTIMIZER_ENABLED": {
+      "status": "documented",
+      "owner": "lib/__init__.py",
+      "description": "Existing optimizer enabled environment override, read through the local configuration adapter in lib/__init__.py; defaults and validation remain owned there."
+    },
+    "PREFETCH_GATE_ENABLED": {
+      "status": "documented",
+      "owner": "lib/search/search_bridge.py",
+      "description": "Existing prefetch gate enabled environment override, read through the local configuration adapter in lib/search/search_bridge.py; defaults and validation remain owned there."
+    },
+    "QWEN_MODEL": {
+      "status": "documented",
+      "owner": "lib/__init__.py",
+      "description": "Existing qwen model environment override, read through the local configuration adapter in lib/__init__.py; defaults and validation remain owned there."
+    },
+    "ROOTLESS_VM_BASE_DISK": {
+      "status": "documented",
+      "owner": "evaluations/swebench/cli.py",
+      "description": "Existing rootless vm base disk environment override, read through the local configuration adapter in evaluations/swebench/cli.py; defaults and validation remain owned there."
+    },
+    "ROOTLESS_VM_IMAGE_STORE": {
+      "status": "documented",
+      "owner": "evaluations/swebench/cli.py",
+      "description": "Existing rootless vm image store environment override, read through the local configuration adapter in evaluations/swebench/cli.py; defaults and validation remain owned there."
+    },
+    "ROOTLESS_VM_QEMU_IMG": {
+      "status": "documented",
+      "owner": "evaluations/swebench/cli.py",
+      "description": "Existing rootless vm qemu img environment override, read through the local configuration adapter in evaluations/swebench/cli.py; defaults and validation remain owned there."
+    },
+    "SCHEDULER_ALLOW_CODE_EXEC": {
+      "status": "documented",
+      "owner": "lib/__init__.py",
+      "description": "Existing scheduler allow code exec environment override, read through the local configuration adapter in lib/__init__.py; defaults and validation remain owned there."
+    },
+    "TOFUDB_REQUIRE_FRESH_ENGINE": {
+      "status": "documented",
+      "owner": "lib/storage/supervisor.py",
+      "description": "Existing tofudb require fresh engine environment override, read through the local configuration adapter in lib/storage/supervisor.py; defaults and validation remain owned there."
+    },
+    "TOFU_ARTIFACT_DOC_MIN_BYTES": {
+      "status": "documented",
+      "owner": "lib/artifacts/scanner.py",
+      "description": "Existing artifact doc min bytes environment override, read through the local configuration adapter in lib/artifacts/scanner.py; defaults and validation remain owned there."
+    },
+    "TOFU_ARTIFACT_FENCE_MIN_BYTES": {
+      "status": "documented",
+      "owner": "lib/artifacts/scanner.py",
+      "description": "Existing artifact fence min bytes environment override, read through the local configuration adapter in lib/artifacts/scanner.py; defaults and validation remain owned there."
+    },
+    "TOFU_ARTIFACT_FENCE_MIN_LINES": {
+      "status": "documented",
+      "owner": "lib/artifacts/scanner.py",
+      "description": "Existing artifact fence min lines environment override, read through the local configuration adapter in lib/artifacts/scanner.py; defaults and validation remain owned there."
+    },
+    "TOFU_ARTIFACT_SCAN_MAX_BYTES": {
+      "status": "documented",
+      "owner": "lib/artifacts/scanner.py",
+      "description": "Existing artifact scan max bytes environment override, read through the local configuration adapter in lib/artifacts/scanner.py; defaults and validation remain owned there."
+    },
+    "TOFU_ATTEMPT_EVENT_PRUNE_INTERVAL": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing attempt event prune interval environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_ATTEMPT_EVENT_PRUNE_MAX_ATTEMPTS": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing attempt event prune max attempts environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_ATTEMPT_EVENT_PRUNE_MAX_ROWS": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing attempt event prune max rows environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_ATTEMPT_EVENT_TTL_DAYS": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing attempt event ttl days environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_BUDGET_APPLICATION_SHELL_FRAGMENT_KIB": {
+      "status": "documented",
+      "owner": "scripts/frontend_budget.py",
+      "description": "Existing budget application shell fragment kib environment override, read through the local configuration adapter in scripts/frontend_budget.py; defaults and validation remain owned there."
+    },
+    "TOFU_BUDGET_FRONTEND_TOTAL_KIB": {
+      "status": "documented",
+      "owner": "scripts/frontend_budget.py",
+      "description": "Existing budget frontend total kib environment override, read through the local configuration adapter in scripts/frontend_budget.py; defaults and validation remain owned there."
+    },
+    "TOFU_BUDGET_RETAINED_RUNTIME_KIB": {
+      "status": "documented",
+      "owner": "scripts/frontend_budget.py",
+      "description": "Existing budget retained runtime kib environment override, read through the local configuration adapter in scripts/frontend_budget.py; defaults and validation remain owned there."
+    },
+    "TOFU_BUDGET_RUNTIME_SECTION_KIB": {
+      "status": "documented",
+      "owner": "scripts/frontend_budget.py",
+      "description": "Existing budget runtime section kib environment override, read through the local configuration adapter in scripts/frontend_budget.py; defaults and validation remain owned there."
+    },
+    "TOFU_BUDGET_STYLE_SECTION_KIB": {
+      "status": "documented",
+      "owner": "scripts/frontend_budget.py",
+      "description": "Existing budget style section kib environment override, read through the local configuration adapter in scripts/frontend_budget.py; defaults and validation remain owned there."
+    },
+    "TOFU_BUDGET_VITE_CHUNK_KIB": {
+      "status": "documented",
+      "owner": "scripts/frontend_budget.py",
+      "description": "Existing budget vite chunk kib environment override, read through the local configuration adapter in scripts/frontend_budget.py; defaults and validation remain owned there."
+    },
+    "TOFU_BUDGET_VITE_SOURCE_MODULE_KIB": {
+      "status": "documented",
+      "owner": "scripts/frontend_budget.py",
+      "description": "Existing budget vite source module kib environment override, read through the local configuration adapter in scripts/frontend_budget.py; defaults and validation remain owned there."
+    },
+    "TOFU_BUDGET_VITE_URL_ASSET_KIB": {
+      "status": "documented",
+      "owner": "scripts/frontend_budget.py",
+      "description": "Existing budget vite url asset kib environment override, read through the local configuration adapter in scripts/frontend_budget.py; defaults and validation remain owned there."
+    },
+    "TOFU_CGROUP_POLL_SEC": {
+      "status": "documented",
+      "owner": "lib/cgroup_guard.py",
+      "description": "Existing cgroup poll sec environment override, read through the local configuration adapter in lib/cgroup_guard.py; defaults and validation remain owned there."
+    },
+    "TOFU_CGROUP_RELIEF_PCT": {
+      "status": "documented",
+      "owner": "lib/cgroup_guard.py",
+      "description": "Existing cgroup relief pct environment override, read through the local configuration adapter in lib/cgroup_guard.py; defaults and validation remain owned there."
+    },
+    "TOFU_CGROUP_WARN_PCT": {
+      "status": "documented",
+      "owner": "lib/cgroup_guard.py",
+      "description": "Existing cgroup warn pct environment override, read through the local configuration adapter in lib/cgroup_guard.py; defaults and validation remain owned there."
+    },
+    "TOFU_CODEX_01491_BINARY": {
+      "status": "documented",
+      "owner": "evaluations/swebench/cli.py",
+      "description": "Existing codex 01491 binary environment override, read through the local configuration adapter in evaluations/swebench/cli.py; defaults and validation remain owned there."
+    },
+    "TOFU_CONVERSATION_SYNC_PRUNE_INTERVAL": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing conversation sync prune interval environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_CONVERSATION_SYNC_PRUNE_MAX_ROWS": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing conversation sync prune max rows environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_CONVERSATION_SYNC_REPLAY_TTL_DAYS": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing conversation sync replay ttl days environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_ENABLE_PYMUPDF_LAYOUT": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Existing enable pymupdf layout environment override, read through the local configuration adapter in runtime_guards.py; defaults and validation remain owned there."
+    },
+    "TOFU_EVENT_LEGACY_RECOVERY_ROWS": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing event legacy recovery rows environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_EVENT_MAINTENANCE_INTERVAL": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing event maintenance interval environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_EVENT_PRUNE_BATCHES": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing event prune batches environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_EVENT_PRUNE_BATCH_ROWS": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing event prune batch rows environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_FIND_FASTPATH_DEADLINE_S": {
+      "status": "documented",
+      "owner": "lib/project_mod/shell_find.py",
+      "description": "Existing find fastpath deadline s environment override, read through the local configuration adapter in lib/project_mod/shell_find.py; defaults and validation remain owned there."
+    },
+    "TOFU_FIND_FASTPATH_SCAN_ENTRIES": {
+      "status": "documented",
+      "owner": "lib/project_mod/shell_find.py",
+      "description": "Existing find fastpath scan entries environment override, read through the local configuration adapter in lib/project_mod/shell_find.py; defaults and validation remain owned there."
+    },
+    "TOFU_GREP_TIMEOUT_CIRCUIT_ENTRIES": {
+      "status": "documented",
+      "owner": "lib/project_mod/grep_timeout_circuit.py",
+      "description": "Existing grep timeout circuit entries environment override, read through the local configuration adapter in lib/project_mod/grep_timeout_circuit.py; defaults and validation remain owned there."
+    },
+    "TOFU_GREP_TIMEOUT_COOLDOWN_S": {
+      "status": "documented",
+      "owner": "lib/project_mod/grep_timeout_circuit.py",
+      "description": "Existing grep timeout cooldown s environment override, read through the local configuration adapter in lib/project_mod/grep_timeout_circuit.py; defaults and validation remain owned there."
+    },
+    "TOFU_HISTORY_BASE_MS": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_history_paging_latency.py",
+      "description": "Existing history base ms environment override, read through the local configuration adapter in tests/visual/test_visual_history_paging_latency.py; defaults and validation remain owned there."
+    },
+    "TOFU_HISTORY_PER_MIB_MS": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_history_paging_latency.py",
+      "description": "Existing history per mib ms environment override, read through the local configuration adapter in tests/visual/test_visual_history_paging_latency.py; defaults and validation remain owned there."
+    },
+    "TOFU_HISTORY_READER_PX_PER_S": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_history_paging_latency.py",
+      "description": "Existing history reader px per s environment override, read through the local configuration adapter in tests/visual/test_visual_history_paging_latency.py; defaults and validation remain owned there."
+    },
+    "TOFU_HTTP_POOL_MAX_CONNECTIONS": {
+      "status": "documented",
+      "owner": "lib/http_transport/client.py",
+      "description": "Existing http pool max connections environment override, read through the local configuration adapter in lib/http_transport/client.py; defaults and validation remain owned there."
+    },
+    "TOFU_HTTP_POOL_MAX_KEEPALIVE": {
+      "status": "documented",
+      "owner": "lib/http_transport/client.py",
+      "description": "Existing http pool max keepalive environment override, read through the local configuration adapter in lib/http_transport/client.py; defaults and validation remain owned there."
+    },
+    "TOFU_INTEGRATION_IDLE_POLL_BASE_SECONDS": {
+      "status": "documented",
+      "owner": "lib/integration_control.py",
+      "description": "Existing integration idle poll base seconds environment override, read through the local configuration adapter in lib/integration_control.py; defaults and validation remain owned there."
+    },
+    "TOFU_INTEGRATION_IDLE_POLL_MAX_SECONDS": {
+      "status": "documented",
+      "owner": "lib/integration_control.py",
+      "description": "Existing integration idle poll max seconds environment override, read through the local configuration adapter in lib/integration_control.py; defaults and validation remain owned there."
+    },
+    "TOFU_INTEGRATION_TEST_TIMEOUT": {
+      "status": "documented",
+      "owner": "lib/integration_control.py",
+      "description": "Existing integration test timeout environment override, read through the local configuration adapter in lib/integration_control.py; defaults and validation remain owned there."
+    },
+    "TOFU_JOURNAL_INDEX_MAX": {
+      "status": "documented",
+      "owner": "lib/project_mod/journal.py",
+      "description": "Existing journal index max environment override, read through the local configuration adapter in lib/project_mod/journal.py; defaults and validation remain owned there."
+    },
+    "TOFU_JOURNAL_READ_CAP": {
+      "status": "documented",
+      "owner": "lib/project_mod/journal.py",
+      "description": "Existing journal read cap environment override, read through the local configuration adapter in lib/project_mod/journal.py; defaults and validation remain owned there."
+    },
+    "TOFU_JOURNAL_RECENT_BYTES": {
+      "status": "documented",
+      "owner": "lib/project_mod/journal.py",
+      "description": "Existing journal recent bytes environment override, read through the local configuration adapter in lib/project_mod/journal.py; defaults and validation remain owned there."
+    },
+    "TOFU_JOURNAL_ROTATE_KEEP": {
+      "status": "documented",
+      "owner": "lib/project_mod/journal.py",
+      "description": "Existing journal rotate keep environment override, read through the local configuration adapter in lib/project_mod/journal.py; defaults and validation remain owned there."
+    },
+    "TOFU_JOURNAL_ROTATE_THRESHOLD": {
+      "status": "documented",
+      "owner": "lib/project_mod/journal.py",
+      "description": "Existing journal rotate threshold environment override, read through the local configuration adapter in lib/project_mod/journal.py; defaults and validation remain owned there."
+    },
+    "TOFU_LINEAR_GIT_CHECKPOINT_LOCK_WAIT_SECONDS": {
+      "status": "documented",
+      "owner": "lib/linear_git_checkpoint.py",
+      "description": "Existing linear git checkpoint lock wait seconds environment override, read through the local configuration adapter in lib/linear_git_checkpoint.py; defaults and validation remain owned there."
+    },
+    "TOFU_LINEAR_GIT_CHECKPOINT_TEST_TIMEOUT": {
+      "status": "documented",
+      "owner": "lib/linear_git_checkpoint.py",
+      "description": "Existing linear git checkpoint test timeout environment override, read through the local configuration adapter in lib/linear_git_checkpoint.py; defaults and validation remain owned there."
+    },
+    "TOFU_LLM_KEEPALIVE_EXPIRY_SECS": {
+      "status": "documented",
+      "owner": "lib/llm/_transport.py",
+      "description": "Existing llm keepalive expiry secs environment override, read through the local configuration adapter in lib/llm/_transport.py; defaults and validation remain owned there."
+    },
+    "TOFU_LLM_MAX_KEEPALIVE_CONNECTIONS": {
+      "status": "documented",
+      "owner": "lib/llm/_transport.py",
+      "description": "Existing llm max keepalive connections environment override, read through the local configuration adapter in lib/llm/_transport.py; defaults and validation remain owned there."
+    },
+    "TOFU_LOCAL_AUTODISCOVER_DELAY": {
+      "status": "documented",
+      "owner": "lib/llm_dispatch/autodiscover_local.py",
+      "description": "Existing local autodiscover delay environment override, read through the local configuration adapter in lib/llm_dispatch/autodiscover_local.py; defaults and validation remain owned there."
+    },
+    "TOFU_LOCAL_AUTODISCOVER_INTERVAL": {
+      "status": "documented",
+      "owner": "lib/llm_dispatch/autodiscover_local.py",
+      "description": "Existing local autodiscover interval environment override, read through the local configuration adapter in lib/llm_dispatch/autodiscover_local.py; defaults and validation remain owned there."
+    },
+    "TOFU_LOCAL_AUTODISCOVER_MAX_INTERVAL": {
+      "status": "documented",
+      "owner": "lib/llm_dispatch/autodiscover_local.py",
+      "description": "Existing local autodiscover max interval environment override, read through the local configuration adapter in lib/llm_dispatch/autodiscover_local.py; defaults and validation remain owned there."
+    },
+    "TOFU_LOG_COALESCE_BURST": {
+      "status": "documented",
+      "owner": "lib/logging_pkg/log_rate_limit.py",
+      "description": "Existing log coalesce burst environment override, read through the local configuration adapter in lib/logging_pkg/log_rate_limit.py; defaults and validation remain owned there."
+    },
+    "TOFU_LOG_COALESCE_HEARTBEAT_SEC": {
+      "status": "documented",
+      "owner": "lib/logging_pkg/log_rate_limit.py",
+      "description": "Existing log coalesce heartbeat sec environment override, read through the local configuration adapter in lib/logging_pkg/log_rate_limit.py; defaults and validation remain owned there."
+    },
+    "TOFU_LOG_COALESCE_WINDOW_SEC": {
+      "status": "documented",
+      "owner": "lib/logging_pkg/log_rate_limit.py",
+      "description": "Existing log coalesce window sec environment override, read through the local configuration adapter in lib/logging_pkg/log_rate_limit.py; defaults and validation remain owned there."
+    },
+    "TOFU_LOOP_EXACT_REMIND": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/orchestrator/_tool_loop_breaker.py",
+      "description": "Existing loop exact remind environment override, read through the local configuration adapter in lib/tasks_pkg/orchestrator/_tool_loop_breaker.py; defaults and validation remain owned there."
+    },
+    "TOFU_MODEL_CATALOG_SYNC_DELAY": {
+      "status": "documented",
+      "owner": "lib/llm_dispatch/provider_catalog_sync.py",
+      "description": "Existing model catalog sync delay environment override, read through the local configuration adapter in lib/llm_dispatch/provider_catalog_sync.py; defaults and validation remain owned there."
+    },
+    "TOFU_MODEL_CATALOG_SYNC_INTERVAL": {
+      "status": "documented",
+      "owner": "lib/llm_dispatch/provider_catalog_sync.py",
+      "description": "Existing model catalog sync interval environment override, read through the local configuration adapter in lib/llm_dispatch/provider_catalog_sync.py; defaults and validation remain owned there."
+    },
+    "TOFU_OPENCODE_BINARY": {
+      "status": "documented",
+      "owner": "evaluations/swebench/cli.py",
+      "description": "Existing opencode binary environment override, read through the local configuration adapter in evaluations/swebench/cli.py; defaults and validation remain owned there."
+    },
+    "TOFU_OPENCODE_CACHE_SEED": {
+      "status": "documented",
+      "owner": "evaluations/swebench/cli.py",
+      "description": "Existing opencode cache seed environment override, read through the local configuration adapter in evaluations/swebench/cli.py; defaults and validation remain owned there."
+    },
+    "TOFU_RAW_ARCHIVE_BUDGET_MIB": {
+      "status": "documented",
+      "owner": "lib/raw_archive.py",
+      "description": "Existing raw archive budget mib environment override, read through the local configuration adapter in lib/raw_archive.py; defaults and validation remain owned there."
+    },
+    "TOFU_RELAY_MODEL": {
+      "status": "documented",
+      "owner": "lib/relay_config.py",
+      "description": "Existing relay model environment override, read through the local configuration adapter in lib/relay_config.py; defaults and validation remain owned there."
+    },
+    "TOFU_RUN_NETWORK_CONNECT_TIMEOUT": {
+      "status": "documented",
+      "owner": "lib/project_mod/network_command.py",
+      "description": "Existing run network connect timeout environment override, read through the local configuration adapter in lib/project_mod/network_command.py; defaults and validation remain owned there."
+    },
+    "TOFU_RUN_NETWORK_MAX_TARGETS": {
+      "status": "documented",
+      "owner": "lib/project_mod/network_command.py",
+      "description": "Existing run network max targets environment override, read through the local configuration adapter in lib/project_mod/network_command.py; defaults and validation remain owned there."
+    },
+    "TOFU_RUN_NETWORK_RACE_TIMEOUT": {
+      "status": "documented",
+      "owner": "lib/project_mod/network_command.py",
+      "description": "Existing run network race timeout environment override, read through the local configuration adapter in lib/project_mod/network_command.py; defaults and validation remain owned there."
+    },
+    "TOFU_RUN_NETWORK_READ_TIMEOUT": {
+      "status": "documented",
+      "owner": "lib/project_mod/network_command.py",
+      "description": "Existing run network read timeout environment override, read through the local configuration adapter in lib/project_mod/network_command.py; defaults and validation remain owned there."
+    },
+    "TOFU_RUN_PYTHON_CACHE_TTL_DAYS": {
+      "status": "documented",
+      "owner": "lib/project_mod/python_bytecode_cache.py",
+      "description": "Existing run python cache ttl days environment override, read through the local configuration adapter in lib/project_mod/python_bytecode_cache.py; defaults and validation remain owned there."
+    },
+    "TOFU_SEARCH_ALLOW_INSECURE_SSL": {
+      "status": "documented",
+      "owner": "lib/search/search_bridge.py",
+      "description": "Existing search allow insecure ssl environment override, read through the local configuration adapter in lib/search/search_bridge.py; defaults and validation remain owned there."
+    },
+    "TOFU_SEARCH_ALLOW_PRIVATE_HOSTS": {
+      "status": "documented",
+      "owner": "lib/search/search_bridge.py",
+      "description": "Existing search allow private hosts environment override, read through the local configuration adapter in lib/search/search_bridge.py; defaults and validation remain owned there."
+    },
+    "TOFU_SEARCH_BLOCK_PRIVATE_ADDRESSES": {
+      "status": "documented",
+      "owner": "lib/search/search_bridge.py",
+      "description": "Existing search block private addresses environment override, read through the local configuration adapter in lib/search/search_bridge.py; defaults and validation remain owned there."
+    },
+    "TOFU_SEARCH_PROXY_DUAL_ATTEMPT": {
+      "status": "documented",
+      "owner": "lib/search/search_bridge.py",
+      "description": "Existing search proxy dual attempt environment override, read through the local configuration adapter in lib/search/search_bridge.py; defaults and validation remain owned there."
+    },
+    "TOFU_SEARCH_PROXY_RACE": {
+      "status": "documented",
+      "owner": "lib/search/search_bridge.py",
+      "description": "Existing search proxy race environment override, read through the local configuration adapter in lib/search/search_bridge.py; defaults and validation remain owned there."
+    },
+    "TOFU_SEARCH_SEARXNG_INSTANCES": {
+      "status": "documented",
+      "owner": "lib/search/search_bridge.py",
+      "description": "Existing search searxng instances environment override, read through the local configuration adapter in lib/search/search_bridge.py; defaults and validation remain owned there."
+    },
+    "TOFU_STATIC_MIRROR_MAX_BYTES": {
+      "status": "documented",
+      "owner": "lib/static_mirror.py",
+      "description": "Existing static mirror max bytes environment override, read through the local configuration adapter in lib/static_mirror.py; defaults and validation remain owned there."
+    },
+    "TOFU_STATIC_MIRROR_MAX_FILES": {
+      "status": "documented",
+      "owner": "lib/static_mirror.py",
+      "description": "Existing static mirror max files environment override, read through the local configuration adapter in lib/static_mirror.py; defaults and validation remain owned there."
+    },
+    "TOFU_STATIC_MIRROR_MAX_FILE_BYTES": {
+      "status": "documented",
+      "owner": "lib/static_mirror.py",
+      "description": "Existing static mirror max file bytes environment override, read through the local configuration adapter in lib/static_mirror.py; defaults and validation remain owned there."
+    },
+    "TOFU_STATIC_MIRROR_RESERVE_BYTES": {
+      "status": "documented",
+      "owner": "lib/static_mirror.py",
+      "description": "Existing static mirror reserve bytes environment override, read through the local configuration adapter in lib/static_mirror.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_BACKLOG_MAINTENANCE_INTERVAL": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing storage backlog maintenance interval environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Existing storage fastpath wal rebase max mib environment override, read through the local configuration adapter in lib/storage_authority_sql/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_IDLE_TRIM_COOLDOWN_SECONDS": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Existing storage idle trim cooldown seconds environment override, read through the local configuration adapter in lib/storage_authority_sql/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_IDLE_TRIM_RSS_MIB": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Existing storage idle trim rss mib environment override, read through the local configuration adapter in lib/storage_authority_sql/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_KEEP_WARM_INTERVAL_SECONDS": {
+      "status": "documented",
+      "owner": "lib/storage/warmup.py",
+      "description": "Existing storage keep warm interval seconds environment override, read through the local configuration adapter in lib/storage/warmup.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_PG_READ_POOL": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Existing storage pg read pool environment override, read through the local configuration adapter in lib/storage_authority_sql/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_PG_WRITE_POOL": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Existing storage pg write pool environment override, read through the local configuration adapter in lib/storage_authority_sql/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_RECLAIM_BUDGET_MS": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing storage reclaim budget ms environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_RECLAIM_INTERVAL": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing storage reclaim interval environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_RECLAIM_MIN_FREE_PAGES": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing storage reclaim min free pages environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_RECLAIM_PAGES": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing storage reclaim pages environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_SQLITE_BACKUP_RESERVE_BYTES": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/backup_policy.py",
+      "description": "Existing storage sqlite backup reserve bytes environment override, read through the local configuration adapter in lib/storage_authority_sql/backup_policy.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_SQLITE_BACKUP_RETENTION": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/backup_policy.py",
+      "description": "Existing storage sqlite backup retention environment override, read through the local configuration adapter in lib/storage_authority_sql/backup_policy.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_SQLITE_BACKUP_TEMP_TTL_SECONDS": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/backup_policy.py",
+      "description": "Existing storage sqlite backup temp ttl seconds environment override, read through the local configuration adapter in lib/storage_authority_sql/backup_policy.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_SQLITE_ROLLBACK_RETENTION": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/backup_policy.py",
+      "description": "Existing storage sqlite rollback retention environment override, read through the local configuration adapter in lib/storage_authority_sql/backup_policy.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_SQLITE_WRITER_CACHE_MIB": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Existing storage sqlite writer cache mib environment override, read through the local configuration adapter in lib/storage_authority_sql/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_TRANSACTION_TIMEOUT_S": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Existing storage transaction timeout s environment override, read through the local configuration adapter in lib/storage_authority_sql/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Existing storage turn projection cache mib environment override, read through the local configuration adapter in lib/storage_authority_sql/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_WARMUP_BOOT_BUDGET_SECONDS": {
+      "status": "documented",
+      "owner": "lib/storage/warmup.py",
+      "description": "Existing storage warmup boot budget seconds environment override, read through the local configuration adapter in lib/storage/warmup.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_WRITER_HARD_KILL_S": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Existing storage writer hard kill s environment override, read through the local configuration adapter in lib/storage_authority_sql/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_STORAGE_WRITER_STALL_GRACE_S": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Existing storage writer stall grace s environment override, read through the local configuration adapter in lib/storage_authority_sql/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_SWARM_AUTOCONTINUE": {
+      "status": "documented",
+      "owner": "lib/swarm/integration/_config.py",
+      "description": "Existing swarm autocontinue environment override, read through the local configuration adapter in lib/swarm/integration/_config.py; defaults and validation remain owned there."
+    },
+    "TOFU_SWITCH_PAINT_CAPTURED": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_conversation_switch_paint.py",
+      "description": "Existing switch paint captured environment override, read through the local configuration adapter in tests/visual/test_visual_conversation_switch_paint.py; defaults and validation remain owned there."
+    },
+    "TOFU_SWITCH_PAINT_ITERATIONS": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_conversation_switch_paint.py",
+      "description": "Existing switch paint iterations environment override, read through the local configuration adapter in tests/visual/test_visual_conversation_switch_paint.py; defaults and validation remain owned there."
+    },
+    "TOFU_SWITCH_PAINT_OUTPUT": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_conversation_switch_paint.py",
+      "description": "Existing switch paint output environment override, read through the local configuration adapter in tests/visual/test_visual_conversation_switch_paint.py; defaults and validation remain owned there."
+    },
+    "TOFU_SWITCH_PAINT_PROFILE": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_conversation_switch_paint.py",
+      "description": "Existing switch paint profile environment override, read through the local configuration adapter in tests/visual/test_visual_conversation_switch_paint.py; defaults and validation remain owned there."
+    },
+    "TOFU_SWITCH_PAINT_TRACE": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_conversation_switch_paint.py",
+      "description": "Existing switch paint trace environment override, read through the local configuration adapter in tests/visual/test_visual_conversation_switch_paint.py; defaults and validation remain owned there."
+    },
+    "TOFU_TASK_EVENT_PRUNE_INTERVAL": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing task event prune interval environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_TEMPLATE_SUPPLY_SYNC_BOOT_DELAY": {
+      "status": "documented",
+      "owner": "lib/model_routing/template_supply.py",
+      "description": "Existing template supply sync boot delay environment override, read through the local configuration adapter in lib/model_routing/template_supply.py; defaults and validation remain owned there."
+    },
+    "TOFU_TEMPLATE_SUPPLY_SYNC_INTERVAL": {
+      "status": "documented",
+      "owner": "lib/model_routing/template_supply.py",
+      "description": "Existing template supply sync interval environment override, read through the local configuration adapter in lib/model_routing/template_supply.py; defaults and validation remain owned there."
+    },
+    "TOFU_TOKEN_COUNTER": {
+      "status": "documented",
+      "owner": "lib/token_counter/config.py",
+      "description": "Existing token counter environment override, read through the local configuration adapter in lib/token_counter/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_TOKEN_COUNTER_API_THRESHOLD": {
+      "status": "documented",
+      "owner": "lib/token_counter/config.py",
+      "description": "Existing token counter api threshold environment override, read through the local configuration adapter in lib/token_counter/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_TOKEN_COUNTER_API_TIMEOUT": {
+      "status": "documented",
+      "owner": "lib/token_counter/config.py",
+      "description": "Existing token counter api timeout environment override, read through the local configuration adapter in lib/token_counter/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_TOKEN_COUNTER_CACHE_TTL": {
+      "status": "documented",
+      "owner": "lib/token_counter/config.py",
+      "description": "Existing token counter cache ttl environment override, read through the local configuration adapter in lib/token_counter/config.py; defaults and validation remain owned there."
+    },
+    "TOFU_TOOL_RESULT_ARTIFACT_PRUNE_BATCHES": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing tool result artifact prune batches environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_TOOL_RESULT_ARTIFACT_PRUNE_BATCH_ROWS": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing tool result artifact prune batch rows environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_TOOL_RESULT_ARTIFACT_PRUNE_INTERVAL": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/event_log.py",
+      "description": "Existing tool result artifact prune interval environment override, read through the local configuration adapter in lib/tasks_pkg/event_log.py; defaults and validation remain owned there."
+    },
+    "TOFU_TREE_INDEX_MAX_AGE_S": {
+      "status": "documented",
+      "owner": "lib/project_mod/tree_index.py",
+      "description": "Existing tree index max age s environment override, read through the local configuration adapter in lib/project_mod/tree_index.py; defaults and validation remain owned there."
+    },
+    "TOFU_TREE_INDEX_STABLE_REFRESH_MAX_S": {
+      "status": "documented",
+      "owner": "lib/project_mod/tree_index.py",
+      "description": "Existing tree index stable refresh max s environment override, read through the local configuration adapter in lib/project_mod/tree_index.py; defaults and validation remain owned there."
+    },
+    "TOFU_TREE_INDEX_STALE_S": {
+      "status": "documented",
+      "owner": "lib/project_mod/tree_index.py",
+      "description": "Existing tree index stale s environment override, read through the local configuration adapter in lib/project_mod/tree_index.py; defaults and validation remain owned there."
+    },
+    "TOFU_TURN_SEARCH_BACKFILL_DELAY_S": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Existing turn search backfill delay s environment override, read through the local configuration adapter in lib/storage_authority_sql/config.py; defaults and validation remain owned there."
+    },
+    "MTSSO_SESSION_SDK": {
+      "status": "documented",
+      "owner": "packages/tofu-mtsso-auth/src/tofu_mtsso_auth/session.py",
+      "description": "Existing absolute path to the installed DataFE shared SSO auth module. An explicitly configured missing or relative path is rejected; otherwise discovery uses locally installed CLI locations without network installation."
+    },
+    "MTSSO_SESSION_TOKEN_FILE": {
+      "status": "documented",
+      "owner": "packages/tofu-mtsso-auth/src/tofu_mtsso_auth/session.py",
+      "description": "Existing absolute path to a shared SSO session file. Relative paths are rejected; when unset, the session owner resolves the existing MLP or LLM CLI token file in the user home."
+    },
+    "MTSSO_SHARED_SESSION": {
+      "status": "documented",
+      "owner": "packages/tofu-mtsso-auth/src/tofu_mtsso_auth/session.py",
+      "description": "Existing shared SSO selection: value 1 explicitly selects shared authentication even with incomplete configuration. Otherwise local SDK and usable same-identity session evidence govern automatic selection."
+    },
+    "TOFU_EXPORT_API_URL": {
+      "status": "documented",
+      "owner": "export_pkg/_live_state.py",
+      "description": "Origin of the running application's API from which an internal export reads the current model-routing authority and audited credential reveals. Unset uses http://127.0.0.1:$PORT (default port 15000). Only http(s) on 127.0.0.1, ::1 or localhost is accepted; requests use no proxy and follow no redirect."
     }
   },
-  "legacy_count": 626
+  "legacy_count": 601
 }

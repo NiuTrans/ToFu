@@ -5,6 +5,9 @@ export interface TimelineRound extends ToolGroupRound {
   readonly todoDisplayUpdateCount?: number; readonly toolContent?: unknown; readonly _swarmActive?: boolean;
   readonly steerRound?: number; readonly peerRound?: number; readonly inboxRound?: number;
   readonly bgCommandRound?: number; readonly stallRound?: number;
+
+  readonly inboxCount?: number; readonly peerCount?: number;
+  readonly inboxPreviews?: readonly unknown[]; readonly peerPreviews?: readonly unknown[];
 }
 export interface TimelineSegment extends ToolNarrationSegment {
   readonly id?: string | number; readonly terminal?: boolean;

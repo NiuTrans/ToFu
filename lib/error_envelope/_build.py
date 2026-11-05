@@ -8,7 +8,7 @@ from typing import Any
 
 from lib.log import get_logger
 
-from lib.error_envelope._classify import _classify_exception
+from lib.error_envelope._classify import _classify_exception, is_host_thread_refusal
 from lib.error_envelope._constants import (
     KINDS,
     _RETRYABLE_KINDS,
@@ -199,6 +199,12 @@ def from_exception(exc: BaseException, *, model: str = '',
                                 SubscriptionCredentialUnavailableError)
     credential_error = exc.__cause__ if isinstance(exc, LocalRequestPreparationError) else exc
     severity, retryable = None, None
+    # A storage failure carries its OWN retryability: a fenced/degraded
+    # authority is not retryable until the process restarts, while a
+    # transient outage is. The kind default assumes transient, so the typed
+    # flag has to override it here.
+    if 'StorageError' in type(exc).__name__:
+        retryable = bool(getattr(exc, 'retryable', True))
     if isinstance(credential_error, SubscriptionCredentialUnavailableError):
         if credential_error.reason == 'codex_home_storage_full':
             message = ('⚠️ Codex 主目录空间或 inode 不足，无法读取共享登录凭据\n'
@@ -257,6 +263,38 @@ def from_exception(exc: BaseException, *, model: str = '',
                        if field.endswith('Tokens'))
         source = 'prompt-admission'
         retryable = False
+    from lib.agent_core.context_errors import TurnRequirementsDeadlineError
+    if isinstance(exc, TurnRequirementsDeadlineError):
+        source, model = 'context-acquisition', ''
+        message = ('⚠️ 本地任务要求读取超时，尚未发送本轮模型请求\n'
+                   'Local task requirements read timed out; this model request was not sent')
+        hint = ('当前任务要求无法及时读取，本轮已在模型调用前停止，未使用旧要求继续执行。'
+                '可重试；若持续发生，请检查本地存储健康与上下文读取日志。更换模型不能解决此读取故障。\n'
+                'The current requirements were not available in time. This round stopped '
+                'before the model call and did not use stale requirements. Retry; if it '
+                'persists, inspect local storage health and context-read logs. '
+                'Switching models cannot fix this local read failure.')
+        retryable = True
+        extensions = {'origin': 'local', 'providerReached': False,
+                      'failureStage': exc.failure_stage,
+                      'timeoutSeconds': exc.timeout_seconds}
+    if is_host_thread_refusal(exc):
+        # The host refused the work, not the model; the refusal clears once
+        # other load releases threads, so a later retry can succeed.
+        model = ''
+        message = ('⚠️ 服务器无法创建新线程，本轮已停止\n'
+                   'The server could not start a new thread; this turn stopped')
+        hint = ('主机线程/进程数已达上限（例如容器 pids 限制或 ulimit -u），'
+                '与模型和 API Key 无关。请在主机负载下降后重试；若反复出现，'
+                '请检查主机上的线程/进程占用与 pids 限制。\n'
+                'The host reached its thread/process limit (for example a '
+                'container pids limit or ulimit -u); the model and API keys '
+                'are not at fault. Retry once host load drops; if it recurs, '
+                'inspect thread/process usage and the pids limit on the host.')
+        retryable = True
+        extensions = {'origin': 'local', 'failureStage': 'thread_start'}
+        if isinstance(exc, LocalRequestPreparationError):
+            extensions['providerReached'] = False
     return make_envelope(
         kind,
         severity=severity,

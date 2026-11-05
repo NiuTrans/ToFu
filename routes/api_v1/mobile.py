@@ -63,8 +63,8 @@ def _presented_token() -> str:
     The session cookie stores the raw token, so a normal browser session
     yields its credential here without any keystore lookup.
     """
-    from .auth import _extract_bearer_or_cookie
-    return _extract_bearer_or_cookie()
+    from .auth import presented_credential
+    return presented_credential().token
 
 
 def _download_url() -> str:

@@ -22,12 +22,27 @@ function imageOnly(node: Node): boolean {
     && Array.from(element.childNodes).every(imageOnly);
 }
 
-/** Called only after sanitization, local-file admission and proxy rewriting. */
+/** Called only after sanitization and proxy rewriting. Admission reads parsed
+ * attributes: serialized attribute values may contain raw `<`/`>`, so tag
+ * text cannot be split safely. */
 export function projectMarkdownImages(html: string, environment: MarkdownRenderEnvironment): string {
   if (!environment.document || !/<img\b/i.test(html)) return html;
   const template = environment.document.createElement('template');
   template.innerHTML = html;
   for (const image of template.content.querySelectorAll<HTMLImageElement>('img')) {
+    // Local agent workspace paths are not browser attachments. Preserve supported
+    // remote/upload images; explain inaccessible files rather than requesting 404s.
+    const source = image.getAttribute('src') ?? '';
+    if (!/^(https?:\/\/|blob:|data:image\/|\/?(?:api|static|uploads)\/)/i.test(source)
+        && !(environment.basePath && source.startsWith(environment.basePath + '/'))) {
+      const note = environment.document.createElement('span');
+      note.className = 'md-inaccessible-attachment';
+      note.setAttribute('role', 'note');
+      note.textContent = `Inaccessible attachment: ${image.getAttribute('alt') || source}. `
+        + 'This local workspace file is not a published image asset. Publish or upload it to view it here.';
+      image.replaceWith(note);
+      continue;
+    }
     image.classList.add('md-image');
     image.classList.remove('md-preview-image');
     image.removeAttribute('data-preview-src');

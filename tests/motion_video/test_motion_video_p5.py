@@ -29,8 +29,7 @@ from types import SimpleNamespace
 
 import pytest
 
-# serial: neuter-gate degradation timing under load — cannot safely overlap the parallel unit lane
-# (TESTING_STRATEGY serial policy).
+# Keep the author integration suite in its existing serial verification lane.
 pytestmark = [pytest.mark.unit, pytest.mark.serial]
 from lib.motion_video import _scene_author as sa
 from lib.motion_video import engine as eng
@@ -355,17 +354,35 @@ def test_abort_during_author_dispatch_is_not_retried(monkeypatch, tmp_path):
     assert calls == ['dispatch']
 
 
-def test_neuter_gate_check_proves_degradation_is_loadbearing(monkeypatch, tmp_path):
-    """NEUTER: make the final gate always pass → junk html would ship as
-    'authored'. Proves the post-loop gate is what forces degradation."""
+@pytest.mark.parametrize('disable_static_gate', [False, True])
+def test_neuter_gate_check_proves_degradation_is_loadbearing(
+        monkeypatch, tmp_path, disable_static_gate):
+    """The same junk is rejected by the real static gate and admitted without it.
+
+    Browser measurements and the renderer report are deterministic inputs;
+    this unit spec exercises the real author/quality logic, not Chrome teardown.
+    """
     junk = '<html><body>' + ('x' * 400) + '</body></html>'
-    _fake_llm(monkeypatch, [('', [('write_composition', {'html': junk})])])
-    monkeypatch.setattr(sa, 'author_scene', sa.author_scene)  # keep symbol
-    monkeypatch.setattr('lib.motion_video._gates.check_composition_html',
-                        lambda html: [])
+    calls = _fake_llm(monkeypatch, [
+        ('', [('write_composition', {'html': junk})]), ('done', []),
+    ])
+    measurements = []
+
+    def measure(html, **_kwargs):
+        measurements.append(html)
+        return {'span': .9, 'top_dead': .05, 'bottom_dead': .05, 'nodes': 6}
+
+    monkeypatch.setattr('lib.motion_video._fill.measure_fill', measure)
+    monkeypatch.setattr('lib.motion_video._render.check_project',
+                        lambda *_args, **_kwargs: {'ok': True, 'errors': []})
+    if disable_static_gate:
+        monkeypatch.setattr('lib.motion_video._gates.check_composition_html',
+                            lambda html: [])
     res = sa.author_scene(_scene(), str(tmp_path), width=1080, height=1440,
                           duration=4.0, scene_index=1, total_scenes=3)
-    assert res['mode'] == 'authored'   # junk shipped — gate was load-bearing
+    assert calls['n'] == 2
+    assert res['mode'] == ('authored' if disable_static_gate else 'template')
+    assert bool(measurements) is disable_static_gate
 
 
 # ══════════════════════════════════════════════════════════

@@ -10,7 +10,7 @@ from lib.storage.errors import StorageError
 from lib.storage_authority_sql.adapters.base import Session
 
 
-SCHEMA_VERSION = 68
+SCHEMA_VERSION = 70
 
 
 _TABLES = (
@@ -663,6 +663,17 @@ _TABLES = (
         result_json TEXT NOT NULL DEFAULT '{}',
         rounds_used BIGINT NOT NULL DEFAULT 0,
         delivered BIGINT NOT NULL DEFAULT 0,
+        updated_at BIGINT NOT NULL DEFAULT 0,
+        checkpoint_id TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (swarm_key, agent_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS swarm_agent_checkpoint_markers (
+        swarm_key TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        result_json TEXT NOT NULL DEFAULT '{}',
+        rounds_used BIGINT NOT NULL DEFAULT 0,
         updated_at BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (swarm_key, agent_id)
     )
@@ -1346,6 +1357,14 @@ from lib.storage_authority_sql.turn_search_chunks import CHUNK_SCHEMA
 
 
 _MIGRATIONS = {
+    # Constant-default append base only: no agent row is read or rewritten. An
+    # empty checkpoint_id never matches an append, so the next write is full.
+    70: ("ALTER TABLE swarm_agents ADD COLUMN checkpoint_id TEXT NOT NULL DEFAULT ''",),
+
+    # The new compact swarm_agent_checkpoint_markers table starts empty; its
+    # CREATE statement in _TABLES installs it. No agent row is read or rewritten.
+    69: (),
+
     # Native already has bytewise entity ranges; SQLite's record primary key
     # is BINARY. PostgreSQL installs the small private-namespace C index below
     # in its explicit schema migration job, never in application queries.

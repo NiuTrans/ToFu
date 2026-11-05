@@ -2,8 +2,10 @@
 + thinking blocks + cold images + (optional) paired interstitials +
 (optional) cold assistant content.
 
-Runs every round (cheap, no LLM call).  Cache-aware: messages in the
-prompt-cache prefix are left byte-identical to avoid invalidation.
+Runs every round (cheap, no LLM call).  Cache-aware: the previous request's
+messages are the provider-cached prefix and stay byte-identical, except that
+the last tool step inside them may be edited when that makes the very next
+request cheaper (``_sent_step_boundary``).
 
 Architecture (2026-06 step refactor):
     ``micro_compact`` is the *orchestration shell* — it computes the
@@ -19,12 +21,72 @@ only the request-local API projection; it never loads or updates transcript
 authority and never stamps compaction fields onto durable tool rounds.
 """
 
+import copy
 import time
 
 from lib.log import get_logger
 import lib.tasks_pkg.compaction._constants as compaction_constants
 
 logger = get_logger(__name__)
+
+
+def _sent_step_boundary(messages: list, sent_count: int, step_names: list, *,
+                        conv_id: str, task: dict | None,
+                        constants) -> tuple[int, int | None]:
+    """Return ``(cache_prefix_count, rewrite_from)`` inside the previous request.
+
+    messages[0:sent_count] were sent and cached by the previous request.
+    Editing any of them makes the next request re-send that request's last
+    tool step, messages[step_start:sent_count] with step_start the last
+    assistant message in the sent prefix; the request before it cached
+    everything earlier. A detached dry run of the same steps with only that
+    step unprotected shows what L1 would change there. The edit is admitted
+    only when writing the edited step costs less than reading the original
+    back (``sent_step_rewrite_economics``); otherwise everything sent stays
+    byte-identical. ``rewrite_from`` is set only for an admitted edit.
+    """
+    step_start = next((index for index in range(sent_count - 1, -1, -1)
+                       if messages[index].get('role') == 'assistant'), None)
+    if step_start is None:
+        return sent_count, None
+    from lib.tasks_pkg.compaction._steps import CompactionContext, run_steps
+    # The trial must leave the live list untouched. Below step_start a shallow
+    # copy suffices: protected steps never edit there, and a step that ignores
+    # the prefix (compact_cold_assistant) only reassigns top-level fields.
+    candidate = ([dict(message) for message in messages[:step_start]]
+                 + copy.deepcopy(messages[step_start:]))
+    run_steps(step_names, CompactionContext(
+        messages=candidate, conv_id=conv_id, task=task, constants=constants,
+        cache_prefix_count=step_start, dry_run=True))
+    if candidate[step_start:sent_count] == messages[step_start:sent_count]:
+        return sent_count, None
+
+    from lib.tasks_pkg.compaction._builtin_steps._shared import _log_id
+    from lib.tasks_pkg.compaction._cache_economics import (
+        _main_route, sent_step_rewrite_economics)
+    from lib.tasks_pkg.compaction._tokens import (
+        _estimate_total_tokens, estimate_msg_tokens_for_model)
+    model = _main_route(task or {})[0]
+    before = sum(estimate_msg_tokens_for_model(message, model)
+                 for message in messages[step_start:sent_count])
+    after = sum(estimate_msg_tokens_for_model(message, model)
+                for message in candidate[step_start:sent_count])
+    verdict = sent_step_rewrite_economics(
+        task, tokens_before=before, tokens_after=after,
+        prompt_tokens=_estimate_total_tokens(messages))
+    if verdict['pricing_known']:
+        priced = 'rewrite %.0f (write x%.2f) %s keep %.0f (read x%.2f)' % (
+            verdict['rewrite_cost_tokens'], verdict['cache_write_mul'],
+            '<' if verdict['admitted'] else '>=',
+            verdict['keep_cost_tokens'], verdict['cache_read_mul'])
+    else:
+        priced = 'pricing unverified'
+    logger.info('[L1] conv=%s sent-step edit %s: msgs[%d:%d] ~%d -> ~%d tokens; %s',
+                _log_id(conv_id), 'admitted' if verdict['admitted'] else 'refused',
+                step_start, sent_count, before, after, priced)
+    if verdict['admitted']:
+        return step_start, step_start
+    return sent_count, None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -38,10 +100,12 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
     The transforms run through the compaction step registry; this
     function owns only request-local bookkeeping and observability.
 
-    Cache-aware: if prompt cache is active (tracked by cache_tracking.py),
-    messages in the cache prefix are left byte-identical to avoid
-    invalidating the cache.  Only messages OUTSIDE the cache prefix
-    window are edited.
+    Cache-aware: the messages the previous request sent (tracked by
+    cache_tracking) are the provider-cached prefix and are left
+    byte-identical. The one exception is that request's last tool step, which
+    is edited only when the dry-run edit makes the next request cheaper on
+    verified main-route prices; such an edit is advertised to the cache-break
+    detector as a bounded rewrite. ``ignore_cache_prefix`` arms skip both.
 
     Args:
         messages: The live messages list.  Mutated in place.
@@ -162,11 +226,11 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
         finally:
             event_elapsed += max(0.0, time.monotonic() - event_started_at)
 
-    # ── Cache-aware: determine which messages are in the cache prefix ──
-    # Messages in the cache prefix are skipped to maintain byte-identical
-    # content for prompt cache stability.
-    _cache_prefix_count = 0
-    if conv_id and not kwargs.get('ignore_cache_prefix', False):
+    # ── Cache-aware: the previous request's messages are the cached prefix ──
+    ignore_cache_prefix = bool(kwargs.get('ignore_cache_prefix', False))
+    dry_run = bool(kwargs.get('_dry_run', False))
+    sent_count = 0
+    if conv_id and not ignore_cache_prefix:
         try:
             from lib.tasks_pkg.cache_tracking._prefix import get_cache_prefix_count
             # Pass the LIVE message count so the (monotonic) boundary is
@@ -174,13 +238,14 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
             # history shrink (L2/L3 macro-compact, edit-and-resend) must let
             # the boundary fall, or micro_compact would be permanently
             # disabled for this conv → unbounded context growth.
-            _cache_prefix_count = get_cache_prefix_count(
+            sent_count = get_cache_prefix_count(
                 conv_id,
                 user_id=owner_id,
                 current_msg_count=len(messages),
             )
         except Exception as e:
             logger.debug('[Compaction] cache_tracking not available: %s', e)
+    sent_count = min(sent_count, len(messages))
 
     # ── Run the L1 transform steps ─────────────────────────────────────
     # The Phase A–D bodies live as registered steps in _builtin_steps.py.
@@ -201,17 +266,36 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
         if kwargs.get('enable_assistant_compact', False):
             step_names.append('compact_cold_assistant')
 
+    constants = make_constants(_c, kwargs.get('constant_overrides'))
+    cache_prefix_count, rewrite_from = sent_count, None
+    if sent_count and not dry_run:
+        cache_prefix_count, rewrite_from = _sent_step_boundary(
+            messages, sent_count, step_names,
+            conv_id=conv_id, task=task, constants=constants)
+    sent_step = (copy.deepcopy(messages[rewrite_from:sent_count])
+                 if rewrite_from is not None else None)
+
     ctx = CompactionContext(
         messages=messages,
         conv_id=conv_id,
         task=task,
-        constants=make_constants(_c, kwargs.get('constant_overrides')),
-        cache_prefix_count=_cache_prefix_count,
-        ignore_cache_prefix=bool(kwargs.get('ignore_cache_prefix', False)),
-        dry_run=bool(kwargs.get('_dry_run', False)),
+        constants=constants,
+        cache_prefix_count=cache_prefix_count,
+        ignore_cache_prefix=ignore_cache_prefix,
+        dry_run=dry_run,
         stamp_fn=_stamp_l1,
     )
     tokens_saved += run_steps(step_names, ctx)
+
+    if sent_step is not None and messages[rewrite_from:sent_count] != sent_step:
+        # Admitted edit of cached bytes: the next read drop from this index on
+        # is expected, while detectors stay live for anything earlier.
+        try:
+            from lib.tasks_pkg.cache_tracking._roi import notify_compaction
+            notify_compaction(conv_id, user_id=owner_id,
+                              intended_rewrite_index=rewrite_from)
+        except Exception as exc:
+            logger.debug('[L1] cache notification failed: %s', exc)
 
     if not (task or {}).get('aborted'):
         from lib.tasks_pkg.context_composer.checklist import carry_checklist_through_compaction

@@ -1,5 +1,6 @@
 """Physical non-stream calls account for success, refusal and ambiguous retries."""
 import importlib
+import json
 import time
 from types import SimpleNamespace
 import pytest
@@ -88,18 +89,68 @@ def test_zero_budget_no_relay(transport,monkeypatch,route):
     with pytest.raises(ModelBudgetAdmissionDenied):invoke(transport,model_budget_admission(owner),**kwargs)
     assert owner['_executionBudget'].consumption_snapshot()==(0,0,True)
 
-def test_learned_limit_recursion_keeps_account_and_unknown_failure(transport,monkeypatch):
+def limit_rejection():
+    return SimpleNamespace(status_code=400,headers={},content=b'synthetic token limit',
+                           text='synthetic token limit',encoding='utf-8')
+
+def test_learned_limit_retry_is_admitted_under_a_finite_budget(transport,monkeypatch):
+    """The 400 naming the output limit is answered before any inference.
+
+    Settling it as unknown fenced the clamped retry of a token-limited task
+    with ``execution_token_usage_unknown``; it is a proven zero instead.
+    """
+    owner=task();seen=[]
+    def send(*a,**k):
+        seen.append(json.loads(k['data']))
+        return limit_rejection() if len(seen)==1 else response({'prompt_tokens':5,'completion_tokens':2})
+    monkeypatch.setattr(transport,'http_post',send)
+    monkeypatch.setattr('lib.model_info._parse_token_limit_from_error',lambda *a:16)
+    monkeypatch.setattr('lib.model_info._learn_model_limit',lambda *a,**k:None)
+    content,usage=invoke(transport,model_budget_admission(owner),max_retries=0)
+    assert content=='ok' and len(seen)==2 and seen[1]['max_tokens']==16
+    assert usage['_model_limit_learned']['new_limit']==16
+    assert owner['_executionBudget'].consumption_snapshot()==(7,0,True)
+    assert owner['_executionBudget'].continuity_snapshot()['pending_model_requests']==0
+
+@pytest.fixture
+def isolated_repair_facts(monkeypatch,tmp_path):
+    import lib.config_dir as config_dir
+    from lib.llm import request_repair
+    real=config_dir.config_path
+    monkeypatch.setattr(config_dir,'config_path',lambda *parts:
+        str(tmp_path/'server_config.json') if parts==('server_config.json',) else real(*parts))
+    monkeypatch.setattr(request_repair,'_ROUTE_OMISSIONS',request_repair._RouteOmissionStore())
+
+def test_repair_retry_is_admitted_under_a_finite_budget(transport,monkeypatch,isolated_repair_facts):
+    owner=task();seen=[]
+    rejection=json.dumps({'error':{'type':'invalid_request_error','param':'temperature',
+        'code':'unsupported_parameter',
+        'message':"Unsupported parameter: 'temperature' is not supported with this model."}})
+    def send(*a,**k):
+        seen.append(json.loads(k['data']))
+        if len(seen)==1:
+            return SimpleNamespace(status_code=400,headers={},content=rejection.encode(),
+                                   text=rejection,encoding='utf-8')
+        return response({'prompt_tokens':5,'completion_tokens':2})
+    monkeypatch.setattr(transport,'http_post',send)
+    content,usage=invoke(transport,model_budget_admission(owner),max_retries=0,temperature=0.4)
+    assert content=='ok' and len(seen)==2
+    assert seen[0]['temperature']==0.4 and 'temperature' not in seen[1]
+    assert owner['_executionBudget'].consumption_snapshot()==(7,0,True)
+    assert owner['_executionBudget'].continuity_snapshot()['pending_model_requests']==0
+
+def test_repeated_limit_rejection_ends_the_request_at_a_proven_zero(transport,monkeypatch):
+    from lib.llm.llm_errors import ModelLimitError
     owner=task();seen=[]
     def send(*a,**k):
         seen.append(True)
-        return SimpleNamespace(status_code=400,headers={},content=b'synthetic token limit',
-                               text='synthetic token limit',encoding='utf-8')
+        return limit_rejection()
     monkeypatch.setattr(transport,'http_post',send)
     monkeypatch.setattr('lib.model_info._parse_token_limit_from_error',lambda *a:16)
-    monkeypatch.setattr('lib.model_info._learn_model_limit',lambda *a:None)
-    with pytest.raises(ModelBudgetAdmissionDenied):invoke(transport,model_budget_admission(owner),max_retries=0)
-    assert len(seen)==1
-    assert owner['_executionBudget'].consumption_snapshot()==(0,0,False)
+    monkeypatch.setattr('lib.model_info._learn_model_limit',lambda *a,**k:None)
+    with pytest.raises(ModelLimitError):invoke(transport,model_budget_admission(owner),max_retries=0)
+    assert len(seen)==2
+    assert owner['_executionBudget'].consumption_snapshot()==(0,0,True)
 
 def test_rate_limit_refusal_settles_at_zero_and_keeps_the_allowance(transport,monkeypatch):
     """A 429 is a waitable refusal, not unconfirmed spend.

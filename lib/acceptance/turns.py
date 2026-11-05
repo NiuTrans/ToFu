@@ -8,6 +8,7 @@ declaration, never inferred from a browser attachment or a task's final claim.
 """
 import uuid
 
+from lib.error_envelope import BadRequest
 from lib.identity import PrincipalContext
 from lib.storage import get_storage_client, StorageError
 from lib.turn_lifecycle import get_turn, get_attempt, LifecycleNotFound
@@ -140,7 +141,7 @@ def read_execution_requirements(conversation_id: str, turn_id: str, attempt_id: 
     if (attempt['conversationId'], attempt['turnId'], attempt['taskId']) != (
             conversation_id, turn_id, task_id):
         raise LifecycleNotFound('Turn execution binding unavailable')
-    turn = get_turn(conversation_id, turn_id, user_id=owner)
+    turn = get_turn(conversation_id, turn_id, user_id=owner, include_projection=False)
     if turn['currentAttemptId'] != attempt_id:
         raise LifecycleNotFound('Turn execution was superseded')
     if turn['actor'] != 'assistant' or turn['laneId'] != 'main':
@@ -163,7 +164,8 @@ def update_review(conversation_id: str, turn_id: str, command: dict, *, principa
         if ('answer' in ids or len(ids) != len(set(ids))
                 or len({slot['artifactId'] for slot in slots}) != len(slots)
                 or any(not slot['label'].strip() for slot in slots)):
-            raise ValueError('Output slots require unique IDs, unique artifacts and nonempty labels')
+            raise BadRequest('Output slots require unique IDs, unique artifacts and nonempty labels',
+                             field='outputs')
         old = {slot['id']: slot for slot in previous.get('outputs', [])}
         outputs = []
         for slot in slots:
@@ -182,12 +184,13 @@ def update_review(conversation_id: str, turn_id: str, command: dict, *, principa
         bindings = command['outputBindings']
         by_id = {row['id']: row for row in current['outputs']}
         if len({row['id'] for row in bindings}) != len(bindings):
-            raise ValueError('Output bindings require unique IDs')
+            raise BadRequest('Output bindings require unique IDs', field='outputBindings')
         if any(row['id'] not in by_id or not by_id[row['id']]['available']
                or row['version'] != by_id[row['id']]['version'] for row in bindings):
             raise ReviewConflict('Outputs changed or unavailable; reload before deciding')
         if item['kind'] == 'constraint' and {row['id'] for row in bindings} != set(by_id):
-            raise ValueError('A global constraint must assess every declared output')
+            raise BadRequest('A global constraint must assess every declared output',
+                             field='outputBindings')
         captured = [{**binding, **{key: by_id[binding['id']][key]
                      for key in ('label', 'kind', 'artifactId')}} for binding in bindings]
         save_decision(review, command, item, {'outputBindings': captured}, conversation_id)

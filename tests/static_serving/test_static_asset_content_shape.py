@@ -53,6 +53,7 @@ import os
 import pytest
 
 from lib.vite_assets import VITE_OUT_DIR, validate_vite_artifact
+from tests._jsdom import require_shipped_graph
 
 pytestmark = pytest.mark.unit
 
@@ -145,6 +146,7 @@ def test_js_asset_is_not_python():
     but only for files a JS-syntax guard actually visits. This covers the two
     largest, most-scanned entry points cheaply.
     """
+    require_shipped_graph()
     manifest = validate_vite_artifact()
     rels = {
         entry['file']

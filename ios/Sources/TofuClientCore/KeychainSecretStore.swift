@@ -1,3 +1,4 @@
+#if canImport(Security)
 import Foundation
 import Security
 
@@ -53,3 +54,4 @@ public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
         ]
     }
 }
+#endif

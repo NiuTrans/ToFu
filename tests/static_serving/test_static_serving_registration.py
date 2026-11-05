@@ -62,3 +62,32 @@ def test_static_route_registration_is_idempotent_and_instance_local(tmp_path):
             assert manifest.headers['Cache-Control'] == 'no-store'
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('suffix', ['woff2', 'woff', 'ttf'])
+def test_public_fonts_allow_opaque_origins_without_credentials(tmp_path, suffix):
+    (tmp_path / f'glyphs.{suffix}').write_bytes(b'font bytes')
+    (tmp_path / 'script.js').write_bytes(b'window.ready = true;')
+    app = create_base_app('font-cors', {'TESTING': True})
+
+    async def offload(loop, filename):
+        return await loop.run_in_executor(None, load_static_bytes, str(tmp_path), filename)
+
+    register_static_route(app, offload=offload, timeout=1, logger=logging.getLogger('test.static'))
+
+    async def exercise():
+        async with app.test_app():
+            client = app.test_client()
+            full = await client.get(f'/static/glyphs.{suffix}', headers={'Origin': 'null'})
+            partial = await client.get(f'/static/glyphs.{suffix}', headers={'Origin': 'null', 'Range': 'bytes=0-3'})
+            cached = await client.get(f'/static/glyphs.{suffix}', headers={
+                'Origin': 'null', 'If-None-Match': full.headers['ETag'],
+            })
+            assert [full.status_code, partial.status_code, cached.status_code] == [200, 206, 304]
+            for response in (full, partial, cached):
+                assert response.headers.get('Access-Control-Allow-Origin') == '*'
+                assert 'Access-Control-Allow-Credentials' not in response.headers
+            script = await client.get('/static/script.js', headers={'Origin': 'null'})
+            assert 'Access-Control-Allow-Origin' not in script.headers
+
+    asyncio.run(exercise())

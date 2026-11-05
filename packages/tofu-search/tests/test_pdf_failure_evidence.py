@@ -29,6 +29,7 @@ def prepare(monkeypatch, pages=()):
     monkeypatch.setattr(pdf_extract, '_dependencies_loaded', True)
     monkeypatch.setattr(pdf_extract, '_pymupdf', SimpleNamespace(open=lambda **kw: document))
     monkeypatch.setattr(pdf_extract, '_pymupdf4llm', None)
+    monkeypatch.setattr(pdf_extract, '_pypdf', None, raising=False)
     response = SimpleNamespace(headers={'Content-Type': 'application/pdf'}, encoding='utf-8')
     requests = []
     def request(url, *args, **kwargs):
@@ -95,3 +96,51 @@ def test_empty_rich_extraction_can_still_recover_raw_text(monkeypatch):
     monkeypatch.setattr(pdf_extract, '_to_markdown_classic', lambda *a, **kw: [{'text': ' \n'}, {'text': ''}])
     assert fetch_page_content('https://pdf.example/rich-empty-raw-works.pdf') == text
     assert document.closed
+
+
+@pytest.mark.parametrize('rich', [False, True])
+@pytest.mark.parametrize('limit', [8, 64])
+def test_pdf_text_budget_preserves_the_source_prefix_without_overshooting(monkeypatch, rich, limit):
+    text = 'Exact source evidence must survive even a small projection budget. ' * 8
+    document, _ = prepare(monkeypatch, [text])
+    if rich:
+        monkeypatch.setattr(pdf_extract, '_pymupdf4llm', object())
+        monkeypatch.setattr(pdf_extract, '_to_markdown_classic', lambda *a, **kw: [{'text': text}])
+    body = pdf_extract.extract_pdf_text(b'%PDF-synthetic fixture', max_chars=limit)
+    assert body.startswith(text[:limit])
+    assert body.partition('[...truncated')[0].rstrip('\n') == text[:limit]
+    assert document.closed
+
+
+def test_short_readable_pdf_is_source_evidence(monkeypatch):
+    text = 'Reference number: 42.'
+    document, _ = prepare(monkeypatch, [text])
+    assert fetch_page_content('https://pdf.example/short-reference.pdf') == text
+    assert document.closed
+
+
+def test_rich_pdf_does_not_guess_that_numeric_source_lines_are_manuscript_labels(monkeypatch):
+    text = '\n'.join(f'Annual observation {index}\n{2010 + index}' for index in range(8))
+    document, _ = prepare(monkeypatch, [text])
+    monkeypatch.setattr(pdf_extract, '_pymupdf4llm', object())
+    monkeypatch.setattr(pdf_extract, '_to_markdown_classic', lambda *a, **kw: [{'text': text}])
+    assert fetch_page_content('https://pdf.example/annual-observations.pdf') == text
+    assert document.closed
+
+
+@pytest.mark.parametrize('suffix', ['.pdf', '/download'])
+@pytest.mark.parametrize('budgets', [(8, 1000), (1000, 8)])
+def test_cached_pdf_respects_each_read_budget_and_response_type(monkeypatch, suffix, budgets):
+    text = 'The PDF evidence includes every recorded annual observation: 2010, 2011, 2012.'
+    _, requests = prepare(monkeypatch, [text])
+    url = f'https://pdf.example/cache-{budgets[0]}{suffix}'
+    for limit in (*budgets, *budgets):
+        diag = {}
+        result = fetch_page_content(url, max_chars=5, pdf_max_chars=limit, diag=diag)
+        if limit < len(text):
+            assert result.startswith(text[:limit] + '\n[...truncated')
+            assert diag['truncated'] is True
+        else:
+            assert result == text
+            assert not diag.get('truncated')
+    assert len(requests) == 2

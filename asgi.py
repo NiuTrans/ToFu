@@ -5,7 +5,9 @@ import os
 import sys
 
 from server import (
-    _acquire_instance_lock, _tofu_data_root, create_production_app)
+    _APPLICATION_IMPORT_ROOTS, _acquire_instance_lock, _tofu_data_root,
+    create_production_app)
+from lib.runtime.pinned_import_source import PinnedImportSource
 
 # server.py takes the single-instance lock only on the ``python server.py``
 # path (``__name__ == '__main__'``).  This module is the uvicorn/hypercorn
@@ -29,6 +31,10 @@ if not _lock_ok:
     logging.getLogger('server').warning(
         '[Lock] TOFU_SKIP_LOCK=1 — bypassing instance lock')
     _instance_lock_fd = None
+
+# Same reason as ``python server.py``: lazily imported modules must come from
+# the revision this long-running process booted with.
+PinnedImportSource(_APPLICATION_IMPORT_ROOTS).install()
 
 app = create_production_app()
 

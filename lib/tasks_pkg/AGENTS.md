@@ -46,7 +46,12 @@ announced occurrence in the existing bounded cache. The admitted domain handler
 consumes them; verify prefetch handoff, identity repair and outcome/cancellation.
 
 NativeGateway qualifies parallel reads through tool_dispatch.api and binds
-original model declarations before execution. tool_dispatch owns invocation-local
+original model declarations before execution. Application composition selects
+concurrent dispatch instead (no gateway lock): prepare_response binds the
+_ordering call order into the settlement's NativeToolOrder, freezes
+run_command directories and gives recycled model call IDs their admission
+identity before any approval; verify native_gateway_concurrent and installed
+native_parallel_writes. tool_dispatch owns invocation-local
 result/envelope carriers and locked shared receipt publication; native_progress
 merges completed evidence atomically. Verify native_gateway_parallel, receipt
 cache/settlement tests and installed native_tools_parallel before changing overlap.
@@ -167,6 +172,11 @@ remain a separate migration boundary.
 
 ## Verification
 
+`turn_trace.py` owns clock evidence, strict accounting and publication;
+`turn_trace_spans.py` owns only per-read event occurrence pairing. Preserve
+phase policy, missing-evidence coverage and complete-tree parity before byte
+compaction. Verify turn trace, execution-clock and storage-projection tests.
+
 Start with the focused task/round/handler/compaction test. Then run event-fold,
 turn-settlement, cancellation, and owner-isolation neighbors named in the task
 and context domain maps. Use `make test-unit` only after those pass.
@@ -240,12 +250,17 @@ while keeping it on the gateway; unknown provider controls still refuse.
 
 `native_parent.py` borrows the canonical live task for detached delegation policy.
 Keep exact principal/account/task checks; never serialize ports or read them from
-request config. Verify native-parent authority and public production delegation.
+request config. Sharing binds identity; child entry admits only a pending/running
+issuer and otherwise raises typed NativeParentSettled before allocation. Verify
+native-parent authority, late-start refusal and public production delegation.
 
 Native prepared gateway borrows RootLoopRequest.all_search_results_text for
 canonical search classification/budgeting. Terminal projection applies the
-existing sources footer once before commit; never scrape arbitrary feedback,
-copy the corpus, or mutate raw model history/usage for presentation.
+existing sources footer once before commit. The footer cites only settled
+page-reading rounds (fetched `fetch_url` rows, accepted `browser_read_page`
+URLs), never search listings or links inside pages (docs/RESOURCE_CONTROL.md).
+Never scrape the corpus or arbitrary feedback, copy the corpus, or mutate raw
+model history/usage for presentation.
 
 Legacy invoice provenance is recovered only from the checked accepted resume
 relation; validate detached exact prefix before assigning it. Keep original quotes

@@ -48,8 +48,8 @@ def request_stdin(
         owner_user_id=owner,
     )
     if entry is None:
-        logger.error('[StdinHandler] duplicate or capacity-exhausted request '
-                     'stdin_id=%s; refusing registration', stdin_id)
+        logger.error('[StdinHandler] duplicate request stdin_id=%s; '
+                     'refusing registration', stdin_id)
         return None
 
     deadline = time.monotonic() + _STDIN_TIMEOUT

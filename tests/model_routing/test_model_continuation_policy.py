@@ -77,12 +77,45 @@ def test_text_compaction_survives_model_switch_without_old_runtime_rules(replay_
 
 @pytest.mark.parametrize('extra', [
     {'content': [{'type': 'image_url', 'image_url': {'url': 'private'}}]},
-    {'reasoning_content': 'opaque thinking'},
+    {'_modelImageSources': ['tofu-media:private']},
     {'_unknownProviderState': 'opaque'},
 ])
 def test_nonportable_evidence_is_not_silently_dropped(extra):
     from lib.tasks_pkg.model_replay import _portable_messages
     assert _portable_messages([{'role': 'assistant', 'content': 'done', **extra}]) is None
+
+
+def test_portable_projection_strips_only_route_bound_provider_state():
+    from lib.tasks_pkg.model_replay import _portable_messages
+    call = {'id': 'call-1', 'type': 'function',
+            'function': {'name': 'read_files', 'arguments': '{"path": "a.py"}'}}
+    steer = {'role': 'user', 'content': 'use staging', '_contextInjectionId': 'inbox_delivery',
+             '_isInboxInject': True, '_containsHumanSteer': True,
+             '_contextInjection': {'id': 'inbox_delivery', 'eventId': 'e1'},
+             '_projectMailbox': 'mailbox', '_projectMessageIds': ['m1']}
+    messages = [
+        {'role': 'user', 'content': 'work', '_turnId': 'u1'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [call],
+         'reasoning_content': 'route-private thinking', 'thinking_signature': 'sig'},
+        {'role': 'tool', 'tool_call_id': 'call-1', 'content': 'exact tool bytes'},
+        steer,
+        # Provider-only row: nothing portable remains.
+        {'role': 'assistant', 'content': '', '_responses_items': [{'type': 'reasoning'}]},
+        {'role': 'assistant', 'content': 'done',
+         '_anthropic_content_blocks': [{'type': 'thinking', 'signature': 'sig'}],
+         '_reasoning_continuity': 'completed_turn', 'reasoning_details': [{'x': 1}]},
+    ]
+    projected = _portable_messages(messages)
+    assert projected == [
+        messages[0],
+        {'role': 'assistant', 'content': '', 'tool_calls': [call]},
+        messages[2],
+        steer,
+        {'role': 'assistant', 'content': 'done'},
+    ]
+    assert projected[3] is not steer  # Detached from the stored checkpoint.
+    # A final answer that was only provider state is not a portable view.
+    assert _portable_messages(messages[:5]) is None
 
 
 def test_history_carrier_private_fields_are_portable_text_metadata():
@@ -140,33 +173,58 @@ def test_same_opus_effort_change_preserves_signed_prefix_and_tool_latch(replay_s
     assert saved['messages'] == messages
 
 
+def _put_policy_checkpoint(replay_store, replay, rows, original, messages, **extra):
+    replay_store.put(user_id=1, conversation_id='c', lane_id='main', projection={
+        'policy': replay.policy_witness(original),
+        'policyFields': replay._policy_fields(original),
+        'portablePolicy': replay.portable_policy_witness(original),
+        'turns': [replay.turn_witness(row) for row in rows], 'messages': messages,
+        **extra})
+
+
 @pytest.mark.parametrize('change', [
     {'model': 'claude-opus-4-7'}, {'providerId': 'another'},
-
     {'preferredProviderId': 'another'},
     {'routing': {'preferred_provider_id': 'another'}},
     {'modelRef': {'creator_id': 'anthropic', 'model_id': 'another'}},
-    {'systemPrompt': 'new'}, {'grantedToolPermissions': ['read']},
     {'thinkingEnabled': False}, {'thinkingDepth': 'off'},
 ])
-def test_effort_witness_does_not_relax_other_boundaries(replay_store, change):
+def test_effort_witness_does_not_relax_route_or_off_changes(replay_store, change):
+    """Only portable text survives: signed reasoning never crosses these boundaries."""
     from lib.tasks_pkg import model_replay as replay
     rows = [_turn('u1', 'human', 'work', 1), _turn('a1', 'assistant', 'done', 2)]
     original = {'model': 'claude-opus-5', 'thinkingDepth': 'medium', 'thinkingEnabled': True}
-    replay_store.put(user_id=1, conversation_id='c', lane_id='main', projection={
-        'policy': replay.policy_witness(original),
-        'effortPolicy': replay.effort_policy_witness(original),
-        'portablePolicy': replay.portable_policy_witness(original),
-        'turns': [replay.turn_witness(row) for row in rows],
-        'messages': [{'role': 'assistant', 'content': 'done', 'reasoning_content': 'summary'}],
-    })
+    _put_policy_checkpoint(
+        replay_store, replay, rows, original,
+        [{'role': 'assistant', 'content': 'done', 'reasoning_content': 'summary'}],
+        effortPolicy=replay.effort_policy_witness(original),
+        toolLatch={'programmaticCalling': 'on'})
+    cfg = {**original, 'thinkingDepth': 'max', **change}
+    restored, covered = replay.restore_prefix(rows + [_turn('a2', 'assistant', '', 3)], cfg,
+                                              conversation_id='c', user_id=1)
+    assert cfg['_modelReplayStatus'] == 'restored_portable'
+    assert (restored, covered) == ([{'role': 'assistant', 'content': 'done'}], 2)
+    assert '_modelReplayToolLatch' not in cfg
+
+
+@pytest.mark.parametrize('change', [
+    {'systemPrompt': 'new'}, {'grantedToolPermissions': ['read']},
+])
+def test_effort_witness_does_not_relax_authority_changes(replay_store, change):
+    from lib.tasks_pkg import model_replay as replay
+    rows = [_turn('u1', 'human', 'work', 1), _turn('a1', 'assistant', 'done', 2)]
+    original = {'model': 'claude-opus-5', 'thinkingDepth': 'medium', 'thinkingEnabled': True}
+    _put_policy_checkpoint(
+        replay_store, replay, rows, original,
+        [{'role': 'assistant', 'content': 'done', 'reasoning_content': 'summary'}],
+        effortPolicy=replay.effort_policy_witness(original))
     cfg = {**original, 'thinkingDepth': 'max', **change}
     assert replay.restore_prefix(rows + [_turn('a2', 'assistant', '', 3)], cfg,
                                  conversation_id='c', user_id=1) == ([], 0)
-    assert cfg['_modelReplayStatus'] in ('policy_changed', 'nonportable_checkpoint')
+    assert cfg['_modelReplayStatus'] == 'policy_changed'
 
 
-def test_legacy_checkpoint_without_effort_witness_still_rebuilds(replay_store):
+def test_legacy_checkpoint_without_effort_witness_restores_only_portable_text(replay_store):
     from lib.tasks_pkg import model_replay as replay
     rows = [_turn('u1', 'human', 'work', 1), _turn('a1', 'assistant', 'done', 2)]
     original = {'model': 'claude-opus-5', 'thinkingDepth': 'medium'}
@@ -177,6 +235,91 @@ def test_legacy_checkpoint_without_effort_witness_still_rebuilds(replay_store):
         'messages': [{'role': 'assistant', 'content': 'done', 'reasoning_content': 'summary'}],
     })
     cfg = {**original, 'thinkingDepth': 'max'}
+    assert replay.restore_prefix(rows + [_turn('a2', 'assistant', '', 3)], cfg,
+                                 conversation_id='c', user_id=1) == (
+        [{'role': 'assistant', 'content': 'done'}], 2)
+    assert cfg['_modelReplayStatus'] == 'restored_portable'
+
+
+_ROUTER_VIEW = [
+    {'role': 'user', 'content': 'route this', '_turnId': 'u1'},
+    {'role': 'user', '_contextComposer': True, 'content': 'old model rules'},
+    {'role': 'assistant', 'content': 'Dispatching.', 'reasoning_content': 'private',
+     '_responses_items': [{'type': 'reasoning', 'encrypted_content': 'opaque'}]},
+    {'role': 'user', 'content': 'steer: prefer staging', '_contextInjectionId': 'inbox_delivery',
+     '_isInboxInject': True, '_containsHumanSteer': True, '_contextInjection': {'eventId': 'e'}},
+    {'role': 'assistant', 'content': 'Worker delegated on staging.'},
+]
+
+
+@pytest.mark.parametrize('change', [
+    {'model': 'gpt-6-astra', 'modelRef': {'creator_id': 'openai', 'model_id': 'gpt-6-astra'}},
+    {'preferredProviderId': 'other', 'routing': {'preferred_provider_id': 'other'}},
+    {'thinkingDepth': 'high'}, {'thinkingEnabled': False}, {'defaultThinkingDepth': 'low'},
+    {'preset': 'fast'},
+])
+def test_route_and_effort_drift_reuse_portable_text(replay_store, change):
+    from lib.tasks_pkg import model_replay as replay
+    rows = [_turn('u1', 'human', 'route this', 1), _turn('a1', 'assistant', 'done', 2)]
+    original = {'model': 'kimi-k3', 'thinkingEnabled': True, 'thinkingDepth': 'medium',
+                'projectPath': '/router-home', 'grantedToolPermissions': ['delegate']}
+    _put_policy_checkpoint(replay_store, replay, rows, original, copy.deepcopy(_ROUTER_VIEW),
+                           toolLatch={'latched': True}, goalState={'kept': False})
+    cfg = {**original, **change}
+    restored, covered = replay.restore_prefix(rows + [_turn('a2', 'assistant', '', 3)], cfg,
+                                              conversation_id='c', user_id=1)
+    assert cfg['_modelReplayStatus'] == 'restored_portable'
+    assert covered == 2  # Only the uncovered suffix is rebuilt fresh.
+    assert set(cfg['_modelReplayPolicyDrift']) == set(change)
+    assert [message['content'] for message in restored] == [
+        'route this', 'Dispatching.', 'steer: prefer staging', 'Worker delegated on staging.']
+    assert not any(key in message for message in restored for key in (
+        'reasoning_content', '_responses_items', '_contextComposer'))
+    assert '_modelReplayToolLatch' not in cfg and '_goalWorkerState' not in cfg
+
+
+@pytest.mark.parametrize('change', [
+    {'grantedToolPermissions': ['delegate', 'write']},            # permissions
+    {'projectPath': '/another-project'}, {'projectEnabled': False},  # project scope
+    {'tools': {'programmaticCalling': 'on'}}, {'enabledTools': ['run_command']},
+    {'disabledTools': ['web_search']}, {'mcpServers': ['github']},
+    {'codeExecEnabled': True}, {'browserEnabled': True},           # tool authority
+    {'planMode': True}, {'delegateMode': True}, {'autopilot': True},  # interaction mode
+    {'systemPrompt': 'new operator rules'},                        # instructions
+    {'_principalContext': {'kind': 'system'}},
+    {'model': 'gpt-6-astra', 'grantedToolPermissions': ['delegate', 'write']},
+])
+def test_authority_drift_still_refuses(replay_store, change):
+    from lib.tasks_pkg import model_replay as replay
+    rows = [_turn('u1', 'human', 'route this', 1), _turn('a1', 'assistant', 'done', 2)]
+    original = {'model': 'kimi-k3', 'thinkingEnabled': True, 'thinkingDepth': 'medium',
+                'projectPath': '/router-home', 'projectEnabled': True,
+                'grantedToolPermissions': ['delegate']}
+    _put_policy_checkpoint(replay_store, replay, rows, original, copy.deepcopy(_ROUTER_VIEW))
+    cfg = {**original, **change}
+    assert replay.restore_prefix(rows + [_turn('a2', 'assistant', '', 3)], cfg,
+                                 conversation_id='c', user_id=1) == ([], 0)
+    assert cfg['_modelReplayStatus'] == 'policy_changed'
+    assert cfg['_modelReplayPolicyDrift']
+
+
+def test_interaction_mode_witness_keeps_standard_digests():
+    from lib.tasks_pkg import model_replay as replay
+    standard = {'model': 'kimi-k3'}
+    assert replay._policy_fields(standard)[2]['interactionMode'] is None
+    assert replay.policy_witness({**standard, 'planMode': False}) == replay.policy_witness(standard)
+    assert replay.policy_witness({**standard, 'planMode': True}) != replay.policy_witness(standard)
+    assert replay.policy_witness({**standard, 'delegateMode': True}) != replay.policy_witness(standard)
+
+
+def test_media_checkpoint_still_rebuilds_on_route_drift(replay_store):
+    from lib.tasks_pkg import model_replay as replay
+    rows = [_turn('u1', 'human', 'look', 1), _turn('a1', 'assistant', 'done', 2)]
+    original = {'model': 'kimi-k3'}
+    _put_policy_checkpoint(replay_store, replay, rows, original, [
+        {'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': 'x'}}]},
+        {'role': 'assistant', 'content': 'done'}])
+    cfg = {'model': 'gpt-6-astra'}
     assert replay.restore_prefix(rows + [_turn('a2', 'assistant', '', 3)], cfg,
                                  conversation_id='c', user_id=1) == ([], 0)
     assert cfg['_modelReplayStatus'] == 'nonportable_checkpoint'

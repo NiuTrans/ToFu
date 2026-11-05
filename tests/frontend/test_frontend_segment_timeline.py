@@ -808,10 +808,6 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(
-    not (shutil.which('node')
-         and os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))),
-    reason='node + jsdom not installed')
 def test_settled_prose_is_sibling_not_nested_in_tool_card():
     """The settled render must keep thinking/narration as SIBLINGS of the
     .ptool-turn card (in the panel body), never nested inside it — the owner's
@@ -823,10 +819,6 @@ def test_settled_prose_is_sibling_not_nested_in_tool_card():
     assert out.count('PASS') >= 5, f'expected >=5 PASS, got:\n{out}'
 
 
-@pytest.mark.skipif(
-    not (shutil.which('node')
-         and os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))),
-    reason='node + jsdom not installed')
 def test_NC_settled_nesting_prose_in_card_bites():
     """NEUTER: nest the prose inside the tool card and confirm the non-nesting
     invariant FAILS — proving the sibling assertion has teeth."""

@@ -39,7 +39,7 @@ export function createMarkdownRenderer(ports: MarkdownRendererPorts) {
   }
 
   /* Reusable streaming prefix from the previous streaming frame. Only a
-   * blank-line-aligned, fence-free, math-free stable prefix is ever recorded,
+   * blank-line-aligned, reference-free, math-free stable prefix is recorded,
    * and only a terminal render clears it — a streaming frame never feeds the
    * terminal cache, so an approximation can never be frozen as final. */
   let streamingPrefix: StreamingPrefixSnapshot | null = null;
@@ -78,8 +78,8 @@ export function createMarkdownRenderer(ports: MarkdownRendererPorts) {
         let cacheable: boolean;
         /* Streaming prefix reuse: render only the grown tail, prepending the
          * prior frame's verified stable-prefix HTML. Math-bearing prefixes
-         * opt out (globally numbered markers), so no tail renumbering is ever
-         * needed. */
+         * opt out (globally numbered markers). Reference-capable brackets stop
+         * the prefix so uses and late definitions always parse together. */
         const reuse = streaming
           && streamingPrefix && streamingPrefixApplies(streamingPrefix, text, escaped)
           ? streamingPrefix : null;
@@ -98,20 +98,25 @@ export function createMarkdownRenderer(ports: MarkdownRendererPorts) {
         html = renderMathFragments(html, prepared.math, environment, streaming, code.owner);
         if (streaming) {
           /* Record the stable prefix's own rendering so the next frame only
-           * projects the grown tail. The prefix is prepared/parsed/sanitized
-           * in isolation here (O(stable prefix)), once per completed block
-           * rather than once per frame; steady-state frames then reuse the
-           * stored htmlPrefix and do O(grown tail) work. Math markers are
-           * globally numbered across the whole source, so a stable prefix that
-           * itself carries math is never reused (the tail's fragment indices
-           * would shift). */
-          const prefixEnd = findStreamingPrefixEnd(prepared.source);
-          if (prefixEnd > 0 && !prepared.math.length) {
-            const prefixSource = prepared.source.slice(0, prefixEnd);
-            const prefixRender = project(prefixSource, environment, streaming);
-            streamingPrefix = { escaped, sourcePrefix: prefixSource, htmlPrefix: prefixRender.html };
+           * projects the grown tail. `prepared` covers only the tail on a
+           * reuse frame, so a newly completed block EXTENDS the reused prefix
+           * (whole-source coordinates); an unchanged prefix is kept without
+           * re-projection. Only newly completed blocks are parsed in
+           * isolation, so steady-state frames do O(grown tail) work. Math
+           * markers are globally numbered across the parsed source, so a
+           * math-bearing source never grows the prefix (the tail's fragment
+           * indices would shift); a math-free reused prefix stays valid. */
+          const prefixEnd = prepared.math.length ? 0 : findStreamingPrefixEnd(prepared.source);
+          if (prefixEnd > 0) {
+            const grownSource = prepared.source.slice(0, prefixEnd);
+            const grownHtml = project(grownSource, environment, streaming).html;
+            streamingPrefix = {
+              escaped,
+              sourcePrefix: (reuse?.sourcePrefix ?? '') + grownSource,
+              htmlPrefix: (reuse?.htmlPrefix ?? '') + grownHtml,
+            };
           } else {
-            streamingPrefix = null;
+            streamingPrefix = reuse;
           }
         } else if (cacheable) {
           streamingPrefix = null;

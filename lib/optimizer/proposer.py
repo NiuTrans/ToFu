@@ -38,9 +38,6 @@ _SYSTEM = (
 # "other" by ``_validate_proposal``.
 _ALLOWED_ACTION_TYPES = [
     'block_search_domain',        # auto-apply
-    'adjust_fetch_timeout',        # suggest-only
-    'adjust_fetch_top_n',          # suggest-only
-    'toggle_llm_content_filter',   # suggest-only
     'suggest_model_fallback',      # suggest-only
     'extend_cache_ttl',            # suggest-only
     'disable_failing_scheduled_task',   # suggest-only
@@ -122,9 +119,20 @@ def _build_user_prompt(evidence: EvidenceBundle) -> str:
                                ensure_ascii=False, default=str)[:800]
     recurring = json.dumps(evidence.recurring_issues[:12],
                            ensure_ascii=False, default=str)[:2000]
+    cache_splits = json.dumps(evidence.cache_read_share_divergence[:8],
+                              ensure_ascii=False, default=str)[:1600]
+    unavailable = (
+        ', '.join(evidence.unavailable_signals)
+        if evidence.unavailable_signals else '(none)')
 
     return f'''## Evidence window
 {evidence.window_hours}h ending {evidence.generated_at}
+
+## Prompt-cache read-share splits (same model, last {evidence.window_hours}h)
+## One request group reads back far less of its prompt than another group on
+## the same model and route. The cause is a property of what the cold group
+## sends (tool names, tool count, system carriers), not TTL or the gateway.
+{cache_splits}
 
 ## Tool call counts (top 20)
 {tool_calls}
@@ -162,6 +170,11 @@ compaction_triggers={evidence.compaction_trigger_count}
 ## These are the SAME failure recurring across tasks — the highest-signal
 ## evidence. A high count with a recent last_seen = an UNRESOLVED problem.
 {recurring}
+
+## Unavailable evidence (collection failed)
+## These sources could not be collected, so their sections above are MISSING
+## data — unknown, never a zero count.
+{unavailable}
 
 ## Audit event counts
 {audit_events}
@@ -207,6 +220,12 @@ Rules:
   action; optionally propose revert by returning action_type="other"
   with rationale explaining "revert <id>".
 * Be conservative. 0-3 proposals is normal. Empty list is fine.
+* If the prompt-cache read-share splits section is not empty, include one
+  proposal per affected model: action_type "other", severity "high", title
+  "Investigate prompt-cache split on <model>", rationale citing the cold and
+  warm groups' shares and round counts. Never answer a split with
+  extend_cache_ttl: TTL does not explain one group reading while another
+  does not.
 '''
 
 

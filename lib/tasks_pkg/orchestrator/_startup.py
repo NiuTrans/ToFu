@@ -261,6 +261,7 @@ def setup_project_context(
 
 
 __all__ = [
+    'emit_startup_phase',
     '_probe_external_edits',
     'setup_project_context',
     'start_external_edit_probe',

@@ -12,7 +12,6 @@ not ready`` even though the authority had loaded and rendered.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import textwrap
 from pathlib import Path
@@ -20,14 +19,11 @@ from pathlib import Path
 import pytest
 
 from tests._runtime_sections import native_module_path
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def _node_available() -> bool:
-    return bool(shutil.which("node") and (ROOT / "node_modules/jsdom").is_dir())
 
 
 _HARNESS = textwrap.dedent(
@@ -91,7 +87,7 @@ _HARNESS = textwrap.dedent(
       }],
     });
 
-    const result = { create: {}, remove: {}, topology: {} };
+    const result = { create: {}, disable: {}, topology: {} };
 
     // Enable STT with no existing provider: createProvider must run with the
     // staged CAS revision, and the reloaded authority + bumped revision must
@@ -100,6 +96,7 @@ _HARNESS = textwrap.dedent(
     {
       registry._stgModelRouting = emptyDocument();
       registry._stgModelRoutingRevision = 7;
+      registry._stgModelRoutingSavedJson = JSON.stringify(registry._stgModelRouting);
       let serverRevision = 7;
       let serverDocument = emptyDocument();
       const calls = [];
@@ -113,7 +110,7 @@ _HARNESS = textwrap.dedent(
             providers: [...serverDocument.providers, bundle.provider],
             provider_accesses: [
               ...serverDocument.provider_accesses, bundle.provider_access] };
-          return { ok: true };
+          return {provider: bundle, revision: serverRevision};
         },
         saveProvider: async () => { throw new Error('unexpected saveProvider'); },
         deleteProvider: async () => { throw new Error('unexpected deleteProvider'); },
@@ -132,31 +129,35 @@ _HARNESS = textwrap.dedent(
       };
     }
 
-    // Disable STT with an existing provider: deleteProvider must run with the
-    // staged CAS revision.
+    // Disabling keeps the existing graph and changes its access flag through
+    // the same CAS owner; the complete response needs no private reload.
     {
       registry._stgModelRouting = withSttProvider();
       registry._stgModelRoutingRevision = 11;
+      registry._stgModelRoutingSavedJson = JSON.stringify(registry._stgModelRouting);
       let serverRevision = 11;
+      let serverDocument = withSttProvider();
       const calls = [];
       window.Api = { modelRouting: {
-        get: async () => ({
-          model_routing: emptyDocument(), revision: serverRevision }),
+        get: async () => { throw new Error('unexpected projection reload'); },
         createProvider: async () => { throw new Error('unexpected createProvider'); },
         saveProvider: async () => { throw new Error('unexpected saveProvider'); },
-        deleteProvider: async (providerId, revision) => {
-          calls.push(['deleteProvider', providerId, revision]);
+        replace: async (document, revision) => {
+          calls.push(['replace', revision]);
           serverRevision += 1;
-          return { ok: true };
+          serverDocument = {...document, revision: serverRevision};
+          return {model_routing: serverDocument, revision: serverRevision};
         },
+        deleteProvider: async () => { throw new Error('unexpected deleteProvider'); },
       } };
       document.getElementById('settingSttEnabled').checked = false;
       await globalThis._persistSttProvider();
-      result.remove = {
+      result.disable = {
         calls,
         stagedRevision,
         stagedProviders: (stagedDocument.providers || [])
           .map((row) => row.provider_id),
+        stagedEnabled: stagedDocument.provider_accesses[0].enabled,
       };
     }
 
@@ -171,8 +172,7 @@ _HARNESS = textwrap.dedent(
 
 
 def _run_persist_scenarios() -> dict:
-    if not _node_available():
-        pytest.skip("node + jsdom dev dependencies are required")
+    require_node_modules('jsdom', 'vite')
     bundle = native_module_path(
         ".native/speech.js",
         "frontend/src/features/settings/speech.ts",
@@ -201,8 +201,9 @@ def test_persist_reads_and_reloads_through_registry_accessor_scope():
         "stagedRevision": 8,
         "stagedProviders": ["stt"],
     }
-    assert result["remove"] == {
-        "calls": [["deleteProvider", "stt", 11]],
+    assert result["disable"] == {
+        "calls": [["replace", 11]],
         "stagedRevision": 12,
-        "stagedProviders": [],
+        "stagedProviders": ["stt"],
+        "stagedEnabled": False,
     }

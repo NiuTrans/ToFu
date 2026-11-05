@@ -17,6 +17,10 @@ snapshot / ordered event
   -> presentation selectors
   -> ui ConversationSurface
 
+ConversationSurface composition
+  -> surface-engine + surface-turn-renderer (identity, windows, lifecycle)
+  -> surface-design typed port (CSS, controls, copy, renderer construction)
+
 users.me payload
   -> core/current-user.ts
   -> composition-owned current owner lifecycle
@@ -159,7 +163,7 @@ have explicit, independently readable responsibilities:
 |---|---|
 | `surface-contracts.ts` | Renderer, intent, window and scroll ports; types only |
 | `surface-windowing.ts` | DOM budgets and option validation; store history stays intact |
-| `conversation-viewport.ts` | Follow suspension, visible-content scroll anchoring and listener disposal |
+| `conversation-viewport.ts` | Follow suspension, exact Turn alignment, visible-content anchoring and listener disposal |
 | `surface-presentation-equality.ts` | Bounded semantic repaint decisions; no DOM |
 | `surface-dom.ts` | Keyed children and singleton slots; preserve unmanaged editor hosts |
 | `surface-default-renderers.ts` | Text-safe fallback markup; production renderers are injected |
@@ -167,7 +171,12 @@ have explicit, independently readable responsibilities:
 The composition entry re-exports its existing public ports; collaborators
 import the type owner directly and never import the composition to discover policy.
 
-The viewport owns the only follow latch and all automatic scroll writes.
+The viewport owns the only follow latch and all scroll writes. `revealTurn()`
+mounts the selected bounded window and aligns its exact Turn instantly, with one
+fenced next-layout correction in the existing layout slot. Explicit jumps cancel
+queued history demand; reader gestures, Latest, replacement and disposal retire
+late corrections. Native smooth scrolling in a retained bridge was rejected
+because ordinary anchor restoration cancels its animation partway through.
 `followLatest()` restores every mounted lane/block window to the logical tail;
 `followLatest({force:false})` preserves reader suspension and never rebuilds the
 transcript. `isNearLatest()` includes unmounted later content. Retained buttons,
@@ -188,7 +197,9 @@ capture reuses the first visible anchor geometry. These are optimizations, never
 permission to omit visible changes or truncate authoritative history.
 
 Executable specs: `ui/surface-presentation-equality.test.ts`,
-`tests/frontend/test_frontend_conversation_surface_vite.py`, and
+`ui/conversation-viewport.test.ts`, `ui/conversation-surface.test.ts`,
+`tests/frontend/test_frontend_conversation_surface_vite.py`,
+`tests/visual/test_visual_turn_jump_scroll.py` and
 `tests/visual/test_visual_round_outline.py`.
 
 ## Renderer ownership
@@ -287,6 +298,8 @@ real-browser round, activity, note-group and navigation suites.
 - Swarm telemetry is a page-lifetime overlay with one idempotent push
   subscription. It rebases onto authoritative Turn revisions and is removed
   only after terminal hydration; it never mutates the durable projection.
+  An overlay outside the loaded lane window never extends the tail with older
+  history (`docs/RENDER_CONTRACT.md`, Identity and ordering).
 - Local interaction facts: focus, selection, scroll anchor, translation
   activity, Human Guidance feedback, artifact binding, block expansion and
   inline turn-edit sessions, always keyed by stable identity and never copied
@@ -405,8 +418,14 @@ attention verdict remain visible. Reader choices survive replay; structured
 interactive/error evidence retains its existing first-paint behavior.
 **Problem:** legacy errors dumped giant serialized output inline and in titles.
 **Decision:** share bounded diagnostics with artifact cards and reuse lazy evidence.
-**Alternative rejected:** clipping raw JSON still leaks storage metadata and hides
-useful nested failure messages. Specs: `tool-failure-presentation.test.ts`,
+Known executor wrappers and their duplicated `Arguments received` payload are
+removed before the prose safety check, so a confirmed non-start shows its refusal
+reason instead of a generic instruction or truncated command JSON. Other unsafe
+or unparseable evidence retains the generic fallback. Unknown effects never infer
+a safe retry or execution outcome from that prose. **Alternative rejected:**
+clipping raw JSON still leaks storage metadata and hides useful nested failure
+messages; promoting every diagnostic string would bypass the evidence safety check.
+Specs: `tool-failure-presentation.test.ts`,
 `tool-result-presentation.test.ts`, `tests/frontend/test_generic_tool_failure.py`.
 
 Repo-map requested scope stays visible even while its result is folded. Object/JSON
@@ -463,26 +482,29 @@ wire-parity test.
 
 ### Intent-first action stream
 
-`ui/history-process.ts` is the Surface-owned historical disclosure boundary.
-Settled assistant turns show the last explicitly authored final-answer scope and
-other deliverables, with compact important result/error receipts outside. All
-nonfinal process evidence remains in authored order inside one native `details`.
-This intentionally replaces the previous historical “tools/narration always
-visible” contract. Close/unmount cancels existing lazy result readers and drops
-all process leaves; expansion mounts a viewport-budget content page (at most
-200 entries). Explicit previous/next buttons browse all evidence; contained inner
-scroll never shifts outer turn/block history windows. UI-only choices are keyed
-by presentation/block identity, retained across repaint/eviction, and cleared on
-conversation reset/disposal; no projection/result mirror or second store exists.
+Every reply, live or settled, reads in grouped zones owned by the pure
+`presentation/grouped-turn-layout.ts`: leading context, ONE merged reasoning
+disclosure, ONE tool panel, the prose (narration and answer in order), then
+trailing receipts. The panel holds every tool/program call plus the process
+events between them (failures, retries, interventions, injections) in authored
+order, so a failure sits directly below the call it followed. The view model
+stays chronological; only the Surface's mounted order is grouped, so anchoring,
+round identity and Turn authority are untouched. The design port
+`toolPanelHeader` (`ui/surface-design.ts`) paints the header (count, rounds,
+error chip); the engine owns its open state, `aria-expanded` and delegation.
+Without a reader choice the panel follows the layout default: folded only for
+a completed reply with its own explicit answer and nothing pending; open for
+live, failed, interrupted or truncated replies, unresolved work, and replies
+whose calls are their only content. A toggle, or a click inside a call, is a reader choice keyed by presentation that
+survives settlement and replay. A closed panel mounts none of its calls;
+opening an oversized panel windows from its header.
 
 `ui/round-outline.ts` still lets each mounted action own its summary and keyed
-evidence disclosure. Live/failed/waiting/interactive/background-unresolved turns
-retain this original actionable stream, never a fabricated completed answer.
-Legacy/missing final boundaries keep narration with an explicit fallback notice.
-`presentation/round-outline.ts` supplies accepted scope and action state;
-`tool-execution-groups.ts` remains the risk/attention classification authority.
-Executable historical contracts: `tests/frontend/test_frontend_history_process.py`
-and `tests/visual/test_visual_historical_process.py`.
+evidence disclosure inside the panel. `presentation/round-outline.ts` supplies
+action state; `tool-execution-groups.ts` remains the risk/attention
+classification authority. Executable contracts:
+`presentation/grouped-turn-layout.test.ts`, `ui/conversation-surface.test.ts`
+and `tests/visual/test_visual_grouped_turn_layout.py`.
 
 
 `program-gateway-presentation.ts` normalizes old exact native `execute_program`

@@ -35,7 +35,12 @@ export const ERROR_KIND_LABELS: Readonly<Record<string, string>> = Object.freeze
   aborted: 'Stopped',
   server_offline: 'Server offline',
   server_busy: 'Server busy',
+  event_delivery_failed: 'Event persistence failed',
   storage_fence: 'Storage fence',
+  storage_unavailable: 'Storage unavailable',
+
+  dispatch_grant_revoked: 'Grant revoked',
+  dispatch_authority_lost: 'Authority lost',
   task_start_failed: 'Generation did not start',
   internal: 'Internal error',
   generic: 'Error',

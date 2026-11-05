@@ -76,3 +76,26 @@ test('includes declared external collaborators in the projection boundary', asyn
   assert.equal(failures.length, 1);
   assert.match(failures[0], /anchor\.ts.*composition facade/);
 });
+
+test('Surface accepts typed appearance ports and rejects design leakage into reconciliation', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'tofu-surface-boundary-'));
+  t.after(() => rmSync(root, { recursive: true }));
+  const owners = { surfaceEngine: 'engine.ts', surfaceTurnRendering: 'turn.ts',
+    conversationDom: 'facade.ts', surfaceDesign: 'design.ts', surfaceDefaultRendering: 'fallback.ts' };
+  const { checkSurfaceDependencies } = await import('../scripts/check_conversation_renderer_boundaries.mjs');
+  writeFileSync(join(root, 'turn.ts'), 'export const turn = true;');
+  writeFileSync(join(root, 'engine.ts'), "import type { Design } from './design-contracts'; design.decorate(node, 'turn'); node.dataset.turnId = id;");
+  assert.deepEqual(checkSurfaceDependencies(root, owners), []);
+  for (const source of [
+    "import './surface.css';", "export { design } from './design';",
+    "const load = () => import('./fallback.js');", "import type { Surface } from './facade';",
+    "node.className = 'turn';", "node['style'].color = 'red';",
+    "node.classList.add('turn');", "node.textContent = 'Loading';",
+    "node.setAttribute('class', 'turn');",
+  ]) {
+    writeFileSync(join(root, 'engine.ts'), source);
+    const failures = checkSurfaceDependencies(root, owners);
+    assert.ok(failures.length > 0, source);
+    assert.ok(failures.every(failure => failure.includes('Surface design port')));
+  }
+});

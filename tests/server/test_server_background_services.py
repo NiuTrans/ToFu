@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import lib.server.server_background_services as background_services
+
 import logging
 from types import SimpleNamespace
 
@@ -30,7 +32,7 @@ def test_persisted_configuration_precedes_network_owned_services(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(automation_runtime, 'ensure_workers_started', lambda *args, **kwargs: False)
     monkeypatch.setattr(
-        routes,
+        background_services,
         'start_registered_background_services',
         lambda _app, **_kwargs: calls.append('routes'),
     )
@@ -85,7 +87,7 @@ def test_distributed_preview_starts_no_background_owner(monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        routes,
+        background_services,
         'start_registered_background_services',
         lambda *_args, **_kwargs: calls.append('routes'),
     )

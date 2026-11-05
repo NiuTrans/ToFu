@@ -12,6 +12,7 @@ import time
 from typing import Any, Callable
 
 from lib.storage.client import StorageClient
+from lib.storage.deadline_policy import storage_write_deadline
 from lib.storage.errors import ERROR_CODES, StorageError
 from lib.storage.protocol import canonical_json
 from lib.storage.storage_event_policy import resolve_storage_event_budget
@@ -388,6 +389,14 @@ class StorageEventBatcher:
         wait: bool = True,
         require_attempts_live: list[str] | None = None,
     ) -> dict[str, Any]:
+        """Accept one event; with ``wait``, return its batch outcome.
+
+        ``timeout`` bounds only the wait for dispatch: an expired undispatched
+        event is cancelled and answers ``database_timeout``. A dispatched
+        event's outcome is awaited, since its batch RPC is bounded by its own
+        deadline and answering earlier invites a re-send that queues the same
+        row twice on a congested authority.
+        """
         pending = self._build_pending_event(
             task_id, sequence, event, require_attempts_live)
         queue_depth, queued_bytes = self._enqueue(pending)
@@ -401,11 +410,19 @@ class StorageEventBatcher:
             return {
                 'accepted': True, 'task_id': task_id, 'sequence': sequence,
             }
-        if not pending.done.wait(max(0.001, timeout)):
-            self._cancel_queued(pending)
+        if (not pending.done.wait(max(0.001, timeout))
+                and self._cancel_queued(pending)):
             raise StorageError(
                 'database_timeout', 'Storage event confirmation timed out',
                 True, 25)
+        # Only the worker settles a claimed event; a worker that died without
+        # settling it must not strand the producer.
+        while not pending.done.wait(max(0.001, timeout)):
+            if not self._thread.is_alive() and not pending.done.is_set():
+                raise StorageError(
+                    'database_unavailable',
+                    'Storage event batcher stopped before settling the event',
+                    True, 50)
         if pending.error is not None:
             if isinstance(pending.error, StorageError):
                 raise pending.error
@@ -574,7 +591,11 @@ class StorageEventBatcher:
                         {'events': [item.payload.decode() for item in storage_batch]},
                         None,
                         priority='event',
-                        deadline=max(2.0, self._max_window_s + 1.0),
+                        # The observed batch service time raises the
+                        # batcher's own cold-start budget, never lowers it.
+                        deadline=storage_write_deadline(
+                            'event.append_batch',
+                            floor_seconds=max(2.0, self._max_window_s + 1.0)),
                     )
                     results = response.get('results') or []
                     if len(results) != len(storage_batch):

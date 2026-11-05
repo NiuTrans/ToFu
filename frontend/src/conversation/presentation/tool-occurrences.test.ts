@@ -35,7 +35,7 @@ describe('continuation timeline producer boundaries', () => {
   it('uses the same pairing on the settled timeline', () => {
     const batches = resolveTimelineBatches([
       { type: 'tool_use', id: 'repeat', attemptId: 'B', llmRound: 0 },
-    ], rounds, new Set(), false, { groupSegments: computeExecutionBatches });
+    ], rounds, new Set(), [], { groupSegments: computeExecutionBatches });
     expect(batches[0].rounds).toEqual([rounds[1]]);
   });
 });

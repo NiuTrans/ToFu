@@ -41,6 +41,8 @@ def installer(tmp_path):
     shutil.copy(ROOT / 'bootstrap_pkg/process.py', project / 'bootstrap_pkg/process.py')
     shutil.copy(ROOT / 'bootstrap_pkg/install_transaction.py', project / 'bootstrap_pkg/install_transaction.py')
     shutil.copy(ROOT / 'runtime_guards.py', project / 'runtime_guards.py')
+    shutil.copytree(ROOT / 'tofu_workers', project / 'tofu_workers',
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     shutil.copy(ROOT / 'bootstrap_pkg/resource_policy_generated.py', project / 'bootstrap_pkg/resource_policy_generated.py')
     (project / 'bootstrap_pkg/install_artifacts.py').write_text(
         'from pathlib import Path\n'
@@ -112,8 +114,19 @@ class StorageSupervisor:
     env = dict(os.environ, HOME=str(home), PATH=str(fake_bin) + os.pathsep + os.environ['PATH'],
                REAL_PYTHON=sys.executable, FIXTURE_PYTHON=str(python_dir / "python"), CALLS_FILE=str(tmp_path / 'calls'),
                PYTHONPATH='', PORT='18676')
+    # A fresh install selects SQLite unless .env says otherwise; a running
+    # server's own deployment selection is not an input of this disposable copy.
     for name in ('CONDA_PREFIX', 'CONDA_BASE', 'TOFU_PYPI_INDEX', 'TOFU_UV_LOCAL',
-                 'BASH_ENV', 'ENV'):
+                 'BASH_ENV', 'ENV', 'TOFU_DEPLOYMENT_MODE', 'TOFU_PROCESS_ROLE',
+                 'TOFU_PERSONAL_STORAGE_BACKEND', 'TOFUDB_TRANSPORT'):
+        env.pop(name, None)
+    # A fresh install starts from the shipped deployment defaults. A pytest
+    # launched from a terminal of a running native-storage server inherits its
+    # storage selection, which would make the installer prepare a native engine
+    # this disposable checkout does not contain.
+    for name in [name for name in env if name.startswith('TOFUDB_')] + [
+            'TOFU_PERSONAL_STORAGE_BACKEND', 'TOFU_DEPLOYMENT_MODE', 'TOFU_PROCESS_ROLE',
+            'TOFU_DISTRIBUTED_PREVIEW_MODE']:
         env.pop(name, None)
     return project, env
 

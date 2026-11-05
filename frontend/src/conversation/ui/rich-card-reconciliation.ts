@@ -82,14 +82,18 @@ function syncElementAttributes(current: Element, next: Element): void {
     && attention !== current.getAttribute('data-program-attention')
     && (attention === 'error' || attention === 'handoff' || attention === 'incomplete');
   if (revealProgram) current.setAttribute('open', '');
-  // Read transition state BEFORE patching attributes. Swarm automatically
-  // reveals newly-running agents, unless the reader already chose a fold.
-  const isRunning = (element: Element): boolean =>
-    ['running', 'thinking'].includes(element.getAttribute('data-sw-agent-status') ?? '');
+  // Read transition state BEFORE patching attributes. When a swarm agent
+  // starts running or fails, the presenter's fold default wins (a failure
+  // opens itself), unless the reader already chose a fold.
+  const agentIn = (element: Element, statuses: readonly string[]): boolean =>
+    statuses.includes(element.getAttribute('data-sw-agent-status') ?? '');
+  const enters = (statuses: readonly string[]): boolean =>
+    !agentIn(current, statuses) && agentIn(next, statuses);
   const swarmReaderChoice = current.classList.contains('sw-agent')
     && next.classList.contains('sw-agent')
     && ['true', 'false'].includes(current.getAttribute('data-sw-reader-open') ?? '');
-  const newlyRunning = !isRunning(current) && isRunning(next) && !swarmReaderChoice;
+  const presenterOwnsAgentFold = !swarmReaderChoice
+    && (enters(['running', 'thinking']) || enters(['failed', 'error']));
   // Capture ownership before syncing: gaining data-collapsible is a new
   // control with presenter defaults, not a prior reader choice.
   const wasCollapsible = current.hasAttribute('data-collapsible')
@@ -140,7 +144,7 @@ function syncElementAttributes(current: Element, next: Element): void {
         || !next.matches('.hg-card:not(.hg-expired)'))) continue;
     if (name === 'hg-selected' && (!current.matches('button.hg-option-card')
         || !next.matches('button.hg-option-card'))) continue;
-    if (name === 'sw-a-open' && newlyRunning) continue;
+    if (name === 'sw-a-open' && presenterOwnsAgentFold) continue;
     if (current.classList.contains(name)) classes.add(name);
     else classes.delete(name);
   }

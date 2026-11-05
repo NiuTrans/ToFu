@@ -1,6 +1,5 @@
 """Committed file receipts trigger builds independently of rendered tool history."""
 from pathlib import Path
-import shutil
 import subprocess
 import pytest
 from tests._runtime_sections import native_module_path
@@ -9,7 +8,6 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.skipif(shutil.which('node') is None, reason='Node required')
 def test_preview_observes_commits_once_and_fences_history_background_and_pending_changes():
     module = native_module_path('paper-preview-changes.js', ROOT / 'frontend/src/features/paper/preview-changes.ts')
     store_module = native_module_path('paper-preview-turn-store.js', ROOT / 'frontend/src/core/turn-state.ts')
@@ -97,7 +95,6 @@ console.log('ok');
     assert result.stdout.strip() == 'ok'
 
 
-@pytest.mark.skipif(shutil.which('node') is None, reason='Node required')
 def test_preview_discovery_uses_bounded_projection_hints_not_fake_receipts_or_prose():
     module = native_module_path('paper-preview-discovery.js', ROOT / 'frontend/src/features/paper/preview-changes.ts')
     store_module = native_module_path('paper-preview-discovery-store.js', ROOT / 'frontend/src/core/turn-state.ts')

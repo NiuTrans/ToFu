@@ -5,9 +5,9 @@ metadata snapshot at durable lane settlement; ``recover_project_dispatch``
 accepts an already discovered owner/canonical-project scope from an existing
 recovery driver. Neither discovers owners/projects, polls, constructs a human
 principal, or runs on a view/GET path. Explicit continuation policies may derive
-finite Coordinator grants through continuation.py after worker recovery. The repository's
-128-item record and the ordinary stable command/atomic birth guards remain the
-only dispatch authority. Dependencies are injectable metadata, repository,
+Coordinator grants through continuation.py after worker recovery. The repository
+and the ordinary stable command/atomic birth guards remain the only dispatch
+authority. Dependencies are injectable metadata, repository,
 trusted service and existing conversation STOP watermark ports.
 
 The existing startup driver calls recover_persisted_dispatch: one bounded
@@ -71,21 +71,35 @@ def recover_project_dispatch(owner: int, project: str, *, recipient_id=None, coo
     stats = _stats()
     for assignment in rows:
         stats['scanned'] += 1
+        if (assignment['execution'] is not None
+                and (recipient_id is None or assignment['request']['recipientId'] == recipient_id)
+                and any(item['phase'] == 'dispatch_intent' for item in assignment['modelAttempts'])):
+            # Startup and lane settlement close intents whose request ended
+            # without a recorded settlement; live leases keep blocking.
+            try:
+                repository.settle_ended_model_intents(assignment['id'])
+            except Exception:
+                logger.warning('[ProjectDispatch] ended intent settlement retained owner=%s '
+                               'assignment=%s', owner, assignment.get('id'), exc_info=True)
         try:
             request, grant = assignment['request'], assignment['grant']
             if (coordinator_only or request.get('profile', {}).get('mode') == 'coordinator'
                     or grant.get('lifecycleVersion') != 1 or request['projectPath'] != project or grant['owner'] != owner
                     or recipient_id is not None and request['recipientId'] != recipient_id
                     or affected is not None and assignment['id'] not in affected
-                    or assignment['execution'] is not None or grant['revoked']
-                    or request['budget']['deadline'] <= clock()):
+                    or assignment['execution'] is not None and not repository.restart_paused(assignment)
+                    or grant['revoked']
+                    or request['budget'].get('deadline') is not None and request['budget']['deadline'] <= clock()):
                 stats['skipped'] += 1
                 continue
             # Preserve observed STOP beyond the runtime watermark's TTL by
             # revoking this existing grant, never by granting new authority.
-            if any(was_aborted_after(conversation_id, owner, grant['createdAt'])
-                   for conversation_id in dict.fromkeys(
-                       (request['coordinatorId'], request['recipientId']))):
+            # The durable watermark also completes a Stop whose own grant
+            # revocation lost its bounded CAS.
+            if (any(was_aborted_after(conversation_id, owner, grant['createdAt'])
+                    for conversation_id in dict.fromkeys(
+                        (request['coordinatorId'], request['recipientId'])))
+                    or repository.stopped(assignment)):
                 repository.revoke(assignment['id'], expected_revision=grant['revision'])
                 stats['aborted'] += 1
                 continue
@@ -103,12 +117,14 @@ def recover_project_dispatch(owner: int, project: str, *, recipient_id=None, coo
                 stats[dispatch] += 1
             else:
                 raise ValueError('Trusted dispatch recovery returned no dispatch verdict')
-        except Exception:
+        except Exception as error:
             # A revoked/rebound/stale or unavailable grant must not starve the
             # remaining assignments. Never mutate/replenish its budget here.
             stats['failed'] += 1
             logger.debug('[ProjectDispatch] recovery skipped unavailable grant owner=%s '
                          'assignment=%s', owner, assignment.get('id'), exc_info=True)
+            from lib.router.watchdog.signals import report_recovery_failure
+            report_recovery_failure(owner, project, error, assignment=assignment)
     if any(row['request'].get('delegation', {}).get('policy', {}).get('continuation') for row in rows):
         from .continuation import recover_coordinator
         for outcome in recover_coordinator(repository, service=service):
@@ -179,12 +195,21 @@ __all__ = ['recover_conversation_dispatch', 'recover_project_dispatch',
 def revoke_conversation_dispatch(conversation_id, *, user_id, occurred_at=None,
                                  conversations=None, repository_factory=None,
                                  lock_factory=None, stop_client=None):
-    """Real Stop withdraws existing grants durably before its runtime fence expires."""
+    """Real Stop withdraws existing grants durably before its runtime fence expires.
+
+    The acknowledged Stop watermark is the withdrawal: admission refuses every
+    grant created before it, so a watermark failure propagates as an
+    unconfirmed Stop. Revoking the referenced grant records follows it; one
+    that loses its bounded CAS returns ``pending_revocation``. Settlement or
+    startup recovery revokes an unstarted grant it would otherwise retry from
+    the same watermark, and a repeated Stop revokes any referenced grant.
+    """
     owner = require_user_id(user_id, context='project dispatch Stop')
 
     timestamp = time.time() if occurred_at is None else occurred_at
-    from .repository import record_stop
+    from .repository import DispatchContention, record_stop
     record_stop(owner, conversation_id, timestamp, client=stop_client)
+    outcome = {'revoked': 0, 'withdrawal': 'complete'}
     if conversations is None:
         from lib.conversations.repository import ConversationRepository
         conversations = ConversationRepository()
@@ -192,24 +217,31 @@ def revoke_conversation_dispatch(conversation_id, *, user_id, occurred_at=None,
     metadata = getattr(snapshot, 'metadata', snapshot)
     settings = metadata.get('settings') if isinstance(metadata, Mapping) else None
     if not isinstance(settings, Mapping):
-        return 0
+        return outcome
     project = settings.get('canonicalProjectPath') or settings.get('projectPath')
     if not project:
-        return 0
+        return outcome
     project = normalize_project_path(project)
     repository = (repository_factory or ProjectDispatchRepository)(owner, project)
     if lock_factory is None:
         from lib.integration_control import _repo_lock
         lock_factory = _repo_lock
-    revoked = 0
     with lock_factory(project):
-        for row in repository.list():
-            if (row['grant']['revoked'] or row['grant']['createdAt'] > timestamp
-                    or conversation_id not in (row['request']['coordinatorId'], row['request']['recipientId'])):
-                continue
-            repository.revoke(row['id'], expected_revision=row['grant']['revision'])
-            revoked += 1
-    return revoked
+        try:
+            for row in repository.list():
+                if (row['grant']['revoked'] or row['grant']['createdAt'] > timestamp
+                        or conversation_id not in (row['request']['coordinatorId'], row['request']['recipientId'])):
+                    continue
+                repository.revoke(row['id'], expected_revision=row['grant']['revision'])
+                outcome['revoked'] += 1
+        except DispatchContention:
+            # Concurrent writers share the project CAS; later grants would
+            # contend the same way, so they stay pending with this one.
+            outcome['withdrawal'] = 'pending_revocation'
+            logger.warning('[ProjectDispatch] Stop recorded; grant revocation retained for '
+                           'recovery owner=%s conversation=%s revoked=%d', owner,
+                           conversation_id, outcome['revoked'], exc_info=True)
+    return outcome
 
 
 def recover_persisted_dispatch(*, client=None, repository_factory=None, recovery=None):
@@ -226,6 +258,8 @@ def recover_persisted_dispatch(*, client=None, repository_factory=None, recovery
     repository_factory = repository_factory or ProjectDispatchRepository
     from .repository import NAMESPACE
     cursor = ''; scopes = 0
+    # One startup pass is one episode of a Router Watchdog recovery signal.
+    episode = int(time.time() * 1000)
     while True:
         page = client.query('record.list', {'namespace': NAMESPACE, 'prefix': '',
                             'after_key': cursor, 'limit': 4}, deadline=30.0)
@@ -255,7 +289,9 @@ def recover_persisted_dispatch(*, client=None, repository_factory=None, recovery
                     SegmentedDispatch(repository).ensure_ready()
                 recovery(owner, project, repository=repository)
                 scopes += 1
-            except Exception:
+            except Exception as error:
                 logger.warning('[ProjectDispatch] boot recovery retained scope owner=%s project=%s',
                                owner, project, exc_info=True)
+                from lib.router.watchdog.signals import report_recovery_failure
+                report_recovery_failure(owner, project, error, episode=episode)
     return scopes

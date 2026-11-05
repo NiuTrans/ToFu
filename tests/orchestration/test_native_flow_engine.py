@@ -16,8 +16,8 @@ CASES=[(cls,name) for _,cls in inspect.getmembers(oracle,inspect.isclass)
     for name in unittest.defaultTestLoader.getTestCaseNames(cls)]
 
 
-@pytest.fixture(scope='module')
-def native_library():
+def load_native_library():
+    """Open a fresh library from the explicitly selected archive or library."""
     archive=os.environ.get('TOFU_NATIVE_FLOW_TEST_ARCHIVE')
     value=os.environ.get('TOFU_NATIVE_FLOW_TEST_LIBRARY')
     if archive:
@@ -29,6 +29,12 @@ def native_library():
         if not value:pytest.skip('explicit native Flow library or archive required')
         path=Path(value)
         library=NativeFlowLibrary(path=path,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),maximum_bytes=64<<20)
+    return library
+
+
+@pytest.fixture(scope='module')
+def native_library():
+    library = load_native_library()
     yield library
     assert not library._graphs
     library.close()

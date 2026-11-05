@@ -299,12 +299,18 @@ def test_checkpoint_exception_does_not_rewrite_settled_task(
 
     monkeypatch.setattr(
         linear_checkpoint, 'settle_task_checkpoint', _explode)
-    task = _task(status='done', error='')
+    task = _task(status='done', error='', finishReason='stop',
+                 streamState='provider_finished')
 
     _run(task, fh_env)
 
     assert task['status'] == 'done'
     assert task['error'] == ''
+    events = fh_env['events']
+    failures = [event['linearGitCheckpoint'] for event in events
+                if event.get('type') == 'round_committed']
+    assert failures and failures[-1]['status'] == 'error'
+    assert 'Git checkpoint unavailable' in failures[-1]['detail']
     assert '_linearGitCheckpoint' not in task
 
 

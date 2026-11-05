@@ -22,6 +22,10 @@ import pytest
 pytest_plugins = ('tests._artifact_sidecar',)
 
 from lib import motion_video as mv
+from tests.support.motion_media import (
+    install_motion_media_doubles as _fake_media,
+    write_fake_video as _touch,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -293,47 +297,6 @@ def _scenes_only_task(tmp_path, scenes, **over):
               scenes_path=str(scenes_path))
     kw.update(over)
     return _new_motion_task(_motion_task_id(), **kw, user_id=TEST_OWNER_USER_ID)
-
-
-def _fake_media(monkeypatch):
-    def fake_render(project_dir, output, **kw):
-        with open(output, 'wb') as f:
-            f.write(b'mp4')
-        return {'ok': True, 'output': output, 'elapsed': 0.1,
-                'render_time_s': 0.1, 'category': '', 'detail': ''}
-    monkeypatch.setattr('lib.motion_video.render_project', fake_render)
-
-    def fake_probe(path, **kw):
-        idx = os.path.join(os.path.dirname(path), 'index.html')
-        dur = 4.0
-        if os.path.isfile(idx):
-            m = re.search(r'data-duration="([0-9.]+)"',
-                          open(idx, encoding='utf-8').read())
-            if m:
-                dur = float(m.group(1))
-        return {'codec': 'h264', 'width': 1080, 'height': 1440, 'fps': 30.0,
-                'duration': dur, 'has_audio': False}
-    monkeypatch.setattr('lib.motion_video.probe_video', fake_probe)
-    monkeypatch.setattr(
-        'lib.motion_video.concat_mp4s',
-        lambda inputs, output, **kw: _touch(output) or {
-            'ok': True, 'output': output, 'duration': 8.0, 'mode': 'copy',
-            'elapsed': 0.1})
-    monkeypatch.setattr(
-        'lib.motion_video.mux_audio_video',
-        lambda v, a, output, **kw: _touch(output) or {
-            'ok': True, 'output': output, 'duration': 8.0, 'elapsed': 0.1})
-    # Engine concurrency tests exercise the scheduling boundary, not network
-    # installation of the shared craft/font dependencies.
-    monkeypatch.setattr(
-        'lib.motion_video._scene_author.prepare_parallel_author_dependencies',
-        lambda **kwargs: True)
-
-
-def _touch(path):
-    with open(path, 'wb') as f:
-        f.write(b'mp4')
-    return None
 
 
 def test_engine_scenes_only_run(monkeypatch, tmp_path):

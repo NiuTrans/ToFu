@@ -3,7 +3,7 @@
 
 Reasoning-effort mapping (Gemini) plus the continue/resume replay-capability
 gates (thinking-signature replay, thought-signature on tool calls,
-reasoning-content replay, assistant-prefill tolerance) and vision support.
+reasoning-content replay) and vision support.
 
 Depends on the family predicates in ._family (acyclic — _family imports
 nothing from here).
@@ -144,7 +144,7 @@ def gpt_reasoning_effort(effort, thinking_enabled: bool = True,
 # K3 always thinks (thinking cannot be disabled) and takes the TOP-LEVEL
 # ``reasoning_effort`` string: low / high / max (default max) — per the
 # official quickstart (platform.kimi.ai/docs/guide/kimi-k3-quickstart) and
-# verified live against the sankuai gateway 2026-07-24. Sending any
+# verified live against the example-corp gateway 2026-07-24. Sending any
 # temperature other than 1.0 earns an HTTP 400
 # (``invalid temperature: only 1 is allowed for this model``), so K3 bodies
 # must omit temperature entirely.
@@ -322,26 +322,28 @@ def grok_reasoning_effort(effort, thinking_enabled: bool = True) -> str:
 # What each provider's API actually accepts when replaying an interrupted
 # assistant turn (tool_calls already made, results available):
 #
-#   Provider            | tool_use replay | thinking replay         | Prefill
-#   --------------------+-----------------+-------------------------+---------
-#   Anthropic (Claude)  | required        | thinking{} block with   | NO
-#                       |                 |   signature — mandatory |
-#                       |                 |   when tools were used  |
-#                       |                 |   and extended-thinking |
-#                       |                 |   is on                 |
-#   Gemini (openai cpt) | required        | extra_content.google.   | tolerated
-#                       |                 |   thought_signature on  |
-#                       |                 |   each tool_call        |
-#   OpenAI / DeepSeek / | standard        | reasoning_content is    | tolerated
-#   Qwen / GLM / Kimi / | tool_calls +    | NOT re-accepted (o1/o3  | (non-lossless —
-#   Doubao / MiniMax    | tool role msgs  | strip it server-side)   |  assistant turn
-#   ERNIE / LongCat     |                 |                         |  just gets appended)
+#   Provider            | tool_use replay | thinking replay
+#   --------------------+-----------------+-------------------------
+#   Anthropic (Claude)  | required        | thinking{} block with
+#                       |                 |   signature — mandatory
+#                       |                 |   when tools were used
+#                       |                 |   and extended-thinking
+#                       |                 |   is on
+#   Gemini (openai cpt) | required        | extra_content.google.
+#                       |                 |   thought_signature on
+#                       |                 |   each tool_call
+#   OpenAI / DeepSeek / | standard        | reasoning_content is
+#   Qwen / GLM / Kimi / | tool_calls +    | NOT re-accepted (o1/o3
+#   Doubao / MiniMax    | tool role msgs  | strip it server-side)
+#   ERNIE / LongCat     |                 |
 #
-# Anthropic's Messages API refuses a final `assistant` turn used as a
-# prefill for free text — the conversation must end on `user` or `tool`.
-# That's why "Continue" can NEVER be truly lossless against Claude for
-# free-form text written between tool batches.  For thinking replay it
-# CAN be lossless as long as we echo back the opaque `signature`.
+# No provider continues an unfinished reply from a bare trailing assistant
+# message: Claude 4.6+ and Gemini 3.6+ reject it with HTTP 400, and OpenAI
+# Chat Completions/Responses treat it as a finished earlier reply. Exact prefix
+# continuation needs provider-specific request flags (DeepSeek/Mistral
+# ``prefix``, Kimi/Qwen ``partial``, vLLM ``continue_final_message``) that this
+# transport does not send, so resume rewinds an unfinished tail to the last
+# complete message instead (docs/contracts/TURN_SETTLEMENT.md).
 
 def model_requires_thinking_signature_replay(model: str) -> bool:
     """True if this model's API requires echoing back the thinking block with
@@ -380,21 +382,6 @@ def model_requires_reasoning_content_replay(model: str) -> bool:
     the replayed turn.
     """
     return is_deepseek(model)
-
-
-def model_supports_assistant_prefill(model: str) -> bool:
-    """True if the API tolerates a trailing ``role='assistant'`` message as a
-    prefill / forced continuation.
-
-    Anthropic Messages API rejects this with HTTP 400 ("This model does not
-    support assistant message prefill. The conversation must end with a user
-    message."), so Claude is excluded.  All OpenAI-compatible endpoints we
-    ship with currently accept it (the server just concatenates the prefill
-    token-for-token), but the continuation is non-lossless: the model may
-    or may not honour the prefill and cannot recover mid-token decoder
-    state.  Callers should document this as best-effort, not exact.
-    """
-    return not is_claude(model)
 
 
 def model_supports_vision(model: str) -> bool:

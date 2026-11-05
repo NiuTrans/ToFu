@@ -266,7 +266,10 @@ def _extract_convs_for_date(date_str, progress_cb=None, *, owner_user_id):
         date_str: ISO date string 'YYYY-MM-DD'.
         progress_cb: Optional callback(current, total) for progress tracking.
 
-    Returns list of digest dicts ready for _analyse_conversations().
+    Returns list of digest dicts ready for _analyse_conversations(); empty
+    means the day had no activity. Authority failures propagate, including
+    lazy hydration failures after earlier batches: a day that could not be
+    read is never reported, analysed or recorded as empty or partial.
     """
     owner_id = require_user_id(
         owner_user_id, context='daily report conversation extraction')
@@ -282,42 +285,23 @@ def _extract_convs_for_date(date_str, progress_cb=None, *, owner_user_id):
     logger.debug('[DailyReport] Extracting convs for %s (range %d–%d)',
                  date_str, day_start_ms, day_end_ms)
 
-    try:
-        from lib.conversations.repository import scan_conversations_bounded
-        candidate_count, rows = scan_conversations_bounded(
-            user_id=owner_id,
-            updated_at_gte=day_start_ms,
-            created_at_lt=day_end_ms,
-            limit=10_000,
-            settings_keys=[],
-        )
-        rows = iter(rows)
-    except Exception as exc:
-        logger.error('[DailyReport] transcript authority read failed: %s',
-                     exc, exc_info=True)
-        return []
+    from lib.conversations.repository import scan_conversations_bounded
+    # A transcript too large for one storage response is read back to the day
+    # start only; see the time-window contract of ``scan_bounded``.
+    candidate_count, rows = scan_conversations_bounded(
+        user_id=owner_id,
+        updated_at_gte=day_start_ms,
+        created_at_lt=day_end_ms,
+        limit=10_000,
+        settings_keys=[],
+        oversized_messages_since_ms=day_start_ms,
+    )
     logger.debug('[DailyReport] Scanning %d conversations (filtered) for date %s',
                  candidate_count, date_str)
 
     digests = []
     scanned_count = 0
-    row_idx = -1
-    while True:
-        try:
-            r = next(rows)
-        except StopIteration:
-            break
-        except Exception as exc:
-            # Hydration is lazy and can fail after earlier batches succeeded.
-            # A report is an all-or-nothing best-effort snapshot; never feed
-            # the LLM a silently partial day.
-            logger.error(
-                '[DailyReport] transcript authority iteration failed: %s',
-                exc,
-                exc_info=True,
-            )
-            return []
-        row_idx += 1
+    for row_idx, r in enumerate(rows):
         scanned_count += 1
         if progress_cb and row_idx % 50 == 0:
             progress_cb(row_idx, candidate_count)

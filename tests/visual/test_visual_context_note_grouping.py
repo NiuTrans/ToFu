@@ -2,18 +2,19 @@
 
 Synthetic Turns stay in a disposable Chromium page. The retained timeline is
 loaded from its authored renderer + batching module, the typed Surface from its
-production module graph, with real shipped CSS. No user data is touched;
-this layout check does not require starting a second storage server.
+production module graph, with real shipped CSS. No user data is touched and no
+application server boots: the shared visual origin serves only static files.
 """
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
 
+from playwright.sync_api import expect
 from tests._runtime_sections import ROOT, native_module_path
 from tests.context.test_system_note_context_grouping import _STUBS, _extract_timeline_fns
+from tests.support.frontend_visual import frontend_visual_origin, frontend_visual_page  # noqa: F401
 
 pytestmark = pytest.mark.visual
 
@@ -23,36 +24,32 @@ REASONS = (
     'current_date', 'skills_index', 'parallel_execution', 'programmatic_execution', 'project_rules',
     'credential_vault', 'environment',
 )
+# One multi-line payload: its row opens in place onto the exact bytes.
+SKILLS_TEXT = ('<available_skills>\nInstalled guides for <b>this</b> turn.\n'
+               '- slides: decks\n</available_skills>')
 
 
 def _notes(legacy=False):
+    def text(index, reason):
+        if index == 0:
+            return 'Session context <script>window.noteScriptExecuted=true</script>'
+        return SKILLS_TEXT if reason == 'skills_index' else f'Wire text for {reason}'
     return [
         {
             'type': 'system_note', 'blockId': f'system-note:fixture:{index}',
             'noteKind': 'system-intervention' if legacy else ('session-context' if index == 0 else 'context-injection'),
-            'reason': reason, 'action': 'prompt', 'llmRound': 0,
-            'text': ('Session context <script>window.noteScriptExecuted=true</script>'
-                     if index == 0 else f'Wire text for {reason}'),
+            'reason': reason, 'action': 'prompt', 'llmRound': 0, 'text': text(index, reason),
         }
         for index, reason in enumerate(REASONS)
     ]
 
 
 @pytest.mark.parametrize('width,language', [(1100, 'zh'), (390, 'en')])
-
 @pytest.mark.parametrize('legacy', [False, True])
 def test_session_context_is_one_expandable_row_in_both_render_paths(
-        browser, request, tmp_path, width, language, legacy):
-    # Use the explicit local app when supplied; otherwise boot an isolated app.
-    origin = os.environ.get('TOFU_E2E_BASE_URL') or request.getfixturevalue('live_server')
-    context = browser.new_context(viewport={'width': width, 'height': 960})
-    page = context.new_page()
-    page.goto(origin, wait_until='domcontentloaded')
-
-    # The app origin establishes a real-server test; the synthetic document
-    # needs no transport subscriptions or further API traffic.
-    page.evaluate('window.stop()')
-    page.route('**/api/**', lambda route: route.fulfill(status=200, content_type='application/json', body='{"data":{},"meta":{}}'))
+        frontend_visual_page, tmp_path, width, language, legacy):  # noqa: F811
+    page = frontend_visual_page
+    page.set_viewport_size({'width': width, 'height': 960})
     segments = _notes(legacy) + [
         {'type': 'thinking', 'blockId': 'thinking:fixture', 'text': 'Now reason', 'llmRound': 0},
         {'type': 'tool_use', 'blockId': 'tool:fixture', 'id': 'read-1',
@@ -117,12 +114,12 @@ def test_session_context_is_one_expandable_row_in_both_render_paths(
         attemptsById:{},queueItems:[],pendingEventsByTurn:{},commandPending:{},
         liveRoundUsageByTurn:{},
       };
-      const provenance = createTurnProvenancePresentation({translate:t,escapeHtml,escAttr:escapeHtml,
-        iconHtml:() => '<span></span>',asMarkdownText:String,formatToolInlineMarkdown:String});
+      const provenance = createTurnProvenancePresentation({translate:t,
+        iconHtml:() => '<span></span>'});
       const renderers = createClassicConversationRenderers({
         renderSafeMarkdownHtml:escapeHtml,
-
         renderContextProvenanceHtml:provenance.renderContextProvenanceHtml,
+        contextProvenanceFacts:provenance.contextProvenanceFacts,
         renderToolBlockHtml:() => '<div>synthetic read</div>',
         localizedText:(key, fallback, values) => fixtureLocale[key]
           ? t(key, values) : fallback.replace(/\{(\w+)\}/g,
@@ -148,8 +145,16 @@ def test_session_context_is_one_expandable_row_in_both_render_paths(
     legacy_panel = page.locator('#legacy .ptool-panel')
     if legacy_panel.count():
         legacy_panel.evaluate("node => node.classList.remove('collapsed')")
+    # The typed reply groups process rows under its tool panel card.
+    page.locator('#typed .conversation-tool-panel__toggle').click()
+
+    # Settled turns lazily mount process evidence only after user disclosure.
+    expect(page.locator('#typed .sw-note-group')).to_have_count(1)
 
     expected_first_text = _notes()[0]['text']
+    labels = {reason: locale[f'systemNote.reason{key}'] for reason, key in (
+        ('current_date', 'CurrentDate'), ('skills_index', 'SkillsIndex'),
+        ('relevant_memories', 'RelevantMemories'))}
     for root in ('#typed', '#legacy'):
         groups = page.locator(f'{root} .sw-note-group')
         assert groups.count() == 1, root
@@ -162,23 +167,49 @@ def test_session_context_is_one_expandable_row_in_both_render_paths(
         assert page.locator(f'{root} .sw-system-note-row').count() == 2
         assert page.locator(f'{root} .sw-system-note-row[data-reason="modified_files"]').count() == 1
         assert group.get_attribute('open') is None
+        # The collapsed summary names what was injected, in the reader's words.
+        names = group.locator('.sw-note-group-names').inner_text()
+        assert all(label in names for label in labels.values()), (root, names)
+        assert 'skills_index' not in names
 
         assert not group.locator('.sw-note-group-body').is_visible()
         assert not group.locator('pre').first.is_visible()
-        group.locator('summary').click()
+        group.locator('summary').first.click()
         assert group.locator('pre').first.is_visible()
         assert group.locator('pre').first.inner_text() == expected_first_text
-        assert group.locator('script, img, [onerror]').count() == 0
+        assert group.locator('script, img, [onerror], b').count() == 0
         assert page.evaluate('window.noteScriptExecuted === true') is False
         assert group.locator('.sw-note-group-item').last.locator('pre').inner_text() == (
             'Wire text for environment')
+        # Rows carry their registry label only: no repeated kind title, raw
+        # reason chip or "context appended" badge; the id stays a tooltip.
+        assert group.locator('.ptool-badge, .sw-note-reason').count() == 0
+        body_text = group.locator('.sw-note-group-body').inner_text()
+        assert locale['systemNote.contextInjectionLabel'] not in body_text
+        assert locale['systemNote.actionPrompt'] not in body_text
+        skills = group.locator('.sw-note-group-item[data-reason="skills_index"]')
+        title = skills.locator('.sw-note-item-title')
+        assert title.inner_text() == labels['skills_index']
+        assert title.get_attribute('title').endswith('skills_index')
+        # Multi-line text opens in place onto its exact bytes; wrapper tags are
+        # quieted by wrapping, never rewritten.
+        assert skills.locator('.sw-note-item-peek').inner_text() == 'Installed guides for <b>this</b> turn.'
+        assert not skills.locator('pre').is_visible()
+        skills.locator('summary').click()
+        assert skills.locator('pre').inner_text() == SKILLS_TEXT
+        assert skills.locator('.sw-note-text-markup').count() == 2
+        assert not skills.locator('.sw-note-item-peek').is_visible()
         if root == '#typed':
-            assert group.locator('[data-provenance-field="memoryPrefetch"]').count() == 1
-            assert group.locator('.sw-note-group-item[data-reason="relevant_memories"]').inner_text().count('FIRST MEMORY') == 1
+            memory = group.locator('.sw-note-group-item[data-reason="relevant_memories"]')
+            assert memory.locator('.sw-note-item-title').inner_text() == labels['relevant_memories']
+            assert memory.locator('[data-provenance-field="memoryPrefetch"]').count() == 1
+            assert memory.inner_text().count('FIRST MEMORY') == 1
             assert page.locator('#typed .tp-segs, #typed .turn-prov').count() == 0
             assert group.locator('img, [onerror]').count() == 0
             page.evaluate('fixtureUpdate()')
             assert group.get_attribute('open') is not None
+            # The reader's opened row survives the live repaint.
+            assert group.locator('.sw-note-group-item[data-reason="skills_index"]').get_attribute('open') is not None
             assert 'UPDATED MEMORY' in group.inner_text()
             assert 'FIRST MEMORY' not in group.inner_text()
         # A zero-overflow disclosure can still be unusable when its parent
@@ -186,17 +217,17 @@ def test_session_context_is_one_expandable_row_in_both_render_paths(
         # turns nearly the whole viewport; verify that contract here too.
         widths = group.evaluate('''node => [...function*(){for(let p=node,i=0;p&&i<9;p=p.parentElement,i++) yield {cls:p.className,client:p.clientWidth,rect:p.getBoundingClientRect().width,computed:getComputedStyle(p).display,grid:getComputedStyle(p).gridTemplateColumns}}()]''')
         assert widths[0]['rect'] >= width * .6, (root, '\n'.join(f"{w['cls']}={w['rect']}:{w['grid']}" for w in widths))
-        label_widths = group.locator('.sw-note-group-item-head > .ptool-text').evaluate_all(
-            '(nodes) => nodes.map(el => ({width:el.getBoundingClientRect().width, size:parseFloat(getComputedStyle(el).fontSize)}))')
-        assert all(value['width'] >= value['size'] * 6 for value in label_widths), (root, label_widths)
+        titles = group.locator('.sw-note-item-head > .sw-note-item-title').evaluate_all(
+            '(nodes) => nodes.map(el => ({height:el.getBoundingClientRect().height, line:parseFloat(getComputedStyle(el).lineHeight)}))')
+        assert all(value['height'] <= value['line'] * 1.5 for value in titles), (root, titles)
         overflow = group.evaluate('''node => ({client:node.clientWidth,scroll:node.scrollWidth,
-          children:[...node.querySelectorAll('summary, .sw-note-group-body, .sw-note-group-item, .sw-note-group-item-head, .sw-note-reason')]
+          children:[...node.querySelectorAll('summary, .sw-note-group-body, .sw-note-list, .sw-note-group-item, .sw-note-item-head')]
             .filter(el => el.scrollWidth > el.clientWidth + 1)
             .slice(0,5).map(el => ({cls:el.className,client:el.clientWidth,scroll:el.scrollWidth})),
           parents:[...function*(){for(let p=node,i=0;p&&i<7;p=p.parentElement,i++)yield {cls:p.className,client:p.clientWidth,scroll:p.scrollWidth}}()]})''')
         assert overflow['scroll'] <= overflow['client'] + 1, (root, overflow)
+        assert not overflow['children'], (root, overflow)
         screenshot = tmp_path / f'context-notes-{root[1:]}-{language}-{width}.png'
         group.screenshot(path=str(screenshot))
         print(f'Context note group ({root}, {language}, {width}): {screenshot}')
     page.evaluate('fixtureDispose()')
-    context.close()

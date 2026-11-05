@@ -170,7 +170,9 @@ def test_route_syntax_failure_is_400(flask_client, monkeypatch):
     assert response.get_json()['ok'] is False
 
 
-def test_route_unexpected_failure_is_structured_502(flask_client, monkeypatch):
+def test_route_unexpected_failure_is_redacted_internal_error(flask_client, monkeypatch):
+    """A server fault is an explicit, logged, redacted 500 — not an upstream
+    502 and never an empty result list (2026-07-28 stale-process outage)."""
     def fail(query, count):
         raise AttributeError("no attribute 'search_by_query'")
 
@@ -179,10 +181,13 @@ def test_route_unexpected_failure_is_structured_502(flask_client, monkeypatch):
         '/api/v4/paper/search-arxiv',
         json={'query': 'q'},
     )
-    assert response.status_code == 502
+    assert response.status_code == 500
     body = response.get_json()
     assert body['ok'] is False
-    assert 'search_by_query' in body['error']['message']
+    assert 'results' not in body
+    assert body['error']['code'] == 'internal_error'
+    assert body['error']['message'] == 'AttributeError'
+    assert 'search_by_query' not in response.get_data(as_text=True)
 
 
 def test_api_search_does_not_swallow_errors():

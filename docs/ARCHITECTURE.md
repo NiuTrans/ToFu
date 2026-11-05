@@ -710,7 +710,10 @@ scoped Rayon pool with the agent's existing gateway/scope owners. **Problem:**
 ordered-only native tools leave independent read work serialized, while detached
 parallel jobs can continue after Stop or terminalization. **Decision:** only
 explicitly classified read names overlap; writes/ordered calls run by provider
-position on the admitted caller lane. Reserve the whole call/byte batch before
+position on the admitted caller lane. The concurrent composition
+(`Scheduler::concurrent`, owner decision 2026-10-28) instead starts every call
+and keeps only the host-declared call order (TOOL_EXECUTION_POLICY.md, "Native
+application rounds"). Reserve the whole call/byte batch before
 publication; scoped jobs await all outcomes before feedback. Required cleanup
 failure cancels remaining scopes and retains fatal priority; local tool Stop
 propagates parent cancellation rather than empty success. Pool startup failures
@@ -1024,6 +1027,17 @@ Dependencies point down this table. A lower layer never imports a route or
 browser owner. Cross-domain behavior is expressed as an explicit protocol or
 committed event, not a call into another domain's private module.
 
+Process startup, shutdown and restart have no delivery-layer exceptions.
+`routes.register_all()` only mounts blueprints. The process service owner in
+`lib/server/server_background_services.py` starts and joins role-scoped workers;
+`lib/app/plugin_registry.py` discovers plugin contributions for both HTTP and
+headless callers. Restart requests converge on `lib/server/server_reexec.py`.
+Problem: lifecycle code reached upward into routes, coupling headless services
+to HTTP imports and giving route registration worker side effects. Decision:
+move these responsibilities into their existing process/application owners and
+remove the reverse-import exemptions. Alternative rejected: retaining route
+facades or injecting callbacks would preserve a second lifecycle entry point.
+
 High-coupling Python seams live in `lib/protocols.py` (`LLMService`,
 `FetchService`, `TaskEventSink`, `ConversationStore`, `ToolHandler`,
 `BodyBuilder`). Application and plugin code takes those ports as parameters.
@@ -1153,6 +1167,23 @@ make test-api
 ```
 
 The exact testing policy lives in [TESTING_STRATEGY.md](TESTING_STRATEGY.md).
+
+Problem: a character-only ban classified a Unicode display glyph as an
+architecture violation. Decision: the architecture gate checks concrete retired
+paths, identifiers, endpoint strings and dependency boundaries; a glyph alone is
+not evidence of obsolete ownership. The unsupported decoration rule is removed.
+Retired tokens still fail inside strings. Alternatives rejected: changing UI
+text to satisfy the scanner, file exceptions, or a new lexer for an ungrounded
+style rule. Synthetic examples in `test_architecture_text_policy.py` cover both
+accepted display content and retained rejection rules.
+
+The loose `lib/` module ratchet counts the current authored worktree. Problem:
+index-only enumeration hid unstaged additions/deletions and deferred a required
+baseline tightening until after commit. Decision: enumerate cached and non-ignored
+untracked root modules with NUL framing, deduplicate them, and count only existing
+files. Ignored local files and nested domain modules stay outside this count.
+Requiring callers to stage first would preserve a false-green development gate.
+Verify the temporary-repository cases in `test_import_direction_architecture.py`.
 
 Search optional PDF activation: **Problem:** importing web search activated native
 PDF/layout/OCR libraries and their resident resources before any PDF request.

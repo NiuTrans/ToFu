@@ -32,6 +32,7 @@ function fixture() {
   const ports = { window: w, document: d, initializeFolders() {},
     sidebar: { activate: id => calls.push(['activate', id]), copy: async id => calls.push(['copy', id]),
       duplicate: id => calls.push(['duplicate', id]), delete: id => calls.push(['delete', id]),
+      exportTranscript: id => calls.push(['export', id]),
       rename: id => calls.push(['rename', id]), reference: (id, title) => calls.push(['reference', id, title]),
       assignFolder: id => calls.push(['folder', id]), reportFailure: e => errors.push(e) },
     composer: { contextIdentity: () => context, pendingCleanOriginalText: () => null,
@@ -86,6 +87,24 @@ test('mouse press activates through a row rebuild; click is deduplicated and tou
   assert.equal(f.calls.filter(c => c[0] === 'activate').length, 5);
   dispose(); f.fire(list.firstChild, 'click'); assert.equal(f.calls.filter(c => c[0] === 'activate').length, 5);
   f.dom.window.close();
+});
+
+test('a search body hit row opens its matching Turn; rows without a valid Turn open plainly', () => {
+  const f = fixture(), list = f.d.getElementById('convList'), opened = [];
+  f.ports.sidebar.activate = (id, turn) => opened.push([id, turn]);
+  const dispose = installApplicationInteractions(f.ports);
+  list.innerHTML = '<div class="conv-item" data-conv-id="a" data-match-turn-id="turn-9" data-match-turn-ordinal="17"><span>Hit</span></div>'
+    + '<div class="conv-item" data-conv-id="b" data-match-turn-id="turn-1" data-match-turn-ordinal="x"><span>Bad</span></div>'
+    + '<div class="conv-item" data-conv-id="c"><span>Title hit</span></div>';
+  const [hit, bad, plain] = list.children;
+  f.fire(hit.firstChild, 'pointerdown', { pointerType: 'mouse', button: 0 });
+  f.fire(hit.firstChild, 'click');
+  f.fire(hit.firstChild, 'pointerdown', { pointerType: 'touch', button: 0 });
+  f.fire(hit.firstChild, 'click');
+  f.fire(bad.firstChild, 'click'); f.fire(plain.firstChild, 'click');
+  assert.deepEqual(opened, [['a', { turnId: 'turn-9', ordinal: 17 }], ['a', { turnId: 'turn-9', ordinal: 17 }],
+    ['b', undefined], ['c', undefined]]);
+  dispose(); f.dom.window.close();
 });
 
 test('row actions never navigate; clipboard remains in the gesture and only one feedback timer is retained', async () => {

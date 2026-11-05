@@ -2,6 +2,7 @@
 import subprocess
 from pathlib import Path
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -36,6 +37,7 @@ def test_global_sidebar_pagination_with_search_bridge():
 
 
 def test_sidebar_search_controller_behavior():
+    require_node_modules('jsdom', 'typescript')
     script = r"""
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -172,6 +174,43 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
  assert.ok(ctx.conversations.some(item=>item.id==='remote'));
  console.log('sidebar search behavior passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_search_body_hit_rows_carry_their_matching_turn():
+    """Rendered body hits name their live Turn so activation opens it there."""
+    require_node_modules('jsdom')
+    script = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const {JSDOM} = require('jsdom');
+const retained = fs.readFileSync('frontend/src/runtime/sections/ui/conversation_list.js', 'utf8');
+const slice = (from, to) => retained.slice(retained.indexOf(from), retained.indexOf(to));
+const dom = new JSDOM('<div id="convList"></div><div id="sidebarSearchStats"></div>');
+const escapeHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const ctx = {document: dom.window.document, t: k => k, escapeHtml, _teardownConvVirtual() {},
+  _conversationDisplayTitle: (title, fallback) => title || fallback, _convStatusFlags: () => ({}),
+  _convStatusHtml: () => ({dotHtml: '', statusTag: ''}), formatConvTime: () => '', activeConvId: '',
+  _lastConvListHash: ''};
+vm.runInNewContext(slice('function _renderSearchResults', '/**\n * Compute the four') + '\n'
+  + slice('function _buildConvItemHTML', '/* ── Two-tier search'), ctx);
+const list = ctx.document.getElementById('convList');
+ctx._renderSearchResults([
+  {conv: {id: 'body', title: 'Body'}, matchField: 'content', matchSnippet: 'the needle', matchRole: 'user',
+   matchTurnId: 'turn-"9', matchTurnOrdinal: 17},
+  {conv: {id: 'titled', title: 'needle'}, matchField: 'title', matchSnippet: null,
+   matchTurnId: null, matchTurnOrdinal: null},
+  {conv: {id: 'bad', title: 'Bad'}, matchField: 'content', matchSnippet: 'needle',
+   matchTurnId: 'turn-1', matchTurnOrdinal: -1},
+], 'needle', list, ctx.document.getElementById('sidebarSearchStats'), false);
+const rows = [...list.querySelectorAll('.conv-item')];
+assert.deepEqual(rows.map(row => [row.dataset.convId, row.dataset.matchTurnId, row.dataset.matchTurnOrdinal]),
+  [['body', 'turn-"9', '17'], ['titled', undefined, undefined], ['bad', undefined, undefined]]);
+console.log('search hit turn rows passed');
 """
     result = subprocess.run(["node", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr

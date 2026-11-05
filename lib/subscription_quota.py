@@ -13,6 +13,10 @@ adjacent snapshots, not a billing-grade per-request debit.  Consumers must
 label it as observed/approximate, especially when several conversations share
 the same subscription concurrently.
 
+Over the Responses WebSocket the same windows arrive as a ``codex.rate_limits``
+side-channel frame instead of response headers; it is projected onto the same
+header vocabulary and recorded with ``source='websocket_event'``.
+
 A second, conversation-free source feeds the same cache: the authenticated
 ``GET /backend-api/wham/usage`` control-plane payload that Codex CLI's
 ``/status`` renders.  Its structured ``rate_limit.primary_window`` /
@@ -192,8 +196,39 @@ def _window(headers: dict[str, str], name: str) -> dict[str, Any] | None:
     return out
 
 
+def codex_rate_limit_event_headers(event: Mapping | None) -> dict[str, str]:
+    """Project a WebSocket ``codex.rate_limits`` frame onto the header names.
+
+    Over WebSocket the backend sends the subscription windows as a
+    side-channel event, ``{plan_type, rate_limits: {primary, secondary}}``
+    with ``used_percent`` / ``window_minutes`` / ``reset_at`` per window,
+    instead of the ``x-codex-*`` response headers.
+    """
+    headers: dict[str, str] = {}
+    if not isinstance(event, Mapping):
+        return headers
+    limits = event.get('rate_limits')
+    if isinstance(limits, Mapping):
+        for name in ('primary', 'secondary'):
+            window = limits.get(name)
+            if not isinstance(window, Mapping):
+                continue
+            for field, suffix in (('used_percent', 'used-percent'),
+                                  ('window_minutes', 'window-minutes'),
+                                  ('reset_at', 'reset-at')):
+                value = window.get(field)
+                if (isinstance(value, (int, float, str))
+                        and not isinstance(value, bool)):
+                    headers[f'x-codex-{name}-{suffix}'] = str(value)
+    plan_type = event.get('plan_type')
+    if isinstance(plan_type, str) and plan_type:
+        headers['x-codex-plan-type'] = plan_type
+    return headers
+
+
 def parse_codex_quota_headers(
         headers: Mapping | None, *, now: float | None = None,
+        source: str = 'response_headers',
 ) -> dict[str, Any] | None:
     """Return a normalized Codex quota snapshot, or ``None`` when absent."""
     lower = _headers_lower(headers)
@@ -204,7 +239,7 @@ def parse_codex_quota_headers(
 
     snapshot: dict[str, Any] = {
         'provider': 'codex',
-        'source': 'response_headers',
+        'source': source,
         'captured_at': int(time.time() if now is None else now),
         'primary': primary,
         'secondary': secondary,
@@ -245,6 +280,7 @@ def _add_observed_deltas(snapshot: dict, previous: dict | None) -> None:
 def record_codex_quota(
         headers: Mapping | None, usage: dict | None = None, *,
         now: float | None = None, cache_key: str = 'codex',
+        source: str = 'response_headers',
 ) -> dict | None:
     """Attach a response quota snapshot to ``usage`` and update the cache.
 
@@ -252,7 +288,7 @@ def record_codex_quota(
     ``None``).  With no Codex quota headers, the original value is returned
     unchanged.
     """
-    snapshot = parse_codex_quota_headers(headers, now=now)
+    snapshot = parse_codex_quota_headers(headers, now=now, source=source)
     if snapshot is None:
         return usage
     cache_key = _normalize_cache_key(cache_key)
@@ -292,6 +328,7 @@ def _reset_subscription_quota_cache_for_tests() -> None:
 
 __all__ = [
     'USAGE_QUOTA_KEY',
+    'codex_rate_limit_event_headers',
     'parse_codex_quota_headers',
     'parse_codex_usage_payload',
     'record_codex_quota',

@@ -4,8 +4,9 @@ NativeAgentConfiguration borrows an admitted image host, running event loop,
 callback executor and issued launch policy. bind_task consumes the SDK's existing
 owned routing issuance. The caller joins its runtime before closing borrowed
 resources. The optional owned_native_agent_configuration entry admits the CLI archive and
-joins its launch-sized callback owner. No storage, model registry, fallback loop
-or default switch.
+joins its demand callback owner, whose idle reuse follows TOFU_AGENT_WORKERS and
+which never caps callbacks or pending approvals by count. No storage, model
+registry, fallback loop or default switch.
 """
 import asyncio
 from contextlib import asynccontextmanager
@@ -87,15 +88,17 @@ class NativeAgentConfiguration:
 
 @asynccontextmanager
 async def owned_native_agent_configuration(*,archive,configuration,working_directory,environ,shutdown_seconds):
-    """CLI lifespan: admit one image, use launch-sized callbacks, and join close."""
+    """CLI lifespan: admit one image, use demand callbacks, and join close."""
     import hashlib
     from lib.agent_core.native_image import NativeArchiveImage
     from lib.tasks_pkg.native_resources import compile_native_transport_budget
     from lib.resource_control.runtime import launch_policy
     from lib.tasks_pkg.native_host import NativeHost
     from lib.version import __version__
+    from runtime_guards import UNLIMITED, resolve_resource_budget
     from tofu_workers.executor import DemandExecutor
     policy=launch_policy(environ)
+    idle_callbacks=resolve_resource_budget('TOFU_AGENT_WORKERS',environ,minimum=1,maximum=UNLIMITED)
     frame_bytes=policy['frame_maximum']
     budget=compile_native_transport_budget(launch_policy=policy,shutdown_seconds=shutdown_seconds)
     archive=Path(archive).resolve()
@@ -107,12 +110,12 @@ async def owned_native_agent_configuration(*,archive,configuration,working_direc
         raise AgentConfigurationError('Cannot read native runtime archive') from exc
     image=NativeArchiveImage(archive=archive,sha256=digest_value,application_version=__version__,budget=budget)
     host=NativeHost(image)
-    callbacks=DemandExecutor(max_workers=policy['root_maximum'],queue_capacity=policy['root_maximum'],
+    callbacks=DemandExecutor(max_workers=idle_callbacks,queue_capacity=0,
         max_abandoned_workers=1,thread_name_prefix='tofu-native-sdk-callback',metric_pool='native-sdk-callback')
     try:
         native=NativeAgentConfiguration(host=host,loop=asyncio.get_running_loop(),executor=callbacks,
             configuration=configuration,working_directory=Path(working_directory).resolve(),resource_policy=policy,
-            pending_calls=policy['root_maximum'],pending_bytes=frame_bytes)
+            pending_calls=UNLIMITED,pending_bytes=frame_bytes)
         descriptor=await image.duplicate(budget.binary_bytes)
         descriptor.close()
         yield native

@@ -18,6 +18,7 @@ boundary, not a trusted-network shortcut.
 | Agent runtime | `lib/desktop_agent/` |
 | Agent permission policy | `lib/desktop_agent/_permissions.py` |
 | Remote project binding | `lib/desktop/remote.py`, `lib/conv_config/` |
+| Waits for an offline device (`await_device`) | `lib/desktop/device_waits.py`, `contracts/device_waits_v1.schema.json` |
 | Remote project execution | `lib/tasks_pkg/handlers/project.py`, agent `_project.py`; [paper builds](../PAPER_BUILDS.md#desktop-execution) reuse the bridge and compiler via agent `_paper.py` |
 | Subscription egress routing | `lib/desktop/egress.py`, `egress_preferences.py`, Sidecar `desktop` domain, agent `_egress.py` |
 | Local subscription adapter / borrowed Codex login | `lib/desktop/adapter.py`, agent `_adapter.py`; [Codex login owner](../IDENTITY.md#borrowing-an-existing-codex-login) |
@@ -65,11 +66,26 @@ The agent executes ordinary commands, paper builds and egress streams outside of
 
 The agent reconstructs its permission floor on startup. Read, write, execute,
 GUI, notification, browser relay, egress, and adapter capabilities are declared
-and enforced on the device; server-side visibility is not sufficient
-authorization for a local action. File and command operations resolve against
-declared share roots. Remote project writes apply local equivalents of path
+and enforced on the device (`lib/desktop_agent/_dispatch.py`); server-side
+visibility is not sufficient authorization for a local action. The read-only
+default lists and reads files and shows a system overview. `desktop_list_files`
+and `desktop_read_file` resolve the real path inside a declared share root on
+every tier (`_project.shared_path`), so `~`, `..`, absolute paths and symlinks
+cannot leave the shared folders, and no share roots means no local file reads.
+The clipboard (read and write) is GUI tier, like reading the screen. Write and
+move need the write tier, open/launch/run the execute tier; those act on the
+machine as the tray describes. Project commands resolve against declared share
+roots (below). Remote project writes apply local equivalents of path
 containment, freshness, read-before-edit, and atomic-write rules; destructive
 targets resolve before execution and must stay inside the selected root.
+
+Problem: the read-only default listed and read any path and exposed the
+clipboard, although this section promised share-root scope. Decision: confine
+listing/reading on the device itself, on every tier, and move the clipboard
+to the GUI tier. Alternatives rejected: a server-side path check (the device
+must not trust the server); lifting the confinement under the execute tier
+(the execute tier already has `desktop_run_command`; one rule is easier to
+verify). Verify `tests/desktop/test_desktop_agent_read_scope.py`.
 
 ## Remote projects
 
@@ -148,6 +164,8 @@ keeps `release_sha256` separate, and acquires sequentially (2 GiB/file, 30 min).
 - Pickup/result timeout: typed bridge transport failure.
 - Remote path outside declared root or insufficient device capability: local
   denial returned as tool failure.
+- Device offline while its conversation could wait: the tool error names
+  `await_device` (below).
 - Stream state expires before terminal: aborted transport, never an infinite
   wait.
 - Distribution refresh failure: serve last known good artifact and expose
@@ -178,15 +196,18 @@ keeps `release_sha256` separate, and acquires sequentially (2 GiB/file, 30 min).
 | Egress host/route | both server and agent egress owners | allow-list, failover, redaction |
 | Adapter lifecycle | both adapter owners | loopback policy, account/catalog sync |
 | Pairing/attach | pairing service and attach route | expiry, one-use, owner binding |
+| Device-online wake | `lib/desktop/device_waits.py`, `register_agent` epochs | exactly-once wake, owner isolation, restart |
 | Installer/artifact | `lib/desktop_dist/`, workflow/spec | kind, checksum, smoke, traversal |
 
 ## Test map
 Run focused tests under `tests/desktop/`, desktop distribution and installer
 parity under `tests/desktop_dist/`, remote worktree routing under `tests/tasks_pkg/`
-and `tests/tools/`, and asynchronous polling under `tests/browser/`.
+and `tests/tools/`, and asynchronous polling under `tests/browser/`. Device waits:
+`tests/desktop/test_device_waits.py`, `tests/api/test_api_v4_device_waits.py`
+and `tests/frontend/test_frontend_devices_tab.py`.
 
 Hope large-checkpoint publication is owned by the private environment provider's
-[Worker result publication contract](../../bundles/meituan/environment-provider/README.md#worker-result-publication).
+[Worker result publication contract](../../bundles/yourprovider/environment-provider/README.md#worker-result-publication).
 Problem: sequential transport prevented a real 25.5 GB research checkpoint from
 being delivered. Decision: admit an optional host-pinned Java6 uploader into the
 source seal, preserving actor/operation destinations, one publication intent,
@@ -213,3 +234,104 @@ Problem: healthy desktop commands were killed by implicit 30/300-second worker t
 ## Independent desktop process supervision
 
 Problem: a direct subprocess outlived an abruptly killed agent after private execution deadlines were removed. Decision: synchronous and streamed commands reuse `lib/paper/builds/process_worker.py` through the existing source/frozen worker entry. The worker waits for its private start marker, checks its creator before admission, and owns descendant retirement independently of the agent. Linux subreaper ownership catches descendants that start a separate session; Windows job binding precedes the start marker, with creator birth/liveness checks protecting the pre-binding interval. Separate private stdout/stderr files support windowed frozen executables without stdio handles. The agent tails these files and joins readers before removing its directory and delivering the final result. Explicit timeout/Stop requests ask the worker to retire children and retain the actual signed command exit status. Cleanup failure remains a visible terminal error. Parent death removes the validated desktop IPC files independently on POSIX. Alternatives considered: a thread watchdog dies with its owner; killing only a shell misses escaped descendants; restoring a timer kills healthy work. Verification: real Linux owner SIGKILL with an escaped child and grandchild leaves no live commands, reaps command descendants and removes private output; pre-admission retired ownership causes no side effect. Separate streams, signed exit status, Stop, explicit timeout, startup failure and cleanup failure remain covered. Windows creator identity is contract-tested; native Windows job/crash cleanup is not verified by the Linux tests. Source/frozen dispatch uses the existing worker flag and does not add an agent startup service.
+
+
+## Desktop shell selection
+
+Problem: the argv builder treated every space, quote and backslash as shell syntax, so each multi-word command, including one simple command whose only metacharacters were quoted data, ran under `/bin/sh -c`. Where `/bin/sh` is dash (Debian/Ubuntu), the shell stays the parent: a command killed by SIGTERM was reported as the shell's status 143 plus a shell-printed `Terminated` line instead of its signed status -15. Bash hosts hid this because bash execs a lone `-c` command. Lone words took the opposite branch and ran without the shell that gives them meaning: builtins (`cd`, `umask`), `NAME=value`, and a trailing carriage return that `shlex` dropped.
+
+Decision: `lib/desktop_agent/_exec.py` tokenizes with POSIX quoting (blanks, backslash, single and double quotes). Exactly one simple command whose words are literal runs as that argv without a shell; quoted metacharacters are data. Unquoted operators, redirections and here-documents, `$`/backtick expansion, patterns, tilde, comments, braces, `!`, newlines and continuations, `NAME=value` prefixes, control characters, unterminated quotes, an empty command name, and reserved words or builtins in command position keep the explicit `/bin/sh -c` path. A direct command reports its own exit status or negative signal. The shell path reports the shell's own status unchanged: POSIX exposes a signalled last command as 128+N, and dash prints the signal name. Windows always uses `cmd.exe /c` because its grammar and builtins are not POSIX. For parity with the shell, commands receive `PWD` naming their working directory; a relative `cwd` resolves against the agent's directory, not the worker's source root. In desktop mode the supervisor applies the execvp rule that runs a file without a recognized header as a sh script. A direct command that cannot start (not found, permission) reports the supervisor's typed start error and status 125, not the shell's 127/126 message.
+
+Alternatives considered:
+- Rewriting 128+N as -N is ambiguous, because a program may exit 143 and ksh93 reports 256+N.
+- Prefixing `exec` to user text, or using a `sh -c 'exec "$0" "$@"'` trampoline for every simple command, gives exec-failure parity but puts a shell back in front of every simple command, including lone words that never used one.
+- `shlex.split` does not follow POSIX (it keeps the backslash in `"\$"`) and reports no quoting, so it cannot tell data from syntax.
+- Checking PATH and file headers in the agent races the real exec.
+
+Verification:
+- Host-shell differential specs compare the direct argv with the words `/bin/sh` assigns through `set --`.
+- End-to-end specs cover quoted metacharacters reaching the program with its exit status, the program's own -15 with clean stderr through all four desktop/project synchronous and streamed entries, the shell's own -15 and `$?` 143, lone builtins, a script without an interpreter line, and agent-relative `cwd` with `PWD`.
+- A Windows contract spec pins `cmd.exe`.
+- A random 14,000-case differential (8,359 commands accepted for direct argv) against dash, bash, bash invoked as `sh` and `bash --posix` found no mismatch.
+- Native Windows execution is not exercised.
+
+
+## Waiting for an offline device
+
+Problem: work that must run on one of the owner's devices (desktop tools or a
+remote worktree) failed while that device was offline, and nothing continued it
+when the device returned; the owner had to notice the reconnect and ask again.
+
+Decision: `await_device(device, reason)` registers one durable wait for the
+current conversation and the model ends its turn. `lib/desktop/device_waits.py`
+owns the owner-scoped records in portable record CAS
+(`contracts/device_waits_v1.schema.json`): one record per wait for its whole
+lifetime, plus a pending pointer `<owner>:<deviceKey>:<conversationId>` that
+exists only while the wait is pending, so a connection reads only the waits
+naming that device and a conversation holds one pending wait per device.
+`device` is an agent ID or a device name; a known device binds to its agent ID,
+an unknown selector matches the first of the owner's devices that connects with
+that ID or name (case-insensitive). If the device is online, nothing is
+registered.
+
+`register_agent` reports a device's online transition once per connection
+epoch: its first poll in this process, a poll after the connection window
+lapsed, or a poll under another owner. The poll route then wakes every pending
+wait of that owner naming the device through `dispatch_scheduled_turn`: one
+`proactive` nonhuman notice, `steer` into a busy conversation, and a command ID
+hashed from (owner, wait ID), so a replay after a crash, reconnect or restart
+reuses the command the conversation already received. `started`, `steered` and
+`queued` close the wait as delivered (agent, epoch, command); a missing
+conversation cancels it; a durable notice that no executor started fails it
+visibly; any other outcome or failure leaves it pending for the device's next
+connection, without failing the poll. The wake continues with the registering
+turn's execution choices: the continuation tool choices and creating-turn
+policy shared with `timer_create` (`CONTINUATION_TOOL_CHOICES`, and
+`CONTINUATION_POLICY_KEYS` through `capture_continuation_policy`: model route,
+reasoning, prompt, interaction mode, tool exposure, workspace roots and owner
+preference mappings, replayed as one `continuation_policy` override so the wake
+runs as the agent that registered it; a wait recorded without a model identity
+keeps the conversation's own selection), the awaited capability
+(`desktopEnabled`, a validated `project_remote` binding) and `schedulerEnabled`.
+Identity, grant and attended fields and a caller's tool-schema list are never
+captured; the notice is not owner text and grants no authority, and device tools
+keep their approvals. A conversation in Plan mode defers the wake (`busy`): it
+stays pending for the device's next connection instead of running outside the
+read-only plan (`docs/modules/scheduling_ops.md`).
+
+Only a conversation whose turn the task owns can wait. The tool is offered where
+device tools are, and to Coordinators and Routers through the coordinator
+ceiling (it executes nothing on a device). Headless requests, child invocations
+and conversation-less tasks are refused like other deferred lanes
+([task engine](task_engine.md#background-command-delivery-owner)); project
+Workers are denied (`workerDeniedTools`) because the ordinary turn command
+discards the assignment grant, so a wake would run outside the grant's tool
+ceiling and workspace. Workers report the dependency instead. Offline device
+tool errors name `await_device` only when the task can wait.
+
+The owner lists pending waits (`GET /api/v4/desktop/device-waits`, which pages
+the pending index; `includeClosed=true` pages every record in registration
+order) and cancels one (`POST /api/v4/desktop/device-waits/<waitId>/cancel`,
+idempotent; another owner's wait is not found) in Settings → Devices. Deleting
+a conversation cancels its pending waits; restoring it does not revive them.
+Nothing is polled and nothing expires; closed records stay as owner history.
+Pointers are written before records, so a delivery keeps a pointer whose record
+does not exist yet: the registration still in progress delivers itself if the
+device is online by then, and an interrupted one is completed by registering
+again.
+
+Alternatives considered:
+- A `timer_create` watcher polling device presence: adds a poll interval, a
+  timeout and a second presence check beside the bridge registry.
+- Waking from every heartbeat or the online list: repeats work on every poll;
+  the connection epoch names the transition, and the derived command ID makes
+  replays idempotent across processes and restarts.
+- Keeping waits in the in-memory bridge registry: lost on restart, while a wait
+  must outlive both the turn and the process.
+- Letting Workers wait: their wake would lose the grant
+  (`test_a_wake_into_a_worker_conversation_could_not_carry_its_grant`).
+
+Limits: delivery runs once per connection epoch, so a storage failure during
+delivery leaves the wait pending until the device connects again or the server
+restarts; the wait stays listed and cancellable meanwhile. Wait IDs order by
+registration millisecond.

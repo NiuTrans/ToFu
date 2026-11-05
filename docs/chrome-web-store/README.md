@@ -26,13 +26,15 @@
 > which the authenticated device-pairing boundary addresses
 > INDEPENDENTLY of this kit.
 >
-> **Kit readiness, checked 2026-10-21** — so a future submitter starts from
+> **Kit readiness, checked 2026-10-31** — so a future submitter starts from
 > facts rather than re-deriving them:
-> - `manifest.store.json` = 12 permissions, version 5.8.1, matching the
+> - `manifest.store.json` = 12 permissions, version 5.8.4, matching the
 >   shipped manifest; `downloads`, `webRequest`, and `webNavigation` present,
 >   `activeTab` absent.
 > - `bash scripts/package_extension.sh --store` produces a valid
->   `tofu-browser-bridge-5.8.1-store.zip` (8 files, `<all_urls>`).
+>   `tofu-browser-bridge-5.8.4-store.zip` (bundled worker modules, `<all_urls>`).
+> - `frame_authority` checks the selected frame URL and pins its Chrome document
+>   ID. It reuses `webNavigation` and `scripting`; no permission is added.
 > - `tests/release/test_chrome_store_manifest_parity.py` — 25/25, and it DERIVES the
 >   required permissions from the extension's real `chrome.*` calls, so it
 >   keeps this kit honest while it sits idle.
@@ -115,7 +117,7 @@ command would have thrown for every store-installed user.
 
 Extension 5.8.0 starts owned transient resources on demand and retains exact
 cleanup/restart records. Per-capture content bounds, redaction, scope checks and
-permissions are unchanged. Both local archives were rebuilt and inspected with
-eight files; packaging uses Python's standard ZIP writer and atomic publication
+permissions are unchanged. Both archive variants include the root entry and every `worker/*.js` owner;
+package tests execute the unpacked import graph. Packaging uses Python's standard ZIP writer and atomic publication
 so a missing external `zip` executable or failed write cannot replace a prior
 verified archive. No store submission is part of this update.

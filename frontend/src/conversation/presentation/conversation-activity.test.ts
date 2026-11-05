@@ -13,6 +13,15 @@ function turn(id: string, actor: TurnRecord['actor'], status: TurnRecord['status
 const conclusions = { run: { status: 'concluded', reason: 'budget_exhausted' } };
 
 describe('shared conversation activity', () => {
+  it.each([undefined, 'idle', 'connecting', 'recovering', 'degraded', 'offline', 'closed'])(
+    'does not present cached running state as confirmed while sync is %s', syncHealth => {
+      const input = { turns: [turn('a', 'assistant', 'running')], streaming: true, syncHealth };
+      expect(presentConversationActivity(input)).toMatchObject({ streaming: true, unconfirmed: true });
+      expect(presentConversationActivity({ ...input, streaming: false }).unconfirmed).toBe(false);
+      expect(presentConversationActivity({ ...input, syncHealth: 'live' }).unconfirmed).toBe(false);
+    },
+  );
+
   it.each(['assistant', 'planner'] as const)('uses durable %s verdict before legacy finish reason', actor => {
     const completed = turn('a', actor, 'completed');
     Object.assign(completed.projection, { finishReason: 'error' });

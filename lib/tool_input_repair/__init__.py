@@ -136,6 +136,7 @@ from lib.tool_input_repair._repair import (
     validate_then_repair,
 )
 from lib.tool_input_repair._classify import (
+    RENAMED_TOOL_NAMES,
     _name_similarity,
     classify_tool_call,
     resolve_tool_name,
@@ -153,6 +154,7 @@ from lib.tool_input_repair._rejection import (
 )
 from lib.tool_input_repair._ingest import (
     IngestedToolCall,
+    contract_rejection_text,
     ingest_tool_call,
     _tool_name_drop_reason,
 )
@@ -168,12 +170,12 @@ _REJECT_COUNTS = _rejection_mod._REJECT_COUNTS
 
 __all__ = [
     'validate_then_repair', 'parse_and_repair_tool_args', 'report_invalid',
-    'resolve_tool_name', 'schema_hint',
+    'resolve_tool_name', 'RENAMED_TOOL_NAMES', 'schema_hint',
     'classify_tool_call', 'suggest_tool_names', 'build_rejection_message',
     'record_rejection', 'clear_rejection', 'REJECTION_ESCALATE_THRESHOLD',
     'HALLUCINATION_ABORT_THRESHOLD',
     'report_hallucinated', 'report_tool_name_aliased', 'RepairLog',
-    'ingest_tool_call', 'IngestedToolCall',
+    'ingest_tool_call', 'IngestedToolCall', 'contract_rejection_text',
     # private symbols imported by the test-suite
     '_salvage_object_array', '_array_item_schema', '_try_schema_array_salvage',
 ]

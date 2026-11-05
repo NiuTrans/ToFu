@@ -1,6 +1,7 @@
 """routes/upload.py — Image upload/serve, image generation, PDF parsing endpoints."""
 
 import base64
+import binascii
 import io
 import os
 import time
@@ -369,21 +370,22 @@ def upload_image():
     if request.is_json:
         data = parse_body(exact=('base64', 'mediaType',))
         encoded = data.get('base64', '')
-        if not isinstance(encoded, str) or not encoded:
+        if not isinstance(encoded, str) or not encoded or not encoded.isascii():
             return api_bad_request('Invalid base64 payload')
         media_type = data.get('mediaType', 'image/png')
         if media_type not in ('image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp', 'image/bmp'):
             return api_error('Unsupported image type — SVG uploads are disabled for security. '
                              'Allowed: png, jpeg, gif, webp, bmp.', status=400)
         with tempfile.TemporaryFile(mode='w+b') as source:
-            try:
-                # Decode aligned base64 chunks to the existing local-file path;
-                # retain the complete source without a second whole byte copy.
-                for offset in range(0, len(encoded), 64 * 1024):
-                    source.write(base64.b64decode(encoded[offset:offset+64 * 1024], validate=True))
-            except (ValueError, TypeError) as error:
-                logger.warning('[upload_image] base64 decode failed: %s',error)
-                return api_bad_request('Invalid base64 payload')
+            # Decode aligned base64 chunks to the existing local-file path;
+            # retain the complete source without a second whole byte copy.
+            for offset in range(0, len(encoded), 64 * 1024):
+                try:
+                    chunk = base64.b64decode(encoded[offset:offset+64 * 1024], validate=True)
+                except binascii.Error as error:
+                    logger.warning('[upload_image] base64 decode failed: %s', error)
+                    return api_bad_request('Invalid base64 payload')
+                source.write(chunk)
             return _persist_uploaded_image(source)
 
     files = request_files()

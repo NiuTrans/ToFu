@@ -22,6 +22,7 @@ from hypercorn.asyncio import serve
 from hypercorn.config import Config
 from lib import response_assets as service
 from routes.response_assets import response_assets_bp
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.visual
@@ -30,6 +31,7 @@ pytest_plugins = ('tests._artifact_sidecar',)
 
 @pytest.fixture(scope='module')
 def response_server(artifact_storage, tmp_path_factory):
+    require_node_modules('vite')
     from unittest.mock import patch
     directory = tmp_path_factory.mktemp('rich-response-http')
     image = directory / 'chart.png'
@@ -253,10 +255,8 @@ def test_real_asset_rich_cards_keyboard_reload_and_proxy(browser,response_server
     assert choices.locator('input[type="radio"]').first.is_disabled()
     assert submit.is_disabled()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth+1')
-    preview_dir = ROOT / 'designs/ui-gallery/previews'
-    preview_dir.mkdir(exist_ok=True)
     page.evaluate("() => { window.scrollTo(0, 0); for (const node of document.querySelectorAll('*')) { if (node.scrollTop) node.scrollTop = 0; if (node.scrollLeft) node.scrollLeft = 0; } }")
-    path=preview_dir/f'rich-components-{theme}-{width}.png';page.screenshot(path=str(path),full_page=True)
+    page.screenshot(path=str(tmp_path / f'rich-components-{theme}-{width}.png'), full_page=True)
     page.reload(wait_until='domcontentloaded');page.locator('#rich-preview img').wait_for(state='visible')
     assert page.locator('.rich-metric').count()==4
     assert page.locator('#rich-inline-preview .rich-timeline-plot').is_visible()

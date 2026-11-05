@@ -17,8 +17,7 @@ fn corrupt() -> io::Error {
     )
 }
 fn bounded() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::OutOfMemory,
+    crate::resource_exhaustion::domain_bound(
         "diagnostic metadata exceeds 1 MiB",
     )
 }

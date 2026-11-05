@@ -17,13 +17,15 @@ would break the feature for its primary audience. So the policy is:
 
 * **Always deny** the genuinely dangerous targets regardless of config:
   link-local (``169.254.0.0/16`` — AWS/GCP/Azure metadata lives here),
-  multicast, reserved, and unspecified (``0.0.0.0``) ranges.
+  the metadata endpoints outside it (Alibaba ``100.100.100.200``, AWS
+  IPv6 ``fd00:ec2::254``), multicast, reserved, and unspecified
+  (``0.0.0.0``) ranges.
 * **Loopback** (``127.0.0.0/8``, ``::1``) and **RFC1918 / ULA private**
   ranges are allowed BY DEFAULT (self-hosted LLM case) but can be locked
   down by operators running a multi-tenant relay:
   - ``TOFU_BYO_BLOCK_LOOPBACK=1`` — refuse loopback targets.
-  - ``TOFU_BYO_BLOCK_PRIVATE=1``  — refuse RFC1918 / ULA targets too
-    (recommended for any deployment that accepts BYO providers from
+  - ``TOFU_BYO_BLOCK_PRIVATE=1``  — refuse every other non-global target
+    too (RFC1918, ULA, RFC 6598 shared space; recommended for any deployment that accepts BYO providers from
     untrusted third parties).
 * ``TOFU_BYO_ALLOW_HOSTS`` — comma-separated exact hostnames that bypass
   the IP checks entirely (an explicit allow-list escape hatch).
@@ -49,6 +51,14 @@ __all__ = ['EgressDenied', 'validate_egress_url', 'is_egress_allowed']
 
 class EgressDenied(ValueError):
     """Raised when a BYO base_url targets a forbidden address."""
+
+
+# Instance-metadata services outside link-local space: Alibaba Cloud ECS
+# (RFC 6598 shared space) and the AWS Nitro IPv6 endpoint (ULA).
+_METADATA_ADDRESSES = frozenset({
+    ipaddress.ip_address('100.100.100.200'),
+    ipaddress.ip_address('fd00:ec2::254'),
+})
 
 
 def _flag(name: str) -> bool:
@@ -81,6 +91,8 @@ def _ip_verdict(ip_str: str) -> str | None:
     # Always-deny ranges (the dangerous SSRF targets).
     if ip.is_link_local:           # 169.254/16 + fe80::/10 → cloud metadata
         return 'link-local (cloud-metadata range)'
+    if ip in _METADATA_ADDRESSES:
+        return 'cloud metadata service'
     if ip.is_multicast:
         return 'multicast'
     if ip.is_reserved:
@@ -90,7 +102,7 @@ def _ip_verdict(ip_str: str) -> str | None:
     # Config-gated ranges.
     if ip.is_loopback and _flag('TOFU_BYO_BLOCK_LOOPBACK'):
         return 'loopback (blocked by TOFU_BYO_BLOCK_LOOPBACK)'
-    if (ip.is_private and not ip.is_loopback
+    if (not ip.is_global and not ip.is_loopback
             and _flag('TOFU_BYO_BLOCK_PRIVATE')):
         return 'private (blocked by TOFU_BYO_BLOCK_PRIVATE)'
     return None

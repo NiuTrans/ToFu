@@ -11,12 +11,14 @@ import re
 import time
 
 from lib.log import audit_log, get_logger
+from lib.observability import measure_task_startup
 from lib.memory.prefetch._config import (
     PREFETCH_BM25_TOP_N,
     PREFETCH_ENABLED,
     PREFETCH_MAX_BYTES,
     PREFETCH_MAX_INJECTED,
 )
+from lib.memory.prefetch._listing import list_prefetch_corpus
 from lib.memory.prefetch._query import (
     _extract_current_user_request,
     _last_authored_provenance_blanked,
@@ -70,12 +72,30 @@ def _confidence(query: str, memory: dict) -> tuple[bool, str, int]:
     return False, f'low_confidence_overlap:{overlap}', overlap
 
 
+def _list_corpus(project_path, extra_paths, corpus_listing, details):
+    if corpus_listing is not None:
+        memories = corpus_listing.take(project_path, extra_paths)
+        if memories is not None:
+            details.update(listing='early', listingMs=corpus_listing.listing_ms)
+            return memories
+    started = time.monotonic()
+    memories = list_prefetch_corpus(project_path, extra_paths)
+    details.update(listing='inline',
+                   listingMs=(time.monotonic() - started) * 1000)
+    return memories
+
+
 def run_memory_prefetch(messages: list, project_path: str | None,
                         task: dict | None = None, emit_event=None,
                         active_tools: list[str] | None = None,
                         extra_paths: list[str] | None = None,
-                        usage_sink=None) -> list[dict]:
-    """Select at most two local memories and stash them for the Composer."""
+                        usage_sink=None, corpus_listing=None) -> list[dict]:
+    """Select at most two local memories and stash them for the Composer.
+
+    ``corpus_listing`` is a ``PrefetchCorpusListing`` started earlier for the
+    attempt; it answers only its exact roots, otherwise the corpus is listed
+    here. The caller keeps ownership and releases it.
+    """
     del active_tools, usage_sink  # no auxiliary model call, hence no billing
     # Every selection attempt owns a fresh result, including empty/failed
     # attempts. Do not leak the last task snapshot through early returns.
@@ -113,14 +133,13 @@ def run_memory_prefetch(messages: list, project_path: str | None,
             emit('skipped', reason='empty_query')
         return []
 
+    # memory_list / memory_rank / memory_hydrate nest inside the caller's
+    # startup_memory stage and inherit its anchor identity.
     try:
-        from lib.memory.storage import get_eligible_memories
-        memories = get_eligible_memories(
-            project_path,
-            extra_paths=extra_paths,
-            include_body=False,
-            record_view='retrieval',
-        )
+        listing_details = {}
+        with measure_task_startup('memory_list', details=listing_details):
+            memories = _list_corpus(project_path, extra_paths, corpus_listing,
+                                    listing_details)
     except Exception as exc:
         emit('failed', reason=f'load_error:{exc}')
         return []
@@ -130,32 +149,34 @@ def run_memory_prefetch(messages: list, project_path: str | None,
 
     emit('started', total_memories=len(memories),
          candidate_target=PREFETCH_BM25_TOP_N, strategy='local_high_confidence')
-    scored = _bm25_top_n(memories, query, top_n=PREFETCH_BM25_TOP_N,
-                         include_body=False)
-    selected: list[dict] = []
-    rejected = 0
-    for idx, score in scored:
-        keep, reason, overlap = _confidence(query, memories[idx])
-        if not keep:
-            rejected += 1
-            continue
-        row = dict(memories[idx])
-        row['_prefetch_score'] = round(float(score), 4)
-        row['_prefetch_reason'] = reason
-        row['_prefetch_overlap'] = overlap
-        selected.append(row)
-        if len(selected) >= PREFETCH_MAX_INJECTED:
-            break
+    with measure_task_startup('memory_rank'):
+        scored = _bm25_top_n(memories, query, top_n=PREFETCH_BM25_TOP_N,
+                             include_body=False)
+        selected: list[dict] = []
+        rejected = 0
+        for idx, score in scored:
+            keep, reason, overlap = _confidence(query, memories[idx])
+            if not keep:
+                rejected += 1
+                continue
+            row = dict(memories[idx])
+            row['_prefetch_score'] = round(float(score), 4)
+            row['_prefetch_reason'] = reason
+            row['_prefetch_overlap'] = overlap
+            selected.append(row)
+            if len(selected) >= PREFETCH_MAX_INJECTED:
+                break
 
     if selected:
         try:
             from lib.memory.storage import load_eligible_memories
-            hydrated = load_eligible_memories(
-                [row.get('id', '') for row in selected if row.get('id')],
-                project_path,
-                extra_paths=extra_paths,
-                body_char_limit=PREFETCH_MAX_BYTES,
-            )
+            with measure_task_startup('memory_hydrate'):
+                hydrated = load_eligible_memories(
+                    [row.get('id', '') for row in selected if row.get('id')],
+                    project_path,
+                    extra_paths=extra_paths,
+                    body_char_limit=PREFETCH_MAX_BYTES,
+                )
             hydrated_by_id = {
                 memory['id']: memory for memory in hydrated
             }

@@ -5,16 +5,17 @@ import type { ConversationBlockViewModel } from '../presentation/conversation-vi
 import { renderActivityEventGroupBlock } from './renderers/activity-block';
 import type { ClassicConversationRendererPorts } from './renderers/ports';
 import en from '../../i18n/locales/en.json';
+import zh from '../../i18n/locales/zh.json';
 
 const { JSDOM } = await vi.importActual<{
   JSDOM: new (markup: string) => { window: Pick<Window, 'document' | 'close'> };
 }>('jsdom');
 
-function entry(id: string, durationMs: number): TurnActivityEntry {
+function entry(id: string, durationMs: number, envelopeKind?: string): TurnActivityEntry {
   return {
     id, spanId: id, seq: 1, occurredAt: 1000, kind: 'model', status: 'failed',
     severity: 'error', count: 1, model: 'deepseek-v4.1-flash-m17',
-    statusCode: 429, durationMs,
+    statusCode: 429, durationMs, envelopeKind,
   };
 }
 
@@ -60,6 +61,65 @@ describe('collapsed retry/failure group', () => {
       expect(summary.querySelector('.activity-event__duration')!.textContent).toBe('12s');
       // Members are still rendered, unchanged, inside the disclosure.
       expect(details().querySelectorAll('.activity-event')).toHaveLength(3);
+    } finally { dom.window.close(); }
+  });
+
+  it('names the dominant failure cause instead of only counting the storm', () => {
+    const { dom, details } = mount([
+      entry('a', 500, 'upstream_error'), entry('b', 700, 'upstream_error'),
+      entry('c', 300, 'upstream_error'),
+    ]);
+    try {
+      const causes = details().querySelector('.activity-event-group__causes')!;
+      expect(causes.textContent).toBe('Upstream error');
+      expect(causes.textContent).not.toContain('×');
+    } finally { dom.window.close(); }
+  });
+
+  it('shows each cause\'s share of a mixed storm, most frequent first', () => {
+    const { dom, details } = mount([
+      entry('a', 500, 'upstream_error'), entry('b', 700, 'ratelimit'),
+      entry('c', 300, 'ratelimit'),
+      // A retry beat carries no classified cause and is never counted as one.
+      { ...entry('d', 200), kind: 'status' as const, status: 'waiting' as const,
+        phase: 'retrying', envelopeKind: undefined },
+    ]);
+    try {
+      expect(details().querySelector('.activity-event-group__causes')!.textContent)
+        .toBe('Rate limited ×2 · Upstream error ×1');
+    } finally { dom.window.close(); }
+  });
+
+  it('localizes the cause labels', () => {
+    const dom = new JSDOM('<!doctype html><body><div></div></body>');
+    const node = dom.window.document.querySelector('div')!;
+    try {
+      renderActivityEventGroupBlock(
+        node, group([entry('a', 1, 'upstream_error'), entry('b', 1, 'upstream_error')]),
+        {
+          renderSafeMarkdownHtml: () => '',
+          localizedText: (key: string, fallback: string, values?: Record<string, unknown>) => (
+            (zh as Record<string, string>)[key] || fallback
+          ).replace(/\{(\w+)\}/g, (match, name) => String(values?.[name] ?? match)),
+        } as unknown as ClassicConversationRendererPorts,
+      );
+      expect(node.querySelector('.activity-event-group__label')!.textContent)
+        .toBe('2 次失败 / 重试的请求 · 上游故障');
+      expect(node.querySelector('.activity-event__facts')!.textContent)
+        .toBe('上游故障 · deepseek-v4.1-flash-m17 · HTTP 429');
+      // A member's routing class must not re-contradict the group summary.
+      const { dom: classDom, node: classNode } = mount([
+        { ...entry('a', 500, 'upstream_error'), reasonCode: 'RateLimitError' },
+        entry('b', 700, 'upstream_error'),
+      ]);
+      try {
+        const facts = classNode.querySelectorAll('.activity-event__facts')[0];
+        expect(facts.textContent).toBe(
+          'Upstream error · deepseek-v4.1-flash-m17 · HTTP 429');
+        expect(classNode.textContent).not.toContain('RateLimitError');
+        expect(facts.querySelector<HTMLElement>('.activity-event__cause')!.title)
+          .toBe('RateLimitError');
+      } finally { classDom.window.close(); }
     } finally { dom.window.close(); }
   });
 

@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -22,24 +23,12 @@ ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "frontend/src/conversation/index.ts"
 
 
-def _ready() -> bool:
-    bundler = ROOT / "scripts" / "vite_test_bundle.mjs"
-    if not shutil.which("node") or not bundler.is_file():
-        return False
-    return subprocess.run(
-        [shutil.which("node"), "-e", "require('jsdom')"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    ).returncode == 0
-
-
-pytestmark = [pytest.mark.unit, pytest.mark.skipif(
-    not _ready(), reason="node + jsdom + Vite test bundler required")]
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(scope="module")
 def conversation_bundle(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    require_node_modules('vite')
     built = tmp_path_factory.mktemp("render-reuse") / "conversation.cjs"
     result = subprocess.run(
         [str(ROOT / "scripts" / "vite_test_bundle.mjs"), str(ENTRY),
@@ -55,6 +44,7 @@ def conversation_bundle(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def _run(bundle: Path, source: str) -> dict:
+    require_node_modules('jsdom')
     script = f"""
 // The public browser composition imports browser API/renderer ports. Install
 // its document before loading it, as in the neighboring Surface harness.

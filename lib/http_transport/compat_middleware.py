@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from quart import request
@@ -11,6 +12,7 @@ from lib.log import get_logger
 
 
 logger = get_logger('server.lifecycle')
+_JSON_STRING_PREFIX = re.compile(br'[ \t\r\n]*"')
 
 
 async def method_override() -> None:
@@ -24,11 +26,16 @@ async def method_override() -> None:
     content_type = request.content_type or ''
     if inbound_method not in ('POST', 'PUT') or 'json' not in content_type:
         return
-    raw = (await request.get_data()).decode('utf-8', errors='replace')
-    if not raw:
+    raw = await request.get_data()
+    # Only a JSON string can wrap another JSON document. Ordinary object,
+    # array and scalar bodies belong to the handler's parser; decoding them
+    # here and discarding the result doubles CPU/GIL work on the serving loop.
+    # Inspect only JSON whitespace and the first token, without copying the
+    # body (lstrip/decode would copy a potentially multi-megabyte upload).
+    if _JSON_STRING_PREFIX.match(raw) is None:
         return
     try:
-        data = json.loads(raw)
+        data = json.loads(raw.decode('utf-8', errors='replace'))
         if isinstance(data, str):
             corrected_value = json.loads(data)
             corrected = json.dumps(corrected_value).encode('utf-8')

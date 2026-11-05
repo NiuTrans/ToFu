@@ -1,10 +1,11 @@
 """Generic authenticated-site reconnaissance and deep content collection.
 
 The extension owns the temporary tab, logged-in browser context, scrolling,
-pagination and raw transport capture.  This module is the sole model-context
-boundary: it re-authorizes the final page and every response URL, classifies
-the observed data source and redacts structured state. Accepted evidence enters
-the common L0 presentation boundary intact. Nothing captured here is durable.
+pagination and raw transport capture. This module re-authorizes the final page
+and composes content.collect_content_and_network once to classify and render
+the accepted source. Content acceptance, per-response policy and redaction stay
+at their common owners. Accepted evidence enters L0 intact; only sanitized
+site-observation metadata may be persisted.
 
 Entry point: ``research_page``.
 """
@@ -12,13 +13,11 @@ Entry point: ``research_page``.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from lib.log import get_logger
 
-from .network_evidence import (
-    analyze_network_evidence,
-    redact_url,
-)
+from .network_evidence import redact_url, render_shape
 
 logger = get_logger(__name__)
 
@@ -91,27 +90,32 @@ def _anti_bot_report(payload: dict, *, owner_user_id: str) -> dict:
     return {'detected': False, 'vendor': None, 'evidence': []}
 
 
-def analyze_research_payload(payload: dict, *, owner_user_id: str, target=None,
-                             content_receipt=None) -> dict:
-    """Classify the most stable observed content source for one research run."""
-    network = analyze_network_evidence(
-        payload, owner_user_id=owner_user_id, max_entries=12, target=target,
-        content_receipt=content_receipt)
-    from .content import collect_content
-    content_receipt = content_receipt or collect_content(
-        payload, owner_user_id=owner_user_id, target=target)
+@dataclass(frozen=True)
+class _ResearchEvidence:
+    """Accepted content and diagnostics from one explicitly owned collection."""
+
+    content_receipt: dict
+    analysis: dict
+
+
+def _collect_research_evidence(payload: dict, *, owner_user_id: str,
+                               target=None) -> _ResearchEvidence:
+    from .content import collect_content_and_network
+
+    content_receipt, network = collect_content_and_network(
+        payload, owner_user_id=owner_user_id, target=target, max_entries=12)
     strategies = {row['strategy'] for row in content_receipt['evidence']}
     initial = payload.get('initialState') if isinstance(payload, dict) else {}
     initial = initial if isinstance(initial, dict) else {}
     present_state = sorted(
         str(name) for name, present in initial.items() if bool(present))
     candidates = network['candidates']
-    blocked = [row for row in candidates if row['verdict'] == 'blocked']
     useful = [row for row in candidates
               if row['verdict'] in ('likely_data', 'maybe_data')]
-    if len(blocked) >= 2:
+    if (content_receipt['status'] == 'blocked'
+            and content_receipt['coverage']['stop_reason'] == 'authentication_required'):
         strategy = 'token_gated_api'
-        reason = f'{len(blocked)} captured endpoints require authentication'
+        reason = 'Target content requires authentication in this browser profile'
         next_step = 'Finish sign-in in this browser profile, then retry the same URL.'
     elif 'hydrated_state' in strategies:
         strategy = 'hydrated_state'
@@ -125,7 +129,7 @@ def analyze_research_payload(payload: dict, *, owner_user_id: str, target=None,
         strategy = 'rendered_dom'
         reason = 'No validated structured endpoint or hydration state was observed'
         next_step = 'Use the accumulated rendered text and stable DOM snapshot tools for targeted interaction.'
-    return {
+    analysis = {
         'strategy': strategy,
         'reason': reason,
         'recommended_next_step': next_step,
@@ -134,13 +138,14 @@ def analyze_research_payload(payload: dict, *, owner_user_id: str, target=None,
             payload, owner_user_id=owner_user_id),
         'network': network,
     }
+    return _ResearchEvidence(content_receipt, analysis)
 
 
-def _render_shape(shape: dict) -> str:
-    if not isinstance(shape, dict) or not shape:
-        return '(body unavailable)'
-    return ', '.join(
-        f'{path}={descriptor}' for path, descriptor in list(shape.items())[:18])
+def analyze_research_payload(payload: dict, *, owner_user_id: str, target=None,
+                             content_receipt=None) -> dict:
+    """Classify one run; a prior content_receipt is compatibility-only input."""
+    return _collect_research_evidence(
+        payload, owner_user_id=owner_user_id, target=target).analysis
 
 
 def _render_analysis(analysis: dict, payload: dict) -> str:
@@ -179,7 +184,7 @@ def _render_analysis(analysis: dict, payload: dict) -> str:
                 f'[{row["status"]} {row["content_type"]}] '
                 f'score={row["real_data_score"]:.2f} '
                 f'observations={row["observations"]}')
-            lines.append(f'  shape: {_render_shape(row["shape"])}')
+            lines.append(f'  shape: {render_shape(row["shape"])}')
     return '\n'.join(lines)
 
 
@@ -197,13 +202,19 @@ def render_research_payload(
 ) -> str:
     """Render one already-authorized deep-capture result for model context."""
     from .content import collect_content, render_content
-    content_receipt = content_receipt or collect_content(
-        payload, owner_user_id=owner_user_id, target=target)
-    analysis = analysis or analyze_research_payload(
-        payload, owner_user_id=owner_user_id, target=target,
-        content_receipt=content_receipt)
+    if mode == 'content':
+        content_receipt = content_receipt or collect_content(
+            payload, owner_user_id=owner_user_id, target=target)
+        return render_content(content_receipt)
+    if not analysis:
+        evidence = _collect_research_evidence(
+            payload, owner_user_id=owner_user_id, target=target)
+        content_receipt, analysis = evidence.content_receipt, evidence.analysis
+    else:
+        content_receipt = content_receipt or collect_content(
+            payload, owner_user_id=owner_user_id, target=target)
     analysis_text = _render_analysis(analysis, payload)
-    if mode != 'content' and prior_observation:
+    if prior_observation:
         from .site_observations import (
             render_adapter_promotion, render_site_observation,
         )
@@ -216,8 +227,6 @@ def render_research_payload(
             analysis_text += '\n\n' + promotion_text
     if mode == 'analysis':
         return analysis_text
-    if mode == 'content':
-        return render_content(content_receipt)
     # Accepted evidence and diagnostics enter the common L0 boundary intact.
     content = render_content(content_receipt)
     return content + '\n\n--- Collection diagnostics ---\n' + analysis_text
@@ -275,12 +284,10 @@ def research_page(fn_args: dict, runtime) -> str:
         from .protocol import (
             BrowserCapability,
             BrowserUpgradeRequired,
+            RESEARCH_CAPABILITIES,
             require_capabilities,
         )
-        protocol_info = require_capabilities(runtime.client_id, (
-            BrowserCapability.DEEP_COLLECT,
-            BrowserCapability.NETWORK_BODY,
-        ))
+        protocol_info = require_capabilities(runtime.client_id, RESEARCH_CAPABILITIES)
     except BrowserUpgradeRequired as exc:
         return (
             'Error: browser extension upgrade required for deep website '
@@ -343,12 +350,11 @@ def research_page(fn_args: dict, runtime) -> str:
                 f'signing in at {final_url}, then retry this research call.')
     except Exception as exc:
         logger.debug('[BrowserResearch] login-wall classification degraded: %s', exc)
-    from .content import collect_content
-    content_receipt = collect_content(
+    if (result.get('research') or {}).get('stopReason') == 'cross_origin_redirect':
+        return 'Error: browser research stopped after a cross-origin navigation.'
+    evidence = _collect_research_evidence(
         result, owner_user_id=runtime.owner_user_id, target=target)
-    analysis = analyze_research_payload(
-        result, owner_user_id=runtime.owner_user_id, target=target,
-        content_receipt=content_receipt)
+    content_receipt, analysis = evidence.content_receipt, evidence.analysis
     # Persist only sources that actually supplied accepted target content.
     accepted_urls = {row['url'] for row in content_receipt['evidence']}
     analysis['network']['candidates'] = [

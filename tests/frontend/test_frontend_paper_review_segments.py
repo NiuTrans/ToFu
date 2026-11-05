@@ -49,7 +49,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 
 import pytest
@@ -66,12 +65,6 @@ CSS = os.path.join(ROOT, 'static', 'styles.css')
 def _read(path: str) -> str:
     with open(path, encoding='utf-8') as f:
         return f.read()
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 # ─────────────────────────── function extraction ───────────────────────────
@@ -193,8 +186,6 @@ function _vis() {
 
 # ─────────────────────────── (1) mutual exclusion ───────────────────────────
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_review_segments_are_mutually_exclusive_full_height():
     driver = _visible_panels_js() + r"""
 var res = {};
@@ -223,8 +214,6 @@ console.log(JSON.stringify(res));
     assert r['activeBtn'] == 'rebuttal', 'active seg button must track the shown segment'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_always_both_visible_reintroduces_the_competition():
     """NEUTER: the switcher never hides the other panel (the old stacked-<details>
     always-both-visible behaviour) → switching to rebuttal leaves the review
@@ -245,8 +234,6 @@ console.log(JSON.stringify({ visible: _vis() }));
 
 # ─────────────────────────── (2) distinct persist slots ───────────────────────────
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_review_and_rebuttal_persist_slots_are_distinct():
     """The two segments key their reading-position slot off distinct langKeys
     (``review:…`` vs ``rebuttal:…``), so a segment switch can never write one

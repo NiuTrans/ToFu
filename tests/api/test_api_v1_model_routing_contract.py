@@ -165,7 +165,7 @@ class LiveConformanceTest(unittest.TestCase):
             compiled = await cli.post(
                 '/api/v1/providers/templates/compile',
                 headers=headers,
-                json={'template_key': 'meituan',
+                json={'template_key': 'yourprovider',
                       'selected_model_ids': ['LongCat-2.0']},
             )
             self.assertEqual(
@@ -242,6 +242,190 @@ class LiveConformanceTest(unittest.TestCase):
                 'contract-provider-credential/secret/reveal',
                 headers=headers)
             self.assertEqual(missing.status_code, 404)
+
+        _new_loop_run(go())
+
+    def test_listed_models_import_loads_the_rest_of_a_listing(self):
+        import tempfile
+        from lib.llm_dispatch import provider_catalog_sync
+
+        listing = [{'model_id': f'relay/model-{index}', 'capabilities': ['text']}
+                   for index in range(3)]
+        calls = []
+
+        def discover(base_url, api_key, **_kwargs):
+            calls.append((base_url, api_key))
+            return listing
+
+        async def go():
+            cli = self.app.test_client()
+            headers = {'Authorization': f'Bearer {self.token}'}
+            absent = await cli.post(
+                '/api/v1/providers/absent/listed-models/import', headers=headers)
+            self.assertEqual(absent.status_code, 404)
+
+            authority = await cli.get('/api/v1/model-routing', headers=headers)
+            revision = (await self._data(authority, 'getModelRouting'))['revision']
+            created = await cli.post(
+                '/api/v1/providers', headers=headers,
+                json=native_test_provider_bundle(
+                    expected_revision=revision, provider_id='relay-provider',
+                    base_url='https://relay.example/v1'))
+            self.assertEqual(created.status_code, 201, await created.get_data(as_text=True))
+
+            imported = await cli.post(
+                '/api/v1/providers/relay-provider/listed-models/import', headers=headers)
+            self.assertEqual(imported.status_code, 200, await imported.get_data(as_text=True))
+            data = await self._data(imported, 'importListedProviderModels')
+            self.assertEqual(
+                (data['provider_id'], data['listed_model_count'], data['added_model_count']),
+                ('relay-provider', 3, 3))
+            self.assertEqual(calls, [('https://relay.example/v1', 'sk-internal-secret')])
+
+            fetched = await cli.get('/api/v1/providers/relay-provider', headers=headers)
+            bundle = (await self._data(fetched, 'getProvider'))['provider']
+            self.assertEqual({row['wire_model_id'] for row in bundle['deployments']},
+                             {row['model_id'] for row in listing})
+
+        with tempfile.TemporaryDirectory() as state_dir, \
+                mock.patch.object(provider_catalog_sync, '_STATE_PATH',
+                                  f'{state_dir}/catalog_sync.json'), \
+                mock.patch.object(provider_catalog_sync, 'discover_models', discover):
+            _new_loop_run(go())
+
+    def test_speech_access_activation_keeps_secrets_and_other_routes(self):
+        import copy
+
+        from lib.model_routing import ModelRoutingRepository, OwnerBoundary
+        from lib.transcription import list_transcription_models
+        from tests.model_routing.test_model_routing_contract import _full_document
+        from tests.support.model_registration import complete_registration
+
+        repository = ModelRoutingRepository()
+        boundary = OwnerBoundary.create(OWNER)
+        prior_secret_count = len(repository.secret_metadata(boundary))
+        document = _full_document()
+        for row in document['models'] + document['offerings']:
+            row['capabilities'] = ['transcription']
+        for row in document['connections']:
+            row['base_url'] = 'https://api.openai.com/v1'
+        for row in document['credentials']:
+            stored = repository.put_secret(boundary, 'synthetic-speech-secret')
+            row.update(kind='api_key', secret_reference=stored['secret_reference'],
+                       key_hint=stored['key_hint'])
+        document = complete_registration(document)
+
+        async def go():
+            cli = self.app.test_client()
+            headers = {'Authorization': f'Bearer {self.token}'}
+            revision = repository.get(boundary).revision
+
+            async def commit(candidate):
+                nonlocal revision
+                response = await cli.put('/api/v1/model-routing', headers=headers,
+                    json={'expected_revision': revision, 'model_routing': candidate})
+                self.assertEqual(response.status_code, 200, await response.get_data(as_text=True))
+                data = await self._data(response, 'putModelRouting')
+                revision = data['revision']
+                return data['model_routing']
+
+            original = await commit(document)
+            secret_count = len(repository.secret_metadata(boundary))
+            self.assertEqual(secret_count - prior_secret_count, 2)
+            for enabled_a, enabled_b in ((False, True), (True, True), (False, False)):
+                candidate = copy.deepcopy(original)
+                candidate['provider_accesses'][0]['enabled'] = enabled_a
+                candidate['provider_accesses'][1]['enabled'] = enabled_b
+                committed = await commit(candidate)
+                candidate['revision'] = revision
+                self.assertEqual(committed, candidate, 'only access flags and revision change')
+                expected = {provider for provider, enabled in (
+                    ('provider-a', enabled_a), ('provider-b', enabled_b)) if enabled}
+                self.assertEqual({row['provider_id'] for row in
+                    list_transcription_models(owner_user_id=OWNER)}, expected)
+                self.assertEqual(len(repository.secret_metadata(boundary)), secret_count)
+                for credential in original['credentials']:
+                    self.assertEqual(repository.resolve_secret(boundary,
+                        credential['secret_reference']), 'synthetic-speech-secret')
+
+        _new_loop_run(go())
+
+    async def _providers_with_shared_secret(self, cli, headers):
+        from lib.model_routing import ModelRoutingRepository, OwnerBoundary
+
+        repository = ModelRoutingRepository()
+        boundary = OwnerBoundary.create(OWNER)
+        for provider_id in ('shared-secret-first', 'shared-secret-second'):
+            created = await cli.post(
+                '/api/v1/providers', headers=headers,
+                json=native_test_provider_bundle(
+                    expected_revision=repository.get(boundary).revision,
+                    provider_id=provider_id, base_url='http://127.0.0.1:1/v1',
+                ),
+            )
+            self.assertEqual(created.status_code, 201, await created.get_data(as_text=True))
+        current = repository.get(boundary)
+        candidate = current.document
+        first = next(row for row in candidate['credentials']
+                     if row['provider_access_id'] == 'shared-secret-first-access')
+        second = next(row for row in candidate['credentials']
+                      if row['provider_access_id'] == 'shared-secret-second-access')
+        shared_reference = first['secret_reference']
+        second['secret_reference'] = shared_reference
+        committed = repository.compare_and_swap(
+            boundary, candidate, expected_revision=current.revision,
+        )
+        return repository, boundary, shared_reference, committed
+
+    def test_provider_delete_retains_a_secret_until_its_last_reference_is_removed(self):
+        async def go():
+            cli = self.app.test_client()
+            headers = {'Authorization': f'Bearer {self.token}'}
+            repository, boundary, shared_reference, committed = await self._providers_with_shared_secret(cli, headers)
+
+            stale = await cli.delete(
+                '/api/v1/providers/shared-secret-first', headers=headers,
+                json={'expected_revision': committed.revision - 1},
+            )
+            self.assertEqual(stale.status_code, 409)
+            self.assertEqual(repository.resolve_secret(boundary, shared_reference), 'sk-internal-secret')
+
+            removed = await cli.delete(
+                '/api/v1/providers/shared-secret-first', headers=headers,
+                json={'expected_revision': committed.revision},
+            )
+            self.assertEqual(removed.status_code, 200, await removed.get_data(as_text=True))
+            self.assertEqual(repository.resolve_secret(boundary, shared_reference), 'sk-internal-secret')
+            remaining = repository.get(boundary)
+            self.assertTrue(any(row['provider_id'] == 'shared-secret-second'
+                                for row in remaining.document['providers']))
+            removed_last = await cli.delete(
+                '/api/v1/providers/shared-secret-second', headers=headers,
+                json={'expected_revision': remaining.revision},
+            )
+            self.assertEqual(removed_last.status_code, 200)
+            self.assertNotIn(shared_reference, {
+                row['secret_reference'] for row in repository.secret_metadata(boundary)
+            })
+
+        _new_loop_run(go())
+
+    def test_credential_rotation_retains_secret_shared_by_another_provider(self):
+        async def go():
+            cli = self.app.test_client()
+            headers = {'Authorization': f'Bearer {self.token}'}
+            repository, boundary, shared_reference, committed = await self._providers_with_shared_secret(cli, headers)
+            rotated = await cli.put(
+                '/api/v1/model-routing/credentials/shared-secret-first-credential/secret',
+                headers=headers,
+                json={'expected_revision': committed.revision, 'secret': 'sk-rotated-fixture'},
+            )
+            self.assertEqual(rotated.status_code, 200, await rotated.get_data(as_text=True))
+            current = repository.get(boundary)
+            first = next(row for row in current.document['credentials']
+                         if row['credential_id'] == 'shared-secret-first-credential')
+            self.assertEqual(repository.resolve_secret(boundary, first['secret_reference']), 'sk-rotated-fixture')
+            self.assertEqual(repository.resolve_secret(boundary, shared_reference), 'sk-internal-secret')
 
         _new_loop_run(go())
 
@@ -683,6 +867,66 @@ class LegacyKeyHintRefreshTest(unittest.TestCase):
             self.assertEqual(persisted['key_hint'], expected)
 
         _new_loop_run(go())
+
+
+class StorageOutageStatusTest(unittest.TestCase):
+    """A storage outage behind the repository is a retryable 503.
+
+    2026-10-27: while storage was fenced, GET /api/v4/model-routing answered
+    500 internal_error ("Uncaught: ... model-routing authority is
+    temporarily unavailable"), and the mutation routes map the same domain
+    kind through ``_error`` to a 400 client error.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from quart import Quart
+        cls.app = Quart(__name__, static_folder=None)
+        cls.app.config.setdefault('PROVIDE_AUTOMATIC_OPTIONS', True)
+        cls.app.config['TESTING'] = True
+        from lib.http_transport.error_handlers import register_http_error_handlers
+        register_http_error_handlers(cls.app)
+        from routes.api_v1.auth import (
+            attach_rate_headers, bearer_auth_before_request,
+        )
+        cls.app.before_request(bearer_auth_before_request)
+        cls.app.after_request(attach_rate_headers)
+
+        from routes.api_v1.providers import api_v1_providers_bp
+        cls.app.register_blueprint(api_v1_providers_bp)
+
+        from lib.api_keys import create_key
+        _row, cls.token = create_key(
+            owner_user_id=OWNER, name='storage-outage', scopes=['providers'])
+
+    def test_model_routing_reports_storage_outage_as_retryable_503(self):
+        from lib.model_routing import ModelRoutingRepository, empty_document
+        from lib.storage.errors import StorageError
+
+        class _FencedClient:
+            def query(self, _operation, _payload):
+                raise StorageError(
+                    'database_unavailable', 'storage runtime is fenced',
+                    retryable=True, retry_after_ms=2000)
+
+        async def go():
+            cli = self.app.test_client()
+            headers = {'Authorization': f'Bearer {self.token}'}
+            with mock.patch.object(
+                    ModelRoutingRepository, '_client',
+                    lambda _self, **_kwargs: _FencedClient()):
+                read = await cli.get('/api/v1/model-routing', headers=headers)
+                write = await cli.put(
+                    '/api/v1/model-routing', headers=headers,
+                    json={'expected_revision': 0,
+                          'model_routing': empty_document()})
+            return (read.status_code, await read.get_json(),
+                    write.status_code, await write.get_json())
+
+        read_status, read_body, write_status, write_body = _new_loop_run(go())
+        self.assertEqual(read_status, 503, read_body)
+        self.assertEqual(write_status, 503, write_body)
+
 
 if __name__ == '__main__':
     unittest.main()

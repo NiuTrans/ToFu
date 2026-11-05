@@ -16,6 +16,7 @@ from pathlib import Path
 import stat
 from typing import Any
 
+from lib.error_envelope import BadRequest
 from lib.identity import require_user_id
 from runtime_path_policy import get_runtime_base
 
@@ -24,9 +25,25 @@ WORKSPACE_CONFIG_KEY = '_conversationWorkspace'
 
 def _workspace_path(conversation_id: str, owner_user_id: int) -> Path:
     if not isinstance(conversation_id, str) or not conversation_id or len(conversation_id) > 256:
-        raise ValueError('A bounded conversation identity is required for a workspace')
+        raise BadRequest(
+            'A bounded conversation identity is required for a workspace',
+            field='conversationId')
     digest = sha256(conversation_id.encode('utf-8')).hexdigest()
     return Path(get_runtime_base()) / 'data' / 'conversation_workspaces' / f'u{owner_user_id}' / digest
+
+
+def is_conversation_workspace(path: Any, conversation_id: str, owner_user_id: int) -> bool:
+    """Whether ``path`` is this conversation's application-owned private root.
+
+    Inherited configs (background-command wakes) keep the path but not the
+    ``WORKSPACE_CONFIG_KEY`` marker, so identity is decided by the path itself.
+    """
+    if not isinstance(path, str) or not path:
+        return False
+    try:
+        return Path(path) == _workspace_path(conversation_id, owner_user_id)
+    except ValueError:
+        return False
 
 
 def resolve_workspace_config(config: Mapping[str, Any], conversation_id: str,
@@ -40,23 +57,29 @@ def resolve_workspace_config(config: Mapping[str, Any], conversation_id: str,
     """
     result = dict(config)
     from lib.tasks_pkg.chat_mode import normalize_chat_mode
+    # Caller-owned tool schemas are a list; a mapping is the owner's tool
+    # preference block and selects no tools.
+    caller_tools = result.get('tools')
     if (normalize_chat_mode(result) is None or result.get('project_remote')
-            or result.get('tools') or result.get('_explicitToolSchemas')
+            or (isinstance(caller_tools, list) and caller_tools)
+            or result.get('_explicitToolSchemas')
             or '_projectDispatchAdmission' in result):
         return result
     path = result.get('projectPath') or ''
     if not isinstance(path, str):
-        raise ValueError('projectPath must be a string')
+        raise BadRequest('projectPath must be a string', field='config.projectPath')
     extras = result.get('projectPaths') or []
     readonly = result.get('readOnlyPaths') or []
     if (not isinstance(extras, list) or not isinstance(readonly, list)
             or any(not isinstance(root, str) or not root for root in extras + readonly)):
-        raise ValueError('Workspace root lists must contain nonempty paths')
+        raise BadRequest('Workspace root lists must contain nonempty paths')
     if not path and extras:
         path = extras[0]
         result['projectPath'] = path
     if not path and readonly:
-        raise ValueError('Read-only roots require an explicit workspace selection')
+        raise BadRequest(
+            'Read-only roots require an explicit workspace selection',
+            field='config.readOnlyPaths')
     if path:
         # Existing roots remain a host/user selection. Never inspect siblings or
         # reinterpret a remote pseudo-path as a server-local directory.

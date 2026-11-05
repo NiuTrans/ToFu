@@ -28,7 +28,7 @@ Quota/billing errors (HTTP 402 / 429-insufficient_quota) are recorded at
 **(key, model)** granularity (``exhausted_models``) whenever the observing
 slot names a model — on an aggregating gateway one key proxies several
 upstream vendors, so a billing-stop on one model must not cross-poison the
-others (2026-07-28: qwen→Aliyun quota-death on a sankuai key must not stop
+others (2026-07-28: qwen→Aliyun quota-death on a example-corp key must not stop
 kimi→Moonshot on the same key). Callers that cannot name a model still flip
 the key-wide ``exhausted`` flag. Manual overrides keep winning over BOTH for
 ordinary interactive admission (user supremacy); the Settings card surfaces
@@ -38,8 +38,8 @@ manual ON for that request only and cannot be promoted as last resort.
 
 Namespace fold (account/face separation, charter #23):
   History may have been recorded under an absorbed duplicate face CARD
-  (``sankuai_anthropic::…``) while the UI renders one card per ACCOUNT
-  (``sankuai::…``). At every load, ``_fold_namespaces_unlocked`` folds such
+  (``example_corp_anthropic::…``) while the UI renders one card per ACCOUNT
+  (``example-corp::…``). At every load and commit, ``_fold_namespaces`` folds such
   namespaces into their account using
   ``lib.llm_dispatch.provider_face.account_namespace_map`` — so a
   billing-stop or a PERSISTENT manual override can never be orphaned onto
@@ -50,7 +50,9 @@ Last-resort guard:
   The auto-disable logic (exhausted flag + success-rate threshold) will NEVER
   leave a provider with zero usable keys.  If disabling a key would remove the
   last raw-enabled key from its provider, it is kept enabled as a "last resort"
-  (see :func:`is_key_enabled`).  Explicit user overrides ``set_key_override(..,
+  (see :func:`is_key_enabled`). A provider's keys are the credentials of its
+  live dispatcher slots, which the slot pool indexes as slots are published
+  and withdrawn.  Explicit user overrides ``set_key_override(..,
   False)`` still take precedence and can force-disable even the last key.
 
 Persistence:
@@ -74,24 +76,31 @@ Persistence:
   ``overrides`` is **not** scoped to the stored ``day`` — it carries over
   across day rollovers so manual decisions survive restarts.
 
-Thread-safe. Reads happen on the dispatcher hot path, so an in-memory snapshot
-is kept and only persisted on writes.
+  Health counters are reconstructible telemetry: recording updates the
+  in-memory snapshot at once, and one coalesced background flush per
+  ``KEY_STATS_FLUSH_INTERVAL_SECONDS`` (plus :func:`shutdown_key_stats` at
+  shutdown and interpreter exit, which waits out a commit in progress)
+  merges them into the latest document under the store's cross-process lock. Manual overrides and billing stops are
+  admission decisions committed to disk before their call returns.
+
+Thread-safe. Reads and recording happen on the dispatcher hot path, so an
+in-memory snapshot is kept and no request thread writes the file.
 
 ────────────────────────────────────────────────────────────────────────────
 This module was split into a FACADE-PRESERVING PACKAGE.  All the shared
-mutable singletons (``_cache``, ``_lock``, ``_siblings_cache``,
-``_siblings_lock``, ``_last_resort_logged``, ``_STATS_PATH``,
-``_SIBLINGS_TTL_SEC``) live in exactly ONE place — ``lib.key_stats._state`` —
+mutable singletons (``_cache``, ``_lock``, ``_last_resort_logged``,
+``_STATS_PATH``) live in exactly ONE place — ``lib.key_stats._state`` —
 and are re-exported here BY REFERENCE, so every ``from lib.key_stats import X``
 call site keeps working byte-identically and there is exactly one ``_cache`` /
 ``_lock`` in the process.
 
 Sub-modules:
-  _state   — shared singletons + low-level cache helpers
+  _state   — shared singletons, low-level cache helpers and persistence
   _record  — hot-path outcome recording (record_outcome / record_rate_limit /
              mark_key_exhausted)
   _admission — request-local strict billing-stop policy for optional work
-  _enable  — raw-enabled + last-resort guard + is_key_enabled
+  _enable  — raw-enabled + last-resort guard + is_key_enabled, and
+             key_admission_batch (one store-freshness check per selection)
   _query   — read/snapshot API + manual overrides
 """
 
@@ -101,7 +110,6 @@ from lib.log import get_logger
 from lib.key_stats._state import (
     MIN_ATTEMPTS,
     MIN_SUCCESS_RATE,
-    _SIBLINGS_TTL_SEC,
     _STATS_PATH,
     _cache,
     _ensure_fresh_unlocked,
@@ -111,9 +119,9 @@ from lib.key_stats._state import (
     _lock,
     _new_entry,
     _pair_key,
-    _siblings_cache,
-    _siblings_lock,
     _today,
+    flush_key_stats,
+    shutdown_key_stats,
 )
 
 # ── Hot-path recording ──
@@ -138,6 +146,7 @@ from lib.key_stats._enable import (
     _rank_for_last_resort_unlocked,
     _raw_enabled_unlocked,
     is_key_enabled,
+    key_admission_batch,
 )
 
 # ── Read/snapshot API + manual overrides ──
@@ -150,7 +159,6 @@ from lib.key_stats._query import (
 
 logger = get_logger(__name__)
 
-# NOTE: preserved verbatim from the original lib/key_stats.py.
 __all__ = [
     'record_outcome',
     'record_rate_limit',
@@ -159,10 +167,13 @@ __all__ = [
     'get_today_stats',
     'get_all_stats',
     'is_key_enabled',
+    'key_admission_batch',
     'strict_billing_stop_admission',
     'is_strict_billing_stop_admission',
     'set_key_override',
     'clear_key_override',
+    'flush_key_stats',
+    'shutdown_key_stats',
     'MIN_ATTEMPTS',
     'MIN_SUCCESS_RATE',
 ]

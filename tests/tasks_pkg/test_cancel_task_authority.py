@@ -181,7 +181,8 @@ def test_v3_registry_miss_preserves_owner_tombstone_and_projection(monkeypatch, 
            'conversationId': 'conv', 'turnId': 'turn'}
     tombstones, events, revoked = [], [], []
     monkeypatch.setattr('lib.project_dispatch.recovery.revoke_conversation_dispatch',
-                        lambda cid, **kwargs: revoked.append((cid, kwargs)))
+                        lambda cid, **kwargs: revoked.append((cid, kwargs))
+                        or {'revoked': 0, 'withdrawal': 'complete'})
     monkeypatch.setattr(lifecycle, '_turn_client', lambda: SimpleNamespace(
         query=lambda operation, payload: row))
     monkeypatch.setattr(lifecycle, 'get_turn', lambda *a, **kw: {

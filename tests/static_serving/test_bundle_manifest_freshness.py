@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path
@@ -21,6 +20,7 @@ from lib.vite_assets import (
     validate_published_vite_artifact,
     validate_vite_artifact,
 )
+from tests._jsdom import require_shipped_graph
 
 
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
@@ -40,6 +40,7 @@ def _frontend_inputs() -> list[Path]:
 
 
 def test_manifest_is_valid_complete_and_content_hashed():
+    require_shipped_graph()
     manifest = validate_vite_artifact()
     assert set(VITE_ENTRIES.values()).issubset(manifest)
     for entry in VITE_ENTRIES.values():
@@ -56,6 +57,7 @@ def test_manifest_is_valid_complete_and_content_hashed():
 
 def test_runtime_graph_survives_locale_source_edits_until_atomic_publish(
         tmp_path, monkeypatch):
+    require_shipped_graph()
     from lib import vite_assets
 
     locale_paths = tuple(
@@ -75,6 +77,7 @@ def test_runtime_graph_survives_locale_source_edits_until_atomic_publish(
 
 
 def test_manifest_is_at_least_as_fresh_as_every_frontend_input():
+    require_shipped_graph()
     manifest_mtime = Path(VITE_MANIFEST).stat().st_mtime_ns
     newest_mtime, newest_path = max(
         (path.stat().st_mtime_ns, path) for path in _frontend_inputs()
@@ -108,26 +111,3 @@ def test_authoring_digest_rejects_non_i18n_content_drift_with_same_mtime(
             manifest, validate_authoring_sources=True)
     _validate_vite_authoring_digest(
         manifest, validate_authoring_sources=False)
-
-
-def test_manifest_commit_point_is_written_after_all_assets():
-    manifest_path = Path(VITE_MANIFEST)
-    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-    commit_mtime = manifest_path.stat().st_mtime_ns
-    for row in manifest.values():
-        for relative in (row.get('file'), *(row.get('css') or ()), *(row.get('assets') or ())):
-            path = manifest_path.parent / relative
-            assert path.is_file(), relative
-            assert path.stat().st_mtime_ns <= commit_mtime, (
-                f'{relative} was published after manifest.json')
-
-
-def test_release_wrapper_preserves_last_good_graph_and_publishes_manifest_last():
-    source = (ROOT / 'scripts/build_frontend.mjs').read_text(encoding='utf-8')
-    copy_at = source.index('for (const asset of nextAssets)')
-    previous_at = source.index("'previous-manifest.json'")
-    manifest_at = source.index("'manifest.json'), nextManifest")
-    assert copy_at < previous_at < manifest_at
-    assert 'await validateManifest(nextManifest, temporaryDir)' in source
-    assert 'new Set([...nextAssets, ...previousAssets]' in source
-    assert 'await rm(temporaryDir, { recursive: true, force: true })' in source

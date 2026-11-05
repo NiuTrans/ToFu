@@ -39,6 +39,15 @@ class TestFontRegistry:
                 assert s.size > 8000, f'{f.id} w{s.weight} size floor'
                 assert s.fmt in ('woff2', 'opentype', 'truetype')
 
+    def test_fontsource_downloads_use_immutable_release_urls(self):
+        import re
+
+        for face in fonts.FONT_REGISTRY:
+            for source in face.sources:
+                if '/fontsource/fonts/' in source.url:
+                    assert re.search(r'@\d+\.\d+\.\d+/', source.url), (
+                        f'{face.id}: a floating release can invalidate audited bytes')
+
     def test_every_license_exists_and_has_evidence_url(self):
         for f in fonts.FONT_REGISTRY:
             lic = fonts.LICENSES.get(f.license_id)

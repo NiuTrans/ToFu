@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -50,16 +50,9 @@ global._pvT = (_key, fallback) => fallback;
 global._pvEsc = (value) => String(value);
 global._pmSeedModel = () => {};
 global._pmAdoptModel = (_kind, model) => { _pvideo.artifactModel = model; };
-global.paperDetachPush = () => { calls.detach++; };
 let push = null;
-global.paperAttachPush = (_state, taskId, options) => { push = { taskId, options }; };
-global.paperIngestEvent = (state, event, consume) => consume(state, event);
-global.taskReplayIngestPage = (state, page, consume, cursor) => {
-  let changed = false;
-  for (const event of page.events || []) changed = Boolean(consume(state, event)) || changed;
-  return { accepted:(page.events || []).length,
-    nextCursor:page.next_cursor ?? cursor, changed };
-};
+global.pushSubscribe = (_channel, taskId, handler) => { push = { taskId, handler }; };
+global.pushUnsubscribe = () => { push = null; calls.detach++; };
 const oldCreated = Date.now() - 180000, oldUpdated = Date.now() - 45000;
 let pollResponse = { ok:true, done:false, next_cursor:1,
   events:[{ type:'phase_started', phase:'compose', phases:['compose','render'], phase_index:1 }] };
@@ -91,10 +84,10 @@ const VideoRuntime = global.TofuTestBundle;
     pushTask:push && push.taskId };
   pollResponse = { ok:true, done:true, status:'done', next_cursor:2, events:[],
     model:'m-done', result:{ duration:12 }, artifact_quality:{ degraded:false } };
-  const terminalPoll = VideoRuntime.pollVideoOnce();
+  const terminalPoll = VideoRuntime.videoTaskObserver.poll();
   await terminalPoll;
   const terminal = { status:_pvideo.status, taskId:_pvideo.taskId,
-    cursor:_pvideo.cursor, doneId:_pvideo._doneTaskId, model:_pvideo.artifactModel };
+    doneId:_pvideo._doneTaskId, model:_pvideo.artifactModel };
 
   const scenePaintsBeforeStaleReply = calls.scenePaints;
   // The terminal poll started a scene request. Switching papers must fence it.
@@ -111,14 +104,14 @@ const VideoRuntime = global.TofuTestBundle;
 
   pollResponse = { ok:true, done:true, status:'done', events:[], result:{applied:false} };
   const beforeRevisionLoad = _pvideo._sceneLoadGeneration;
-  await VideoRuntime.pollVideoOnce();
+  await VideoRuntime.videoTaskObserver.poll();
   const keptRevision = _pvideo.status === 'done' && !_pvideo.regenTaskId && !!_pvideo.revisionMessage && _pvideo._sceneLoadGeneration === beforeRevisionLoad;
   _pvideo.regenTaskId = 'failed-revision';
   pollResponse = { ok:true, done:true, status:'error', events:[], error:{kind:'quality_failed'} };
-  await VideoRuntime.pollVideoOnce();
+  await VideoRuntime.videoTaskObserver.poll();
   const failedRevisionKept = _pvideo.status === 'done' && !!_pvideo.revisionMessage;
-  _pvideo.regenTaskId = 'lost-revision'; _pvideo.pollFails = 4;
-  VideoRuntime.failVideoPoll();
+  _pvideo.regenTaskId = 'lost-revision'; pollResponse = null;
+  for (let i = 0; i < 5; i++) await VideoRuntime.videoTaskObserver.poll();
   const lostRevisionKept = _pvideo.status === 'done' && !_pvideo.regenTaskId;
   let pendingRevision;
   Api.motion.regenScene = async () => new Promise(resolve => { pendingRevision = resolve; });
@@ -146,18 +139,14 @@ const VideoRuntime = global.TofuTestBundle;
   console.log(JSON.stringify({ reattach, terminal, oldScenesFenced,
     keptRevision, failedRevisionKept, lostRevisionKept, staleRevisionFenced, stoppedStartFenced,
     regenAttached, regens:calls.regens, staleFenced, aborts:calls.aborts,
-    destroyed:_pvideo.taskId === '' && _pvideo.regenTaskId === '' && !_pvideo.pollTimer,
+    destroyed:_pvideo.taskId === '' && _pvideo.regenTaskId === '' && !push,
     leakedGlobal:typeof global._initVideoTab === 'function' }));
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD)
-    or not os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom')),
-    reason='node/jsdom/esbuild dev dependencies required',
-)
 def test_compiled_video_runtime_owns_tasks_and_fences_scene_races(tmp_path):
+    require_node_modules('jsdom', 'vite')
     built = tmp_path / 'video-runtime.js'
     compiled = subprocess.run(
         [ESBUILD, SOURCE, '--bundle', '--format=iife', '--platform=browser',
@@ -173,8 +162,7 @@ def test_compiled_video_runtime_owns_tasks_and_fences_scene_races(tmp_path):
         'oldActivity': True, 'pushTask': 'video-live',
     }
     assert result['terminal'] == {
-        'status': 'done', 'taskId': '', 'cursor': 2,
-        'doneId': 'video-live', 'model': 'm-done',
+        'status': 'done', 'taskId': '',         'doneId': 'video-live', 'model': 'm-done',
     }
     assert result['oldScenesFenced']
     assert result['regenAttached']

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from tests._runtime_sections import native_module_path, runtime_section_names
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -19,10 +19,6 @@ DIALOG_BUNDLE = native_module_path("dialog-controller.js", DIALOG_SOURCE)
 LAZY_DIALOG_BUNDLE = native_module_path(
     "lazy-dialog-controller.js",
     ROOT / "frontend/src/lazy-dialog-controller.ts",
-)
-HAS_BROWSER_DEPS = bool(
-    shutil.which("node")
-    and (ROOT / "node_modules/jsdom/package.json").is_file()
 )
 
 
@@ -207,8 +203,7 @@ function createEnvironment() {
 
 @pytest.fixture(scope="module")
 def dialog_behavior() -> dict:
-    if not HAS_BROWSER_DEPS:
-        pytest.skip("node + jsdom dev dependencies are required")
+    require_node_modules('jsdom')
     result = subprocess.run(
         ["node", "-e", _HARNESS, DIALOG_BUNDLE, LAZY_DIALOG_BUNDLE],
         cwd=ROOT,

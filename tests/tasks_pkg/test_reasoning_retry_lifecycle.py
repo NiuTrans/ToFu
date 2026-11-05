@@ -1,4 +1,6 @@
 """Reasoning retries keep intent; only a selected route may authorize its wire."""
+
+import lib.tasks_pkg.llm_fallback._recovery as _fallback_recovery
 from copy import deepcopy
 from types import SimpleNamespace
 import json
@@ -73,7 +75,7 @@ def test_same_model_reactive_rebuild_keeps_explicit_profile_and_budget():
     from lib.llm.llm_errors import PromptTooLongError
     body = source_body()
     before = deepcopy(body)
-    rebuilt = _call._prepare_reactive_retry_body(
+    rebuilt = _fallback_recovery._prepare_reactive_retry_body(
         {'id': 'synthetic', 'config': {}}, body, body['model'], body['messages'],
         [], 'medium', True, PromptTooLongError('synthetic'), 'synthetic')
     assert rebuilt is not None
@@ -97,7 +99,7 @@ def test_reactive_pending_or_changed_destination_cannot_inherit_compilation(chan
                           reasoning_intent=body['_reasoning_intent'], defer_reasoning=True)
     before = deepcopy(body)
     model = 'different-destination' if changed_model else body['model']
-    retry = _call._prepare_reactive_retry_body(
+    retry = _fallback_recovery._prepare_reactive_retry_body(
         {'id': 'synthetic', 'config': {}}, body, model, body['messages'],
         [], 'medium', True, PromptTooLongError('synthetic'), 'synthetic')
     assert retry is not None

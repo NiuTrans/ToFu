@@ -57,7 +57,7 @@ export function selectGoalProgress(
       const calls = Array.isArray(agent._toolCalls) ? agent._toolCalls : [];
       const latest = calls[calls.length - 1];
       workers.push({
-        text: String(agent.name || agent.id).slice(0, 160),
+        text: String(agent.name || agent.id).slice(0, 160), status: String(agent.status),
         phase: String(agent.phase || agent.status), waitReason: String(agent.waitReason || ''),
         ...(latest ? { latestTool: [latest.toolName || latest.tool, latest.argsBrief].filter(Boolean).join(' · ').slice(0, 500) } : {}),
         ...(typeof latest?.error === 'string' ? { toolError: latest.error.slice(0, 500) } : {}),

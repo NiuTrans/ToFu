@@ -12,6 +12,7 @@ from collections.abc import Mapping
 # Feature names are stable contract keys, not provider or model names. A new
 # dialect adds an installed binding here and a focused serializer, not a regex.
 _FEATURE_PROTOCOLS = {
+    'chat_cache_breakpoints': 'openai',
     'responses_tool_search': 'responses',
     'responses_programmatic': 'responses',
     'responses_multi_agent': 'responses',
@@ -30,6 +31,12 @@ _FEATURE_PROTOCOLS = {
     'anthropic_tool_search': 'anthropic',
     'anthropic_compaction': 'anthropic',
 }
+# Gateway bindings ride HTTP headers rather than a protocol body, so one
+# declaration holds on every wire face of that gateway. Their serializer is
+# lib.llm.cache_affinity.CACHE_AFFINITY_HEADER_CARRIERS.
+_GATEWAY_FEATURES = frozenset({
+    'cache_affinity_mt_session_id',
+})
 _SUBSCRIPTION_FEATURES = frozenset({
     'responses_reasoning_replay', 'responses_prompt_cache',
     'responses_reasoning_summary',
@@ -47,7 +54,8 @@ def route_feature(profile, feature: str, *, protocol: str, oauth: str = '') -> b
     if not isinstance(profile, Mapping):
         return False
     wire = 'responses' if protocol == 'openai_responses' else protocol
-    if _FEATURE_PROTOCOLS.get(feature) != wire:
+    if (feature not in _GATEWAY_FEATURES
+            and _FEATURE_PROTOCOLS.get(feature) != wire):
         return False
     if oauth and feature not in _SUBSCRIPTION_FEATURES:
         return False

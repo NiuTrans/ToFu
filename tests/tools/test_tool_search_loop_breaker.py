@@ -548,3 +548,35 @@ def test_mcp_alias_keeps_server_hyphens_and_underscores():
         [_tool(name)], 'experiment', namespace='mcp__my_llm-server',
         namespace_by_name={name: 'my_llm-server'})
     assert [r['name'] for r in result['items']] == [name]
+
+
+def test_concurrent_identical_searches_are_both_counted():
+    """Calls of one round run concurrently (owner decision 2026-10-28); the
+    repeat counter must not lose an identical sibling search."""
+    import threading
+
+    from lib.tasks_pkg.handlers import tool_gateway as handler
+
+    readers = threading.Barrier(2)
+
+    class RacingCounts(dict):
+        """Both searches read the count before either writes, unless serialized."""
+
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            try:
+                readers.wait(timeout=1)
+            except threading.BrokenBarrierError:
+                pass
+            return value
+
+    task = {'_tool_search_query_counts': RacingCounts()}
+    seen = []
+    workers = [threading.Thread(target=lambda: seen.append(handler._note_search_query(
+        task, {'query': 'project_board_complete'}, _catalog()))) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(10)
+
+    assert sorted(seen) == [1, 2]

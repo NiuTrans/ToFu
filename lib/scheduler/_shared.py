@@ -10,8 +10,14 @@ import json
 import os as _os
 import re as _re
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
+
 from lib.log import get_logger
+# Owned by the turn projection. Scheduler dispatch still attaches it to
+# virtual-user continuations, which the turn lifecycle leaves unannotated.
+from lib.turn_projection_patch import build_turn_ctx_snapshot as build_turn_ctx_snapshot
 
 logger = get_logger(__name__)
 
@@ -346,12 +352,80 @@ def derive_condition_kind(check_instruction: str, condition_command: str) -> str
 #  Config builder
 # ═════════════════════════════════════════════════════════════════════════════
 
+# Explicit tool choices a deferred continuation (timer_create, await_device)
+# keeps from the turn that created it. build_task_config fills the remaining
+# keys from the target conversation; no default web search is granted to a
+# bare continuation and attended capabilities are not copied here.
+CONTINUATION_TOOL_CHOICES = (
+    "projectPath", "searchMode", "fetchEnabled", "codeExecEnabled",
+    "browserEnabled", "browserClientId", "imageGenEnabled",
+    "memoryEnabled", "autoTranslate", "uiLang",
+)
+
+
+#: The creating turn's policy that a deferred continuation (timer_create,
+#: await_device) reproduces. Both capture these server-side from the creating
+#: task's accepted config (:func:`capture_continuation_policy`) into the
+#: continuation's tools config; :func:`continuation_policy` replays them.
+#: Model-authored scheduler payloads (the ``schedule_create`` tools_config)
+#: never reach that override.
+CONTINUATION_POLICY_KEYS = (
+    # Model route, reasoning and call parameters.
+    'model', 'preset', 'modelRef', 'preferredProviderId', 'routing',
+    'thinkingDepth', 'thinkingEnabled', 'maxTokens', 'temperature',
+    # Prompt, interaction mode and tool exposure. With the preference blocks
+    # below these are the model-replay policy witness fields a continuation
+    # can share with its creator, so it reuses the creator's replayed context
+    # instead of rebuilding it.
+    'systemPrompt', 'systemPromptMode', 'systemPromptBlocks',
+    'chatMode', 'delegateMode', 'schedulerEnabled', 'mcpToolExposure',
+    # The creating turn's workspace binding, kept together with projectPath.
+    'projectPaths', 'readOnlyPaths',
+    # Owner experiment preferences. Only mappings: a list-valued ``tools`` is
+    # a caller-supplied schema grant and is never replayed.
+    'tools', 'cache', 'responses', 'compaction',
+)
+_PREFERENCE_BLOCKS = frozenset({'tools', 'cache', 'responses', 'compaction'})
+
+
+def capture_continuation_policy(config: Mapping[str, Any]) -> dict:
+    """Snapshot the creating task's policy that its deferred continuation replays."""
+    return {key: config[key] for key in CONTINUATION_POLICY_KEYS
+            if key in config and (key not in _PREFERENCE_BLOCKS
+                                  or isinstance(config[key], Mapping))}
+
+
+def continuation_policy(tools_config: Mapping[str, Any]) -> dict:
+    """Return a timer's captured creating-turn policy as one config override.
+
+    The route is replaced as a unit: ``modelRef`` binds routing, so mixing a
+    captured ``model`` with the conversation's ``modelRef`` (or the reverse)
+    could pair one model's name with another model's route. A row created
+    before the capture carries no identity and yields ``{}``; the target
+    conversation's own selection then applies through :func:`build_task_config`.
+    """
+    if not (tools_config.get('model') or tools_config.get('modelRef')):
+        return {}
+    policy: dict[str, Any] = {
+        'modelRef': None, 'preferredProviderId': '', 'routing': {},
+        'thinkingDepth': None,
+    }
+    policy.update({key: tools_config[key] for key in CONTINUATION_POLICY_KEYS
+                   if key in tools_config})
+    policy.setdefault('preset', policy.get('model') or '')
+    return policy
+
+
 def build_task_config(tools_config: dict, conv_settings: dict) -> dict:
     """Build an agentic task config by merging tools_config with conversation settings.
 
     ``tools_config`` (from the timer / proactive task definition) takes
-    precedence; ``conv_settings`` (from the target conversation) provides
-    fallback values.
+    precedence for tool choices; ``conv_settings`` (from the target
+    conversation) provides fallback values. The model route, reasoning depth,
+    workspace roots and write-approval mode follow the conversation, resolved
+    by its config owner as for a human turn; a timer replays its creating
+    turn's policy on top (:func:`continuation_policy`). A definition's
+    model-authored ``tools_config`` never selects the model.
 
     Args:
         tools_config: Tool settings stored on the timer or scheduled task.
@@ -360,10 +434,33 @@ def build_task_config(tools_config: dict, conv_settings: dict) -> dict:
     Returns:
         Config dict suitable for ``create_task()``.
     """
+    from lib.conv_config import resolve_conv_config
+
+    conversation = resolve_conv_config(conv_settings, is_active=False)
+    # ``modelRef`` is the routing authority (task registration aligns
+    # ``config['model']`` to it), so the name follows the reference.
+    model = (conversation['modelRef'] or {}).get('model_id') or conversation['model']
     return {
-        'model': conv_settings.get('model') or tools_config.get('model', ''),
-        'preset': conv_settings.get('model') or tools_config.get('model', ''),
-        'thinkingEnabled': True,
+        'model': model,
+        'preset': model,
+        'modelRef': conversation['modelRef'],
+        'preferredProviderId': conversation['preferredProviderId'],
+        'routing': conversation['routing'],
+        'thinkingDepth': conversation['thinkingDepth'],
+        # A conversation without a reasoning choice keeps the scheduler's
+        # historical thinking-on default.
+        'thinkingEnabled': (True if conversation['thinkingEnabled'] is None
+                            else conversation['thinkingEnabled']),
+        # Extra and read-only roots are the conversation's workspace
+        # selection; a scheduled turn must not make a read-only root writable.
+        'projectPaths': conversation['projectPaths'],
+        'readOnlyPaths': conversation['readOnlyPaths'],
+        # The conversation's Manual write approval governs every turn in it.
+        'autoApply': conversation['autoApply'],
+        # A scheduled turn never gains an attended capability. Explicitly off
+        # is also how a human turn's policy witness records them.
+        'autopilot': False, 'autopilotEnabled': False,
+        'desktopEnabled': False, 'humanGuidanceEnabled': False,
         'searchMode': tools_config.get('searchMode', conv_settings.get('searchMode', 'multi')),
         'fetchEnabled': tools_config.get('fetchEnabled', conv_settings.get('fetchEnabled', True)),
         'projectPath': tools_config.get('projectPath', conv_settings.get('projectPath', '')),
@@ -382,52 +479,6 @@ def build_task_config(tools_config: dict, conv_settings: dict) -> dict:
         'uiLang': tools_config.get('uiLang', conv_settings.get('uiLang', '')),
     }
 
-
-def build_turn_ctx_snapshot(task_config: dict) -> dict | None:
-    """Build the per-turn context note (``_ctx``) for a scheduler-owned turn.
-
-    Human turns get this snapshot from the browser at send time
-    (``static/js/info-rail.js`` → ``payload['ctx']``); timer / proactive /
-    swarm-continuation turns never touch a browser, so the dispatch path
-    derives the same shape from the already-merged task config. Mirrors the
-    chip mapping of ``_collectTools()``/``_short()`` in info-rail.js; the
-    done frame's fact card (actualModel/actualDepth/actualModes) still
-    settles the note server-side. MCP/desktop chips are client-only state
-    and stay absent — the note records what THIS config guarantees.
-    """
-    tools = []
-    search_mode = str(task_config.get('searchMode') or 'off')
-    if search_mode != 'off':
-        tools.append({
-            'label': 'Search' if search_mode == 'single' else 'Search ×N',
-            'tone': 'search',
-        })
-    for key, label, tone in (
-        ('fetchEnabled', 'Fetch', 'net'),
-        ('browserEnabled', 'Browser', 'net'),
-        ('codeExecEnabled', 'Code Exec', 'code'),
-        ('memoryEnabled', 'Memory', 'ai'),
-        ('imageGenEnabled', 'Image Gen', 'ai'),
-        ('autoTranslate', 'Translate', 'ai'),
-    ):
-        if task_config.get(key):
-            tools.append({'label': label, 'tone': tone})
-    roots = []
-    project_path = str(task_config.get('projectPath') or '')
-    if project_path:
-        parts = [p for p in project_path.split('/') if p]
-        short = '/'.join(parts[-2:]) if len(parts) > 2 else project_path
-        roots.append({'short': short, 'path': project_path, 'ro': False})
-    model = str(task_config.get('model') or '')
-    if not tools and not roots and not model:
-        return None
-    return {
-        'roots': roots,
-        'tools': tools,
-        'modes': [],
-        'model': model,
-        'depth': '',
-    }
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  JSON decision parser
@@ -490,7 +541,7 @@ def build_poll_system_prompt(decision_key: str, tools_available: bool,
     if tools_available:
         tool_line = (
             "\n\nYou have access to tools (web_search, fetch_url, run_command, "
-            "read_files, grep_search, find_files, etc.) to actively "
+            "read_files, search_files, find_files, etc.) to actively "
             "gather information. Use them only when the provided data is "
             "insufficient, and minimise tool calls.")
     rules = _POLL_COMMON_RULES.format(key=decision_key) + extra_rules

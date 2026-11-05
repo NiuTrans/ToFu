@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from lib.identity import require_user_id
 from lib.storage.errors import StorageError
+from lib.turn_lifecycle import LifecycleNotFound
 
 
 if TYPE_CHECKING:
@@ -125,7 +126,7 @@ def resume_action(task_id, *, user_id):
     identity = {'user_id': owner, 'task_id': task_id}
     calls = ModelCalls.open(client, **identity)
     if calls is None:
-        raise LookupError('Research action not found')
+        raise LifecycleNotFound('Research action not found')
     ordinal = calls.latest_model_ordinal()
     if not ordinal:
         raise StorageError('database_conflict', 'Research action has no admitted checkpoint')

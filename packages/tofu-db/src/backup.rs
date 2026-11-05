@@ -12,7 +12,7 @@ use crate::backup_gc::{MarkMetrics, SpillMarkSet};
 use crate::block::{BlockId, BlockRemovalMetrics, BlockStore, BlockWriteMetrics, MAX_BLOCK_BYTES};
 use crate::control::{ControlFile, ControlState};
 use crate::engine::Engine;
-use crate::entity::visit_entity_page_graph_with_values;
+use crate::entity::{visit_entity_page_graph_with_values, visit_entity_page_graphs_once};
 use crate::history::{decode_segment, HistoryManifest};
 use crate::vfs::{
     sync_all_barrier, sync_directory_barrier, FileKind, OpenRequest, RealVfs, Vfs, VfsFile,
@@ -28,10 +28,8 @@ const RESTORE_MARKER: &str = "RESTORE";
 const RESTORE_TEMP_PREFIX: &str = ".restore-new-";
 const MAX_RESTORE_ROOT_ENTRIES: usize = 8;
 const MAX_PREFLIGHT_DIRECTORIES: u64 = 4_096;
-const MAX_PREFLIGHT_FILES: u64 = 20_000_000;
 const RESTORE_METADATA_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 const BACKUP_LOCK: &str = "BACKUP_LOCK";
-const MAX_GC_PHYSICAL_BLOCKS: usize = 50_000_000;
 const MAX_BACKUP_PINS: usize = 1_024;
 const PRUNE_MARKER: &str = "PRUNE";
 const PRUNE_MAGIC: &[u8; 8] = b"TDBPRN01";
@@ -199,9 +197,10 @@ fn bounded_directory_bytes_inner(
         &Path,
     ) -> io::Result<Vec<(std::path::PathBuf, bool, bool, u64)>>,
 ) -> io::Result<u64> {
+    // The walk holds one directory's entries and the pending directory stack,
+    // so the number of files bounds no memory and refuses nothing.
     let mut pending = vec![root.to_owned()];
     let mut directory_count = 0_u64;
-    let mut file_count = 0_u64;
     let mut total = 0_u64;
     while let Some(directory) = pending.pop() {
         directory_count = directory_count
@@ -217,12 +216,6 @@ fn bounded_directory_bytes_inner(
                 }
                 pending.push(path);
             } else if is_file {
-                file_count = file_count
-                    .checked_add(1)
-                    .ok_or_else(|| invalid_data("capacity file count overflow"))?;
-                if file_count > MAX_PREFLIGHT_FILES {
-                    return Err(invalid_input("capacity preflight file bound exceeded"));
-                }
                 total = total
                     .checked_add(len)
                     .ok_or_else(|| invalid_data("capacity byte count overflow"))?;
@@ -626,12 +619,32 @@ pub(crate) fn existing_manifests(snapshots_path: &Path, vfs: &dyn Vfs) -> io::Re
     Ok(manifests)
 }
 
+// Incremental copies: a block the destination already holds is neither
+// rewritten nor read back for comparison. Blocks whose bytes define further
+// references (pages, manifests, history segments) are still read from the
+// source; referenced leaves are copied only when absent.
 fn copy_block(source: &BlockStore, destination: &BlockStore, id: BlockId) -> io::Result<Vec<u8>> {
-    let payload = source.get(id)?;
+    let payload = source.get_traversal(id)?;
+    publish_copied_block(destination, id, &payload)?;
+    Ok(payload)
+}
+
+fn copy_leaf_block(source: &BlockStore, destination: &BlockStore, id: BlockId) -> io::Result<()> {
+    if destination.retain_held_block(id)? {
+        return Ok(());
+    }
+    let payload = source.get_traversal(id)?;
     if destination.put(&payload)? != id {
         return Err(invalid_data("backup block identity changed during copy"));
     }
-    Ok(payload)
+    Ok(())
+}
+
+fn publish_copied_block(destination: &BlockStore, id: BlockId, payload: &[u8]) -> io::Result<()> {
+    if !destination.retain_held_block(id)? && destination.put(payload)? != id {
+        return Err(invalid_data("backup block identity changed during copy"));
+    }
+    Ok(())
 }
 
 fn copy_entity_reachable_blocks(
@@ -641,25 +654,15 @@ fn copy_entity_reachable_blocks(
 ) -> io::Result<()> {
     visit_entity_page_graph_with_values(
         root,
-        |block_id| source.get(block_id),
-        |block_id, payload| {
-            if destination.put(payload)? != block_id {
-                return Err(invalid_data(
-                    "backup entity-page identity changed during copy",
-                ));
-            }
-            Ok(())
-        },
+        |block_id| source.get_traversal(block_id),
+        |block_id, payload| publish_copied_block(destination, block_id, payload),
         |key, value| {
-            visit_semantic_value_blocks(source, key, value, |block_id, payload| {
-                if destination.put(payload)? != block_id {
-                    return Err(invalid_data(
-                        "backup semantic-block identity changed during copy",
-                    ));
-                }
-                Ok(())
-            })?;
-            Ok(())
+            visit_semantic_value_references(
+                key,
+                value,
+                |block_id| copy_block(source, destination, block_id),
+                |block_id| copy_leaf_block(source, destination, block_id),
+            )
         },
     )?;
     Ok(())
@@ -669,29 +672,78 @@ pub(crate) fn visit_semantic_value_blocks<VisitBlock>(
     source: &BlockStore,
     key: &crate::entity::EntityKey,
     value: &[u8],
-    mut visit_block: VisitBlock,
+    visit_block: VisitBlock,
 ) -> io::Result<()>
 where
     VisitBlock: FnMut(BlockId, &[u8]) -> io::Result<()>,
 {
+    visit_semantic_value_blocks_with(key, value, |block_id| source.get(block_id), visit_block)
+}
+
+/// Every block an entity value reaches, with its payload, read through
+/// `read_block`. Copies and integrity walks need the bytes.
+pub(crate) fn visit_semantic_value_blocks_with<ReadBlock, VisitBlock>(
+    key: &crate::entity::EntityKey,
+    value: &[u8],
+    mut read_block: ReadBlock,
+    mut visit_block: VisitBlock,
+) -> io::Result<()>
+where
+    ReadBlock: FnMut(BlockId) -> io::Result<Vec<u8>>,
+    VisitBlock: FnMut(BlockId, &[u8]) -> io::Result<()>,
+{
     if let Some(block_id) = crate::stream::stored_segment_block_reference(key, value)? {
-        let payload = source.get(block_id)?;
+        let payload = read_block(block_id)?;
         visit_block(block_id, &payload)?;
     }
-    let reference = crate::versioned_document::stored_blob_reference(value)?
-        .or(crate::receipt::stored_blob_reference(value)?)
-        .or(crate::logical_outbox::stored_blob_reference(value)?)
-        .or(crate::artifact::stored_blob_reference(key, value)?);
-    if let Some(reference) = reference {
+    if let Some(reference) = semantic_value_blob_reference(key, value)? {
         crate::blob::visit_blob_graph(
             key.tenant_id(),
             key.owner_user_id(),
             reference,
-            |block_id| source.get(block_id),
+            read_block,
             |block_id, payload| visit_block(block_id, payload),
         )?;
     }
     Ok(())
+}
+
+/// The same block identities as `visit_semantic_value_blocks`, for marks
+/// that need reachability only. Stream segments and blob chunks are leaves:
+/// their payloads hold no references, so only blob manifests are read.
+pub(crate) fn visit_semantic_value_references<ReadBlock, VisitReference>(
+    key: &crate::entity::EntityKey,
+    value: &[u8],
+    read_block: ReadBlock,
+    mut visit_reference: VisitReference,
+) -> io::Result<()>
+where
+    ReadBlock: FnMut(BlockId) -> io::Result<Vec<u8>>,
+    VisitReference: FnMut(BlockId) -> io::Result<()>,
+{
+    if let Some(block_id) = crate::stream::stored_segment_block_reference(key, value)? {
+        visit_reference(block_id)?;
+    }
+    if let Some(reference) = semantic_value_blob_reference(key, value)? {
+        crate::blob::visit_blob_references(
+            key.tenant_id(),
+            key.owner_user_id(),
+            reference,
+            read_block,
+            visit_reference,
+        )?;
+    }
+    Ok(())
+}
+
+fn semantic_value_blob_reference(
+    key: &crate::entity::EntityKey,
+    value: &[u8],
+) -> io::Result<Option<crate::blob::BlobReference>> {
+    Ok(crate::versioned_document::stored_blob_reference(value)?
+        .or(crate::receipt::stored_blob_reference(value)?)
+        .or(crate::logical_outbox::stored_blob_reference(value)?)
+        .or(crate::artifact::stored_blob_reference(key, value)?))
 }
 
 pub(crate) fn copy_reachable_blocks(
@@ -703,8 +755,7 @@ pub(crate) fn copy_reachable_blocks(
     let Some(history_id) = manifest.history_manifest_block_id else {
         return Ok(());
     };
-    let history_bytes = copy_block(source, destination, history_id)?;
-    let history = HistoryManifest::decode(&history_bytes)?;
+    let history = HistoryManifest::load(history_id, |id| copy_block(source, destination, id))?;
     if history.checkpoint_sequence != manifest.checkpoint_sequence
         || history.checkpoint_hash != manifest.checkpoint_hash
     {
@@ -716,11 +767,11 @@ pub(crate) fn copy_reachable_blocks(
         let segment_bytes = copy_block(source, destination, reference.block_id)?;
         for transaction in decode_segment(&segment_bytes, reference)? {
             for block_id in transaction.envelope.block_ids {
-                copy_block(source, destination, block_id)?;
+                copy_leaf_block(source, destination, block_id)?;
             }
         }
     }
-    for id in source.history_payload_metadata_ids(&history)? { copy_block(source, destination, id)?; }
+    for id in source.history_payload_metadata_ids(&history)? { copy_leaf_block(source, destination, id)?; }
     Ok(())
 }
 
@@ -847,7 +898,7 @@ fn load_snapshot_history(
     let Some(history_id) = manifest.history_manifest_block_id else {
         return Ok(None);
     };
-    let history = HistoryManifest::decode(&source.get(history_id)?)?;
+    let history = HistoryManifest::load(history_id, |id| source.get(id))?;
     if history.checkpoint_sequence != manifest.checkpoint_sequence
         || history.checkpoint_hash != manifest.checkpoint_hash
     {
@@ -864,16 +915,11 @@ fn write_live_marks(
     backup_dir: &Path,
     vfs: Arc<dyn Vfs>,
 ) -> io::Result<(SpillMarkSet, MarkMetrics)> {
-    let latest = retained
-        .iter()
-        .max_by_key(|manifest| {
-            (
-                manifest.durable_sequence,
-                manifest.source_control_generation,
-            )
-        })
-        .ok_or_else(|| invalid_input("backup GC requires a retained generation"))?;
+    if retained.is_empty() {
+        return Err(invalid_input("backup GC requires a retained generation"));
+    }
     let mut live = SpillMarkSet::initialize(backup_dir, vfs)?;
+    let reader = source.traversal_reader(|| Ok(()))?;
     for manifest in retained {
         if let Some(Some(root)) = manifest.authority_state_root {
             live.insert(root)?;
@@ -884,7 +930,7 @@ fn write_live_marks(
         if let Some(history) = load_snapshot_history(source, manifest)? {
             for reference in &history.segments {
                 live.insert(reference.block_id)?;
-                let segment_bytes = source.get(reference.block_id)?;
+                let segment_bytes = reader.get(reference.block_id)?;
                 for transaction in decode_segment(&segment_bytes, reference)? {
                     for block_id in transaction.envelope.block_ids {
                         live.insert(block_id)?;
@@ -894,17 +940,22 @@ fn write_live_marks(
             for id in source.history_payload_metadata_ids(&history)? { live.insert(id)?; }
         }
     }
+    // Every retained generation stays restorable: a restore pinned to an
+    // older generation copies that generation's whole tree, not the newest.
+    let roots: Vec<Option<BlockId>> = retained
+        .iter()
+        .map(|manifest| manifest.authority_state_root.flatten())
+        .collect();
     {
         let live_cell = std::cell::RefCell::new(&mut live);
-        visit_entity_page_graph_with_values(
-            latest.authority_state_root.flatten(),
-            |block_id| source.get(block_id),
+        visit_entity_page_graphs_once(
+            &roots,
+            |block_id| reader.get(block_id),
             |block_id, _| live_cell.borrow_mut().insert(block_id),
             |key, value| {
-                visit_semantic_value_blocks(source, key, value, |block_id, _| {
+                visit_semantic_value_references(key, value, |block_id| reader.get(block_id), |block_id| {
                     live_cell.borrow_mut().insert(block_id)
-                })?;
-                Ok(())
+                })
             },
         )?;
     }
@@ -1014,7 +1065,7 @@ pub(crate) fn prune_backup_with_vfs(
     }
 
     let mut removal_metrics = BlockRemovalMetrics::default();
-    blocks.visit_block_shards(MAX_GC_PHYSICAL_BLOCKS, |shard, block_ids| {
+    blocks.visit_block_shards(|shard, block_ids| {
         let live_for_shard = live.live_for_shard(shard)?;
         let unreachable: Vec<_> = block_ids
             .into_iter()
@@ -1905,6 +1956,36 @@ mod tests {
     }
 
     #[test]
+    fn capacity_walk_sums_every_file_with_no_file_count_bound() {
+        // 1,000 directories of 20,001 files: more files than the retired
+        // 20,000,000 cap, generated per directory so memory stays one listing.
+        let directories = 1_000_u64;
+        let files_per_directory = 20_001_u64;
+        let leaf = Path::new("/leaf");
+        let total = bounded_directory_bytes_inner(Path::new("/root"), |directory| {
+            if directory == Path::new("/root") {
+                Ok((0..directories).map(|_| (leaf.to_path_buf(), true, false, 0)).collect())
+            } else {
+                Ok((0..files_per_directory)
+                    .map(|_| (std::path::PathBuf::new(), false, true, 3))
+                    .collect())
+            }
+        })
+        .unwrap();
+        assert_eq!(total, directories * files_per_directory * 3);
+
+        let too_many_directories = bounded_directory_bytes_inner(Path::new("/root"), |directory| {
+            if directory == Path::new("/root") {
+                Ok((0..MAX_PREFLIGHT_DIRECTORIES).map(|_| (leaf.to_path_buf(), true, false, 0)).collect())
+            } else {
+                Ok(Vec::new())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(too_many_directories.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
     fn backup_and_restore_reject_overlapping_directory_trees() {
         let source = tempfile::tempdir().unwrap();
         let mut engine = Engine::initialize(source.path()).unwrap();
@@ -1946,14 +2027,14 @@ mod tests {
     fn prune_retains_latest_generation_and_collects_only_unreachable_blocks() {
         let (_source, backup, engine, manifests) = three_generation_backup();
         let blocks = BlockStore::open(backup.path()).unwrap();
-        let before = blocks.list_block_ids(MAX_GC_PHYSICAL_BLOCKS).unwrap().len();
+        let before = blocks.list_block_ids(usize::MAX).unwrap().len();
         let metrics = prune_backup(backup.path(), 1).unwrap();
         assert_eq!(metrics.retained_generations, 1);
         assert_eq!(metrics.removed_generations, 2);
         assert_eq!(metrics.removed_blocks, 2);
         assert!(metrics.removed_block_bytes > 0);
         assert_eq!(
-            blocks.list_block_ids(MAX_GC_PHYSICAL_BLOCKS).unwrap().len(),
+            blocks.list_block_ids(before).unwrap().len(),
             before - 2
         );
 
@@ -2041,6 +2122,63 @@ mod tests {
         let metrics = prune_backup(backup.path(), 1).unwrap();
         assert_eq!(metrics.retained_generations, 1);
         assert_eq!(metrics.removed_generations, 1);
+    }
+
+    #[test]
+    fn prune_keeps_every_block_an_interrupted_restore_still_copies() {
+        let source = tempfile::tempdir().unwrap();
+        let backup = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let mut database = EntityDatabase::initialize(source.path()).unwrap();
+        // Commits rewrite pages, so each generation's tree has pages of its own.
+        database.set_write_overlay_enabled(false);
+        let keys: Vec<EntityKey> = (0..512_u32)
+            .map(|index| EntityKey::new(7, 11, "record", format!("{index:05}").as_bytes()).unwrap())
+            .collect();
+        let write_all = |database: &mut EntityDatabase, generation: u8| {
+            let mut write = database.begin(7, 11).unwrap();
+            for key in &keys {
+                database.put(&mut write, key.clone(), vec![generation; 256]).unwrap();
+            }
+            database.commit(write).unwrap();
+        };
+        let latest_manifest = || {
+            let (_, snapshots) = open_backup(backup.path(), Arc::new(RealVfs)).unwrap();
+            existing_manifests(&snapshots, &RealVfs)
+                .unwrap()
+                .into_iter()
+                .max_by_key(|manifest| manifest.durable_sequence)
+                .unwrap()
+        };
+
+        write_all(&mut database, 1);
+        create_incremental_backup(database.writer_engine_mut().unwrap(), backup.path()).unwrap();
+        // Retire the history that carried the first tree's pages, so the
+        // pinned generation reaches them only through its own tree.
+        let engine = database.writer_engine_mut().unwrap();
+        engine.commit(b"filler").unwrap();
+        engine.checkpoint().unwrap();
+        assert!(engine.compact_history(1).unwrap().retired_segments > 0);
+        create_incremental_backup(database.writer_engine_mut().unwrap(), backup.path()).unwrap();
+        let pinned = latest_manifest();
+        // A restore interrupted after publishing its pin and marker.
+        publish_restore_pin(backup.path(), target.path(), &pinned, &RealVfs).unwrap();
+        publish_restore_marker(target.path(), &pinned, &RealVfs).unwrap();
+
+        write_all(&mut database, 2);
+        create_incremental_backup(database.writer_engine_mut().unwrap(), backup.path()).unwrap();
+        assert_ne!(latest_manifest().authority_state_root, pinned.authority_state_root);
+        let metrics = prune_backup(backup.path(), 1).unwrap();
+        assert_eq!(metrics.retained_generations, 2);
+        drop(database);
+
+        let restored = restore_latest_backup(backup.path(), target.path()).unwrap();
+        assert_eq!(restored, pinned);
+        let reopened = EntityDatabase::open(target.path()).unwrap();
+        let mut read = reopened.begin(7, 11).unwrap();
+        for key in &keys {
+            assert_eq!(reopened.get(&mut read, key).unwrap(), Some(vec![1; 256]));
+        }
     }
 
     #[test]

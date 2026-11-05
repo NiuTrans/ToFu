@@ -113,6 +113,7 @@
 .ctx-bar-popover dt {color:var(--text-secondary)}
 .ctx-bar-popover dd {margin:0;text-align:right;overflow-wrap:anywhere}
 .ctx-pop-item {width:100%;text-align:left;padding:5px 7px}
+.ctx-pop-status {margin:0 0 var(--space-2);padding:5px 7px;border-radius:6px;background:var(--accent-subtle,rgba(127,127,127,.12));color:var(--text-secondary);font-size:12px;line-height:1.4}
 .ctx-pop-compact {border-top:1px solid var(--border)!important;border-radius:0!important}
 .turn-jump-panel {width:340px;padding:6px}
 .turn-jump-list {display:grid;gap:2px}

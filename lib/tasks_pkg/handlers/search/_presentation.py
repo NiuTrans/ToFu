@@ -11,11 +11,15 @@ from __future__ import annotations
 import json
 
 from lib.tasks_pkg.handlers.search._display import _vertical_header_for_llm
+from lib.log import get_logger
+from lib.tools.search import WEB_SEARCH_MAX_QUERY_CHARS
 from lib.tools.result_value import (
     CapturedToolResult, ResultPart, TrustedResultText, tool_result_failure_verdict,
 )
 
 SEARCH_PREVIEW_CONTENT_CHARS = 20_000
+
+logger = get_logger(__name__)
 
 
 def fetch_failure_text(item, *, task=None, round_entry=None):
@@ -86,7 +90,23 @@ def format_search_observations(observations, formatter):
                              source_omitted=True)
 
 
-def failed_search_observation(query):
+def failed_search_observation(query, failure=''):
     item = search_observation(query, [])
-    item['failure'] = f'Search failed for "{query}": internal error (see logs)'
+    item['failure'] = failure or f'Search failed for "{query}": internal error (see logs)'
     return item
+
+
+def oversized_query_refusal(query):
+    """Refusal text for a query no engine accepts; ``''`` when it may run.
+
+    Refusing beats truncating: a cut query silently changes what is searched,
+    while this tells the model what to fix.
+    """
+    length = len(query.strip())
+    if length <= WEB_SEARCH_MAX_QUERY_CHARS:
+        return ''
+    logger.info('[Search] web_search refused a %d-character query (limit %d)',
+                length, WEB_SEARCH_MAX_QUERY_CHARS)
+    return (f'Error: this search query is {length} characters; web_search accepts '
+            f'at most {WEB_SEARCH_MAX_QUERY_CHARS}, so it was not run. Shorten it '
+            'to keywords and search again.')

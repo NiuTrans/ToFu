@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 
 import pytest
@@ -54,12 +53,6 @@ JS_DIR = os.path.join(ROOT, 'static', 'js')
 INDEX_HTML = os.path.join(ROOT, 'index.html')
 STYLES_CSS = os.path.join(ROOT, 'static', 'styles.css')
 _CONV = os.path.join(JS_DIR, 'ui', 'conversation_list.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 def _extract_prepaint_script() -> str:
@@ -213,8 +206,6 @@ _EXPECTED = (
 )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_rail_cls_prepaint_and_sync():
     output = _run(_extract_prepaint_script())
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -223,8 +214,6 @@ def test_rail_cls_prepaint_and_sync():
         assert ('PASS ' + must) in output, output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_prepaint_stamp_is_load_bearing():
     """Neuter the pre-paint stamp: strip the setAttribute('data-rail', …) call
     from the extracted inline script → the pre-paint stamp checks FAIL (the

@@ -20,7 +20,7 @@ import pytest
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 BRIDGE_JS = ROOT / 'frontend/src/runtime/sections/feature-bridge.js'
-MAIN_TS = ROOT / 'frontend/src/main.ts'
+MAIN_TS = ROOT / 'frontend/src/application.ts'
 
 
 def _bridge_entry_points() -> list[str]:

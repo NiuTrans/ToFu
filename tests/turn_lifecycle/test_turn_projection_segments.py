@@ -1132,6 +1132,194 @@ def test_reference_browser_omits_round_cost_without_cny_authority():
     }
 
 
+def _browser_evidence_projection():
+    return {
+        "content": "final answer",
+        "segments": [
+            {"type": "thinking", "blockId": "thinking:llm-0", "text": "plan",
+             "signature": "sig-" + "s" * 2_000, "llmRound": 0},
+            {"type": "tool_use", "blockId": "tool:call-a", "id": "call-a",
+             "name": "search", "input": {"q": "x"},
+             "result": {"content": "hit", "status": "done"}, "llmRound": 0},
+            {"type": "text", "blockId": "text:terminal", "text": "final answer",
+             "terminal": True},
+        ],
+        "toolRounds": [{
+            "toolCallId": "call-a", "toolName": "search", "toolArgs": {"q": "x"},
+            "toolContent": "hit", "status": "done", "llmRound": 0,
+            "thinking": "plan", "thinkingSignature": "sig-" + "s" * 2_000,
+            "_anthropicContentBlocks": [{"type": "thinking", "signature": "opaque"}],
+        }],
+        "apiRounds": [{
+            "round": 1,
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+            "cacheBreak": {"reasons": [{"code": "cache_read_drop", "detail": "d"}]},
+            "writeBreakdown": {
+                "write": 900, "prevOutput": 10, "toolResults": 20,
+                "contextWrite": 0, "recacheBody": 870, "envelope": 0,
+                "readDrop": 5, "capped": False, "allocation": "estimated",
+                "totalsSource": "provider_usage",
+                "recacheCause": {"reasons": [{"code": "cache_read_drop",
+                                               "detail": "d" * 4_000}]},
+            },
+            "promptAdmission": {
+                "action": "admit", "totalTokens": 900, "messageTokens": 800,
+                "toolSchemaTokens": 100, "targetTokens": 1_000,
+                "measurementVersion": "tofu.prompt-admission/v2",
+                "contextWindowSource": "model_routing_v2",
+            },
+        }],
+        "timingTrace": {
+            "version": 1, "taskId": "task-a", "running": False, "tEnd": 20,
+            "clockSource": "server-monotonic", "coverage": "full", "totalMs": 19,
+            "tStart": 1, "status": "done", "source": "event-log",
+            "summary": {"totalMs": 19, "llmMs": 9, "toolMs": 5, "waitMs": 0,
+                        "compactionMs": 0, "approvalWaitMs": 0,
+                        "unattributedMs": 5, "ttftMs": 2, "overBudget": []},
+            "spans": [{"spanId": "s1", "parent": None, "depth": 0, "kind": "llm",
+                       "name": "model", "tStart": 1, "tEnd": 10,
+                       "status": "done", "attrs": {}}],
+            "statusHistory": [{"id": "h1", "phase": "llm", "attention": "progress",
+                               "tStart": 1, "lastObservedAt": 2, "count": 1}],
+        },
+    }
+
+
+def test_completed_browser_view_omits_replay_signatures_and_unrendered_detail():
+    from lib.turn_projection_segments import (
+        projection_with_reference_tool_segments,
+    )
+
+    source = _browser_evidence_projection()
+    before = deepcopy(source)
+    browser = projection_with_reference_tool_segments(source, status="completed")
+
+    assert source == before
+    assert "signature" not in browser["segments"][0]
+    assert browser["segments"][0]["text"] == "plan"
+    round_record = browser["toolRounds"][0]
+    assert "thinkingSignature" not in round_record
+    assert "_anthropicContentBlocks" not in round_record
+    assert round_record["thinking"] == "plan"
+    api_round = browser["apiRounds"][0]
+    assert api_round["cacheBreak"] is source["apiRounds"][0]["cacheBreak"]
+    assert api_round["writeBreakdown"] == {
+        "write": 900, "prevOutput": 10, "toolResults": 20, "contextWrite": 0,
+        "recacheBody": 870, "envelope": 0, "readDrop": 5, "capped": False,
+    }
+    assert api_round["promptAdmission"] == {
+        "action": "admit", "totalTokens": 900, "messageTokens": 800,
+        "toolSchemaTokens": 100, "targetTokens": 1_000,
+    }
+    # Exactly what presentTurnExecutionTiming reads; no span list remains to
+    # be addressed positionally because none of it is a compaction span.
+    assert browser["timingTrace"] == {
+        "version": 1, "taskId": "task-a", "running": False, "tEnd": 20,
+        "clockSource": "server-monotonic", "coverage": "full", "totalMs": 19,
+    }
+
+    compacted = deepcopy(source)
+    compacted["timingTrace"]["spans"].append({
+        "spanId": "c1", "parent": None, "depth": 0, "kind": "compaction",
+        "name": "compact", "tStart": 11, "tEnd": 15, "status": "done",
+        "attrs": {},
+    })
+    compacted_view = projection_with_reference_tool_segments(
+        compacted, status="completed",
+    )
+    assert compacted_view["timingTrace"]["spans"] is compacted["timingTrace"]["spans"]
+
+    for status in ("interrupted", "truncated", "failed"):
+        resumable = projection_with_reference_tool_segments(source, status=status)
+        assert resumable["segments"][0]["signature"] == before["segments"][0]["signature"]
+        assert resumable["toolRounds"][0]["thinkingSignature"] == before[
+            "toolRounds"][0]["thinkingSignature"]
+        assert resumable["timingTrace"] is source["timingTrace"]
+        assert resumable["apiRounds"] is source["apiRounds"]
+    for status in ("pending", "running"):
+        assert projection_with_reference_tool_segments(
+            source, status=status,
+        ) is source
+
+
+def test_client_edit_of_browser_view_restores_omitted_server_evidence():
+    from lib.turn_projection_segments import (
+        projection_with_reference_tool_segments,
+        projection_with_restored_browser_evidence,
+    )
+
+    authority = _browser_evidence_projection()
+    browser = projection_with_reference_tool_segments(
+        authority, status="completed",
+    )
+    # The generated client materializes roundRef segments before TurnStore.
+    edit = {
+        **browser,
+        "segments": [browser["segments"][0], authority["segments"][1],
+                     {**authority["segments"][2], "text": "edited answer"}],
+        "content": "edited answer",
+    }
+
+    restored = projection_with_restored_browser_evidence(edit, authority)
+
+    assert restored["content"] == "edited answer"
+    assert restored["segments"][2]["text"] == "edited answer"
+    assert restored["segments"][0]["signature"] == authority["segments"][0]["signature"]
+    assert restored["toolRounds"][0]["thinkingSignature"] == authority[
+        "toolRounds"][0]["thinkingSignature"]
+    assert restored["toolRounds"][0]["_anthropicContentBlocks"] == authority[
+        "toolRounds"][0]["_anthropicContentBlocks"]
+    assert restored["apiRounds"] is authority["apiRounds"]
+    assert restored["timingTrace"] is authority["timingTrace"]
+    assert projection_with_restored_browser_evidence(authority, authority) is authority
+
+    # A signature only proves the exact reasoning it signed, and an explicit
+    # client value is never replaced by server evidence.
+    rethought = deepcopy(edit)
+    rethought["segments"][0]["text"] = "different plan"
+    rethought["toolRounds"][0]["thinking"] = "different plan"
+    rethought["apiRounds"] = [{"round": 1}]
+    kept = projection_with_restored_browser_evidence(rethought, authority)
+    assert "signature" not in kept["segments"][0]
+    assert "thinkingSignature" not in kept["toolRounds"][0]
+    assert "_anthropicContentBlocks" not in kept["toolRounds"][0]
+    assert kept["apiRounds"] == [{"round": 1}]
+    assert kept["timingTrace"] is authority["timingTrace"]
+
+
+def test_shared_tool_documents_alias_only_identical_values_of_equal_length():
+    from lib.turn_projection_segments import snapshot_with_reference_tool_segments
+
+    repeated = "a" * 2_000
+    same_length = "b" * 2_000
+    unique = "c" * 3_000
+
+    def turn(index, contents):
+        return {"turnId": f"turn-{index}", "status": "running", "projection": {
+            "toolRounds": [{"toolCallId": f"call-{index}-{position}",
+                            "toolContent": content, "status": "done"}
+                           for position, content in enumerate(contents)],
+        }}
+
+    snapshot = {"conversationId": "c", "turns": [
+        turn(0, [repeated, same_length, unique]), turn(1, [unique + "d", repeated]),
+    ]}
+    before = deepcopy(snapshot)
+    view = snapshot_with_reference_tool_segments(snapshot)
+
+    assert snapshot == before
+    assert list(view["sharedToolDocuments"].values()) == [repeated]
+    rounds = [round_record for item in view["turns"]
+              for round_record in item["projection"]["toolRounds"]]
+    key = next(iter(view["sharedToolDocuments"]))
+    assert [round_record.get("_snapshotDocumentRefs") for round_record in rounds] == [
+        {"toolContent": key}, None, None, None, {"toolContent": key},
+    ]
+    assert [round_record.get("toolContent") for round_record in rounds] == [
+        None, same_length, unique, unique + "d", None,
+    ]
+
+
 def test_tool_segment_references_fail_closed_to_full_payloads():
     from lib.turn_projection_segments import (
         projection_with_reference_tool_segments,
@@ -1486,3 +1674,171 @@ def test_content_reference_encoding_errors_remain_inline(invalid_field):
     assert references == {}
     assert projected is source
     assert source == before
+
+
+@pytest.mark.parametrize('status', ['running', 'completed'])
+def test_captured_injection_projects_before_checkpoint_and_is_idempotent(status):
+    from lib.tasks_pkg.segments import INJECTED_NOTES_FIELD, record_injected_note
+    from lib.turn_lifecycle import capture_task_projection_source, _task_projection
+
+    task = {'id': 'task-note', '_attemptId': 'attempt-note', 'status': status,
+            'content': 'answer', 'toolRounds': [], 'segments': []}
+    note = record_injected_note(task, llm_round=0, kind='context-injection',
+                                reason='inbox_delivery', text='worker finding')
+    source = capture_task_projection_source(task, {'type': 'round_start'})
+    # The event owns a frozen receipt, not a reference to mutable task memory.
+    task[INJECTED_NOTES_FIELD][0]['text'] = 'later mutation'
+    first = _task_projection(source, {})
+    second = _task_projection(source, first)
+    assert second == first
+    notes = [s for s in first['segments'] if s['type'] == 'system_note']
+    assert len(notes) == 1
+    assert notes[0]['text'] == 'worker finding'
+    assert notes[0]['blockId'] == note['blockId']
+    assert first['segments'].index(notes[0]) < next(
+        i for i, s in enumerate(first['segments']) if s.get('terminal'))
+    assert INJECTED_NOTES_FIELD not in first
+
+
+def test_live_note_updates_in_place_without_erasing_earlier_attempt():
+    from lib.tasks_pkg.segments import INJECTED_NOTES_FIELD, record_injected_note
+    from lib.turn_lifecycle import _task_projection
+
+    old_task = {'id': 'old-task', '_attemptId': 'old', 'status': 'running'}
+    record_injected_note(old_task, llm_round=0, kind='context-injection',
+                         text='earlier attempt input')
+    previous = _task_projection(old_task, {})
+    task = {'id': 'new-task', '_attemptId': 'new', 'status': 'running'}
+    note = record_injected_note(task, llm_round=0, kind='context-injection',
+                                text='current input')
+    first = _task_projection(task, previous)
+    task[INJECTED_NOTES_FIELD][0]['text'] = 'current grouped input updated'
+    second = _task_projection(task, first)
+    notes = [s for s in second['segments'] if s['type'] == 'system_note']
+    assert [(s['attemptId'], s['text']) for s in notes] == [
+        ('old', 'earlier attempt input'), ('new', 'current grouped input updated')]
+    assert notes[1]['blockId'] == note['blockId']
+
+
+def test_completed_tool_repair_keeps_input_before_its_consuming_round():
+    from lib.tasks_pkg.segments import record_injected_note, assemble_segments, segments_to_json
+    from lib.turn_lifecycle import _task_projection
+
+    task = {'id': 'task-note', '_attemptId': 'attempt-note', 'status': 'running',
+            'content': '', 'toolRounds': [], 'segments': []}
+    note = record_injected_note(task, llm_round=0, kind='context-injection',
+                                reason='inbox_delivery', text='worker finding')
+    live = _task_projection(task, {})
+    task.update(status='completed', content='answer', toolRounds=[{
+        'roundNum': 1, 'llmRound': 0, 'toolCallId': 'tool-1', 'toolName': 'read_files',
+        'status': 'done', 'args': {}, 'result': 'evidence', 'text': 'checking evidence',
+        'taskId': 'task-note', 'attemptId': 'attempt-note',
+    }])
+    repaired = _task_projection(task, live)
+    expected = segments_to_json(assemble_segments(task))
+    assert [s['type'] for s in repaired['segments']] == [s['type'] for s in expected]
+    assert repaired['segments'][0]['blockId'] == note['blockId']
+    assert repaired['segments'][0]['text'] == 'worker finding'
+    assert _task_projection(task, repaired) == repaired
+
+
+@pytest.mark.parametrize('checkpoint', [False, True], ids=['live-repair', 'checkpoint'])
+def test_pending_live_note_precedes_same_round_terminal_narration(checkpoint):
+    from lib.tasks_pkg.segments import (
+        INJECTED_NOTES_FIELD, assemble_segments, record_injected_note, segments_to_json,
+    )
+    from lib.turn_lifecycle import capture_task_projection_source, _task_projection
+
+    task = {
+        'id': 'task-live', '_attemptId': 'attempt-live', 'status': 'running',
+        'content': 'I will check the evidence.', 'thinking': 'Inspect the source.',
+        'segments': [],
+        'toolRounds': [{
+            'roundNum': 1, 'llmRound': 0, 'toolCallId': 'call-live',
+            'toolName': 'read_files', 'toolArgs': {'path': 'source.py'},
+            'status': 'searching', 'taskId': 'task-live', 'attemptId': 'attempt-live',
+        }],
+    }
+    if checkpoint:
+        # The early tool is known, but its narration has not been stamped yet.
+        task['segments'] = segments_to_json(assemble_segments(task))
+    note = record_injected_note(
+        task, llm_round=0, kind='context-injection',
+        reason='inbox_delivery', text='pending worker finding',
+    )
+    source = capture_task_projection_source(task, {'type': 'tool_start'})
+    first = _task_projection(source, {})
+    expected = segments_to_json(assemble_segments(task))
+    expected_ids = [
+        note['blockId'], 'thinking:terminal', 'text:terminal', 'tool:call-live',
+    ]
+    assert [s['blockId'] for s in expected] == expected_ids
+    assert [s['blockId'] for s in first['segments']] == expected_ids
+    assert first['segments'][0]['llmRound'] == 0
+    assert first['segments'][1]['text'] == task['thinking']
+    assert first['segments'][2]['text'] == task['content']
+
+    # A later grouped receipt updates the same block in the committed prefix,
+    # rather than reassembling a checkpoint or appending another note.
+    before = deepcopy(first)
+    task.pop('segments')
+    task[INJECTED_NOTES_FIELD][0]['text'] = 'updated grouped worker finding'
+    updated = _task_projection(task, first)
+    assert first == before
+    assert [s['blockId'] for s in updated['segments']] == expected_ids
+    assert updated['segments'][0] == {
+        **first['segments'][0], 'text': 'updated grouped worker finding',
+    }
+    assert updated['segments'][1:] == first['segments'][1:]
+    assert _task_projection(task, updated) == updated
+    assert [s['blockId'] for s in segments_to_json(assemble_segments(task))] == expected_ids
+
+
+@pytest.mark.parametrize('identity_fields', [
+    ('attemptId',), ('taskId',), ('attemptId', 'taskId'),
+], ids=['attempt', 'task', 'attempt-and-task'])
+@pytest.mark.parametrize('note_round', [0, None], ids=['same-round', 'unknown-round'])
+def test_pending_note_terminal_anchor_stays_with_its_execution(identity_fields, note_round):
+    from lib.turn_projection_segments import projection_with_stable_segments
+
+    def scope(name):
+        return {field: f'{field}-{name}' for field in identity_fields}
+
+    earlier = {
+        'type': 'thinking', 'blockId': 'thinking:earlier',
+        'text': 'earlier attempt', 'terminal': True, **scope('earlier'),
+    }
+    current = {
+        'type': 'thinking', 'blockId': 'thinking:current',
+        'text': 'current narration', 'terminal': True, **scope('current'),
+    }
+    later = {
+        'type': 'text', 'blockId': 'text:later',
+        'text': 'later attempt', 'terminal': True, 'deliverable': True, **scope('later'),
+    }
+    source = {'content': 'later attempt', 'thinking': 'current narration', 'segments': [
+        earlier,
+        {'type': 'tool_use', 'blockId': 'tool:earlier', 'id': 'earlier',
+         'name': 'read_files', 'llmRound': 8, 'result': {}, **scope('earlier')},
+        current,
+        {'type': 'tool_use', 'blockId': 'tool:current', 'id': 'current',
+         'name': 'read_files', 'llmRound': 0, 'result': {}, **scope('current')},
+        later,
+    ]}
+    note = {
+        'kind': 'context-injection', 'blockId': 'system-note:current',
+        'text': 'current input', 'llmRound': note_round, **scope('current'),
+    }
+    before = deepcopy(source)
+    projected = projection_with_stable_segments(
+        source, status='running', injected_notes=[note],
+    )
+    assert source == before
+    assert [s['blockId'] for s in projected['segments']] == [
+        'thinking:earlier', 'tool:earlier', 'system-note:current',
+        'thinking:current', 'tool:current', 'text:later',
+    ]
+    assert [s for s in projected['segments'] if s['type'] != 'system_note'] == source['segments']
+    assert projection_with_stable_segments(
+        projected, status='running', injected_notes=[note],
+    ) == projected

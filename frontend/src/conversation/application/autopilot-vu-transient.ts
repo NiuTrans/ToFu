@@ -238,7 +238,8 @@ function settleUnfinishedToolRounds(
 ): UnknownRecord[] {
   return rounds.map((round) => {
     const status = text(round.status);
-    if (status !== 'running' && status !== 'searching' && status !== 'cancelling') {
+    if (status !== 'running' && status !== 'searching' && status !== 'queued'
+      && status !== 'cancelling') {
       return round;
     }
     return {
@@ -354,6 +355,8 @@ function applyToolProgress(
   if (spooling) next._partialOutputSpooling = true;
   if (terminalReason) next._partialOutputTerminalReason = terminalReason;
   if (inner.grepSearchIntercepted === true) next.grepSearchIntercepted = true;
+  // Handler entry of a call announced as queued.
+  if (text(inner.status) && next.status === 'queued') next.status = text(inner.status);
   return next;
 }
 
@@ -405,7 +408,7 @@ export function reduceAutopilotVuTransientTurn(
       roundNum: evt.roundNum,
       query: text(evt.query),
       results: null,
-      status: 'searching',
+      status: evt.status === 'queued' ? 'queued' : 'searching',
       toolName: text(evt.toolName),
       toolCallId: text(evt.toolCallId),
       toolArgs: evt.toolArgs ?? null,

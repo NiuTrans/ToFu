@@ -42,11 +42,14 @@ Five things (mirrors the memory pilot's acceptance criteria):
      `.recent-search-input` (0,1,0). The 16px bottom margin inflated
      `.recent-search` to 48px and dropped the absolute clear button ~8px
      below the input's true middle (the off-center × bug); the padding
-     bleed also killed the 30px right padding that keeps typed text clear
+     bleed also killed the 32px right padding that keeps typed text clear
      of the button. Fix: chain the authored selectors to
      `.recent-search .recent-search-input` (0,2,0) — mirrors the
      `.mp-add-row .mp-path-input` pattern. NC: un-chain the base rule in
      memory → padding flips to the bleed's 10px 12px.
+  6. SHARED FOLDER BROWSER — the same source-exclusion keeps the bleed off
+     `.folder-browser-input` (the browser draws its own filter/create fields
+     inside the Co-Pilot .modal); its NC reverts only that carve-out.
 """
 
 from __future__ import annotations
@@ -92,7 +95,15 @@ _TOFU_INTENDED_BORDER = '2px solid #3B2E1E'          # authored blocky border
 _TOFU_BLEED_BORDER = '1px solid rgba(184,176,160,0.4)'  # the over-broad bleed
 _BLEED_SELECTOR = (
     '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
-    'input:not(.recent-search-input)'
+    'input:not(.recent-search-input):not(.folder-browser-input)'
+)
+# The shared folder browser's filter inside the Co-Pilot modal:
+#   <div class="modal project-modal pm-workbench"> … <section class="folder-browser">
+#      <div class="folder-browser-search"><input class="folder-browser-input …">
+_FOLDER_BROWSER_INPUT = _Elem(
+    'input', {'folder-browser-input', 'folder-browser-filter'}, theme='tofu',
+    ancestors=[{'folder-browser-search'}, {'folder-browser'}, {'pm-browser-pane'},
+               {'modal', 'project-modal', 'pm-workbench'}],
 )
 
 
@@ -153,7 +164,7 @@ def test_specificity_math_authored_would_lose_without_exclusion():
     - bleed (no excl)`[data-theme=tofu] .modal:not(.memory-modal) input`      = (0,3,1) → would BEAT
       authored (0,3,0) — hence a plain !important-free authored rule is NOT
       enough; the source-exclusion is required.
-    - bleed (shipped, +:not ×2) = (0,5,1) but no longer matches the input at all."""
+    - bleed (shipped, +:not ×3) = (0,6,1) but no longer matches the input at all."""
     authored = _specificity(
         '[data-theme="tofu"] .recent-search .recent-search-input')
     base = _specificity('.modal input')
@@ -167,7 +178,7 @@ def test_specificity_math_authored_would_lose_without_exclusion():
     assert bleed_no_excl > authored, (
         'the un-excluded bleed WOULD out-specify the authored rule (hence the '
         'source-exclusion, not an !important, is the correct fix)')
-    assert bleed_shipped == (0, 5, 1), bleed_shipped
+    assert bleed_shipped == (0, 6, 1), bleed_shipped
 
 
 # ─────────────────────────── 4. NO OVER-NARROWING (control) ───────────────────────────
@@ -208,8 +219,13 @@ def test_tofu_generic_modal_rules_do_not_match_settings_panel(css_text):
 
 _NC_FIND = (
     '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
+    'input:not(.recent-search-input):not(.folder-browser-input){')
+_NC_REPL = (
+    '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
+    'input:not(.folder-browser-input){')
+_NC_BROWSER_REPL = (
+    '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
     'input:not(.recent-search-input){')
-_NC_REPL = '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input{'
 
 
 def test_nc_reverting_exclusion_reintroduces_bleed(css_text):
@@ -231,9 +247,20 @@ def test_nc_reverting_exclusion_reintroduces_bleed(css_text):
         f'{_TOFU_BLEED_BORDER!r}. The exclusion is not what protects it.')
 
 
+def test_folder_browser_input_is_excluded_from_tofu_bleed(css_text):
+    """The shared browser's filter keeps its own borderless field: the bleed
+    no longer matches it, and reverting only that carve-out (in memory) boxes
+    it with the 1px bleed border again."""
+    assert not _selector_matches(_BLEED_SELECTOR, _FOLDER_BROWSER_INPUT)
+    border = _resolve(css_text, _FOLDER_BROWSER_INPUT, 'border')
+    assert border != _TOFU_BLEED_BORDER, border
+    neutered_css = css_text.replace(_NC_FIND, _NC_BROWSER_REPL, 1)
+    assert _resolve(neutered_css, _FOLDER_BROWSER_INPUT, 'border') == _TOFU_BLEED_BORDER
+
+
 # ─────────────── 5. BASE .modal input bleed (theme-agnostic) ───────────────
 
-_AUTHORED_PADDING = '6px 30px 6px 12px'    # 30px right padding clears the × button
+_AUTHORED_PADDING = '4px 32px 4px 12px'    # 32px right padding clears the × button
 _BASE_BLEED_PADDING = '10px 12px'          # the .modal input mega-line bleed
 _AUTHORED_FONT_SIZE = '12.5px'
 _BASE_BLEED_FONT_SIZE = '13px'

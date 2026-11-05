@@ -1,8 +1,9 @@
 /**
  * Contiguous thinking and context-note coalescing plus terminal reasoning activity.
  * Explicit scope prevents crossing authored round boundaries.
- * Entry: coalesceAdjacentThinkingBlocks, coalesceAdjacentSystemNoteBlocks,
- * coalesceAdjacentRetryActivityBlocks, settleThinkingActivity.
+ * Entry: mergeThinkingBlocks, coalesceAdjacentThinkingBlocks,
+ * coalesceAdjacentSystemNoteBlocks, coalesceAdjacentRetryActivityBlocks,
+ * settleThinkingActivity.
  * Dependencies: conversation-sync.generated, round-outline, context-note-grouping,
  * types. */
 import {
@@ -23,6 +24,46 @@ import {
 } from './types';
 
 const ADJACENT_THINKING_SEPARATOR = '\n\n';
+
+/**
+ * Merge reasoning disclosures into one, in order. The first block remains the
+ * DOM identity and memberBlockIds keeps every durable identity. The merged
+ * body shows a translation only when every member displays one; activity
+ * follows the newest member.
+ */
+export function mergeThinkingBlocks(
+  run: ReadonlyArray<ThinkingBlockViewModel>,
+): ThinkingBlockViewModel {
+  const first = run[0];
+  if (run.length === 1) return first;
+  const everyDisplayTranslated = run.every(
+    (block) => block.displayMode === 'translated',
+  );
+  const everyDurablyTranslated = run.every(
+    (block) => block.translatedMarkdown !== undefined,
+  );
+  const markdown = run.map((block) => block.markdown)
+    .join(ADJACENT_THINKING_SEPARATOR);
+  const translatedMarkdown = everyDurablyTranslated
+    ? run.map((block) => block.translatedMarkdown ?? '')
+      .join(ADJACENT_THINKING_SEPARATOR)
+    : undefined;
+  return {
+    blockId: first.blockId,
+    kind: 'thinking',
+    identitySource: first.identitySource,
+    source: first.source,
+    memberBlockIds: run.flatMap((block) => block.memberBlockIds),
+    markdown,
+    ...(translatedMarkdown !== undefined ? { translatedMarkdown } : {}),
+    displayMarkdown: everyDisplayTranslated
+      ? run.map((block) => block.displayMarkdown)
+        .join(ADJACENT_THINKING_SEPARATOR)
+      : markdown,
+    displayMode: everyDisplayTranslated ? 'translated' : 'original',
+    terminal: run[run.length - 1].terminal,
+  };
+}
 
 /**
  * Present uninterrupted reasoning as one disclosure without changing Turn
@@ -51,37 +92,7 @@ export function coalesceAdjacentThinkingBlocks(
       run.push(blocks[index] as ThinkingBlockViewModel);
       index += 1;
     }
-    if (run.length === 1) {
-      coalesced.push(first);
-      continue;
-    }
-    const everyDisplayTranslated = run.every(
-      (block) => block.displayMode === 'translated',
-    );
-    const everyDurablyTranslated = run.every(
-      (block) => block.translatedMarkdown !== undefined,
-    );
-    const markdown = run.map((block) => block.markdown)
-      .join(ADJACENT_THINKING_SEPARATOR);
-    const translatedMarkdown = everyDurablyTranslated
-      ? run.map((block) => block.translatedMarkdown ?? '')
-        .join(ADJACENT_THINKING_SEPARATOR)
-      : undefined;
-    coalesced.push({
-      blockId: first.blockId,
-      kind: 'thinking',
-      identitySource: first.identitySource,
-      source: first.source,
-      memberBlockIds: run.flatMap((block) => block.memberBlockIds),
-      markdown,
-      ...(translatedMarkdown !== undefined ? { translatedMarkdown } : {}),
-      displayMarkdown: everyDisplayTranslated
-        ? run.map((block) => block.displayMarkdown)
-          .join(ADJACENT_THINKING_SEPARATOR)
-        : markdown,
-      displayMode: everyDisplayTranslated ? 'translated' : 'original',
-      terminal: run[run.length - 1].terminal,
-    });
+    coalesced.push(mergeThinkingBlocks(run));
   }
   blocks.splice(0, blocks.length, ...coalesced);
 }

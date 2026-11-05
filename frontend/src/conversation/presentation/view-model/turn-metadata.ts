@@ -5,7 +5,6 @@
  * Dependencies: conversation-sync.generated, turn-finish, types. */
 import {
   type TurnProjection,
-  type AttemptRecord,
   type TurnRecord,
   type TurnStatus,
   type TurnTranslation,
@@ -21,18 +20,13 @@ import {
   type ConversationTurnActionViewModel,
 } from './types';
 
-import { reasoningMetadataFrom } from './turn-reasoning';
-
 export function metadataFrom(
   projection: TurnProjection,
   blocks: ReadonlyArray<ConversationBlockViewModel>,
   preferredTranslationMode: TranslationDisplayMode,
   activity?: TranslationActivity,
   costSignature?: string,
-  turn?: TurnRecord,
-  attempt?: Partial<AttemptRecord>,
 ): TurnMetadataViewModel {
-  const reasoning = turn ? reasoningMetadataFrom(turn, blocks, attempt) : undefined;
   const hasFallback = Boolean(
     projection.fallbackModel || projection.fallbackFrom
     || projection.fallbackReason || projection.fallbackKind,
@@ -51,7 +45,6 @@ export function metadataFrom(
   ));
   const translation = projection.translation as TurnTranslation | undefined;
   return {
-    ...(reasoning ? { reasoning } : {}),
     ...(projection.model ? { model: projection.model } : {}),
     ...(projection.preset ? { preset: projection.preset } : {}),
     ...((projection.providerId || projection.provider_id)

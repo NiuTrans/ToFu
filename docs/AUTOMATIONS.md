@@ -328,8 +328,9 @@ loses wakes; resetting intent or replaying unknown writes duplicates effects.
 
 The supplied presentation port persists `task.show_time` output using frozen
 actual-start evidence. Worker/all roles install clock, event and run handlers
-through `lib/automations/runtime.py`; import performs no I/O. The runtime contract
-uses launch-probed task capacity, lazy executor growth and one idle queue poll.
+through `lib/automations/runtime.py`; import performs no I/O. Every claimed job
+starts on demand; the runtime contract names the fixed `TOFU_AGENT_WORKERS`
+idle-reuse hint, with lazy executor growth and one idle queue poll.
 Shutdown revokes dispatch, awaits effects/heartbeats, then defers the owned claim
 before storage closes. Native/SQLite/PostgreSQL tests prove immediate recovery
 and unknown-write reconciliation. Owned time publication is installed; skills/Agent/Flow ports remain unfinished.
@@ -414,9 +415,45 @@ were retained. These are local synthetic measurements, not throughput, physical
 storage or steady-state memory guarantees. Waiting changes the existing queue
 cursor/availability rather than appending a clock job or retry receipt.
 
-Problem: fixed polling pools consume idle capacity and grow command receipts.
-Decision: one receipt-free idle claim with demand-driven bounded execution.
-Alternatives rejected: per-rule threads, a new queue, and abandoning live effects at shutdown.
+Problem: fixed polling pools consume idle capacity and grow command receipts;
+the single receipt-free idle claim that replaced them still ran
+`worker_job.claim_next` every 250 ms. That claim is a command: on native TofuDB
+it takes the exclusive writer (not parallel-safe), on SQL a write transaction.
+A 72-hour production daemon showed about 4 exclusive dispatches per second while
+writer acquisitions averaged 65.9 ms of wait, competing with Turn writes.
+Decision: receipt-free demand-driven execution with event-driven claims. The
+coordinator first asks the read-only `worker_job.claim_horizon`
+([storage](STORAGE.md#durable-worker-jobs)); only a 0 answer enters `claim_next`,
+which re-validates under the writer. Otherwise it sleeps until that horizon, a
+command named in `claimWakeOperations` of `contracts/automation_runtime_v1.json`
+acknowledged in this process (`subscribe_committed_operations` in
+`lib/storage/commit_events.py`; the contract test pins every reserved-kind
+producer), or a settled claim. A probe clears the wake hint before it reads, so a
+producer committing during the probe forces one more probe; no wakeup is lost. A
+lost race (horizon 0, claim empty) retries after `failureBackoffMilliseconds`.
+Monotonic waits stop during host suspend and drift from UTC under clock slew, so
+a pending horizon is re-read at least every `horizonReanchorMilliseconds`: one
+calendar minute, the `x-schedule` precision whose skip mode admits a slot only in
+its current UTC minute. An empty queue costs no storage call at all. Commits from
+another process are not observed directly; every supported topology runs
+producers and workers in one process (personal mode requires role `all`, and the
+distributed preview starts no background services). Such a commit is still found
+at the next pending-horizon re-read, settled claim, local producer hint or restart.
+Measured idle cost on a fresh authority (base poll vs event-driven, per minute,
+two runs): native `command_execute` dispatches and writer acquisitions 232–236 →
+0, SQLite writer jobs 231–234 → 0, coordinator process CPU 0.14–0.17 s → ≤0.02 s.
+Four CPU-bound GIL spinners slowed the old poll to 94–111 exclusive claims per
+minute without removing it. Specs: `tests/automations/test_runtime_application.py`
+(idle, in-process wake, delayed availability, racing enqueue, far-horizon
+re-anchor on SQLite, native and PostgreSQL) and the horizon contract tests.
+Alternatives rejected: keeping the 250 ms poll on the cheap read path (still 240
+RPCs per minute and a tuning interval); a longer poll interval (a knob trading
+latency for cost); authority-originated worker commit notices (a new wire topic
+on both backends for one in-process consumer whose producer operations are already
+named); a daemon/sidecar long-poll (connection-held waits on both backends, still
+monotonic-timed); parallel-lane `claim_next` (the native finish still takes the
+writer for its durability witness, and SQL commands always enter the writer);
+per-rule threads, a new queue, and abandoning live effects at shutdown.
 ## Decision
 
 Problem: timing, readiness checks and Agent execution need one explainable record.

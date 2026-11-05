@@ -9,7 +9,9 @@
   Creation count/activity mutations share this deferred queue; counts and
   activity-index reads flush it on the original snapshot. All creation metadata
   applies before recency backfill, including multi-create transactions.
-  Verify with `cargo test --lib recency`.
+  Unfolded catalog pages inside the window share the same gates through
+  `covered_entries`; funnels update the owner count before maintaining the
+  directory. Verify with `cargo test --lib recency`.
 - `migration.rs` imports source logical header state. It also exposes the same
   transaction-local insert-or-match operation for trash staging.
 - `trash_migration.rs` owns one pending capsule per owner, its durable seal,

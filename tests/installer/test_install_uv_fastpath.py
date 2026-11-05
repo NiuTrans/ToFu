@@ -16,9 +16,17 @@ Background — the "install is too slow" optimization (2026-07):
   server) so the fast path can never silently swallow the fallback.
 """
 
+import base64
+import hashlib
+import json
 import os
+from pathlib import Path
 import re
+import shlex
+import shutil
+import subprocess
 import sys
+import zipfile
 
 import pytest
 
@@ -39,10 +47,41 @@ def _install_sh() -> str:
         return f.read()
 
 
-def _server_py() -> str:
-    """Source owner for server.py's facade-exported environment logic."""
-    with open(os.path.join(ROOT, 'lib', 'server_boot_env.py'), 'r', encoding='utf-8') as f:
-        return f.read()
+def _run_server_reexec(tmp_path, monkeypatch, *, python, env_prefix, backend='uv'):
+    """Drive server.py's marker re-exec with a fake marker; record its effects."""
+    from lib.server import server_boot_env
+    project = tmp_path / 'project'
+    project.mkdir()
+    (project / '.tofu_env.json').write_text(json.dumps(
+        {'python': str(python), 'env_prefix': str(env_prefix), 'backend': backend}))
+    effects = []
+    monkeypatch.setattr(server_boot_env, '_PROJ_DIR', str(project))
+    monkeypatch.setattr(server_boot_env, '_tofu_export_env_native_paths',
+                        lambda prefix, kind: effects.append(('export', prefix, kind)))
+    monkeypatch.setattr(server_boot_env.os, 'execv',
+                        lambda path, argv: effects.append(('execv', path)))
+    monkeypatch.setenv('_TOFU_ENV_REEXEC', '0')
+    server_boot_env._tofu_maybe_reexec_into_env()
+    return effects
+
+
+def _run_bootstrap_reexec(tmp_path, monkeypatch, *, python, env_prefix, backend='uv'):
+    """Drive bootstrap.py's marker re-exec with a fake marker; record its effects."""
+    from bootstrap_pkg import env_reexec
+    project = tmp_path / 'bootstrap-project'
+    project.mkdir()
+    (project / '.tofu_env.json').write_text(json.dumps(
+        {'python': str(python), 'env_prefix': str(env_prefix), 'backend': backend}))
+    effects = []
+    monkeypatch.setattr(env_reexec, 'BASE_DIR', str(project))
+    monkeypatch.setattr(env_reexec, '_tofu_export_env_native_paths',
+                        lambda prefix, kind, name=None: effects.append(('export', prefix, kind)))
+    monkeypatch.setattr(env_reexec.os, 'execv',
+                        lambda path, argv: effects.append(('execv', path)))
+    monkeypatch.delenv('TOFU_DISABLE_ENV_REEXEC', raising=False)
+    monkeypatch.setenv('_TOFU_ENV_REEXEC', '0')
+    env_reexec._tofu_maybe_reexec_into_env()
+    return effects
 
 
 def _bootstrap_env_reexec_py() -> str:
@@ -179,15 +218,21 @@ def test_uv_venv_uses_managed_python():
     _ok('uv venv is seeded from a managed standalone CPython')
 
 
-def test_reexec_uses_prefix_not_just_executable():
+def test_reexec_uses_prefix_not_just_executable(tmp_path, monkeypatch):
     """server.py + bootstrap.py must decide 'already in env' by comparing
     sys.prefix to env_prefix (a venv's bin/python is a symlink to a base
     interpreter, so a bare executable compare can false-positive)."""
-    for src, name in (
-            (_server_py(), 'lib/server/server_boot_env.py'),
-            (_bootstrap_env_reexec_py(), 'bootstrap_pkg/env_reexec.py')):
-        assert re.search(r'os\.path\.realpath\(sys\.prefix\) == os\.path\.realpath\(env_prefix\)',
-                         src), f'{name} does not use a sys.prefix vs env_prefix re-exec check'
+    venv_python = tmp_path / 'venv' / 'bin' / 'python'
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(os.path.realpath(sys.executable))
+    effects = _run_server_reexec(tmp_path, monkeypatch, python=venv_python,
+                                 env_prefix=tmp_path / 'venv')
+    assert ('execv', str(venv_python)) in effects, \
+        'server.py treated a venv whose python symlinks to this interpreter as already active'
+    effects = _run_bootstrap_reexec(tmp_path, monkeypatch, python=venv_python,
+                                    env_prefix=tmp_path / 'venv')
+    assert ('execv', str(venv_python)) in effects, \
+        'bootstrap.py treated a venv whose python symlinks to this interpreter as already active'
     _ok('re-exec guard compares sys.prefix to env_prefix (symlink-safe) in both consumers')
 
 
@@ -214,14 +259,25 @@ def test_uv_ripgrep_no_source_build():
     _ok('uv path detects system rg/fd, never builds ripgrep from source')
 
 
-def test_server_reexec_respects_uv_backend():
+def test_server_reexec_respects_uv_backend(tmp_path, monkeypatch):
     """server.py must only setdefault CONDA_PREFIX when backend != 'uv'."""
-    text = _server_py()
-    assert "backend = cfg.get('backend')" in text, \
-        "server.py re-exec does not read the marker's backend field"
-    assert re.search(
-        r"if backend != 'uv':\s*\n\s*os\.environ\.setdefault\('CONDA_PREFIX', env_prefix\)",
-        text), 'server.py setdefaults CONDA_PREFIX unconditionally (venv would misfire)'
+    import chromium_env
+    from lib.server import server_boot_env
+    export_native_paths = server_boot_env._tofu_export_env_native_paths
+    effects = _run_server_reexec(tmp_path, monkeypatch, python=sys.executable,
+                                 env_prefix=sys.prefix, backend='uv')
+    assert ('export', sys.prefix, 'uv') in effects, \
+        "server.py re-exec does not pass the marker's backend field on"
+    monkeypatch.setattr(chromium_env, 'ensure_chromium_env', lambda **_kwargs: None)
+    prefix = tmp_path / 'env'
+    (prefix / 'bin').mkdir(parents=True)
+    monkeypatch.setenv('PATH', os.environ.get('PATH', ''))
+    monkeypatch.delenv('CONDA_PREFIX', raising=False)
+    export_native_paths(str(prefix), 'uv')
+    assert 'CONDA_PREFIX' not in os.environ, \
+        'server.py set CONDA_PREFIX for a uv venv (bootstrap would misfire)'
+    export_native_paths(str(prefix), 'conda')
+    assert os.environ['CONDA_PREFIX'] == str(prefix)
     _ok("server.py skips the CONDA_PREFIX shim for a uv-backed venv")
 
 
@@ -248,7 +304,7 @@ def test_bootstrap_reexec_respects_uv_backend():
     _ok("bootstrap.py skips the conda shim for a uv-backed venv")
 
 
-def test_playwright_env_exported_before_reexec_early_return():
+def test_playwright_env_exported_before_reexec_early_return(tmp_path, monkeypatch):
     """Regression (2026-07-27): Chromium is a CHILD process and resolves libatk /
     libatk-bridge / libnss out of $env_prefix/lib, which is not on the default
     linker path. The export used to live INSIDE the re-exec branch, so a server
@@ -263,9 +319,16 @@ def test_playwright_env_exported_before_reexec_early_return():
     behavioural counterpart (a real screenshot from a scrubbed env) lives in
     tests/browser/test_chromium_env.py.
     """
+    effects = _run_server_reexec(tmp_path, monkeypatch, python=sys.executable,
+                                 env_prefix=sys.prefix, backend='conda')
+    assert effects == [('export', sys.prefix, 'conda')], (
+        'lib/server/server_boot_env.py: an already-active env must still export the '
+        f'native paths and must not re-exec: {effects}')
+    assert _really_imports_chromium_env('lib/server/server_boot_env.py'), (
+        'lib/server/server_boot_env.py no longer imports chromium_env.py — it has '
+        'grown its own copy of the LD_LIBRARY_PATH logic again')
     for src, name, early_var in (
-            (_server_py(), 'lib/server/server_boot_env.py', 'already_in_env'),
-            (_bootstrap_env_reexec_py(), 'bootstrap_pkg/env_reexec.py', 'same')):
+            (_bootstrap_env_reexec_py(), 'bootstrap_pkg/env_reexec.py', 'same'),):
         assert '_tofu_export_env_native_paths' in src, \
             f'{name} has no native-path export helper'
         # Anchor on the CALL site (leading indent), not the bare name: the `def`
@@ -303,9 +366,8 @@ def test_fontconfig_exported_when_no_system_config():
         'chromium_env.py does not export FONTCONFIG_PATH/FONTCONFIG_FILE'
     # Must be conditional: a host WITH /etc/fonts keeps using it. The probe
     # returns (None, None) in that case, which is the guard.
-    assert re.search(r"if os\.path\.isdir\('/etc/fonts'\):\s*\n\s*return None, None", src), \
-        ('chromium_env.py does not bail out when /etc/fonts exists — it would '
-         'override a real system fontconfig config')
+    assert '_fontconfig_supports_chinese(' in src, \
+        'chromium_env.py does not check Chinese coverage before retaining system fontconfig'
     # And both entry points must actually route through it.
     for name in ('lib/server/server_boot_env.py', 'bootstrap_pkg/env_reexec.py'):
         assert _really_imports_chromium_env(name), \
@@ -326,7 +388,9 @@ def test_conda_path_installs_fonts_for_chromium():
     assert 'fontconfig' in libs, 'CHROMIUM_LIBS does not install fontconfig'
     assert re.search(r'font-ttf-\S+', libs), \
         'CHROMIUM_LIBS installs no font family — Chromium renders text as nothing'
-    _ok('conda path pins fontconfig + a real font family for Chromium')
+    assert 'font-ttf-noto-cjk' in libs, \
+        'CHROMIUM_LIBS omits Chinese glyph coverage for rendered screenshots'
+    _ok('conda path pins fontconfig and Latin/CJK font coverage for Chromium')
 
 
 def test_uv_path_verifies_chromium_actually_launches():
@@ -342,6 +406,8 @@ def test_uv_path_verifies_chromium_actually_launches():
         'uv path never verifies Chromium can actually launch'
     assert 'measureText' in fn, \
         'uv path does not verify text rendering (a fontless browser screenshots blank)'
+    assert "measureText('中')" in fn and '10ffff' in fn, \
+        'uv path accepts Latin-only fonts without detecting missing Chinese glyphs'
     assert 'install-deps chromium' in fn, \
         'uv path gives no root recovery command'
     assert '--use-conda' in fn, 'uv path gives no rootless recovery command'
@@ -367,6 +433,8 @@ def test_healthcheck_probe_actually_launches_chromium():
         'healthcheck browser probe never launches Chromium (import-only check)'
     assert 'measureText' in probe, \
         'healthcheck probe does not measure a glyph (misses the zero-fonts failure)'
+    assert "measureText('中')" in probe and '10ffff' in probe, \
+        'healthcheck cannot distinguish a Chinese glyph from a missing-glyph box'
     assert 'chromium_env' in probe, \
         'healthcheck probe does not set up the Chromium env — false failure'
     # The two distinct failure modes must be reported distinctly, not merged.
@@ -760,6 +828,205 @@ def test_base_conda_git_install_respects_ownership():
     assert 're-run install.sh' in owned, \
         'user-owned branch does not list manual options / re-run guidance'
     _ok('base-conda git install is ownership-gated; user-owned conda is never mutated')
+
+
+# ── Fresh-host bootstrap (executes the shipped shell functions) ──────────
+#
+# Each test pins one defect that made every 0.18.x fresh install fail on a
+# host where astral.sh, GitHub and PyPI were all reachable (measured
+# 2026-10-23 with the published installer):
+#
+# 1. ``_install_run`` ran its command under ``bootstrap_pkg/process.py``,
+#    which gives the child ``stdin=DEVNULL``. The two ``python -`` heredoc
+#    programs therefore executed an EMPTY program and exited 0, so the uv
+#    wheelhouse was never prepared and ``uv pip install -r install.lock``
+#    failed with "File not found".
+# 2. The astral uv installer honors ``XDG_BIN_HOME``/``XDG_DATA_HOME`` (and a
+#    caller's ``UV_INSTALL_DIR``); a host that exports XDG paths received uv
+#    somewhere ``_ensure_uv`` never looked, so the fast path was skipped.
+# 3. The Miniforge installer refuses to run unless ``$0`` ends in ``.sh``;
+#    ``mktemp .../miniforge.XXXXXX`` produced a name without that suffix, so
+#    the conda fallback died with 'Please run using "bash" ... not "source"'.
+# 4. ``uv pip install --require-hashes`` ran inside the checkout and so read
+#    its ``pyproject.toml`` ``[tool.uv] constraint-dependencies`` security
+#    floor (``certifi>=2026.10.19``, unpinned). Hash mode rejected it, and
+#    every fresh install fell back to the much slower conda path.
+
+_bash_contract = pytest.mark.skipif(os.name == 'nt', reason='Bash installer contract')
+
+
+def _function(name: str) -> str:
+    source = _install_sh()
+    start = source.index(f'{name}() {{')
+    return source[start:source.index('\n}\n', start) + 3]
+
+
+def _executable(path: Path, body: str) -> None:
+    path.write_text('#!/bin/sh\n' + body, encoding='utf-8')
+    path.chmod(0o755)
+
+
+def _host_env(tmp_path: Path, fake_bin: Path) -> dict[str, str]:
+    home = tmp_path / 'home'
+    home.mkdir(exist_ok=True)
+    return {'HOME': str(home), 'PATH': f'{fake_bin}:/usr/bin:/bin',
+            'TMPDIR': str(tmp_path), 'LANG': 'C.UTF-8'}
+
+
+@_bash_contract
+def test_install_run_feeds_heredoc_programs_to_the_child(tmp_path):
+    """A ``python -`` heredoc must execute, not silently succeed as a no-op."""
+    project = tmp_path / 'project'
+    (project / 'bootstrap_pkg').mkdir(parents=True)
+    (project / 'bootstrap_pkg' / 'process.py').write_bytes(
+        (Path(ROOT) / 'bootstrap_pkg' / 'process.py').read_bytes())
+    marker = tmp_path / 'ran'
+    script = f'''
+set -euo pipefail
+INSTALL_DIR={str(project)!r}
+ENV_PYTHON={sys.executable!r}
+{_function('_install_run')}
+_install_run 60 "$ENV_PYTHON" - {str(marker)!r} <<'PYEOF'
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text('heredoc executed')
+PYEOF
+'''
+    result = subprocess.run(['bash', '-c', script], capture_output=True,
+                            text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file(), (
+        'the heredoc program never ran: _install_run must not replace the '
+        'caller-provided stdin of a `python -` program with /dev/null')
+    assert marker.read_text() == 'heredoc executed'
+
+
+def test_every_heredoc_install_run_site_is_a_python_stdin_program():
+    """Pin the shape the stdin-forwarding rule exists for."""
+    sites = re.findall(r'_install_run \d+ "\$[A-Za-z_]+" - .*<<', _install_sh())
+    assert len(sites) == 2, sites
+
+
+@_bash_contract
+def test_ensure_uv_finds_uv_even_when_xdg_redirects_the_astral_installer(tmp_path):
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    # Same destination rule as astral's installer: UV_INSTALL_DIR, then
+    # XDG_BIN_HOME, then ~/.local/bin.
+    installer = ('dir="${UV_INSTALL_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}"\n'
+                 'mkdir -p "$dir" && printf "#!/bin/sh\\necho uv-fixture\\n" > "$dir/uv"'
+                 ' && chmod +x "$dir/uv"\n')
+    (tmp_path / 'uv-installer.sh').write_text(installer, encoding='utf-8')
+    _executable(fake_bin / 'curl', f'cat {str(tmp_path / "uv-installer.sh")!r}\n')
+    env = _host_env(tmp_path, fake_bin)
+    env['XDG_BIN_HOME'] = str(tmp_path / 'xdg-bin')
+    script = f'''
+set -euo pipefail
+info() {{ :; }}; warn() {{ printf 'warn:%s\\n' "$*"; }}
+INSTALL_DIR={str(tmp_path / 'missing-checkout')!r}
+TOFU_INSTALL_LOG={str(tmp_path / 'install.log')!r}
+{_function('_install_run')}
+{_function('_ensure_uv')}
+_ensure_uv
+command -v uv
+'''
+    result = subprocess.run(['bash', '-c', script], env=env, capture_output=True,
+                            text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip().endswith('/home/.local/bin/uv'), result.stdout
+
+
+@_bash_contract
+def test_downloaded_miniforge_installer_passes_its_own_dollar_zero_guard(tmp_path):
+    source = _install_sh()
+    start = source.index('    MF_FILE="Miniforge3-${PLATFORM}-${ARCH}.sh"')
+    end = source.index('    CONDA_BIN="${SIBLING_CONDA_DIR}/bin/conda"', start)
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    # The real Miniforge header refuses any $0 that does not end in `.sh`.
+    installer = (tmp_path / 'miniforge-body.sh')
+    installer.write_text(
+        'if ! echo "$0" | grep \'\\.sh$\' > /dev/null; then\n'
+        '    printf \'Please run using "bash"/"dash"/"sh"/"zsh", but not "." or "source".\\n\' >&2\n'
+        '    exit 1\nfi\n'
+        'while [ $# -gt 0 ]; do [ "$1" = -p ] && prefix="$2"; shift; done\n'
+        'mkdir -p "$prefix/bin" && printf "#!/bin/sh\\n" > "$prefix/bin/conda" && chmod +x "$prefix/bin/conda"\n',
+        encoding='utf-8')
+    _executable(fake_bin / 'curl',
+                'while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done\n'
+                f'cp {str(installer)!r} "$out"\n')
+    prefix = tmp_path / 'tofu-miniforge3'
+    script = f'''
+set -euo pipefail
+info() {{ :; }}; warn() {{ printf 'warn:%s\\n' "$*"; }}; fail() {{ printf 'fail:%s\\n' "$*"; exit 1; }}
+_install_run() {{ shift; "$@" </dev/null; }}
+PLATFORM=Linux; ARCH=x86_64; SIBLING_CONDA_DIR={str(prefix)!r}
+{source[start:end]}
+fi
+[[ -x "${{SIBLING_CONDA_DIR}}/bin/conda" ]]
+'''
+    result = subprocess.run(['bash', '-c', script], env=_host_env(tmp_path, fake_bin),
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'Please run using' not in result.stderr
+    assert not list(tmp_path.glob('tofu-miniforge.*')), 'temporary installer directory leaked'
+
+
+def _demo_wheel(directory: Path) -> Path:
+    files = {
+        'demo_pkg/__init__.py': b"VALUE = 'installed'\n",
+        'demo_pkg-1.0.dist-info/METADATA':
+            b'Metadata-Version: 2.1\nName: demo-pkg\nVersion: 1.0\n',
+        'demo_pkg-1.0.dist-info/WHEEL':
+            b'Wheel-Version: 1.0\nGenerator: tofu-test\nRoot-Is-Purelib: true\n'
+            b'Tag: py3-none-any\n',
+    }
+    record = ''.join(
+        f'{name},sha256='
+        + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()
+        + f',{len(data)}\n'
+        for name, data in files.items())
+    record += 'demo_pkg-1.0.dist-info/RECORD,,\n'
+    wheel = directory / 'demo_pkg-1.0-py3-none-any.whl'
+    with zipfile.ZipFile(wheel, 'w') as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+        archive.writestr('demo_pkg-1.0.dist-info/RECORD', record)
+    return wheel
+
+
+@_bash_contract
+def test_hashed_uv_install_ignores_the_checkouts_uv_config(tmp_path):
+    """Run the shipped uv install command line from a checkout whose
+    pyproject declares an unpinned uv constraint, as the real one does."""
+    if shutil.which('uv') is None:
+        pytest.skip('uv is not installed on this host')
+    line = next(text for text in _install_sh().splitlines()
+                if 'uv pip install' in text and '--require-hashes' in text)
+    command = line.split('_install_run 900 ', 1)[1].split(' 2>&1', 1)[0]
+    checkout = tmp_path / 'checkout'
+    checkout.mkdir()
+    (checkout / 'pyproject.toml').write_text(
+        '[project]\nname = "fixture"\nversion = "0"\n\n'
+        '[tool.uv]\nconstraint-dependencies = ["demo-pkg>=1.0"]\n', encoding='utf-8')
+    wheelhouse = tmp_path / 'wheels'
+    wheelhouse.mkdir()
+    digest = hashlib.sha256(_demo_wheel(wheelhouse).read_bytes()).hexdigest()
+    (wheelhouse / 'install.lock').write_text(
+        f'demo-pkg==1.0 --hash=sha256:{digest}\n', encoding='utf-8')
+    environment = tmp_path / 'env'
+    subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(environment)],
+                   check=True, timeout=120)
+    python = environment / 'bin' / 'python'
+    script = (f'_uvpy={shlex.quote(str(python))}; '
+              f'_wheelhouse={shlex.quote(str(wheelhouse))}; '
+              f'cd {shlex.quote(str(checkout))} && {command}')
+    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True,
+                            timeout=300, env={**os.environ, 'UV_NO_PROGRESS': '1'})
+    assert result.returncode == 0, result.stdout + result.stderr
+    imported = subprocess.run([str(python), '-c', 'import demo_pkg; print(demo_pkg.VALUE)'],
+                              capture_output=True, text=True, timeout=60)
+    assert imported.stdout.strip() == 'installed', imported.stderr
 
 
 def main():

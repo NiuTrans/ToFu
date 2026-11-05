@@ -36,20 +36,21 @@ def test_folder_workbench_layout_and_keyboard(frontend_visual_page, theme, width
       window.openEditor=()=>openFolderSettings({t,
         create:async values=>{calls.saves.push(values);return {id:'created'};},
         update:async ()=>({id:'updated'}),
-        recent:async ()=>{calls.recent++;return recentPaths.map(path=>({path}));},
+        recent:async ()=>{calls.recent++;return recentPaths.map((path,index)=>({path,count:index+1}));},
         browse:async path=>{calls.browse++;return {path:'/workspace',parent:'/',
-          dirs:[{name:'child',path:'/workspace/child'}]};}
+          dirs:[{name:'child',path:'/workspace/child',hasCode:true,itemCount:12},
+                {name:'notes',path:'/workspace/notes',itemCount:3}]};}
       });
       window.editor=openEditor();
     }''')
     dialog = page.locator('dialog:modal')
-    assert page.evaluate('calls.browse===0 && calls.recent===0')
+    dialog.locator('.folder-browser-row').first.wait_for(state='visible')
+    # Opening reads the folder listing and recents once each; nothing is written.
+    assert page.evaluate('calls.browse===1 && calls.recent===1 && calls.saves.length===0')
     name = dialog.locator('.folder-settings-identity input')
     name.fill('Tofu')
     assert not dialog.locator('.folder-settings-path-field input').get_attribute('aria-invalid')
-    dialog.locator('.folder-settings-recents summary').click()
-    cards = dialog.locator('.folder-settings-recent-list button')
-
+    cards = dialog.locator('.folder-settings-recent-list button[data-path]')
     cards.first.wait_for(state='visible')
     assert cards.count() == 5
     assert cards.first.locator('.folder-settings-recent-name').inner_text() == 'tofu'
@@ -58,18 +59,28 @@ def test_folder_workbench_layout_and_keyboard(frontend_visual_page, theme, width
     assert cards.first.is_disabled()
     assert dialog.locator('.folder-settings-root-name').inner_text() == 'tofu'
     geometry = dialog.evaluate('''d=>{
-      const w=d.querySelector('.folder-settings-workspace').getBoundingClientRect();
-      const r=d.querySelector('.folder-settings-recents').getBoundingClientRect();
+      const b=d.querySelector('.folder-browser').getBoundingClientRect();
+      const r=d.querySelector('.folder-settings-rail').getBoundingClientRect();
       const save=d.querySelector('button[type=submit]').getBoundingClientRect();
+      const list=d.querySelector('.folder-browser-list').getBoundingClientRect();
       return {width:d.getBoundingClientRect().width,overflow:d.scrollWidth>d.clientWidth+1,
-        columns:r.left>=w.right,saveTop:save.top,saveBottom:save.bottom,
+        columns:r.left>=b.right,saveTop:save.top,saveBottom:save.bottom,listHeight:list.height,
         border:parseFloat(getComputedStyle(d).borderTopWidth),background:getComputedStyle(d).backgroundColor};
     }''')
     assert geometry['width'] <= width and not geometry['overflow']
     assert geometry['columns'] == (width > 700)
+    assert geometry['listHeight'] >= 120, geometry
     assert geometry['border'] == 3 and geometry['background'] != 'rgba(0, 0, 0, 0)'
     assert geometry['saveTop'] >= 0 and geometry['saveBottom'] <= 900
-    assert cards.first.locator('.folder-settings-recent-path').evaluate('el=>getComputedStyle(el).whiteSpace') == 'nowrap'
+    for selector in ('.folder-settings-recent-path', '.folder-settings-root-path', '.folder-browser-current'):
+        assert dialog.locator(selector).first.evaluate('el=>getComputedStyle(el).whiteSpace') == 'nowrap'
+    # Long paths keep their tail (the folder's own name) visible.
+    tail = dialog.locator('.folder-settings-recent-path').first.evaluate('''el=>{
+      const box=el.getBoundingClientRect(); const range=document.createRange();
+      range.selectNodeContents(el.querySelector('bdi')); const text=range.getBoundingClientRect();
+      return {clipped:text.width>box.width+1, endVisible:text.right<=box.right+1};
+    }''')
+    assert tail['clipped'] and tail['endVisible'], tail
     assert dialog.evaluate('''d=>[...d.querySelectorAll('button[hidden]')].every(
       button=>getComputedStyle(button).display==='none' && button.getClientRects().length===0)''')
     out = ROOT / 'output/playwright/folder-settings'
@@ -109,12 +120,22 @@ def test_folder_browser_selection_and_footer(frontend_visual_page, width):
       recent:async()=>[],browse:async()=>({path:'/workspace',parent:'/',
         dirs:Array.from({length:20},(_,i)=>({name:'directory-'+i,path:'/workspace/'+i}))})})''')
     dialog=page.locator('dialog:modal')
-    dialog.get_by_role('button',name=locale['folder.projectPathBrowse'],exact=True).click()
-    dialog.locator('.folder-settings-directories button').first.wait_for(state='visible')
+    rows=dialog.locator('.folder-browser-row')
+    rows.first.wait_for(state='visible')
+    assert rows.count() == 20
+    # The list scrolls inside its pane instead of growing the dialog.
+    assert dialog.locator('.folder-browser-list').evaluate('el=>el.scrollHeight>el.clientHeight')
     footer=dialog.locator('button[type=submit]').bounding_box()
     assert footer['y'] >= 0 and footer['y']+footer['height'] <= 740
-    use=dialog.get_by_role('button',name=locale['folder.settings.useDirectory'],exact=True)
-    assert use.is_enabled()
-    use.click()
+    shown="d=>[...d.querySelectorAll('.folder-browser-row')].filter(row=>!row.hidden).length"
+    search=dialog.locator('.folder-browser-filter')
+    search.fill('directory-1')
+    assert dialog.evaluate(shown) == 11
+    search.press('Escape')
+    assert dialog.evaluate(shown) == 20
+    assert page.locator('dialog:modal').count() == 1  # Escape cleared the filter only
+    add=dialog.get_by_role('button',name=locale['pm.addThisFolder'],exact=True)
+    assert add.is_enabled()
+    add.click()
     assert dialog.locator('.folder-settings-root').get_attribute('data-path') == '/workspace'
-    assert not dialog.locator('.folder-settings-browser').is_visible()
+    assert dialog.locator('.folder-browser-footer button').is_disabled()

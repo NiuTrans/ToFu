@@ -148,13 +148,14 @@ def assert_secret_free(harness, payload):
 
 @pytest.mark.parametrize('all_off', [False, True])
 @pytest.mark.parametrize('wire', ['alpha-wire-a', 'unsaved/request-name'])
-def test_disabled_selected_cell_uses_saved_transport_and_success_is_read_only(
+def test_enabled_selected_cell_uses_saved_transport_and_success_is_read_only(
         harness, all_off, wire):
     repository = harness.repository
     if all_off:
         for key in ('provider_accesses', 'connections', 'offerings', 'credentials'):
             for row in repository.document[key]:
                 row['enabled'] = False
+    repository.document['offerings'][0]['enabled'] = True
     before = deepcopy(repository.document)
     status, started = harness.request('POST', START, {
         'force': True, 'targets': [target('  ' + wire + '  ')],
@@ -195,18 +196,25 @@ def test_disabled_selected_cell_uses_saved_transport_and_success_is_read_only(
         assert_secret_free(harness, snapshot)
 
 
-@pytest.mark.parametrize('all_off', [False, True])
-def test_manual_route_without_targets_also_includes_disabled_rows(harness, all_off):
-    if all_off:
-        for key in ('connections', 'offerings'):
-            for row in harness.repository.document[key]:
-                row['enabled'] = False
+@pytest.mark.parametrize('all_offerings_off', [False, True])
+def test_manual_route_skips_disabled_offerings_on_disabled_connections(
+        harness, all_offerings_off):
+    for row in harness.repository.document['connections']:
+        row['enabled'] = False
+    if all_offerings_off:
+        for row in harness.repository.document['offerings']:
+            row['enabled'] = False
     before = deepcopy(harness.repository.document)
-    status, body = harness.request('POST', START, {'force': True})
-    assert status == 200, body
-    work = harness.queued[0][1]
-    assert {(row[0], row[3]) for row in work} == {
-        (key, wire) for key in (0, 1) for wire in ('alpha-wire-a', 'beta-wire-a')}
+    response = harness.request('POST', START, {'force': True})
+    if all_offerings_off:
+        assert_error(response, 'provider_probe_no_offerings')
+        assert harness.queued == []
+    else:
+        status, body = response
+        assert status == 200, body
+        work = harness.queued[0][1]
+        assert {(row[0], row[3]) for row in work} == {
+            (key, 'beta-wire-a') for key in (0, 1)}
     assert_unmodified(harness, before)
 
 
@@ -259,6 +267,7 @@ def test_cached_snapshot_cannot_hide_changed_credential_columns(harness):
     {'model_ids': ['beta-wire-a']},
 ])
 def test_empty_explicit_scope_errors_instead_of_probing_unselected_cells(harness, only):
+    harness.repository.document['offerings'][0]['enabled'] = True
     before = deepcopy(harness.repository.document)
     response = harness.request('POST', START, {
         'force': True, 'targets': [target()], 'only': only})
@@ -302,6 +311,7 @@ def test_force_keeps_existing_cache_restart_behavior(harness):
 
 
 def test_explicit_draft_targets_bypass_completed_cache_without_force(harness):
+    harness.repository.document['offerings'][0]['enabled'] = True
     harness.cached = {'status': 'done', 'cells': {'0::beta-wire-a': {
         'key_idx': 0, 'model_id': 'beta-wire-a', 'status': 'ok'}}}
     status, body = harness.request('POST', START, {
@@ -359,9 +369,9 @@ def test_retargeted_deployment_rebuilds_cached_detect_plan(
 
     try:
         bundle = compile_provider_template_bundle(
-            'meituan', selected_model_ids=['gpt-6.1-sol'])
+            'yourprovider', selected_model_ids=['gpt-6.1-sol'])
     except ProviderTemplateRecipeError:
-        pytest.skip('meituan provider template is not shipped in this build')
+        pytest.skip('yourprovider provider template is not shipped in this build')
     repository = InMemoryModelRoutingRepository()
     secret = repository.put_secret(BOUNDARY, 'synthetic-probe-key')
     document = empty_document()
@@ -454,6 +464,7 @@ def test_retarget_only_repair_rebuilds_plan_and_skips_completed_snapshot(
 
     new_url = 'https://repaired.example/v1'
     document = harness.repository.document
+    document['offerings'][0]['enabled'] = True
     source = document['deployments'][0]['connection_id']
     connection = next(row for row in document['connections']
                       if row['connection_id'] == source)

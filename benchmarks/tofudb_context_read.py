@@ -142,9 +142,14 @@ def measure(args):
                 (args.binary.parent / name).read_bytes()).hexdigest()
                 for name in (args.binary.name, "libtofu_db.so")}
         proof = history_proof(appended)
-        for replay in (False, True):
+
+        def measure_reads(replay):
             request = payload | {"replay": replay}
-            for _ in range(5):
+            start = time.perf_counter_ns()
+            value = engine.execute("turn.context.read", request, False)
+            first_ns = time.perf_counter_ns() - start
+            validate(value, expected, continuation, replay, proof, appended)
+            for _ in range(4):
                 value = engine.execute("turn.context.read", request, False)
                 validate(value, expected, continuation, replay, proof, appended)
             samples = []
@@ -154,12 +159,21 @@ def measure(args):
                 samples.append(time.perf_counter_ns() - start)
                 validate(value, expected, continuation, replay, proof, appended)
             ordered = sorted(samples)
-            report["workloads"]["continuation" if replay else "rebuild"] = {
+            return {
+                "first_ns": first_ns,
                 "mean_ns": statistics.mean(samples), "p50_ns": statistics.median(samples),
                 "p95_ns": _percentile(ordered, .95), "p99_ns": _percentile(ordered, .99),
                 "samples_ns": samples, "verified_responses": len(samples),
                 "returned_turns": len(value["turns"]), "history_proof": proof,
             }
+
+        for replay in (False, True):
+            report["workloads"]["continuation" if replay else "rebuild"] = measure_reads(replay)
+        # A reopened authority starts a new epoch and declines persisted prefix
+        # certificates: until the next advancing save every continuation read
+        # proves the checkpoint anchor with one streamed walk over all headers.
+        engine.restart_cycle()
+        report["workloads"]["reopened_continuation"] = measure_reads(True)
         report["caller_peak_rss_kib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         report["rss_scope"] = "caller high-water mark; includes native embedded, excludes SQLite child; not cross-backend comparable"
         if args.engine == "tofudb" and report["artifacts_sha256"] != {
@@ -184,8 +198,8 @@ def main():
     args = parser.parse_args()
     if args.engine == "tofudb" and args.binary is None:
         parser.error("--binary is required for tofudb")
-    if not 2 <= args.history <= 2000 or args.history % 2:
-        parser.error("--history must be even and within 2..2000")
+    if args.history < 2 or args.history % 2:
+        parser.error("--history must be even and at least 2")
     if not 1 <= args.payload_bytes <= 1048576 or (args.history + 2) * args.payload_bytes > 16 * 1024**2:
         parser.error("payload must be 1..1048576 bytes and total fixture at most 16 MiB")
     if not 1 <= args.count <= 10000:

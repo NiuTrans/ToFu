@@ -180,7 +180,7 @@ class TestDeleteTargetContainment:
     def test_neuter_containment_guard_lets_escape_through(self, proj, monkeypatch):
         """剥掉锁根守卫 → 绝对路径删除越界放过 = 守卫承重(用临时目录,不碰真路径)."""
         monkeypatch.setattr(pj, '_check_delete_targets_within',
-                            lambda _cmd, _root: None)
+                            lambda _cmd, _cwd, _root: None)
         target = proj['tmp'] / 'would_die'
         target.mkdir()
         out = pj.cmd_project_run_command(
@@ -582,6 +582,133 @@ def test_supervised_stdout_stderr_and_negative_exit_remain_separate(tmp_path):
     assert outcome['stdout'] == 'out\n' and outcome['stderr'] == 'err\n'
     assert outcome['exit_code'] == -15
     assert outcome['timed_out'] is False and outcome['cancelled'] is False
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX shell grammar')
+@pytest.mark.parametrize('command', [
+    "python3 -u -c 'import os,signal;print(1)'",
+    'git commit -m "fix: a; b & c | d > e"',
+    'ls a\\ b \\$HOME \\* \\~ \\# \\" \\\'',
+    'tool "a\\"b" "c\\\\d" "\\$x" "\\`y" "e\\f" "g\'h" \'i"j\\k\'',
+    "tool 'it'\"'\"'s' '' \"\" x''y \"\"z",
+    "tool 'multi\nline' \"tab\there\" \"cr\rhere\"",
+    'make CC=gcc --jobs=4 a]b ^x %y @z +w ,v :u .t',
+    '  /usr/bin/env\t -i  ',
+    'tool 文件 naïve',
+])
+def test_direct_argv_is_exactly_the_host_shell_words(command):
+    import subprocess
+    from lib.compat import get_shell_args
+    argv = ex._build_args(command)
+    assert argv != get_shell_args(command)
+    # The host /bin/sh is the oracle: it tokenizes the same text as `set --` operands.
+    shell = subprocess.run(['/bin/sh', '-c', 'set -- ' + command + '\nprintf "%s\\0" "$@"'],
+                           capture_output=True, check=True)
+    assert shell.stdout.decode('utf-8').split('\0')[:-1] == argv
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX shell grammar')
+def test_direct_program_receives_quoted_metacharacters_and_reports_its_status(tmp_path):
+    import shlex
+    import sys
+    data = ['a|b', 'c;d', '$HOME', '`id`', '*', "it's", 'x y', '~', '#', '', 'e&f', '<g>']
+    command = shlex.join([sys.executable, '-c',
+        'import json,sys;print(json.dumps(sys.argv[1:]));sys.exit(3)', *data])
+    assert ex._build_args(command)[0] == sys.executable
+    chunks, outcome = _run_streamed(command, str(tmp_path), None)
+    assert json.loads(outcome['stdout']) == data
+    assert outcome['exit_code'] == 3 and outcome['stderr'] == '' and 'error' not in outcome
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX shell grammar')
+def test_shell_syntax_reports_the_shells_own_status_and_signal(tmp_path):
+    import shlex
+    import sys
+    child = shlex.join([sys.executable, '-c', 'import os,signal;os.kill(os.getpid(),signal.SIGTERM)'])
+    # A signalled non-final command is the shell's to report: POSIX exposes it as 128+N.
+    chunks, listed = _run_streamed(f'{child}; echo "status=$?"', str(tmp_path), None)
+    assert listed['exit_code'] == 0 and 'status=143' in listed['stdout']
+    # A signalled shell keeps its own signed status and separate streams.
+    chunks, killed = _run_streamed("printf 'out\\n'; printf 'err\\n' >&2; kill -TERM $$",
+                                   str(tmp_path), None)
+    assert killed['stdout'] == 'out\n' and killed['stderr'] == 'err\n'
+    assert killed['exit_code'] == -15
+    assert killed['timed_out'] is False and killed['cancelled'] is False
+
+
+def test_every_command_entry_shares_direct_argv_and_signed_status(proj):
+    import shlex
+    import sys
+    command = shlex.join([sys.executable, '-u', '-c', "import os,signal,sys;print('out|;',flush=True);"
+        "print('err',file=sys.stderr,flush=True);os.kill(os.getpid(),signal.SIGTERM)"])
+    desktop = {'command': command, 'cwd': str(proj['root'])}
+    project = {'root': 'app', 'command': command}
+    outcomes = {'desktop sync': ex.cmd_run_local(desktop),
+                'project sync': pj.cmd_project_run_command(project)}
+    for name, start, params in (('desktop streamed', ex.start_local_run, desktop),
+                                ('project streamed', pj.start_project_run, project)):
+        done, settled = threading.Event(), []
+        assert start(name, params, lambda *_: None,
+                     lambda outcome: (settled.append(outcome), done.set())) is None
+        assert done.wait(15)
+        outcomes[name] = settled[0]
+    for name, outcome in outcomes.items():
+        assert (outcome['stdout'], outcome['stderr'], outcome['exit_code']) == ('out|;\n', 'err\n', -15), name
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX execvp semantics')
+def test_direct_script_without_interpreter_line_runs_as_posix_sh_script(tmp_path):
+    script = tmp_path / 'plain-script'
+    script.write_text('printf "%s|%s\\n" "$0" "$1"\nexit 4\n')
+    script.chmod(0o755)
+    command = "./plain-script 'a b'"
+    assert ex._build_args(command) == ['./plain-script', 'a b']
+    chunks, outcome = _run_streamed(command, str(tmp_path), None)
+    assert outcome['stdout'] == './plain-script|a b\n' and outcome['stderr'] == ''
+    assert outcome['exit_code'] == 4 and 'error' not in outcome
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX working-directory environment')
+def test_command_cwd_is_agent_relative_and_exported_as_pwd(tmp_path, monkeypatch):
+    import shlex
+    import sys
+    (tmp_path / 'sub').mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('PWD', '/stale/agent/directory')
+    show = shlex.join([sys.executable, '-c', 'import os;print(os.getcwd());print(os.environ["PWD"])'])
+    expected = [os.path.realpath(tmp_path / 'sub')] * 2
+    for command in (show, show + '; :'):
+        outcome = ex.cmd_run_local({'command': command, 'cwd': 'sub'})
+        assert outcome['exit_code'] == 0 and 'error' not in outcome, outcome
+        assert outcome['stdout'].split('\n')[:2] == expected
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='a deleted working directory is POSIX-only')
+def test_absolute_command_cwd_does_not_consult_the_agent_directory(tmp_path, monkeypatch):
+    import shlex
+    import sys
+    retired = tmp_path / 'retired-agent-directory'
+    retired.mkdir()
+    monkeypatch.chdir(retired)
+    retired.rmdir()
+    try:
+        outcome = ex.cmd_run_local({'command': shlex.join([sys.executable, '-c', 'import os;print(os.getcwd())']),
+                                    'cwd': str(tmp_path)})
+    finally:
+        os.chdir(tmp_path)
+    assert 'error' not in outcome and outcome['exit_code'] == 0, outcome
+    assert outcome['stdout'] == os.path.realpath(tmp_path) + '\n'
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX shell grammar')
+def test_lone_shell_builtin_keeps_shell_semantics(tmp_path):
+    (tmp_path / 'sub').mkdir()
+    outcomes = {command: _run_streamed(command, str(tmp_path), None)[1]
+                for command in ('exit 3', 'cd sub', 'cd missing')}
+    assert all('error' not in outcome for outcome in outcomes.values()), outcomes
+    assert outcomes['exit 3']['exit_code'] == 3
+    assert outcomes['cd sub']['exit_code'] == 0
+    assert outcomes['cd missing']['exit_code'] > 0
 
 
 @pytest.mark.parametrize('birth,status,expected', [(1,'running',True),(2,'running',False),(1,'zombie',False)])

@@ -100,6 +100,94 @@ def test_pytest_explicit_candidate_refusal_is_fatal(tmp_path, monkeypatch):
         _configure_explicit_test_engine({'TOFU_TEST_TOFUDB_BIN': str(tmp_path / 'missing')})
 
 
+def test_pytest_explicit_candidate_serves_differential_fixtures_without_building(tmp_path, monkeypatch):
+    from tests.conftest import _configure_explicit_test_engine
+    from tests.support import tofudb_binary as binary_support
+    candidate = tmp_path / 'tofu-db'
+    candidate.write_bytes(b'candidate')
+    candidate.chmod(0o755)
+    monkeypatch.setattr(engines, 'verify_current', lambda *args: None)
+    env = {'TOFU_TEST_TOFUDB_BIN': str(candidate)}
+    _configure_explicit_test_engine(env)
+    monkeypatch.setenv('TOFUDB_DIFFERENTIAL_BIN', env.get('TOFUDB_DIFFERENTIAL_BIN', ''))
+    monkeypatch.setattr(binary_support, '_RESOLVED', None)
+    monkeypatch.setattr(binary_support, '_RESOLUTION_ATTEMPTED', False)
+    monkeypatch.setattr(binary_support, '_cargo_build', lambda *args: pytest.fail(
+        'an explicit test engine must not start an in-tree cargo build'))
+    assert binary_support.ensure_engine_binary(tmp_path) == candidate
+    explicit = {'TOFU_TEST_TOFUDB_BIN': str(candidate), 'TOFUDB_DIFFERENTIAL_BIN': '/supplied/tofu-db'}
+    _configure_explicit_test_engine(explicit)
+    assert explicit['TOFUDB_DIFFERENTIAL_BIN'] == '/supplied/tofu-db'
+def _refuse_inherited_engine():
+    raise engines.EnginePreparationError(
+        'Storage engine does not match this application.')
+
+
+def test_shared_test_storage_skips_an_inherited_engine_built_from_other_source(monkeypatch):
+    import lib.storage
+    from tests.conftest import _start_test_storage
+    monkeypatch.delenv('TOFU_TEST_TOFUDB_BIN', raising=False)
+    monkeypatch.setattr(lib.storage, 'start_storage', _refuse_inherited_engine)
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        _start_test_storage()
+    reason = str(skipped.value)
+    assert 'does not match this application' in reason
+    assert 'TOFU_TEST_TOFUDB_BIN' in reason
+    assert 'TOFU_PERSONAL_STORAGE_BACKEND=sqlite' in reason
+
+
+def test_shared_test_storage_refusal_stays_fatal_for_an_explicit_engine(tmp_path, monkeypatch):
+    import lib.storage
+    from tests.conftest import _start_test_storage
+    monkeypatch.setenv('TOFU_TEST_TOFUDB_BIN', str(tmp_path / 'tofu-db'))
+    monkeypatch.setattr(lib.storage, 'start_storage', _refuse_inherited_engine)
+    with pytest.raises(engines.EnginePreparationError):
+        _start_test_storage()
+
+
+@pytest.mark.parametrize('phase', ['pytest_runtest_setup', 'pytest_runtest_call'])
+def test_native_refusal_in_any_fixture_or_test_body_skips_with_the_remedy(phase, monkeypatch):
+    import tests.conftest as conftest
+    monkeypatch.delenv('TOFU_TEST_TOFUDB_BIN', raising=False)
+    hook = getattr(conftest, phase)(item=None)
+    next(hook)
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        hook.throw(engines.EnginePreparationError(
+            'Storage engine does not match this application.'))
+    reason = str(skipped.value)
+    assert 'does not match this application' in reason
+    assert 'TOFU_TEST_TOFUDB_BIN' in reason
+    assert 'TOFU_PERSONAL_STORAGE_BACKEND=sqlite' in reason
+
+
+@pytest.mark.parametrize('phase', ['pytest_runtest_setup', 'pytest_runtest_call'])
+def test_native_refusal_stays_fatal_in_an_explicit_engine_lane(phase, tmp_path, monkeypatch):
+    import tests.conftest as conftest
+    monkeypatch.setenv('TOFU_TEST_TOFUDB_BIN', str(tmp_path / 'tofu-db'))
+    hook = getattr(conftest, phase)(item=None)
+    next(hook)
+    with pytest.raises(engines.EnginePreparationError):
+        hook.throw(engines.EnginePreparationError('stale'))
+
+
+def test_only_the_typed_engine_refusal_becomes_a_skip(monkeypatch):
+    import tests.conftest as conftest
+    monkeypatch.delenv('TOFU_TEST_TOFUDB_BIN', raising=False)
+    hook = conftest.pytest_runtest_setup(item=None)
+    next(hook)
+    with pytest.raises(RuntimeError, match='authority defect'):
+        hook.throw(RuntimeError('authority defect'))
+
+
+def test_child_process_prerequisite_refuses_like_the_application(monkeypatch):
+    import lib.storage.supervisor as supervisor
+    from tests.support.native_engine_prerequisite import require_native_engine_for_checkout
+    monkeypatch.delenv('TOFU_TEST_TOFUDB_BIN', raising=False)
+    monkeypatch.setattr(supervisor, '_resolve_tofudb_binary', _refuse_inherited_engine)
+    with pytest.raises(pytest.skip.Exception, match='TOFU_TEST_TOFUDB_BIN'):
+        require_native_engine_for_checkout()
+
+
 def test_isolated_output_symlink_is_never_followed(source, tmp_path):
     target = tmp_path / 'existing'
     target.mkdir()

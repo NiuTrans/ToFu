@@ -6,18 +6,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import lib as _lib  # module ref for hot-reload
-
 from lib.agent_core.events import EventType, build_event
 from lib.log import get_logger
 from lib.protocols import FetchService
 from lib.tasks_pkg.manager import append_event
 
 logger = get_logger(__name__)
-
-# NOTE: Do NOT re-export _lib.FETCH_* as module-level copies here.
-# Module-level copies become stale after reload_config() — always read
-# from _lib.<VAR> at call time to pick up hot-reloaded values.
 
 
 # ── Tool summary generation (mechanical, zero LLM calls) ──
@@ -139,7 +133,10 @@ def _prefetch_user_urls(
         append_event(task, build_event(EventType.TOOL_START, roundNum=rn, query=f'Fetching {url[:80]}', toolName='fetch_url'))
     # Dispatch through protocol or concrete import
     _fetch_urls = fetch_service.fetch_urls if fetch_service is not None else fetch_urls
-    fetched = _fetch_urls(urls, max_chars=_lib.FETCH_MAX_CHARS_DIRECT, pdf_max_chars=_lib.FETCH_MAX_CHARS_PDF, timeout=_lib.FETCH_TIMEOUT)
+    limits = search_runtime.get_config()
+    fetched = _fetch_urls(urls, max_chars=limits.fetch_max_chars_direct,
+                          pdf_max_chars=limits.fetch_max_chars_pdf,
+                          timeout=limits.fetch_timeout)
     # ── LLM content filter for pre-fetched URLs ──
     to_filter = [(url, text) for url, text in fetched.items()
                  if text and len(text) > 1500

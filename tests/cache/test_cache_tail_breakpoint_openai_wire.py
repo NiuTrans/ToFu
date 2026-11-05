@@ -1,20 +1,30 @@
-"""tests/cache/test_cache_tail_breakpoint_openai_wire.py — PIN a known, unfixed defect.
+"""tests/cache/test_cache_tail_breakpoint_openai_wire.py — tail breakpoint in OpenAI-wire tool loops.
 
-WHAT IS PINNED
-==============
-On a NON-Anthropic wire, an agent tool loop loses its conversation-TAIL cache
-breakpoint whenever the trailing assistant turn carries ``tool_calls`` with
-EMPTY ``content`` — the shape a model produces when it calls a tool without
-writing prose first. Only 2 of the 4 markers land (system + last tool
-definition); the rolling tail marker, which is the single highest-value one
-because it covers the growing prefix, is silently dropped.
+WHAT IS SPECIFIED
+=================
+On a NON-Anthropic wire two turn shapes cannot carry ``cache_control``:
 
-Consequence: whether a round can cache its conversation body depends on whether
-the model happened to narrate before calling a tool. That is not a property any
-cache strategy should hinge on.
+* ``tool`` results — the gateway's OpenAI→Anthropic translation would carry
+  the marker into ``tool_result.content`` (vendor HTTP 400, see
+  test_cache_tool_marker_protocol.py);
+* assistant turns that call a tool WITHOUT prose — there is no content block
+  to hang a marker on (route A below).
 
-WHY IT IS UNFIXED — both routes are closed, each for a DIFFERENT reason
-=======================================================================
+An agent tool loop is a run of exactly those two shapes, so the nearest
+markable turn (the latest user turn, or the latest assistant turn that wrote
+prose) can sit arbitrarily far behind the tail. The tail scan therefore walks
+back until it finds one, stopping at a system message. The former fixed
+5-message window dropped the conversation breakpoint outright once a loop held
+>= 5 such messages (three no-prose rounds, or one fan-out of five parallel tool
+calls): only the system + tool-definition markers landed, so whether a round
+could cache its conversation body hinged on whether the model happened to
+narrate before calling a tool.
+
+The Anthropic wire keeps its historical placement: our translator hoists the
+marker onto the tool_result / tool_use block, so the tail itself is markable.
+
+WHY THE MARKER CANNOT SIT ON THE TAIL ITSELF
+============================================
 Route A — mark the assistant turn on the OpenAI wire. **Closed by the OpenAI
   schema itself**, which is a repo-verifiable fact, not a gateway behaviour:
   ``prepare_request`` (lib/llm/_sse_core.py) only invokes
@@ -38,21 +48,20 @@ Route B — switch this provider to the Anthropic wire. **NOT settled.** Probing
   endpoint's cache behaviour is asserted here, in either direction. Deciding it
   needs the gateway team's internal observability, not more outside probing.
   (Note for whoever picks this up: the base_url in
-  static/provider_templates/meituan_claude_code.json is ``/v1/anthropic``, which
+  static/provider_templates/yourprovider_claude_code.json is ``/v1/anthropic``, which
   returns 404 — the reachable path has an extra segment. That template has never
   served live traffic.)
 
 SO: this file asserts ONLY the client-side marker arithmetic, which is pure
 local logic. It deliberately makes NO assertion about hit rates, cached_tokens,
-or any gateway response. If a future change makes the tail marker land in the
-empty-content case, `test_openai_wire_loses_the_tail_breakpoint` fails — that is
-the intended signal to delete this file, not to update the number.
+or any gateway response.
 
 Run:
     PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/cache/test_cache_tail_breakpoint_openai_wire.py -v
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -60,6 +69,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from lib.llm.body._model_tweaks import CLAUDE_PREFILL_SENTINEL  # noqa: E402
 from lib.llm.cache import add_cache_breakpoints  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -94,21 +104,36 @@ def _marked_roles(body: dict) -> list[str]:
     return out
 
 
+def _marked_indexes(body: dict) -> list[int]:
+    return [i for i, msg in enumerate(body.get('messages') or [])
+            if isinstance(msg.get('content'), list) and any(
+                isinstance(b, dict) and 'cache_control' in b
+                for b in msg['content'])]
+
+
+def _tool_call(i: int) -> dict:
+    return {'id': 'c%d' % i, 'type': 'function',
+            'function': {'name': 'read_files', 'arguments': '{}'}}
+
+
+def _tool_result(i: int) -> dict:
+    return {'role': 'tool', 'tool_call_id': 'c%d' % i,
+            'content': 'RESULT ' * 60}
+
+
 def _tool_loop(*, rounds: int = 10, prose: bool) -> dict:
-    """An agent tool loop. ``prose=False`` is the shape that loses the marker:
-    assistant turns carry tool_calls with empty content."""
+    """An agent tool loop. ``prose=False`` is the shape whose trailing turns
+    are ALL unmarkable on the OpenAI wire: assistant turns carry tool_calls
+    with empty content."""
     messages = [{'role': 'system', 'content': 'S' * 400},
                 {'role': 'user', 'content': 'go'}]
     for i in range(rounds):
         messages.append({
             'role': 'assistant',
             'content': 'Let me check that.' if prose else '',
-            'tool_calls': [{'id': 'c%d' % i, 'type': 'function',
-                            'function': {'name': 'read_files',
-                                         'arguments': '{}'}}],
+            'tool_calls': [_tool_call(i)],
         })
-        messages.append({'role': 'tool', 'tool_call_id': 'c%d' % i,
-                         'content': 'RESULT ' * 60})
+        messages.append(_tool_result(i))
     return {
         'model': _MODEL,
         'messages': messages,
@@ -119,32 +144,79 @@ def _tool_loop(*, rounds: int = 10, prose: bool) -> dict:
     }
 
 
-# ── The pinned defect ───────────────────────────────────────────────────
+# ── Walk-back to the nearest markable turn ──────────────────────────────
 
-def test_openai_wire_loses_the_tail_breakpoint():
-    """KNOWN DEFECT, pinned deliberately: 2 markers instead of 3.
-
-    If this fails because the count rose to 3, the defect was FIXED — delete
-    this file rather than updating the expected number.
-    """
+def test_no_prose_tool_loop_keeps_its_conversation_breakpoint():
+    """20 trailing unmarkable messages: the tail marker walks back past all of
+    them to the user turn — system + tool def + conversation = 3 markers."""
     body = _tool_loop(prose=False)
     add_cache_breakpoints(body, log_prefix='', api_protocol='openai')
-    assert _count_markers(body) == 2, (
-        'expected the known-defective 2 markers, got %d (roles=%s)'
+    assert _count_markers(body) == 3, (
+        'expected system + tool-def + conversation markers, got %d (roles=%s)'
         % (_count_markers(body), _marked_roles(body)))
+    assert _marked_indexes(body) == [0, 1]
     assert 'assistant' not in _marked_roles(body)
     assert 'tool' not in _marked_roles(body)
 
 
-def test_the_same_loop_with_prose_keeps_its_tail_breakpoint():
-    """The defect is shape-dependent: one sentence of prose recovers the marker.
+def test_walk_back_lands_on_the_latest_markable_turn():
+    """With earlier history the marker lands on the NEWEST markable turn before
+    the loop (the follow-up user turn), not the first one — it must cover as
+    much of the growing prefix as the wire allows."""
+    body = _tool_loop(rounds=6, prose=False)
+    body['messages'][2:2] = [
+        {'role': 'assistant', 'content': 'Here is the plan.'},
+        {'role': 'user', 'content': 'continue'},
+    ]
+    add_cache_breakpoints(body, log_prefix='', api_protocol='openai')
+    assert _marked_indexes(body) == [0, 3]
 
-    This contrast IS the bug report — cache coverage must not depend on whether
-    the model narrated before calling a tool.
-    """
+
+def test_parallel_tool_fan_out_keeps_the_prose_breakpoint():
+    """One assistant turn fanning out to six parallel tool calls: six trailing
+    tool results outrun any short window, yet the prose turn right before them
+    is markable and must carry the conversation marker."""
+    body = _tool_loop(rounds=0, prose=False)
+    body['messages'].append({'role': 'assistant',
+                             'content': 'Reading all six files.',
+                             'tool_calls': [_tool_call(i) for i in range(6)]})
+    body['messages'].extend(_tool_result(i) for i in range(6))
+    add_cache_breakpoints(body, log_prefix='', api_protocol='openai')
+    assert _marked_indexes(body) == [0, 2]
+    assert _count_markers(body) == 3
+
+
+def test_walk_back_still_skips_a_trailing_prefill_conversion():
+    """The volatile prefill-converted turn stays unmarkable however deep the
+    walk goes: the marker lands on the stable user turn behind the loop."""
+    body = _tool_loop(rounds=3, prose=False)
+    body['messages'].append({
+        'role': 'user',
+        'content': CLAUDE_PREFILL_SENTINEL + '\nhalf-written answer'})
+    add_cache_breakpoints(body, log_prefix='', api_protocol='openai')
+    assert _marked_indexes(body) == [0, 1]
+
+
+def test_walk_back_stops_at_a_system_message(caplog):
+    """A system message bounds the walk (the system phase owns its marker):
+    the user turn BEFORE it is never chosen, and the miss is logged."""
+    body = _tool_loop(rounds=5, prose=False)
+    body['messages'].insert(2, {'role': 'system',
+                                'content': 'Mid-conversation system note.'})
+    caplog.set_level(logging.DEBUG, logger='lib.llm.cache')
+    add_cache_breakpoints(body, log_prefix='[t]', api_protocol='openai')
+    marked = _marked_indexes(body)
+    assert [body['messages'][i]['role'] for i in marked] == ['system', 'system']
+    assert 'BP4 tail breakpoint could not be placed' in caplog.text
+
+
+def test_the_same_loop_with_prose_marks_the_latest_prose_turn():
+    """With prose the nearest markable turn is the last assistant turn, right
+    before the trailing (unmarkable) tool result."""
     body = _tool_loop(prose=True)
     add_cache_breakpoints(body, log_prefix='', api_protocol='openai')
     assert _count_markers(body) == 3
+    assert _marked_indexes(body) == [0, len(body['messages']) - 2]
     assert 'assistant' in _marked_roles(body)
 
 
@@ -153,9 +225,9 @@ def test_anthropic_wire_marker_arithmetic_is_unaffected():
 
     On the Anthropic protocol a ``tool`` message IS markable (our translator
     hoists the marker onto the emitted tool_result block), so the tail marker
-    lands in BOTH shapes. Asserted because any change to the protocol gate in
-    add_cache_breakpoints would silently alter it. This says nothing about what
-    the gateway does with those markers.
+    lands on the LAST message in BOTH shapes. Asserted because any change to
+    the protocol gate in add_cache_breakpoints would silently alter it. This
+    says nothing about what the gateway does with those markers.
     """
     for prose in (True, False):
         body = _tool_loop(prose=prose)
@@ -163,6 +235,7 @@ def test_anthropic_wire_marker_arithmetic_is_unaffected():
         assert _count_markers(body) == 3, (
             'anthropic wire, prose=%s: expected 3 markers, got %d'
             % (prose, _count_markers(body)))
+        assert _marked_indexes(body) == [0, len(body['messages']) - 1]
 
 
 def test_assistant_tool_calls_carry_no_content_block_to_mark():

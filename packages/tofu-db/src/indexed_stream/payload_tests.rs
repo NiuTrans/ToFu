@@ -36,6 +36,7 @@ fn rows(db: &AuthorityDatabase, owner: u64) -> io::Result<Value> {
             types: vec!["messages_snapshot".to_owned()],
             type_prefixes: vec![],
             payload_types: None,
+            inspector_projection: false,
         },
     )?;
     Ok(serde_json::from_slice(&raw).unwrap())
@@ -54,6 +55,7 @@ fn event_time_spine_omits_blob_materialization_but_full_replay_still_verifies_it
     let selected = ListRequest {
         task_id: item.task_id.clone(), after_sequence: None, limit: 10,
         types: vec![], type_prefixes: vec![], payload_types: Some(vec![]),
+        inspector_projection: false,
     };
     let spine: Value = serde_json::from_slice(&list(&db, &mut tx, &selected).unwrap()).unwrap();
     assert_eq!(spine, json!([{"sequence": 19, "created_at_ms": 1234,
@@ -63,6 +65,8 @@ fn event_time_spine_omits_blob_materialization_but_full_replay_still_verifies_it
     assert_eq!(end, spine[0]);
     let full = ListRequest { payload_types: None, ..selected };
     assert!(list(&db, &mut tx, &full).unwrap_err().to_string().contains("missing"));
+    let inspector = ListRequest { inspector_projection: true, ..full };
+    assert!(list(&db, &mut tx, &inspector).unwrap_err().to_string().contains("missing"));
     assert!(latest(&db, &mut tx, &item.task_id, false).unwrap_err().to_string().contains("missing"));
     drop(tx);
     // The injected failure never changes durable payload state.
@@ -345,6 +349,7 @@ fn complete_type_catalog_merges_sparse_events_and_summarizes_after_reopen() {
             types: vec![events[0].event_type.clone()],
             type_prefixes: vec!["endpoint_".to_owned(), "endpoint_00".to_owned()],
             payload_types: Some(vec![]),
+            inspector_projection: false,
         };
         let page: Value = serde_json::from_slice(&list(&db, &mut tx, &request).unwrap()).unwrap();
         let rows = page.as_array().unwrap();

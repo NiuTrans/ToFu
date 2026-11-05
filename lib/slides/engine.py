@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 from lib.agent_core.events import Phase, build_phase
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -37,7 +38,7 @@ def _emit(task: dict, event: dict) -> None:
 #: Task fields persisted so a crashed process can re-spawn this job.
 _MANIFEST_FIELDS = ('task_id', 'topic', 'lang', 'style', 'max_pages', 'size',
                     'conv_id', 'workdir', 'model', 'creative_mode', 'user_id',
-                    'interactive_outline', 'template_id')
+                    'interactive_outline', 'template_id', 'material')
 
 
 def _write_manifest(task: dict, state: str) -> None:
@@ -73,6 +74,7 @@ def run_slides_task(task: dict) -> None:
             max_pages=int(task.get('max_pages') or 12),
             creative_mode=task.get('creative_mode') or 'director',
             model=task.get('model') or None,
+            material=task.get('material') or '',
             owner_user_id=owner_user_id,
             interactive_outline=bool(task.get('interactive_outline')),
             task_id=task_id,
@@ -173,6 +175,7 @@ def start_slides_job(topic: str, *, lang: str = 'zh', style: str = '',
                      creative_mode: str = 'director',
                      interactive_outline: bool = False,
                      template_id: str = '',
+                     material: str = '',
                      user_id: int) -> dict:
     """Create + spawn a deck job; returns {task_id, deduped}."""
     from lib.slides.runtime import (
@@ -184,21 +187,27 @@ def start_slides_job(topic: str, *, lang: str = 'zh', style: str = '',
         normalise_slide_size,
         normalise_slide_style,
         normalise_slide_topic,
+        normalise_slide_material,
     )
     from lib.production.contracts import CREATIVE_MODES, normalise_creative_mode
 
     _cleanup_stale_slides_tasks()
+    if not isinstance(lang, str):
+        raise BadRequest('lang must be a string', field='lang')
     topic = normalise_slide_topic(topic)
+    material = normalise_slide_material(material)
     style = normalise_slide_style(style)
     model = normalise_slide_model(model)
     creative_raw = str(creative_mode or '').strip().lower()
     if creative_raw and creative_raw not in CREATIVE_MODES:
-        raise ValueError(
-            f'creative_mode must be one of {"|".join(CREATIVE_MODES)}')
+        raise BadRequest(
+            f'creative_mode must be one of {"|".join(CREATIVE_MODES)}',
+            field='creative_mode')
     creative_mode = normalise_creative_mode(creative_mode)
     max_pages = normalise_slide_page_count(max_pages)
     size = normalise_slide_size(size)
-    key = (user_id, topic, lang, style, max_pages, size, model, creative_mode)
+    key = (user_id, topic, lang, style, max_pages, size, model, creative_mode,
+           material)
     # Fail before workdir creation, task registration, research, or LLM spend.
     from lib.slides.readiness import ensure_slides_runtime_ready
     ensure_slides_runtime_ready()
@@ -212,6 +221,8 @@ def start_slides_job(topic: str, *, lang: str = 'zh', style: str = '',
         task['interactive_outline'] = True
     if not existing and template_id:
         task['template_id'] = str(template_id)[:48]
+    if not existing and material:
+        task['material'] = material
     if existing:
         return {'task_id': existing, 'deduped': True}
     try:

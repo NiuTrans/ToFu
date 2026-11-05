@@ -35,6 +35,37 @@ function lazyOutputPaths() {
   });
 }
 
+/** Share parsed files and filesystem probes across the per-bundle programs.
+ *
+ * One check reads an unchanging checkout. Without sharing, every bundle
+ * program re-resolves the ~60 default lib files (about 3,000 directory probes
+ * each on a network-mounted checkout) and re-parses lib.dom.d.ts. Programs stay
+ * separate, so names declared by one bundle's imports never resolve another's.
+ */
+function createSharedCompilerHost(compilerOptions) {
+  const host = ts.createCompilerHost(compilerOptions);
+  for (const name of ['fileExists', 'directoryExists', 'readFile', 'realpath', 'getDirectories']) {
+    const probe = host[name];
+    if (typeof probe !== 'function') continue;
+    const results = new Map();
+    host[name] = (target) => {
+      if (!results.has(target)) results.set(target, probe.call(host, target));
+      return results.get(target);
+    };
+  }
+  const sourceFiles = new Map();
+  const getSourceFile = host.getSourceFile;
+  host.getSourceFile = (fileName, ...rest) => {
+    let sourceFile = sourceFiles.get(fileName);
+    if (sourceFile === undefined) {
+      sourceFile = getSourceFile.call(host, fileName, ...rest);
+      if (sourceFile !== undefined) sourceFiles.set(fileName, sourceFile);
+    }
+    return sourceFile;
+  };
+  return host;
+}
+
 export function checkLazyRuntimeBindings() {
   const failures = [];
   const outputs = lazyOutputPaths();
@@ -49,13 +80,17 @@ export function checkLazyRuntimeBindings() {
     noImplicitAny: false,
     skipLibCheck: true,
   };
+  const host = createSharedCompilerHost(compilerOptions);
   for (const bundle of outputs) {
     if (!fs.existsSync(bundle.output)) {
       failures.push(`${bundle.name}: generated output is missing`);
       continue;
     }
-    const program = ts.createProgram([bundle.output], compilerOptions);
-    for (const diagnostic of ts.getPreEmitDiagnostics(program)) {
+    const program = ts.createProgram([bundle.output], compilerOptions, host);
+    // Only the bundle's own diagnostics are reported, and a bundle exports
+    // nothing another file could resolve, so imported modules go unchecked.
+    const sourceFile = program.getSourceFile(bundle.output);
+    for (const diagnostic of ts.getPreEmitDiagnostics(program, sourceFile)) {
       if (!diagnostic.file
           || path.resolve(diagnostic.file.fileName) !== bundle.output
           || !unresolvedDiagnosticCodes.has(diagnostic.code)) continue;

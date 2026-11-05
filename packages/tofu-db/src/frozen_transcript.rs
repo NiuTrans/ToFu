@@ -21,9 +21,6 @@ fn corrupt(message: &str) -> io::Error {
 fn conflict(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, message)
 }
-fn bounded(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
 fn validate_id(id: &str) -> io::Result<()> {
     if id.is_empty() || id.len() > 256 || id.contains('\0') {
         return Err(invalid("invalid frozen transcript identity"));
@@ -226,7 +223,7 @@ fn page_bytes(
 }
 fn parse_page(raw: &[u8]) -> io::Result<Vec<Value>> {
     if raw.len() > MAX_FROZEN_TRANSCRIPT_PAGE_BYTES {
-        return Err(bounded("frozen transcript page exceeds byte budget"));
+        return Err(crate::resource_exhaustion::domain_bound("frozen transcript page exceeds byte budget"));
     }
     let messages: Vec<Value> = serde_json::from_slice(raw)
         .map_err(|_| invalid("frozen transcript page is not a message array"))?;
@@ -278,11 +275,11 @@ fn restore_page(
     m.messages = m
         .messages
         .checked_add(count)
-        .ok_or_else(|| bounded("frozen transcript count overflow"))?;
+        .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("frozen transcript count overflow"))?;
     m.decoded_bytes = m
         .decoded_bytes
         .checked_add(raw.len())
-        .ok_or_else(|| bounded("frozen transcript byte count overflow"))?;
+        .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("frozen transcript byte count overflow"))?;
     m.pages.push(descriptor);
     validate_manifest(&m)?;
     versioned_document::put_with_blob_owner_bounded(
@@ -354,9 +351,9 @@ pub(crate) fn messages(
             if (start..end).contains(&(p.start + offset)) {
                 bytes = bytes
                     .checked_add(serde_json::to_vec(&message)?.len() + 1)
-                    .ok_or_else(|| bounded("frozen transcript response byte overflow"))?;
+                    .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("frozen transcript response byte overflow"))?;
                 if bytes > MAX_FROZEN_TRANSCRIPT_PAGE_BYTES {
-                    return Err(bounded("frozen transcript response exceeds page budget"));
+                    return Err(crate::resource_exhaustion::domain_bound("frozen transcript response exceeds page budget"));
                 }
                 result.push(message);
             }

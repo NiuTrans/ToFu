@@ -160,7 +160,7 @@ def test_projection_pairs_storyboard_gate():
 def test_storyboard_real_wait_accepts_immediate_answer(tmp_path, monkeypatch):
     from lib.tasks_pkg import human_guidance
     from lib.tasks_pkg.human_gate_registry import OwnedHumanGateRegistry
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(human_guidance, 'human_gate_registry', registry)
     def emit(task, event):
         if event['type'] == 'storyboard_gate':
@@ -174,7 +174,7 @@ def test_storyboard_real_wait_accepts_immediate_answer(tmp_path, monkeypatch):
 def test_storyboard_cancel_response_never_persists_approval(tmp_path, monkeypatch):
     from lib.tasks_pkg import human_guidance
     from lib.tasks_pkg.human_gate_registry import OwnedHumanGateRegistry
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(human_guidance, 'human_gate_registry', registry)
     def emit(task, event):
         if event['type'] == 'storyboard_gate':
@@ -190,7 +190,7 @@ def test_storyboard_stop_propagates_into_real_wait(tmp_path, monkeypatch):
     import threading
     from lib.tasks_pkg import human_guidance
     from lib.tasks_pkg.human_gate_registry import OwnedHumanGateRegistry
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(human_guidance, 'human_gate_registry', registry)
     stop = threading.Event()
     task = _task(tmp_path, abort_event=stop)

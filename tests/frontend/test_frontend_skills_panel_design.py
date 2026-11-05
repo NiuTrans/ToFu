@@ -1,26 +1,9 @@
 #!/usr/bin/env python3
-"""Guards for the Skills settings-tab redesign (tofu re-skin, 2026-08-04).
+"""Skills settings rendering, shared theme tokens and header structure.
 
-The panel's skills-specific CSS was a dark-theme leftover: a #1a1a1a scope
-pill, a purple-accented drop zone, a green installed wash, and a #333 footer
-hairline — all alien inside the cream tofu settings chrome (owner: "界面太丑,
-对齐/风格/重点突出都不行"). The redesign re-skins every skills-* rule to the
-tofu tokens (--s-ink / --s-gold / --s-cream / --s-white) and restructures the
-header to mirror the MCP store header (title+badges | scope | action | search).
-
-Three layers pinned here:
-
-  1. jsdom render pins — the catalog card renderer emits the featured stamp
-     (the catalog sorts featured-first; the reason is now VISIBLE), the
-     official/warn/note blocks, and the installed card's gold-language
-     classes + action set.
-  2. Dark-leftover ratchet — no skill-* rule body in settings.css may
-     reference the retired dark tokens again (the exact regression class).
-  3. Panel-structure pins — header control order + the new-memory button
-     demoted from a fake scope tab to a real .btn-secondary.
-
-Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
-     tests/frontend/test_frontend_skills_panel_design.py
+State selectors must retain theme-aware styling across palette revisions;
+individual shadow colors are not a product contract. Browser journeys and
+exact-source actions are covered by the skill library's behavioral tests.
 """
 
 from __future__ import annotations
@@ -189,37 +172,16 @@ def test_no_dark_leftovers_in_skills_css():
     )
 
 
-def test_skills_css_tofu_anchors_present():
-    """Positive pins: the load-bearing tofu accents exist (guards against a
-    'delete everything' way of going green)."""
+def test_skills_semantic_states_use_shared_theme_tokens():
+    """State styling remains present and theme-aware across palette revisions."""
     with open(SETTINGS_CSS, encoding='utf-8') as fh:
-        css = fh.read()
-    rules = dict()
-    for sel, body in _skill_rules(css):
-        rules.setdefault(sel, body)
-
-    def _body(sel_part: str) -> str:
-        for sel, body in rules.items():
-            if sel_part in sel:
-                return body
-        raise AssertionError(f'no skill rule matching {sel_part!r}')
-
-    assert 'var(--s-gold)' in _body('.skills-scope-tab.active'), (
-        'the active scope tab lost its gold offset shadow'
-    )
-    assert 'var(--s-ink)' in _body('.skills-scope-tab.active'), (
-        'the active scope tab is no longer the ink block'
-    )
-    assert 'var(--s-gold)' in _body('.mcp-app-card.is-installed'), (
-        'the installed card lost the gold connected-language shadow'
-    )
-    assert '--s-gold-glow' in _body('.skills-drop-zone.is-dragging'), (
-        'the drag-over state lost its gold fill'
-    )
-    assert 'var(--s-ink)' in _body('.skill-installed-tag') and \
-        'var(--s-gold)' in _body('.skill-installed-tag'), (
-        'the installed tag is no longer the ink/gold stamp'
-    )
+        rules = list(_skill_rules(fh.read()))
+    for state in ('.skills-scope-tab.active', '.mcp-app-card.is-installed',
+                  '.skills-drop-zone.is-dragging', '.skill-installed-tag'):
+        bodies = [body for selector, body in rules if state in selector]
+        assert bodies, f'missing skill state: {state}'
+        assert any('var(--s-' in body for body in bodies), (
+            f'{state} must consume shared theme tokens')
 
 
 # ── 3. Panel-structure pins ──────────────────────────────────────────

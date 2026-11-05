@@ -16,6 +16,7 @@ from lib.log import get_logger
 from lib.optimizer import analyzer as _facade
 from ._logs import _collect_app_log_signals, _safe_tail_lines
 from ._audit import _collect_audit_log_evidence
+from ._cache import _collect_cache_read_share_divergence
 from ._issues import _collect_error_log_evidence, _collect_recurring_issues
 from ._signals import (
     _collect_conversation_tool_distribution,
@@ -55,11 +56,17 @@ class EvidenceBundle:
     compaction_trigger_count: int = 0
     model_switch_events: list[dict] = field(default_factory=list)
     top_cost_conversations: list[dict] = field(default_factory=list)
+    # Same-route prompt-cache splits: one request group cold while another on
+    # the same model stays warm (lib/tasks_pkg/cache_tracking/_health.py).
+    cache_read_share_divergence: list[dict] = field(default_factory=list)
     failing_scheduled_tasks: list[dict] = field(default_factory=list)
     idle_proactive_tasks: list[dict] = field(default_factory=list)
     # Fingerprint-clustered recurring failures (the recurring/unresolved
     # issue surface the removed project_error_tracker.py once provided).
     recurring_issues: list[dict] = field(default_factory=list)
+    # Evidence sources whose collection failed: their values are missing,
+    # never a silent zero/empty reading.
+    unavailable_signals: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -177,15 +184,32 @@ def gather_evidence(
     cost = _collect_cost_outliers(owner_user_id=owner_user_id)
     bundle.top_cost_conversations = cost['top_cost_conversations']
 
-    conv_signals = _collect_conversation_tool_distribution(
-        cutoff_local, owner_user_id=owner_user_id)
-    # Merge conv-side tool counts with log-side counts (log wins for per-tool
-    # invocation count, conv-side fills any gaps)
-    merged = dict(bundle.tool_call_counts)
-    for k, v in conv_signals['tool_counts'].items():
-        merged[k] = max(merged.get(k, 0), v)
-    bundle.tool_call_counts = merged
-    bundle.top_search_domains = conv_signals['search_urls']
+    try:
+        conv_signals = _collect_conversation_tool_distribution(
+            cutoff_local, owner_user_id=owner_user_id)
+    except Exception as e:
+        # A failed transcript scan is missing evidence, not an empty reading:
+        # record it so the proposer never reads silence as "no tool usage".
+        logger.error('[Optimizer.analyzer] conversation tool distribution '
+                     'unavailable: %s', e, exc_info=True)
+        bundle.unavailable_signals.append('conversation_tool_distribution')
+    else:
+        # Merge conv-side tool counts with log-side counts (log wins for
+        # per-tool invocation count, conv-side fills any gaps)
+        merged = dict(bundle.tool_call_counts)
+        for k, v in conv_signals['tool_counts'].items():
+            merged[k] = max(merged.get(k, 0), v)
+        bundle.tool_call_counts = merged
+        bundle.top_search_domains = conv_signals['search_urls']
+
+    if allow_unowned_observability:
+        try:
+            bundle.cache_read_share_divergence = (
+                _collect_cache_read_share_divergence(cutoff_local))
+        except Exception as e:
+            logger.error('[Optimizer.analyzer] prompt-cache read-share '
+                         'evidence unavailable: %s', e, exc_info=True)
+            bundle.unavailable_signals.append('cache_read_share_divergence')
 
     bundle.daily_report_snippets = _collect_daily_report_snippets(
         days=7, owner_user_id=owner_user_id)

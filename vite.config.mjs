@@ -1,19 +1,10 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+
+const { entries } = JSON.parse(readFileSync(new URL('./frontend/authoring-inputs.json', import.meta.url), 'utf8'));
 
 const outDir = process.env.TOFU_VITE_OUT_DIR || 'static/vite';
-const TOOL_PRESENTATION_CHUNK_MARKER = '/frontend/src/conversation/presentation/';
-
-/* Derive the chunk by path prefix, not a filename allowlist: a rename stays in
- * the chunk instead of silently no-op'ing back into the entry graph. The whole
- * presentation directory is small, startup-required policy/presentation code,
- * so one eagerly cached chunk is the intended delivery shape. */
-export function manualChunkName(moduleId) {
-  const normalizedId = moduleId.replaceAll('\\', '/');
-  return normalizedId.includes(TOOL_PRESENTATION_CHUNK_MARKER)
-    ? 'tool-presentation'
-    : undefined;
-}
 
 export default defineConfig({
   root: '.',
@@ -35,15 +26,12 @@ export default defineConfig({
     target: 'safari15',
     sourcemap: true,
     rollupOptions: {
-      input: {
-        main: resolve(process.cwd(), 'frontend/src/main.ts'),
-        admin: resolve(process.cwd(), 'frontend/src/admin.ts'),
-      },
+      input: Object.fromEntries(Object.entries(entries).map(([name, path]) =>
+        [name, resolve(process.cwd(), path)])),
       output: {
         entryFileNames: 'assets/[name]-[hash].js',
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash][extname]',
-        manualChunks: manualChunkName,
       },
     },
   },

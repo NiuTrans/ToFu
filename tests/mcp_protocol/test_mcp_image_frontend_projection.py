@@ -8,31 +8,19 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 BUNDLER = ROOT / "scripts" / "vite_test_bundle.mjs"
 ENTRY = ROOT / "frontend/src/conversation/index.ts"
 
 
-def _ready() -> bool:
-    if not shutil.which("node") or not BUNDLER.is_file():
-        return False
-    return subprocess.run(
-        [shutil.which("node"), "-e", "require('jsdom')"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    ).returncode == 0
-
-
-pytestmark = [
-    pytest.mark.unit,
-    pytest.mark.skipif(not _ready(), reason="node + jsdom + Vite test bundler required"),
-]
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(scope="module")
 def conversation_bundle(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    require_node_modules('vite')
     built = tmp_path_factory.mktemp("mcp-image-projection") / "conversation.cjs"
     result = subprocess.run(
         [
@@ -55,6 +43,7 @@ def conversation_bundle(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def test_mcp_turn_image_renders_as_interactive_thumbnail(
     conversation_bundle: Path,
 ) -> None:
+    require_node_modules('jsdom')
     script = f"""
 const {{ JSDOM }} = require('jsdom');
 const dom = new JSDOM('<main><div id="block"></div></main>');

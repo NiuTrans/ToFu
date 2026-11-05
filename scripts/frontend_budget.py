@@ -1,106 +1,15 @@
 #!/usr/bin/env python3
-"""Frontend source-shape and compressed-resource budgets used by CI.
+"""Check frontend authoring shape and the complete compressed delivery graph.
 
-Defaults are a ratchet just above the measured 2026-08-27 baseline.  Operators
-may tighten them through environment variables; increasing a limit is an
-explicit reviewable CI change rather than an accidental bundle regression.
+Responsibility: enforce existing source, entry, async-module and total-graph
+budgets without hiding shared static imports. Immediate startup dynamic roots
+come from frontend/authoring-inputs.json. Standalone URL workers are counted
+separately under an explicit asset whitelist, never silently omitted.
 
-2026-08-20 baseline re-measurement (reviewed): 1538.7 KiB total, ratcheted to
-1560 KiB.  The +38 KiB growth since 2026-08-14 is deliberate feature delivery
-(orchestration studio/task-mode controllers, paper lane, memory panel — all
-async chunks loaded on demand), NOT shell weight: the main entry went DOWN
-715.0 → 672.5 KiB in the same window after dead-code removal (87 functions),
-dead i18n key cleanup (-14.7 KiB), and the highlight.js eager/lazy grammar
-split.  First-paint cost is the metric that matters; total counts bytes that
-40 on-demand chunks may never ship to a given session.
-
-2026-08-27 delivery re-measurement (reviewed): Project Brain moved from the
-retained main runtime into an on-demand chunk, removing
-102,852 raw bytes from the main entry. Locale dictionaries now ship as
-content-hashed JSON data rather than JavaScript modules: the chosen language
-is fetched once and no dictionary is parsed as code. This reduced total Vite
-JavaScript from 1,601,399 to 1,430,160 gzip bytes while the main entry measured
-589,025 gzip bytes. Project Brain content translation also moved from retained
-JavaScript to a typed, explicitly bounded owner; its final lazy chunk is
-29,268 gzip bytes. The retained-runtime, main-entry, ordinary async-chunk and
-total-JavaScript ceilings were ratcheted to 3,554, 580, 120 and 1,410 KiB.
-The 2026-08-28 typed branding decomposition then lowered the retained source
-ceiling to 3,431 KiB without increasing delivery budgets; removing the
-duplicate retained HTTP-result projector tightened it to 3,428 KiB, and the
-typed bounded-work pool lowered it to 3,425 KiB. Removing the cookie-capture
-adapter tightened the ceiling to 3,424 KiB; moving the SSE reader into the
-lazy typed Paper graph tightened it to 3,420 KiB, and replacing the retained
-translation guard with a bounded typed registry tightened it to 3,416 KiB.
-Moving conversation catalog queries behind explicit typed inputs tightened the
-retained ceiling to 3,415 KiB. Separating Marked policy from dead cache-console
-helpers tightened it again to 3,413 KiB. Retiring the unreferenced message-era
-translation presentation model tightened it to 3,410 KiB. Moving My Context
-preference actions behind an injected typed controller tightened it to
-3,409 KiB, and moving shared image actions behind a lifecycle-owned typed DOM
-controller tightened it to 3,407 KiB. Moving send-preparation transient state
-into an injected conversation controller tightened it to 3,405 KiB.
-The subsequent retained-owner pass reached 3,350 KiB; moving My Day's
-owner-scoped cache, digest and reminder lifecycle into typed lazy/background
-owners tightened the current ceiling to 3,341 KiB. Paper's always-together
-typed panel owners now share one composition chunk, reducing total Vite
-JavaScript without changing the 1,410 KiB delivery ceiling.
-Later retained-owner and availability migrations tightened the source ceiling
-to 3,300 KiB. Moving all application dialogs into one lifecycle-owned typed
-controller lowers the current ceiling to 3,289 KiB without changing delivery
-budgets. Moving Turn provenance HTML and inline-Markdown policy out of the
-retained tool renderer lowers the current ceiling to 3,271 KiB; the typed owner
-remains in the existing main graph, so delivery ceilings stay unchanged. The
-write-gate refusal presenter then lowers the source ceiling to 3,266 KiB.
-The bounded tool-result presenter lowers it to 3,240 KiB, and the typed search
-presenter plus its composition port tighten the current shared-tree ceiling to
-3,224 KiB without changing delivery budgets. Image, browser-JavaScript, and
-command-execution presentation owners then lower the retained ceiling to
-3,202 KiB. The subsequent bounded write-approval owner lowers it to 3,195 KiB
-and joins their explicit static `tool-presentation` chunk; it remains
-startup-required and measures 22.8 KiB gzip. The independently cached main
-entry measures 559.2 KiB under its 561 KiB ratchet, while the total-JavaScript
-graph measures 1,406.8 KiB under its 1,410 KiB ceiling and counts that eager
-chunk exactly once.
-Moving the four synthetic context-injection lanes behind one bounded typed
-presenter then lowers the retained source ceiling to 3,177 KiB. The expanded
-eager policy chunk measures 25.2 KiB gzip, while the main entry is 557.1 KiB
-and the complete JavaScript graph is 1,407.2 KiB under the unchanged delivery
-ceilings.
-Moving Human Guidance normalization, cards, outcome rows, and delegated action
-strings behind one bounded typed presenter lowers the retained source ceiling
-again to 3,171 KiB. Guidance response I/O and translation remain lifecycle
-owners rather than presentation dependencies. The isolated gzip-9 graph
-measures the eager tool-policy chunk at 26.8 KiB, the independently cacheable
-main entry at 556.4 KiB, and total JavaScript at 1,408.0 KiB under the
-unchanged delivery ceilings.
-
-2026-09 metric correction (reviewed): the pdf.worker URL asset (~405 KiB
-gzip) was counted inside "total Vite JavaScript", although it is a
-standalone on-demand binary — fetched only when a session opens a PDF, never
-parsed into the module graph, and pinned by the vendored pdfjs version
-rather than by our edits (exactly analogous to fonts, which were never
-counted). It now has its own ratcheted budget line
-(TOFU_BUDGET_VITE_URL_ASSET_KIB), and "total Vite JavaScript" measures the
-module graph it always claimed to measure — re-tightened from 1,410 to
-1,024 KiB against the 1,011.8 KiB re-measured graph, so neither metric can
-hide growth in the other.
- URL-asset membership is an explicit whitelist
-(EXPECTED_URL_ASSET_STEMS): a chunk that falls out of the manifest graph
-fails loudly instead of silently joining this line under its own per-file
-budget.
-
-2026-09-03 delivery re-measurement (reviewed): the restored 本地部署
-settings flow (engine preset chooser, batch endpoint probe-and-stage,
-managed model-path chat handoff) added ~1.6 KiB gzip to the on-demand
-settings-presenters lazy chunk — loaded only when a session opens
-Settings → Providers, never on first paint. Main entry and retained
-ceilings are unchanged; the total module-graph ceiling ratchets from
-1,024 to 1,026 KiB against the 1,025.3 KiB re-measured graph.
-
-The source checks are architecture guardrails for model-only maintenance:
-ordinary modules stay small enough to inspect in one bounded read, while the
-retained migration runtime has a separate shrinking ratchet. Generated files
-are checked by their own generators and are excluded from the module-size cap.
+Source checks cover authored sections; generated delivery files keep their own
+generator verification. Budget values below remain the reviewed ceilings;
+changing chunk layout cannot bypass them. Ownership and verification rationale:
+docs/FRONTEND_ARCHITECTURE.md.
 """
 
 from __future__ import annotations
@@ -122,6 +31,27 @@ VITE_PRIMARY_ENTRIES = (
     ('main', 'frontend/src/main.ts'),
     ('admin', 'frontend/src/admin.ts'),
 )
+VITE_STARTUP_DYNAMIC_ENTRIES = json.loads(
+    (ROOT / 'frontend/authoring-inputs.json').read_text(encoding='utf-8')
+)['startupDynamicImports']
+
+
+def _startup_assets(manifest: dict, entry: str) -> set[str]:
+    """Count required startup owners and shared static dependencies once."""
+    pending = [entry]
+    if entry in VITE_STARTUP_DYNAMIC_ENTRIES:
+        pending.extend(manifest[entry].get('dynamicImports') or ())
+    seen: set[str] = set()
+    assets: set[str] = set()
+    while pending:
+        key = pending.pop()
+        if key in seen:
+            continue
+        seen.add(key)
+        row = manifest[key]
+        assets.add(row['file'])
+        pending.extend(row.get('imports') or ())
+    return assets
 
 
 def _limit(name: str, default_kib: int) -> int:
@@ -356,11 +286,15 @@ def main() -> int:
                _limit('TOFU_BUDGET_VITE_URL_ASSET_KIB', 410), failures)
 
     for entry_name, entry_key in VITE_PRIMARY_ENTRIES:
-        _check(f'Vite {entry_name} entry', vite_sizes[manifest[entry_key]['file']],
+        _check(f'Vite {entry_name} startup',
+               sum(vite_sizes[path] for path in _startup_assets(manifest, entry_key)),
                _limit(f'TOFU_BUDGET_VITE_{entry_name.upper()}_KIB',
                       561 if entry_name == 'main' else 16), failures)
 
     primary_entry_keys = {key for _, key in VITE_PRIMARY_ENTRIES}
+    primary_entry_keys.update(
+        key for entry in VITE_STARTUP_DYNAMIC_ENTRIES
+        for key in manifest[entry].get('dynamicImports') or ())
     for key, row in sorted(manifest.items()):
         if key in primary_entry_keys or not isinstance(row, dict) or not row.get('isDynamicEntry'):
             continue

@@ -69,8 +69,6 @@ def dispatch_fixture(monkeypatch):
     dispatcher = _RequestDispatcher()
     monkeypatch.setattr(api, 'get_dispatcher', lambda: dispatcher)
     monkeypatch.setattr(api, '_audit_severity_downgrade', lambda: None)
-    monkeypatch.setattr('lib.llm_dispatch._api_stream._check_request_headroom',
-                        lambda *a, **kw: None)
     monkeypatch.setattr('lib.llm_dispatch.conv_affinity.get_conv_affinity',
                         lambda: '')
     sleep = Mock(side_effect=AssertionError('local failure must not back off'))
@@ -152,11 +150,7 @@ def test_local_failure_releases_once_without_health_retry_or_fallback(
 
     assert len(failures) == 1
     assert isinstance(failures[0], error_type)
-    if stage == 'body_adaptation':
-        assert raised.value.__cause__ is failures[0]
-        assert raised.value.stage == 'slot_body_adaptation'
-    else:
-        assert raised.value is failures[0]
+    assert raised.value is failures[0]
     assert len(dispatcher.picks) == 1
     assert [slot.release_calls for slot in dispatcher.slots] == [1, 0]
     assert [slot.inflight for slot in dispatcher.slots] == [0, 0]
@@ -171,4 +165,42 @@ def test_local_failure_releases_once_without_health_retry_or_fallback(
     provider_send.assert_not_called()
     restarts.assert_not_called()
     content.assert_not_called()
+    sleep.assert_not_called()
+
+
+@pytest.mark.parametrize('asynchronous', [False, True])
+@pytest.mark.parametrize('kind', ['cancel', 'abort', 'unexpected'])
+def test_adaptation_failure_releases_reserved_slot_even_on_cancellation(
+        monkeypatch, dispatch_fixture, asynchronous, kind):
+    from lib.llm.llm_errors import AbortedError
+    api, dispatcher, sleep = dispatch_fixture
+    failure = {
+        'cancel': asyncio.CancelledError(),
+        'abort': AbortedError('cancelled'),
+        'unexpected': RuntimeError('private request fragment'),
+    }[kind]
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(api, '_adapt_stream_body_for_slot', fail)
+    expected = LocalRequestPreparationError if kind == 'unexpected' else type(failure)
+    with pytest.raises(expected) as raised:
+        messages = [{'role': 'user', 'content': 'offline specification'}]
+        if asynchronous:
+            asyncio.run(api.async_dispatch_stream(messages, owner_user_id=987654))
+        else:
+            api.dispatch_stream(messages, owner_user_id=987654)
+    if kind == 'unexpected':
+        assert raised.value.__cause__ is failure
+        assert raised.value.stage == 'slot_body_adaptation'
+        assert 'private' not in str(raised.value)
+    else:
+        assert raised.value is failure
+    assert [slot.release_calls for slot in dispatcher.slots] == [1, 0]
+    assert [slot.inflight for slot in dispatcher.slots] == [0, 0]
+    for slot in dispatcher.slots:
+        slot.record_error.assert_not_called()
+        slot.record_success.assert_not_called()
+    assert len(dispatcher.picks) == 1
     sleep.assert_not_called()

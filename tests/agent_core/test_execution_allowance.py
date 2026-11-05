@@ -79,6 +79,41 @@ def test_local_incomplete_usage_also_withholds_a_finite_balance():
     assert execution_allowance_snapshot(child)['tokens_available'] is None
 
 
+def test_a_conversation_continues_with_unconfirmed_usage_but_keeps_its_cap():
+    """The receipt stays honest; the human's own turn keeps going.
+
+    An unknown total is not an exhausted one. The account still records the
+    missing receipt and still stops at the explicit finite cap, but it no
+    longer refuses the next request merely because the count is unknown.
+    """
+    task = owner(tokens=100)
+    task['config']['_unknownUsagePolicy'] = 'continue'
+    account = ExecutionBudget(task);task['_executionBudget'] = account
+    lease = account.reserve_model(task, input_tokens=10, max_output_tokens=20)
+    lease.settle(None)
+    snapshot = execution_allowance_snapshot(task)
+    assert not snapshot['usage_known'] and not snapshot['actuals_complete']
+    assert snapshot['tokens_available'] is None
+    following = model_budget_admission(task)(input_tokens=10, max_output_tokens=20)
+    following.settle({'prompt_tokens': 10, 'completion_tokens': 1})
+    # The earlier gap is never erased: this turn's own counters stay a lower
+    # bound even though the continuation was admitted.
+    assert task.get('_executionActualsComplete') is False
+    assert account.actuals_complete() is False
+    # The explicit cap is untouched: a request that cannot fit is still refused.
+    with pytest.raises(AbortedError, match='execution_token_budget_exhausted'):
+        model_budget_admission(task)(input_tokens=90, max_output_tokens=20)
+
+
+def test_automation_keeps_the_unknown_usage_fence_by_default():
+    """Unattended paid budgets still stop rather than spend blind."""
+    task = owner()
+    account = ExecutionBudget(task);task['_executionBudget'] = account
+    model_budget_admission(task)(input_tokens=10, max_output_tokens=20).settle(None)
+    with pytest.raises(AbortedError, match='execution_token_usage_unknown'):
+        model_budget_admission(task)(input_tokens=1, max_output_tokens=1)
+
+
 def test_earliest_deadline_and_exhausted_zero_keep_their_meaning(monkeypatch):
     import lib.agent_core.execution_budget as budgets
     monkeypatch.setattr(budgets, 'time', SimpleNamespace(time=lambda: 100.25))

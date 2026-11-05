@@ -14,7 +14,7 @@ pytestmark = pytest.mark.unit
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 INDEX_HTML = ROOT / 'index.html'
-MAIN_ENTRY = ROOT / 'frontend/src/main.ts'
+MAIN_ENTRY = ROOT / 'frontend/src/application.ts'
 MYDAY_ENTRY = ROOT / 'frontend/src/features/myday.ts'
 BACKGROUND_ENTRY = ROOT / 'frontend/src/features/background.ts'
 MANIFEST = ROOT / 'frontend/src/runtime/sections/manifest.json'
@@ -136,7 +136,7 @@ def test_boot_side_effects_are_typed_and_idle_loaded():
 
 def test_retained_escape_handler_uses_the_late_feature_port():
     main = runtime_section('main.js')
-    assert 'runtimeScope.closeDailyReport();' in main
+    assert re.search(r'closeDailyReport:\s*\(\)\s*=>\s*runtimeScope\.closeDailyReport\(\)', main)
     assert re.search(r'(?<![\w.])closeDailyReport\(\);', main) is None
 
 

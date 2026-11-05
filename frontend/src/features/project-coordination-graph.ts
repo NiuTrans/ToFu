@@ -3,13 +3,13 @@
  * joined by conversation or ordered as a fabricated execution timeline.
  * Entry points: projectCoordinationGraph, layoutCoordinationGraph.
  */
-import type { ProjectDispatchDependency, ProjectDispatchDependencyState, ProjectDispatchView } from '../api/project-dispatch.generated';
+import type { ProjectDispatchDependency, ProjectDispatchDependencyState, ProjectDispatchHistoryRow } from '../api/project-dispatch.generated';
 import type { CoordinationWork } from './project-coordination';
 
 import type { CoordinationReference } from './project-coordination-reference';
 
 export interface CoordinationGraphOptions {
-  assignments?: readonly ProjectDispatchView[] | null;
+  assignments?: readonly ProjectDispatchHistoryRow[] | null;
   coordinatorId?: string;
   /** Conversation currently open, used for navigation context only. */
   activeConversationId?: string;
@@ -60,19 +60,19 @@ const cleanTitle = (value: string | undefined, limit: number) => {
 const assignmentKey = (id: string) => `assignment:${id}`;
 const coordinatorKey = (id: string) => `coordinator:${id}`;
 
-function dependencyReferences(item: ProjectDispatchView): ProjectDispatchDependency[] {
+function dependencyReferences(item: ProjectDispatchHistoryRow): ProjectDispatchDependency[] {
   const references = new Map<string, ProjectDispatchDependency>();
   for (const ref of [...(item.request.dependencies || []).slice(0, 8), ...(item.dependencyStates || []).slice(0, 8).map(state => state.reference)]) {
     if (!references.has(ref.assignmentId)) references.set(ref.assignmentId, ref);
   }
   return [...references.values()].slice(0, COORDINATION_GRAPH_LIMITS.dependencies);
 }
-function dependencyState(item: ProjectDispatchView, reference: ProjectDispatchDependency) {
+function dependencyState(item: ProjectDispatchHistoryRow, reference: ProjectDispatchDependency) {
   return item.dependencyStates?.slice(0, COORDINATION_GRAPH_LIMITS.dependencies).find(state =>
     state.reference.assignmentId === reference.assignmentId && state.reference.grantRevision === reference.grantRevision
     && state.reference.resultRevision === reference.resultRevision && state.reference.checkpointSha === reference.checkpointSha)?.status;
 }
-function assignmentStatus(item: ProjectDispatchView): CoordinationGraphStatus {
+function assignmentStatus(item: ProjectDispatchHistoryRow): CoordinationGraphStatus {
   // Execution evidence outranks later revocation or changing prerequisites. A
   // withdrawn grant does not prove that an already running attempt has stopped.
   switch (item.execution?.status) {
@@ -120,7 +120,7 @@ export function projectCoordinationGraph(
     const assignments = options.assignments!.slice(0, COORDINATION_GRAPH_LIMITS.assignments);
     graph.truncated = options.assignments!.length > assignments.length;
     for (const item of assignments) coordinatorIds.add(item.request.coordinatorId);
-    const visible: ProjectDispatchView[] = [];
+    const visible: ProjectDispatchHistoryRow[] = [];
     for (const item of assignments) {
       if (coordinatorIds.has(item.request.recipientId) || nodes.has(assignmentKey(item.assignmentId))) continue;
       visible.push(item);

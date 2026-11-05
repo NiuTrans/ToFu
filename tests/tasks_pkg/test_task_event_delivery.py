@@ -1,4 +1,9 @@
 """Execution/durability separation, FIFO ownership and finite residency."""
+
+import lib.tasks_pkg.llm_fallback._pool as _fallback_pool
+import lib.tasks_pkg.llm_fallback._retry as _fallback_retry
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+import lib.tasks_pkg.manager._events as _fallback_events
 from contextvars import ContextVar
 import threading
 import time
@@ -8,6 +13,51 @@ from lib.storage.errors import StorageError
 from lib.tasks_pkg.event_delivery import DeliveryLane, EventDeliveryCoordinator, EventDeliveryError
 
 pytestmark = pytest.mark.unit
+
+
+def _eventually(predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(.005)
+    return True
+
+
+def _count_pump_jobs(owner):
+    """Record every pump job the coordinator submits and when each one retires."""
+    jobs, exits = [], []
+    run = owner._run
+
+    def counted_run():
+        jobs.append(time.monotonic())
+        try:
+            return run()
+        finally:
+            exits.append(time.monotonic())
+
+    owner._run = counted_run
+    return jobs, exits
+
+
+def _observe_pump_waits(monkeypatch, owner):
+    """Pump-thread waits on the coordinator's own conditions: (entered, returned)."""
+    entered, returned = [], []
+    original_wait = threading.Condition.wait
+
+    def wait(condition, timeout=None):
+        observed = (condition._lock is owner._state_lock
+                    and threading.current_thread().name.startswith('task-event-delivery'))
+        if observed:
+            entered.append(threading.current_thread().name)
+        try:
+            return original_wait(condition, timeout)
+        finally:
+            if observed:
+                returned.append(threading.current_thread().name)
+
+    monkeypatch.setattr(threading.Condition, 'wait', wait)
+    return entered, returned
 
 
 @pytest.fixture
@@ -41,6 +91,198 @@ def test_blocked_write_does_not_block_next_event_or_other_owner(coordinator):
         release.set()
     coordinator.flush(blocked)
     assert observed == ['commit-1', 'push-1', 'commit-2', 'push-2']
+
+
+def test_followers_of_a_running_lane_neither_wake_nor_retire_nor_submit_pumps(monkeypatch):
+    owner = EventDeliveryCoordinator(workers=2, retry_delay=0, idle_timeout=30)
+    jobs, exits = _count_pump_jobs(owner)
+    running, parked = DeliveryLane({'id': 'running'}), DeliveryLane({'id': 'parked'})
+    entered, release = threading.Event(), threading.Event()
+    observed = []
+
+    def blocked():
+        entered.set()
+        assert release.wait(5)
+        observed.append(0)
+
+    try:
+        owner.submit(running, 0, 128, blocked, lambda: None)
+        assert entered.wait(2)
+        waits, wakes = _observe_pump_waits(monkeypatch, owner)
+        owner.submit(parked, 0, 128, lambda: None, lambda: None)
+        owner.flush(parked)
+        assert _eventually(lambda: len(waits) > len(wakes)), 'the second pump never parked'
+        parked_wakes = len(wakes)
+        for sequence in range(1, 65):
+            owner.submit(running, sequence, 128,
+                         lambda sequence=sequence: observed.append(sequence), lambda: None)
+        time.sleep(.05)
+        assert len(jobs) == 2, 'a follower of a running lane submitted a pump job'
+        assert exits == [], 'a parked pump retired before its idle deadline'
+        assert len(wakes) == parked_wakes, 'a follower of a running lane woke a parked pump'
+        release.set()
+        owner.flush(running)
+        assert observed == list(range(65))
+        assert len(jobs) == 2 and exits == []
+    finally:
+        release.set()
+        assert owner.close(2)
+    assert len(exits) == 2
+
+
+def test_a_newly_ready_lane_wakes_exactly_one_parked_pump(monkeypatch):
+    owner = EventDeliveryCoordinator(workers=4, retry_delay=0, idle_timeout=30)
+    jobs, exits = _count_pump_jobs(owner)
+    waits, wakes = _observe_pump_waits(monkeypatch, owner)
+    rendezvous = threading.Barrier(2, timeout=5)
+    first, second, later = (DeliveryLane({'id': name}) for name in ('first', 'second', 'later'))
+    try:
+        owner.submit(first, 0, 128, rendezvous.wait, lambda: None)
+        owner.submit(second, 0, 128, rendezvous.wait, lambda: None)
+        owner.flush(first)
+        owner.flush(second)
+        assert _eventually(lambda: len(waits) - len(wakes) == 2), 'both pumps never parked'
+        before = len(wakes)
+        owner.submit(later, 0, 128, lambda: None, lambda: None)
+        owner.flush(later)
+        assert _eventually(lambda: len(waits) - len(wakes) == 2), 'the woken pump never parked again'
+        time.sleep(.05)
+        assert len(wakes) - before == 1, 'one ready lane must wake exactly one parked pump'
+        assert len(jobs) == 2 and exits == []
+    finally:
+        assert owner.close(2)
+
+
+def test_spurious_pump_wakeup_keeps_its_idle_deadline(monkeypatch):
+    owner = EventDeliveryCoordinator(workers=1, retry_delay=0, idle_timeout=.5)
+    jobs, exits = _count_pump_jobs(owner)
+    original_wait = threading.Condition.wait
+    parked_at = []
+
+    def wait(condition, timeout=None):
+        if (condition._lock is owner._state_lock
+                and threading.current_thread().name.startswith('task-event-delivery')):
+            parked_at.append(time.monotonic())
+            if len(parked_at) == 1:
+                # Return at once without any notification or ready lane.
+                return original_wait(condition, 0)
+        return original_wait(condition, timeout)
+
+    monkeypatch.setattr(threading.Condition, 'wait', wait)
+    lane = DeliveryLane({'id': 'spurious'})
+    try:
+        owner.submit(lane, 0, 128, lambda: None, lambda: None)
+        owner.flush(lane)
+        assert _eventually(lambda: exits, timeout=3)
+        assert len(parked_at) >= 2, 'the pump retired on a spurious wake-up'
+        assert exits[0] - parked_at[0] >= .45, 'the pump retired before its idle deadline'
+        assert len(jobs) == 1
+    finally:
+        assert owner.close(2)
+
+
+def test_pump_start_never_holds_the_coordinator_lock(monkeypatch):
+    from lib.observability import InstrumentedThreadPoolExecutor
+    from lib.tasks_pkg.event_delivery import EventBacklog
+    owner = EventDeliveryCoordinator(workers=1, retry_delay=0, idle_timeout=.02)
+    starting, release = threading.Event(), threading.Event()
+    original_submit = InstrumentedThreadPoolExecutor.submit
+
+    def slow_start(executor, *args, **kwargs):
+        starting.set()
+        assert release.wait(5)
+        return original_submit(executor, *args, **kwargs)
+
+    monkeypatch.setattr(InstrumentedThreadPoolExecutor, 'submit', slow_start)
+    lane = DeliveryLane({'id': 'slow-start'})
+    observed, reads = [], []
+    producer = threading.Thread(target=owner.submit,
+                                args=(lane, 0, 128, lambda: observed.append(0), lambda: None))
+    producer.start()
+    try:
+        assert starting.wait(2)
+        reader = threading.Thread(target=lambda: reads.append(owner.backlog(lane)))
+        reader.start()
+        reader.join(1)
+        assert reads == [EventBacklog(1, False)], 'a pump start held the coordinator lock'
+    finally:
+        release.set()
+        producer.join(2)
+    owner.flush(lane)
+    assert observed == [0]
+    assert owner.close(2)
+
+
+def test_barrier_cost_counts_persist_calls_and_separates_storage_from_queueing(coordinator):
+    lane = DeliveryLane({'id': 'barrier-cost'})
+    failures = [StorageError('database_busy', 'injected'), StorageError('database_busy', 'injected')]
+
+    def slow_flaky_head():
+        time.sleep(.06)
+        if failures:
+            raise failures.pop()
+
+    costs = []
+    coordinator.submit(lane, 1, 128, slow_flaky_head, lambda: None)
+    coordinator.submit(lane, 2, 128, lambda: time.sleep(.06), lambda: None)
+    assert coordinator.flush(lane, on_release=costs.append) == 2
+    [cost] = costs
+    assert cost.persist_calls == 4
+    assert cost.persist_seconds >= .24
+    # The follower waited behind the head's storage calls, not for a pump.
+    assert cost.queued_seconds < .1
+
+
+def test_producer_projection_read_never_waits_for_the_coordinator_lock(monkeypatch):
+    import uuid
+    from lib import turn_lifecycle
+    from lib.agent_core.execution_session import ExecutionPhase
+    from lib.tasks_pkg import event_delivery
+    from lib.tasks_pkg.manager import _events
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    owner = EventDeliveryCoordinator(workers=1, retry_delay=0, idle_timeout=.02)
+    monkeypatch.setattr(event_delivery, '_COORDINATOR', owner)
+    monkeypatch.setattr(turn_lifecycle, 'record_task_event', lambda task, wire, **kwargs: 'carried')
+    captured = threading.Event()
+    original_capture = turn_lifecycle.capture_task_projection_snapshot
+
+    def capture(*args, **kwargs):
+        captured.set()
+        return original_capture(*args, **kwargs)
+
+    monkeypatch.setattr(turn_lifecycle, 'capture_task_projection_snapshot', capture)
+    task = chat_task_runtime.create(user_id=1, task_id='lane-read-' + uuid.uuid4().hex)
+    task.update(_attemptId='lane-read-attempt', convId='lane-read-conv', _turnId='lane-read-turn',
+        _workerStartedAt=time.time(), status='running', config={}, content='x', thinking='',
+        toolRounds=[], content_lock=threading.Lock())
+    holding, release = threading.Event(), threading.Event()
+
+    def hold_coordinator_lock():
+        with owner.condition:
+            holding.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold_coordinator_lock)
+    producer = threading.Thread(target=_events.append_event,
+                                args=(task, {'type': 'delta', 'content': 'x'}))
+    holder.start()
+    try:
+        assert holding.wait(2)
+        producer.start()
+        assert captured.wait(2), 'the projection read waited for the coordinator lock'
+    finally:
+        release.set()
+        holder.join(2)
+        producer.join(2)
+    try:
+        lane = event_delivery.delivery_lane_for(task)
+        owner.flush(lane)
+        assert lane.accepted == lane.completed == 1
+        assert lane.projection.source is not None
+    finally:
+        assert owner.close(2)
+        task['_executionSession'].settle(ExecutionPhase.CANCELLED)
+        chat_task_runtime.discard(task['id'])
 
 
 def test_foreign_commits_do_not_resume_an_unrelated_durability_barrier(coordinator, monkeypatch):
@@ -333,14 +575,111 @@ def test_metrics_read_does_not_start_optional_delivery_workers(monkeypatch):
     assert event_delivery.event_delivery_metrics() == {}
 
 
-def test_last_delivery_releases_detached_projection_residency(coordinator):
-    lane = DeliveryLane({'id': 'projection-release'})
+def test_drained_lane_retains_its_structural_source_and_releases_the_charge_once(coordinator):
+    import gc
+
+    def submit_structure(lane, sequence, source, identity=None):
+        coordinator.submit(lane, sequence, 128, lambda: None, lambda: None,
+                           projection_source=source, projection_bytes=2048,
+                           projection_identity=identity)
+
+    kept = DeliveryLane({'id': 'retained-structure'})
     source = {'toolRounds': [{'result': 'x' * 1024}]}
-    coordinator.submit(lane, 1, 2048, lambda: None, lambda: None,
-                       projection_source=source, projection_bytes=2048)
-    coordinator.flush(lane)
-    assert lane.projection_source is None
-    assert coordinator.snapshot()['pending_bytes'] == 0
+    submit_structure(kept, 1, source)
+    coordinator.flush(kept)
+    retained = kept.projection
+    assert retained.source is source and retained.source_bytes == 2048
+    assert coordinator.snapshot()['pending_bytes'] == 2048
+    # A follower that reuses the retained identity adds no second structure charge.
+    submit_structure(kept, 2, dict(source), retained.identity)
+    assert coordinator.snapshot()['pending_bytes'] == 2048 + 128
+    coordinator.flush(kept)
+    assert kept.projection.identity is retained.identity
+    assert coordinator.snapshot()['pending_bytes'] == 2048
+    # A new structural source replaces it and releases the old charge once.
+    replacement = {'toolRounds': []}
+    submit_structure(kept, 3, replacement)
+    coordinator.flush(kept)
+    assert kept.projection.source is replacement
+    assert retained.identity not in coordinator.projections
+    assert coordinator.snapshot()['pending_bytes'] == 2048
+    coordinator.release_projection(kept)
+    coordinator.release_projection(kept)
+    assert kept.projection.source is None
+    assert coordinator.snapshot()['pending_bytes'] == 0 and not coordinator.projections
+    # Revocation and an abandoned lane each end their retained charge.
+    revoked, abandoned = DeliveryLane({'id': 'revoked'}), DeliveryLane({'id': 'abandoned'})
+    submit_structure(revoked, 1, {'toolRounds': []})
+    submit_structure(abandoned, 1, {'toolRounds': []})
+    coordinator.flush(revoked)
+    coordinator.flush(abandoned)
+    assert coordinator.snapshot()['pending_bytes'] == 4096
+    assert coordinator.revoke(revoked)
+    assert coordinator.snapshot()['pending_bytes'] == 2048
+    del abandoned
+    gc.collect()
+    assert coordinator.snapshot()['pending_bytes'] == 0 and not coordinator.projections
+
+
+def test_shutdown_releases_every_retained_structural_source():
+    owner = EventDeliveryCoordinator(workers=1, retry_delay=0, idle_timeout=.02)
+    lanes = [DeliveryLane({'id': f'shutdown-{index}'}) for index in range(2)]
+    for lane in lanes:
+        owner.submit(lane, 1, 128, lambda: None, lambda: None,
+                     projection_source={'toolRounds': []}, projection_bytes=1024)
+        owner.flush(lane)
+    assert owner.snapshot()['pending_bytes'] == 2048
+    assert owner.close(2)
+    assert owner.snapshot()['pending_bytes'] == 0 and not owner.projections
+    assert all(lane.projection.source is None for lane in lanes)
+
+
+def test_drained_lane_progress_reuses_the_retained_structure_without_a_new_copy(monkeypatch):
+    import uuid
+    from lib import turn_lifecycle
+    from lib.agent_core.execution_session import ExecutionPhase
+    from lib.tasks_pkg import event_delivery
+    from lib.tasks_pkg.manager import _events
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    owner = EventDeliveryCoordinator(workers=1, retry_delay=0, idle_timeout=.02)
+    monkeypatch.setattr(event_delivery, '_COORDINATOR', owner)
+    monkeypatch.setattr(turn_lifecycle, 'record_task_event', lambda task, wire, **kwargs: 'carried')
+    monkeypatch.setattr('lib.translate.terminal.schedule_terminal_turn_translations', lambda task: None)
+    task = chat_task_runtime.create(user_id=1, task_id='retained-' + uuid.uuid4().hex)
+    task.update(_attemptId='retained-attempt', convId='retained-conv', _turnId='retained-turn',
+        _workerStartedAt=time.time(), status='running', config={}, content='', thinking='',
+        content_lock=threading.Lock(), toolRounds=[
+            {'round': index, 'toolName': 'read_files', 'status': 'done', 'result': 'x' * 4096}
+            for index in range(8)])
+    try:
+        _events.append_event(task, {'type': 'delta', 'content': 'a'})
+        lane = event_delivery.delivery_lane_for(task)
+        owner.flush(lane)
+        retained = lane.projection
+        assert retained.source is not None and retained.source_bytes > 0
+        assert owner.snapshot()['pending_bytes'] == retained.source_bytes
+        # After the drain, the next progress frame reuses the detached structure.
+        task['content'] = 'ab'
+        _events.append_event(task, {'type': 'delta', 'content': 'b'})
+        owner.flush(lane)
+        assert lane.projection.identity is retained.identity
+        assert lane.projection.source['toolRounds'] is retained.source['toolRounds']
+        assert lane.projection.source['content'] == 'ab'
+        assert owner.snapshot()['pending_bytes'] == retained.source_bytes
+        # A structural event replaces it; the old charge is released exactly once.
+        _events.append_event(task, {'type': 'phase', 'phase': 'tools', 'detail': ''})
+        owner.flush(lane)
+        assert lane.projection.identity is not retained.identity
+        assert retained.identity not in owner.projections
+        assert owner.snapshot()['pending_bytes'] == lane.projection.source_bytes
+        # The terminal frame ends the lane's retained source.
+        _events.append_event(task, {'type': 'done', 'finishReason': 'stop'})
+        assert lane.projection.source is None
+        assert owner.snapshot()['pending_bytes'] == 0 and not owner.projections
+    finally:
+        assert owner.close(2)
+        task['_executionSession'].settle(ExecutionPhase.CANCELLED)
+        chat_task_runtime.discard(task['id'])
 
 
 def test_composition_handoff_drains_before_retarget_and_keeps_its_own_port(coordinator, monkeypatch):
@@ -463,11 +802,11 @@ def test_local_delivery_failure_preserves_original_cause_and_never_switches_mode
     def stream(*args, **kwargs):
         calls.append('stream')
         raise error
-    monkeypatch.setattr(_call, 'stream_llm_response', stream)
-    monkeypatch.setattr(_call, '_get_fallback_model', lambda task: 'fallback-model')
-    monkeypatch.setattr(_call, 'append_event', lambda *args, **kwargs:
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream)
+    monkeypatch.setattr(_fallback_retry, '_get_fallback_model', lambda task: 'fallback-model')
+    monkeypatch.setattr(_fallback_events, 'append_event', lambda *args, **kwargs:
         pytest.fail('local delivery failure must not emit a fallback phase'))
-    monkeypatch.setattr(_call, '_attempt_pool_rescue', lambda *args, **kwargs:
+    monkeypatch.setattr(_fallback_pool, '_attempt_pool_rescue', lambda *args, **kwargs:
         pytest.fail('local delivery failure must not rotate providers'))
     task = {'id': 'local-delivery', 'convId': 'local-delivery-conv', '_userId': 1,
         'config': {}, 'content': '', 'thinking': '', 'events': [],
@@ -479,7 +818,7 @@ def test_local_delivery_failure_preserves_original_cause_and_never_switches_mode
     assert caught.value is error
     assert calls == ['stream']
     envelope = from_exception(error, context='task-fatal')
-    assert envelope['kind'] == 'server_busy'
+    assert envelope['kind'] == 'event_delivery_failed'
     assert envelope['retryable']
     assert envelope['raw'] == str(error)
     assert '_fallback_model' not in task
@@ -516,13 +855,13 @@ def test_production_progress_events_share_one_charged_detached_history(monkeypat
         _events.append_event(task, {'type': 'delta', 'content': '0'})
         assert entered.wait(2)
         lane = event_delivery.delivery_lane_for(task)
-        identity = lane.projection_identity
-        structure_bytes = lane.projection_bytes
+        identity = lane.projection.identity
+        structure_bytes = lane.projection.source_bytes
         first_charge = owner.snapshot()['pending_bytes']
         for index in range(1, 64):
             task['content'] = str(index)
             _events.append_event(task, {'type': 'delta', 'content': str(index)})
-            assert lane.projection_identity is identity
+            assert lane.projection.identity is identity
         charged = owner.snapshot()['pending_bytes']
         assert charged == structure_bytes + sum(item.retained_bytes for item in lane.pending)
         assert charged < structure_bytes * 2
@@ -539,6 +878,8 @@ def test_production_progress_events_share_one_charged_detached_history(monkeypat
         assert [row['event']['content'] for row in canonical_frames] == list(map(str, range(64)))
         assert owner.snapshot()['merged_progress'] == 62
         assert all(row[2] == '0' + 'x' * 10000 for row in captured)
+        assert owner.snapshot()['pending_bytes'] == structure_bytes
+        owner.release_projection(lane)
         assert owner.snapshot()['pending_bytes'] == 0
     finally:
         release.set()
@@ -599,6 +940,8 @@ def test_production_progress_retains_pressure_wait_and_exact_evidence(monkeypatc
         assert [frame['sequence'] for frame in frames] == list(range(64))
         assert [frame['event']['content'] for frame in frames] == list(map(str, range(64)))
         assert projections and all(value == 'retained history' * 1000 for value in projections)
+        assert owner.snapshot()['pending_bytes'] == lane.projection.source_bytes > 0
+        owner.release_projection(lane)
         assert owner.snapshot()['pending_bytes'] == 0
     finally:
         recovered = True
@@ -641,6 +984,9 @@ def test_progress_batch_bounds_split_without_a_total_admission_window():
         assert commits == [[0], list(range(1, owner.progress_batch_limit + 1)),
                            [owner.progress_batch_limit + 1]]
         assert published == list(range(owner.progress_batch_limit + 2))
+        assert owner.snapshot()['pending_bytes'] == 128
+        assert list(owner.projections) == [identity]
+        owner.release_projection(lane)
         assert owner.snapshot()['pending_bytes'] == 0
         assert not owner.projections
     finally:
@@ -744,7 +1090,8 @@ def test_unstarted_event_worker_failure_retains_only_its_lane_and_recovers(monke
         nonlocal starts
         if thread.name.startswith('task-event-delivery_'):
             starts += 1
-            if starts == 2:
+            # The failed lane's start and its one startup recovery both fail.
+            if starts in (2, 3):
                 raise RuntimeError('injected physical worker start failure')
         return original(thread)
 

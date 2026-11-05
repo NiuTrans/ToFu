@@ -12,6 +12,8 @@ SDK compatibility.
 
 from __future__ import annotations
 
+import asyncio
+
 from quart import Blueprint
 
 from lib.agent_core.admission import (
@@ -24,7 +26,7 @@ from lib.agent_core.execution_session import (
     execution_session_for_task,
 )
 from lib.api_response import (
-    api_bad_request, api_error, api_internal_error,
+    api_bad_request, api_internal_error,
     sse_response,
 )
 from lib.model_routing import ModelRoutingError
@@ -33,6 +35,7 @@ from lib.compat.anthropic import (
     translate_anthropic_request,
 )
 from lib.compat._common import CompatTerminalFailure
+from lib.error_envelope import BadRequest
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
@@ -79,8 +82,10 @@ async def messages():
     body = await async_parse_body()
     try:
         msgs, cfg, options = translate_anthropic_request(body)
-    except ValueError as e:
-        return api_bad_request(str(e))
+    except BadRequest as e:
+        # Any other translation failure is a server fault for the global
+        # boundary's logged, redacted 500.
+        return api_bad_request(str(e), **({'field': e.field} if e.field else {}))
     if not msgs:
         return api_bad_request('messages is empty', field='messages')
 
@@ -93,7 +98,8 @@ async def messages():
     _route_group = None
     _model_in = cfg.get('model') or ''
     try:
-        _model_id, _selection, _route_group = mint_compatible_request_route(
+        _model_id, _selection, _route_group = await asyncio.to_thread(
+            mint_compatible_request_route,
             body,
             model_id=_model_in,
             owner_user_id=auth.owner_user_id,
@@ -117,7 +123,8 @@ async def messages():
     from lib.tasks_pkg.spawn import spawn_task
     conv_id = short_id('compat-anthropic-', 12)
     task = create_task(
-        conv_id, msgs, cfg, user_id=int(request_user_id())
+        conv_id, msgs, cfg, user_id=int(request_user_id()),
+        saved_conversation=False,
     )
     task['_inline_messages'] = True
     task['_compat_anthropic'] = True
@@ -141,24 +148,13 @@ async def messages():
             task, exc, cause='model_route_bind_failed', conv_id=conv_id)
         raise
 
-    # ── Admission control: refuse with 503 when at capacity ───────
+    # ── Execution ownership: an exact lease, never a capacity refusal ──
     try:
-        admission_lease = acquire_and_bind_admission(
-            execution_session, controller)
+        acquire_and_bind_admission(execution_session, controller)
     except Exception as exc:
         reject_unstarted_chat_task(
             task, exc, cause='admission_acquire_failed', conv_id=conv_id)
         raise
-    if admission_lease is None:
-        reject_unstarted_chat_task(
-            task, RuntimeError('Task admission refused'),
-            cause='task_admission_refused', conv_id=conv_id)
-        logger.warning('[compat:anthropic] admission refused '
-                       '(in_flight=%d/%d) key=%s model=%s',
-                       controller.in_flight, controller.capacity,
-                       auth.key_id, cfg.get('model', '?'))
-        return api_error('Server at capacity; retry shortly.', status=503,
-                         error_kind='overloaded', retry_after=5)
     register_waiter(task['id'])
 
     try:
@@ -224,11 +220,10 @@ def count_tokens():
     body = parse_body()
     try:
         msgs, _cfg, _opts = translate_anthropic_request(body)
-    except ValueError as e:
-        # Mirror the /v1/messages handler: a malformed body is a 400, not an
-        # uncaught 500 (translate_anthropic_request raises ValueError on bad
-        # input, and this call was the one place it wasn't guarded).
-        return api_bad_request(str(e))
+    except BadRequest as e:
+        # Mirror the /v1/messages handler: the translator's typed rejection
+        # of a malformed body is a 400; any other failure is a server fault.
+        return api_bad_request(str(e), **({'field': e.field} if e.field else {}))
     # Reuse Tofu's token counter if available.
     n = 0
     try:

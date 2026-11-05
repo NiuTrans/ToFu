@@ -1,18 +1,21 @@
 """tests/llm/test_llm_replay_unit.py — Unit contracts for the LLM replay kit.
 
-Pins the four support seams in isolation (no agent loop, no storage):
+Pins the support seams in isolation (no agent loop, no storage):
 
-* ``normalize`` — environment differences (cwd, tmp root, dates) never change
-  a request digest; semantic changes always do;
+* ``normalize`` — environment differences (cwd, tmp root, home, host OS,
+  dates) never change a request digest; semantic changes always do;
 * ``script`` — malformed lines fail loud with the line number, and every
   recorded result must construct a valid ``ProviderStreamResult``;
-* ``replayer`` — callback order, drift/exhaustion errors, error/chat steps,
+* ``replayer`` — callback order, drift/exhaustion errors that name the first
+  differing JSON path with recorded and current values, error/chat steps,
   and the mid-stream abort mirror of ``lib/llm/stream.py``;
 * ``recorder`` — a deterministic fake transport round-trips through
-  record → replay with identical callback sequences and results.
+  record → replay with identical callback sequences and results;
+* ``diff`` — request differences align list elements by content and name.
 
 The fixture-corpus sweep at the bottom keeps every committed scenario
-fixture loadable and constructible without running the scenarios.
+fixture loadable and constructible without running the scenarios, and
+requires the request store to hold exactly the recorded requests.
 """
 
 from __future__ import annotations
@@ -25,14 +28,21 @@ import pytest
 from lib.llm.stream_result import ProviderStreamResult, ProviderStreamState
 
 from tests.support.llm_replay import (
+    ABSENT,
+    REQUEST_STORE_DIRNAME,
     Recorder,
     ReplaySession,
     ScenarioDriftError,
     ScriptError,
+    describe_difference,
+    load_recorded_request,
     load_script,
     mode_from_env,
     normalize_value,
+    normalized_field_digests,
     normalized_request_digest,
+    request_differences,
+    stored_request_path,
 )
 
 pytestmark = pytest.mark.unit
@@ -117,6 +127,27 @@ class TestNormalize:
         normalized = normalize_value(value, cwd=_CWD_A)
         assert normalized['when'] == 'Thursday, {{DATE}}'
         assert normalized['where'] == '{{HOME}}/notes/{{DATE}}.md'
+
+    def test_host_os_release_never_changes_digest(self, monkeypatch):
+        """The composed environment section names the host kernel; a fixture
+        recorded on one Linux host must replay on another."""
+        import platform
+
+        from lib.tasks_pkg import system_prompt_base
+
+        def request_on(release: str) -> tuple[str, str]:
+            monkeypatch.setattr(platform, 'system', lambda: 'Linux')
+            monkeypatch.setattr(platform, 'release', lambda: release)
+            section = system_prompt_base.section_environment(
+                cwd='', is_git=False, model='replay-model')
+            body = {**_body(), 'messages': [
+                {'role': 'user', 'content': section}]}
+            return section, normalized_request_digest(body, cwd=_CWD_A)
+
+        section_a, digest_a = request_on('4.18.0-147.el8_1.x86_64')
+        section_b, digest_b = request_on('5.10.0-28-amd64')
+        assert section_a != section_b
+        assert digest_a == digest_b
 
     def test_admitted_request_mapping_digest_matches_plain_body(self):
         """AdmittedRequest mappings digest like their plain dict twin."""
@@ -229,6 +260,70 @@ class TestReplayer:
         with pytest.raises(ScenarioDriftError, match=r'step 0: request '
                                                      r'digest mismatch'):
             session.stream_chat(drifted)
+
+    def test_drift_names_first_difference_path_and_values(self, tmp_path):
+        """A drifted request names the JSON path plus the recorded and current
+        values, so a reviewer can tell an intended change from a regression."""
+        store = tmp_path / 'requests'
+        recorded = _body()
+        recorded['tools'] = [
+            {'type': 'function', 'function': {
+                'name': 'read_files', 'description': 'Read files.'}},
+            {'type': 'function', 'function': {
+                'name': 'timer_create', 'description': 'Start a timer.',
+                'parameters': {'type': 'object', 'anyOf': [
+                    {'required': ['check_instruction']}]}}},
+        ]
+        out_path = tmp_path / 'script.next.jsonl'
+        Recorder(out_path, cwd=_CWD_A, request_store=store).wrap_stream_chat(
+            lambda *_args, **_kwargs: ProviderStreamResult(
+                message={'role': 'assistant', 'content': 'ok'},
+                compatibility_finish_reason='stop', usage=None,
+                state=ProviderStreamState.PROVIDER_FINISHED,
+                provider_finish_reason='stop', saw_done=True,
+                saw_finish_reason=True))(recorded)
+        current = json.loads(json.dumps(recorded))
+        del current['tools'][1]['function']['parameters']['anyOf']
+        session = ReplaySession(out_path, cwd=_CWD_A, request_store=store)
+        with pytest.raises(ScenarioDriftError) as info:
+            session.stream_chat(current)
+        message = str(info.value)
+        assert message.startswith('step 0: request digest mismatch')
+        assert ('$.tools[1:timer_create].function.parameters.anyOf: '
+                'recorded [{"required":["check_instruction"]}], '
+                'current <absent>') in message
+
+    def test_drift_without_stored_request_still_names_the_field(
+            self, tmp_path):
+        recorded = _body()
+        path = _write_script(tmp_path, [json.dumps({
+            'kind': 'chat', 'content': 'x', 'usage': None,
+            'request_digest': normalized_request_digest(
+                recorded, cwd=_CWD_A),
+            'field_digests': normalized_field_digests(
+                recorded, cwd=_CWD_A)})])
+        session = ReplaySession(path, cwd=_CWD_A,
+                                request_store=tmp_path / 'requests')
+        with pytest.raises(ScenarioDriftError,
+                           match=r"differing fields: messages; recorded "
+                                 r"values unavailable: .*not stored"):
+            session.chat([{'role': 'user', 'content': 'other'}],
+                         model=recorded['model'],
+                         extra={'tools': recorded['tools']})
+
+    def test_corrupt_stored_request_keeps_the_drift_error(self, tmp_path):
+        store = tmp_path / 'requests'
+        out_path = tmp_path / 'script.next.jsonl'
+        messages = [{'role': 'user', 'content': 'recorded'}]
+        Recorder(out_path, cwd=_CWD_A, request_store=store).wrap_chat(
+            lambda *_args, **_kwargs: ('ok', None))(messages, model='m')
+        for stored in store.glob('messages-*.json'):
+            stored.write_text('<<<<<<< HEAD\n', encoding='utf-8')
+        session = ReplaySession(out_path, cwd=_CWD_A, request_store=store)
+        with pytest.raises(ScenarioDriftError,
+                           match='recorded values unavailable: .*not valid '
+                                 'JSON'):
+            session.chat([{'role': 'user', 'content': 'current'}], model='m')
 
     def test_exhaustion_raises_drift(self, tmp_path):
         session = self._session(tmp_path, [])
@@ -400,6 +495,46 @@ class TestRecordReplayRoundTrip:
 
 
 # ═════════════════════════════════════════════════════════════════════
+#  request diff — drift explanation, never identity
+# ═════════════════════════════════════════════════════════════════════
+
+def _tool(name: str, description: str = 'd') -> dict:
+    return {'type': 'function',
+            'function': {'name': name, 'description': description}}
+
+
+class TestRequestDiff:
+    def test_identical_requests_have_no_differences(self):
+        assert request_differences(_body(), _body()) == []
+
+    def test_inserted_tool_is_one_difference_not_a_shift(self):
+        recorded = {'tools': [_tool('a'), _tool('b'), _tool('c')]}
+        current = {'tools': [_tool('a'), _tool('new'), _tool('b'),
+                             _tool('c')]}
+        differences = request_differences(recorded, current)
+        assert [(d.path, d.recorded) for d in differences] == [
+            ('$.tools[1:new]', ABSENT)]
+
+    def test_changed_tool_beside_an_insertion_is_paired_by_name(self):
+        recorded = {'tools': [_tool('a'), _tool('b', 'old'), _tool('c')]}
+        current = {'tools': [_tool('a'), _tool('x'), _tool('b', 'new'),
+                             _tool('c')]}
+        differences = request_differences(recorded, current)
+        assert [(d.path, d.recorded, d.current) for d in differences] == [
+            ('$.tools[1:x]', ABSENT, _tool('x')),
+            ('$.tools[2:b].function.description', 'old', 'new')]
+
+    def test_long_string_excerpt_starts_near_the_first_change(self):
+        prefix = 'x' * 500
+        difference = request_differences(
+            {'system': prefix + 'old tail'},
+            {'system': prefix + 'new tail'})[0]
+        line = describe_difference(difference, width=40)
+        assert 'old tail' in line and 'new tail' in line
+        assert 'x' * 100 not in line
+
+
+# ═════════════════════════════════════════════════════════════════════
 #  env mode gate
 # ═════════════════════════════════════════════════════════════════════
 
@@ -420,11 +555,43 @@ class TestModeFromEnv:
 #  fixture corpus — every committed scenario script stays honest
 # ═════════════════════════════════════════════════════════════════════
 
+def _scenario_dirs() -> list[Path]:
+    if not FIXTURES_ROOT.is_dir():
+        return []
+    return sorted(path for path in FIXTURES_ROOT.iterdir()
+                  if path.is_dir() and path.name != REQUEST_STORE_DIRNAME)
+
+
 class TestFixtureCorpus:
+    def test_every_recorded_request_is_stored_and_reproduces_its_digest(self):
+        """Every committed step can explain its drift: the request store
+        holds the exact normalized request behind each recorded digest."""
+        store = FIXTURES_ROOT / REQUEST_STORE_DIRNAME
+        for fixture_dir in _scenario_dirs():
+            for index, step in enumerate(
+                    load_script(fixture_dir / 'script.jsonl')):
+                where = f'{fixture_dir.name} step {index}'
+                assert step.field_digests, f'{where}: no field digests'
+                request = load_recorded_request(store, step.field_digests)
+                assert normalized_request_digest(
+                    request, cwd='') == step.request_digest, where
+
+    def test_request_store_holds_only_referenced_requests(self):
+        store = FIXTURES_ROOT / REQUEST_STORE_DIRNAME
+        referenced = {
+            stored_request_path(store, field, digest)
+            for fixture_dir in _scenario_dirs()
+            for step in load_script(fixture_dir / 'script.jsonl')
+            for field, digest in (step.field_digests or {}).items()
+        }
+        orphans = sorted(str(path) for path in store.glob('*.json')
+                         if path not in referenced)
+        assert not orphans, (
+            f'unreferenced recorded requests (delete them after a '
+            f're-record): {orphans}')
+
     def test_every_fixture_loads_and_constructs(self):
-        fixture_dirs = sorted(
-            path for path in FIXTURES_ROOT.iterdir()
-            if path.is_dir()) if FIXTURES_ROOT.is_dir() else []
+        fixture_dirs = _scenario_dirs()
         assert fixture_dirs, (
             f'no LLM replay fixtures under {FIXTURES_ROOT} — the scenario '
             f'suite expects at least the six seeded scenarios')

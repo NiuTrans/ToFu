@@ -252,7 +252,7 @@ def test_deferred_quiesce_max_wait_s_by_source(monkeypatch):
     monkeypatch.delenv(supervisor.ENV_DEFER_QUIESCE_MAX_WAIT_S, raising=False)
     monkeypatch.delenv(
         supervisor.ENV_APPLICATION_DEFER_QUIESCE_MAX_WAIT_S, raising=False)
-    assert supervisor.deferred_quiesce_max_wait_s('application-update') == 15.0
+    assert supervisor.deferred_quiesce_max_wait_s('application-update') == 0.0
     assert supervisor.deferred_quiesce_max_wait_s('http-deferred') == 3600.0
     assert supervisor.deferred_quiesce_max_wait_s('application-test') == 3600.0
     assert supervisor.deferred_quiesce_max_wait_s('application-unknown') == 3600.0
@@ -260,7 +260,7 @@ def test_deferred_quiesce_max_wait_s_by_source(monkeypatch):
     assert supervisor.deferred_quiesce_max_wait_s('application-update') == 8.0
 
 
-def test_application_deferred_restart_uses_short_quiescence_wait(monkeypatch):
+def test_approved_application_restart_does_not_repeat_interruption_wait(monkeypatch):
     restarted = threading.Event()
     seen = {}
 
@@ -281,7 +281,30 @@ def test_application_deferred_restart_uses_short_quiescence_wait(monkeypatch):
     assert supervisor.ManagerHTTPServer.schedule_deferred_restart(
         _Server(), '/project', source='application-update') is True
     assert restarted.wait(timeout=2)
-    assert seen['max_wait_s'] == 15.0
+    assert seen == {}, 'approved interruption must not wait for unrelated tasks to finish'
+
+
+def test_application_restart_preserves_explicit_quiescence_wait(monkeypatch):
+    restarted = threading.Event()
+    waits = []
+
+    class Manager:
+        def restart(self, *, source):
+            restarted.set()
+            return {'ok': True}
+
+    class Server:
+        managers = {'/project': Manager()}
+
+    monkeypatch.delenv(supervisor.ENV_DEFER_QUIESCE_MAX_WAIT_S, raising=False)
+    monkeypatch.setenv(supervisor.ENV_APPLICATION_DEFER_QUIESCE_MAX_WAIT_S, '4')
+    monkeypatch.setattr(supervisor, '_await_worker_quiescence',
+                        lambda _manager, *, max_wait_s, poll_s:
+                        waits.append(max_wait_s) or 'timeout')
+    assert supervisor.ManagerHTTPServer.schedule_deferred_restart(
+        Server(), '/project', source='application-update') is True
+    assert restarted.wait(timeout=2)
+    assert waits == [4.0]
 
 
 def test_worker_quiescence_probe_semantics(monkeypatch, tmp_path):
@@ -403,6 +426,64 @@ def test_do_start_spawns_when_stopped(tmp_path, monkeypatch):
     assert calls['cmd'][1] == 'server.py'
     assert calls['cwd'] == os.path.realpath(str(proj))
     assert calls['new_session'] is True
+
+
+def test_do_start_takes_current_dotenv_over_stale_supervisor_env(tmp_path, monkeypatch):
+    proj = _make_project(tmp_path)
+    canon = os.path.realpath(str(proj))
+    monkeypatch.setattr(supervisor, '_pid_is_server', lambda pid: False)
+    monkeypatch.setenv('CODEX_HOME', '/stale-supervisor-launch-shell/.codex-local')
+    monkeypatch.setenv('TOFU_AMBIENT_ONLY_SENTINEL', 'ambient')
+    monkeypatch.setenv('TOFU_AGENT_QUEUE_CAPACITY', '2')
+    (proj / '.env').write_text(
+        'CODEX_HOME=/current-project-dotenv/.codex\n'
+        'TOFU_PROJECT_PATH=/another/project\n'
+        'TOFU_EXTERNAL_CONSOLE_LOG=/another/console.log\n'
+        'TOFU_AGENT_QUEUE_CAPACITY=8\n')
+    spawned = {}
+
+    class FakeProc:
+        pid = 7778
+
+    def fake_popen(cmd, **kw):
+        spawned.update(kw['env'])
+        return FakeProc()
+
+    monkeypatch.setattr(supervisor.subprocess, 'Popen', fake_popen)
+    assert supervisor.do_start(str(proj))['ok'] is True
+    assert spawned['CODEX_HOME'] == '/current-project-dotenv/.codex'
+    assert spawned['TOFU_AMBIENT_ONLY_SENTINEL'] == 'ambient'
+    assert spawned['TOFU_PROJECT_PATH'] == canon
+    assert spawned['TOFU_EXTERNAL_CONSOLE_LOG'] == os.path.join(
+        canon, 'data', 'supervisor-server.log')
+    assert spawned['TOFU_AGENT_QUEUE_CAPACITY'] == '8'
+    assert os.environ['CODEX_HOME'] == '/stale-supervisor-launch-shell/.codex-local'
+
+
+def test_do_start_with_non_utf8_dotenv_spawns_on_inherited_values(
+        tmp_path, monkeypatch):
+    proj = _make_project(tmp_path)
+    monkeypatch.setattr(supervisor, '_pid_is_server', lambda pid: False)
+    monkeypatch.setenv('CODEX_HOME', '/stale-supervisor-launch-shell/.codex-local')
+    monkeypatch.delenv('TOFU_AGENT_QUEUE_CAPACITY', raising=False)
+    (proj / '.env').write_bytes(
+        b'CODEX_HOME=/current-project-dotenv/.codex\n'
+        b'TOFU_AGENT_QUEUE_CAPACITY=8\n\xff\n')
+    spawned = {}
+
+    class FakeProc:
+        pid = 7779
+
+    def fake_popen(cmd, **kw):
+        spawned.update(kw['env'])
+        return FakeProc()
+
+    monkeypatch.setattr(supervisor.subprocess, 'Popen', fake_popen)
+    result = supervisor.do_start(str(proj))
+
+    assert result['ok'] is True, result
+    assert spawned['CODEX_HOME'] == '/stale-supervisor-launch-shell/.codex-local'
+    assert 'TOFU_AGENT_QUEUE_CAPACITY' not in spawned
 
 
 # ── stop ──────────────────────────────────────────────────────────────
@@ -625,16 +706,23 @@ def test_http_server_retires_when_checkout_ownership_disappears(
     monkeypatch.setenv(supervisor.ENV_PORT, '0')
     monkeypatch.setenv(supervisor.ENV_PROJECTS, canon)
     httpd = supervisor.build_server()
-    sentinel = tmp_path / 'manager-owner.py'
+    checkout = tmp_path / 'manager-checkout'
+    checkout.mkdir()
+    sentinel = checkout / 'supervisor.py'
     sentinel.write_text('# owner\n')
-    httpd.ownership_sentinel = str(sentinel)
+    clock = [100.0]
+    httpd.ownership = server_manager.SupervisorOwnership(
+        str(sentinel), clock=lambda: clock[0])
     try:
         httpd.service_actions()
-        sentinel.unlink()
+        shutil.rmtree(checkout)
+        httpd.service_actions()
+        clock[0] += server_manager.SUPERVISOR_CHECKOUT_MISSING_GRACE_SECONDS
         with pytest.raises(
                 supervisor.SupervisorOwnershipLost,
                 match='ownership sentinel disappeared'):
             httpd.service_actions()
+        assert httpd._ownership_retired is True
     finally:
         httpd.server_close()
 
@@ -649,9 +737,9 @@ def test_http_server_retires_when_ephemeral_owner_disappears(
     monkeypatch.setenv(supervisor.ENV_PROJECTS, canon)
     monkeypatch.setenv(supervisor.ENV_OWNER_PID, '424242')
     httpd = supervisor.build_server()
-    monkeypatch.setattr(supervisor, 'pid_is_alive', lambda _pid: False)
+    monkeypatch.setattr(server_manager, 'pid_is_alive', lambda _pid: False)
     try:
-        assert httpd.ownership_pid == 424242
+        assert httpd.ownership.owner_pid == 424242
         with pytest.raises(
                 supervisor.SupervisorOwnershipLost,
                 match='owner process disappeared'):
@@ -716,13 +804,20 @@ def _make_sh_project(tmp_path, neuter_setsid=False):
     stub = (
         'import os, time\n'
         "owner = int(os.environ.get('TOFU_SUPERVISOR_OWNER_PID', '0'))\n"
+        'def owner_gone():\n'
+        '    try:\n'
+        '        os.kill(owner, 0)\n'
+        '    except OSError:\n'
+        '        return True\n'
+        '    try:\n'
+        "        with open(f'/proc/{owner}/stat') as handle:\n"
+        "            return handle.read().rsplit(')', 1)[1].split()[0] in 'ZX'\n"
+        '    except OSError:\n'
+        '        return False\n'
         'deadline = time.monotonic() + 300\n'
         'while time.monotonic() < deadline:\n'
-        '    if owner:\n'
-        '        try:\n'
-        '            os.kill(owner, 0)\n'
-        '        except OSError:\n'
-        '            break\n'
+        '    if owner and owner_gone():\n'
+        '        break\n'
         '    time.sleep(0.05)\n'
     )
     (proj / 'supervisor.py').write_text(stub)
@@ -864,6 +959,52 @@ def test_daemon_watchdog_retires_after_explicit_owner_exits(tmp_path):
 
 @_needs_bash_setsid
 @pytest.mark.serial
+def test_daemon_watchdog_retires_when_its_owner_exits_unreaped(tmp_path):
+    """``kill -0`` still reaches an exited owner its parent has not reaped;
+    the watchdog must not keep restarting a Supervisor that already retired."""
+    proj = _make_sh_project(tmp_path)
+    sh = str(proj / 'supervisor.sh')
+    owner = subprocess.Popen(
+        [sys.executable, '-c', 'import sys; sys.stdin.buffer.read()'],
+        stdin=subprocess.PIPE)
+    env = dict(
+        os.environ,
+        TOFU_SUPERVISOR_PROJECTS=str(proj),
+        TOFU_SUPERVISOR_OWNER_PID=str(owner.pid),
+    )
+    watchdog_pid = None
+    try:
+        launched = subprocess.run(
+            ['bash', sh, 'daemon'], env=env, capture_output=True, text=True,
+            timeout=30)
+        assert launched.returncode == 0, launched.stderr
+        watchdog_pid = _read_pid(proj)
+        assert watchdog_pid is not None
+
+        owner.stdin.close()
+        deadline = time.monotonic() + 10.0
+        while open(f'/proc/{owner.pid}/stat').read().rsplit(')', 1)[1].split()[0] != 'Z':
+            assert time.monotonic() < deadline, 'owner never exited'
+            time.sleep(0.02)
+        deadline = time.monotonic() + 10.0
+        while (server_manager.pid_is_alive(watchdog_pid)
+               and time.monotonic() < deadline):
+            time.sleep(0.05)
+        assert not server_manager.pid_is_alive(watchdog_pid)
+        assert not (proj / 'data' / 'supervisor.pid').exists()
+        assert 'configured owner disappeared' in (
+            proj / 'logs' / 'server-manager.log').read_text()
+        watchdog_pid = None
+    finally:
+        owner.wait(timeout=5)
+        subprocess.run(
+            ['bash', sh, 'stop'], env=env, capture_output=True, text=True,
+            timeout=20)
+        _kill_group(watchdog_pid)
+
+
+@_needs_bash_setsid
+@pytest.mark.serial
 def test_daemon_launches_detached_session_leader_with_pidfile(
         tmp_path, supervisor_owner_lease):
     proj = _make_sh_project(tmp_path)
@@ -915,6 +1056,55 @@ def test_daemon_launches_detached_session_leader_with_pidfile(
     finally:
         os.close(inherited_read_fd)
         os.close(inherited_write_fd)
+        _kill_group(pid)
+
+
+@_needs_bash_setsid
+@pytest.mark.serial
+def test_daemon_identity_ignores_the_callers_terminal_width(
+        tmp_path, supervisor_owner_lease):
+    """An inherited COLUMNS must not hide a live watchdog from its controls.
+
+    Readline-using parents (pytest's controller among them) export
+    COLUMNS=80. A checkout whose watchdog argv is wider than that must still
+    have exactly one lifecycle owner that daemon, status and stop recognize.
+    """
+    wide_parent = tmp_path / ('wide-checkout-' + 'w' * 80)
+    wide_parent.mkdir()
+    proj = _make_sh_project(wide_parent)
+    sh = str(proj / 'supervisor.sh')
+    assert len(f'bash {sh} __watchdog__') > 80
+    env = dict(
+        os.environ,
+        COLUMNS='80',
+        TOFU_SUPERVISOR_PROJECTS=str(proj),
+        TOFU_SUPERVISOR_OWNER_PID=supervisor_owner_lease,
+    )
+
+    def invoke(command):
+        return subprocess.run(
+            ['bash', sh, command], env=env, capture_output=True, text=True,
+            timeout=30)
+
+    pid = None
+    try:
+        launched = invoke('daemon')
+        assert launched.returncode == 0, launched.stderr
+        pid = _read_pid(proj)
+        assert pid is not None
+
+        joined = invoke('daemon')
+        assert joined.returncode == 0, joined.stderr
+        assert _read_pid(proj) == pid
+
+        assert f'RUNNING (pid={pid},' in invoke('status').stdout
+
+        stopped = invoke('stop')
+        assert stopped.returncode == 0, stopped.stderr
+        assert not (proj / 'data' / 'supervisor.pid').exists()
+        assert not server_manager.pid_is_alive(pid)
+        pid = None
+    finally:
         _kill_group(pid)
 
 

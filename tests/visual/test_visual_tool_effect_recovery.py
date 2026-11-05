@@ -82,3 +82,93 @@ def test_live_surface_repaints_on_status_only_transition(frontend_visual_page, t
     expect(page.locator('[data-tool-effect-notice]')).to_contain_text('Operation outcome unknown')
     assert page.evaluate('document.activeElement===previousSummary')
     page.evaluate('surface.dispose()')
+
+
+@pytest.mark.parametrize('locale,width', [('zh', 390), ('en', 1180)])
+def test_command_outcome_chrome_matches_notice_and_retains_diagnostics(
+        frontend_visual_page, locale, width, tmp_path):
+    from playwright.sync_api import expect
+    page = frontend_visual_page
+    page.set_viewport_size({'width': width, 'height': 950})
+    entry = tmp_path / 'command-outcome.ts'
+    entry.write_text('\n'.join('export * from ' + json.dumps(str(ROOT / path)) + ';' for path in [
+        'frontend/src/conversation/ui/renderers/tool-blocks.ts',
+        'frontend/src/conversation/presentation/tool-header-presentation.ts',
+        'frontend/src/conversation/presentation/tool-result-presentation.ts',
+        'frontend/src/conversation/presentation/view-model/activity-blocks.ts',
+    ]))
+    page.add_script_tag(path=native_module_path('.native/command-outcome.js', entry))
+    messages = json.loads((ROOT / f'frontend/src/i18n/locales/{locale}.json').read_text())
+    page.evaluate('''messages => {
+      document.body.innerHTML='<main class="conversation-surface"><div id="not_started"></div><div id="unknown"></div></main>';
+      const translate=key=>messages[key]??key;
+      const writeGateRefusal={resolveRefusal:()=>null,renderBadgeHtml:()=>'',renderNoticeHtml:()=>''};
+      const header=createToolHeaderPresentation({translate,writeGateRefusal});
+      const results=createToolResultPresentation({translate,writeGateRefusal});
+      const ports={localizedText:(key,fallback)=>messages[key]??fallback,
+        renderToolBlockHtml:block=>results.renderGenericResultHtml(block.round,{}, {
+          iconHtml:'',queryHtml:'git log -1; git branch --show-current; git status --short | head',
+          rootPillHtml:'',badgeHtml:header.renderBadgeHtml(block.round,{})})};
+      for(const state of ['not_started','unknown']) {
+        const round={toolName:'run_command',roundNum:28,status:'error',
+          executionEffect:{operationId:'a'.repeat(32),state,recovery:'reconcile',scope:'attempt'},
+          toolContent:JSON.stringify({code:state==='unknown'?'tool_effect_unknown':'tool_execution_failed',
+            status:'error',retryable:false,message:state==='unknown'
+              ?'Workspace tree lifecycle write is active [holder: pid=123]'
+              :'Error: tool "run_command" execution failed with CommandAdmissionRefusal: Error [git-inspection-preparation]: Git worktree lifecycle requires literal operands. Command was not started.. Arguments received: {"command":"git worktree remove \\"$WT\\""}'})};
+        const block={id:state,kind:'tool',name:'run_command',toolCallId:state,input:{},round};
+        renderToolBlock(document.getElementById(state),block,{turnId:'turn',status:'running',source:{}},ports);
+      }
+    }''', messages)
+    page.add_style_tag(content='body{display:block;height:auto;overflow:auto;margin:0;padding:var(--space-4);background:var(--bg-primary)}main{max-width:var(--conversation-reading-measure);margin-inline:auto;}')
+    known = page.locator('#not_started')
+    unknown = page.locator('#unknown')
+    expect(known.locator('summary')).to_contain_text(messages['tool.notStarted'])
+    expect(known.locator('summary')).to_contain_text('Git worktree lifecycle requires literal operands')
+    expect(known.locator('summary')).not_to_contain_text('Arguments received')
+    expect(known.locator('[data-tool-effect-notice]')).to_have_count(0)
+    expect(unknown.locator('summary')).to_contain_text(messages['tool.effectUnknown'])
+    expect(unknown.locator('[data-tool-effect-notice]')).to_contain_text(messages['tool.effectReconcile'])
+    # Named once by the header chip; neither a reason line nor the notice repeats it.
+    expect(unknown.locator('.ptool-artifact-failure')).to_have_count(0)
+    expect(unknown.locator('[data-tool-effect-notice]')).not_to_contain_text(messages['tool.effectUnknown'])
+    for card, token in ((known, '--text-secondary'),):
+        assert card.locator('.ptool-artifact-failure').evaluate('''(node,token)=>{
+          const probe=document.createElement('span');probe.style.color=`var(${token})`;node.append(probe);
+          const matches=getComputedStyle(node).color===getComputedStyle(probe).color;probe.remove();return matches;
+        }''', token)
+    for card in (known, unknown):
+        expect(card.locator('summary')).not_to_contain_text(messages['tool.failedTip'])
+        expect(card.locator('summary .ptool-badge')).not_to_have_text(messages['tool.failed'])
+        expect(card.locator('summary')).not_to_contain_text('pid=123')
+        expect(card.locator('details')).not_to_have_attribute('open', '')
+    page.screenshot(path=str(tmp_path / f'command-outcome-{locale}-{width}.png'), full_page=True)
+    # The screenshot incident: an unknown-effect run_command plus the activity
+    # row its lost completion frame left behind. The card names the outcome
+    # once and the timeline does not trail a stale "run_command started".
+    from lib.turn_activity_timeline import fold_activity_timeline
+    task = {'_attemptId': 'attempt-a', 'id': 'task-a'}
+    timeline = None
+    for event in (
+            {'type': 'tool_start', 'seq': 1, 'emittedAt': 1_000,
+             'toolCallId': 'unknown', 'toolName': 'run_command', 'roundNum': 28},
+            {'type': 'done', 'seq': 2, 'emittedAt': 46_000, 'finishReason': 'aborted'}):
+        timeline = fold_activity_timeline(timeline, event, task)
+    entry = timeline['entries'][0]
+    assert entry['summaryKey'] == 'activity.tool.aborted'
+    rows = page.evaluate('''entry => {
+      const block={id:'unknown',kind:'tool',blockId:'tool-unknown',identitySource:'contract',
+        source:{blockId:'tool-unknown'},name:'run_command',toolCallId:'unknown',input:{},result:{},
+        round:{toolName:'run_command',roundNum:28,toolCallId:'unknown',status:'error',
+          executionEffect:{operationId:'a'.repeat(32),state:'unknown',recovery:'reconcile',scope:'attempt'}}};
+      return visibleActivityEntries({blockId:'timeline',version:1,entries:[entry]},[],[block]);
+    }''', entry)
+    assert rows == [], 'the settled card already owns this outcome'
+    started = messages['activity.tool.started'].format(tool='run_command')
+    stopped = messages['activity.tool.aborted'].format(tool='run_command')
+    assert page.locator('#unknown').inner_text().count(messages['tool.effectUnknown']) == 1
+    assert started not in page.locator('#unknown').inner_text()
+    assert stopped not in page.locator('#unknown').inner_text()
+    known.locator('summary').press('Enter')
+    expect(known.locator('.ptool-result-body')).to_contain_text('Arguments received')
+    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')

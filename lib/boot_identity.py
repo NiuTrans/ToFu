@@ -73,7 +73,7 @@ _FINGERPRINT_LOCK = threading.Lock()
 _FINGERPRINT_CACHE: 'dict | None' = None
 
 
-def _compute_code_fingerprint() -> dict:
+def _compute_code_fingerprint(head: 'str | None' = None) -> dict:
     """Fingerprint the tracked source tree as loaded by this process.
 
     Combines the committed HEAD sha with a hash of ``git diff HEAD`` so that
@@ -90,6 +90,9 @@ def _compute_code_fingerprint() -> dict:
 
     Best-effort: any failure yields ``{'head': None, 'dirty': None,
     'digest': None}`` so ``/api/health`` never breaks over this.
+
+    ``head`` is the full HEAD sha the caller already resolved for this same
+    observation; without one it is read here.
     """
     try:
         from lib.self_update._git import _head_sha, _run_git
@@ -103,7 +106,8 @@ def _compute_code_fingerprint() -> dict:
     # cwd inside the tree and git walks UP to the repo, so they succeed
     # regardless; a genuine non-git deploy yields head=None + non-zero diff rc,
     # which the all-None guard below handles correctly.
-    head = _head_sha()
+    if not head:
+        head = _head_sha()
     diff_bytes = b''
     dirty = False
     try:
@@ -148,7 +152,7 @@ def code_fingerprint() -> dict:
     return _FINGERPRINT_CACHE
 
 
-def pending_code_changes() -> dict:
+def pending_code_changes(*, current_head: 'str | None' = None) -> dict:
     """Compare the on-disk source tree against the boot-frozen fingerprint.
 
     The BEFORE-restart counterpart of the restart verifier: where the verdict
@@ -165,13 +169,45 @@ def pending_code_changes() -> dict:
       ``current_head`` — HEAD sha on disk right now.
       ``dirty``        — current working tree has uncommitted tracked edits.
 
-    Costs one fresh ``git diff HEAD`` per call (the frozen side is cached), so
-    this belongs on user-triggered surfaces (e.g. /update/check), never on
-    the hot /api/health poll path.
+    A changed HEAD already establishes pending code: only probe whether
+    tracked edits exist, without generating a patch. When HEAD still matches,
+    compare the full fresh fingerprint to detect edits within that commit.
+    Both paths perform fresh Git work and belong on user-triggered surfaces
+    (e.g. /update/check), never on the hot /api/health poll path.
+
+    ``current_head`` is the full HEAD sha this request already resolved
+    (``lib.self_update.observe_repository``); without one it is read here.
+    A resolved HEAD is never read a second time for the fingerprint.
     """
     frozen = code_fingerprint()
-    current = _compute_code_fingerprint()
     loaded_digest = frozen.get('digest')
+    head = current_head
+    if loaded_digest and frozen.get('head'):
+        if not head:
+            try:
+                from lib.self_update._git import _head_sha
+                head = _head_sha()
+            except Exception as e:
+                logger.debug('[BootIdentity] current HEAD unavailable: %s', e)
+        if head and head[:12] != frozen['head']:
+            dirty = None
+            try:
+                # Git's 0/1 statuses answer this boolean directly. Other
+                # exits leave it unknown; never report a failed probe clean.
+                from lib.self_update._git import _run_git
+                cp = _run_git(['diff', '--quiet', 'HEAD'])
+                if cp.returncode in (0, 1):
+                    dirty = cp.returncode == 1
+            except Exception as e:
+                logger.debug('[BootIdentity] tracked-change probe failed: %s', e)
+            return {
+                'pending': True,
+                'loaded_head': frozen['head'],
+                'current_head': head[:12],
+                'dirty': dirty,
+            }
+    # A HEAD that did not resolve gets its own read by the fingerprint.
+    current = _compute_code_fingerprint(head)
     disk_digest = current.get('digest')
     pending = (disk_digest != loaded_digest) if (loaded_digest and disk_digest) else None
     return {

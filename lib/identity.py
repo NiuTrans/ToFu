@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from operator import index
 from typing import Any, Literal
 
 PERSONAL_USER_ID = 1
@@ -23,11 +24,15 @@ def require_user_id(value: Any, *, context: str = "operation") -> int:
     Core application and storage code calls this at ownership boundaries.
     Personal-user defaults belong only in request/bootstrap composition, never
     in a repository, task, or background callback.
+
+    Accept an integer or the existing base-10 integer-text representation.
+    Numeric conversion must not round a fractional owner, accept a boolean,
+    or let an object's custom __int__ choose a different identity.
     """
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
         raise ValueError(f"{context} requires a numeric user_id")
     try:
-        user_id = int(value)
+        user_id = index(value) if isinstance(value, int) else int(value, 10)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{context} requires a numeric user_id") from exc
     if user_id <= 0:

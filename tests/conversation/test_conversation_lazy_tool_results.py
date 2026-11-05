@@ -137,6 +137,78 @@ def test_lazy_tool_result_http_reads_exact_bytes_and_rejects_wrong_owner_and_sta
         client.command('conversation.purge', {'conv_id': cid, 'user_id': 1}, cid + '-purge')
 
 
+@pytest.mark.api
+@pytest.mark.auth_mode('open')
+def test_refs_view_edit_round_trip_keeps_server_only_evidence(
+    flask_client, chat_sidecar, monkeypatch,
+):
+    """A whole-projection edit built from the slim browser view loses nothing."""
+    import uuid
+    from lib.conversation_sync.repository import SidecarConversationSyncRepository
+    from lib.conversation_sync.service import ConversationSyncService
+    from lib.storage import get_storage_client
+    from routes import conversation_sync_v3 as routes
+    client = get_storage_client(write=True); cid = 'refs-edit-' + uuid.uuid4().hex
+    service = ConversationSyncService(SidecarConversationSyncRepository(client_factory=lambda write=False: client))
+    monkeypatch.setattr(routes, '_service', service)
+    client.command('conversation.create', {'conv_id': cid, 'user_id': 1, 'title': 'Refs edit',
+                   'created_at': 1, 'updated_at': 1, 'settings': {}}, cid + '-create')
+    signature = 'sig-' + 's' * 4_000
+    try:
+        round_record = {'toolCallId': 'call', 'toolName': 'search_files', 'status': 'done',
+                        'toolArgs': {'q': 'x'}, 'toolContent': 'hit', 'llmRound': 0,
+                        'thinking': 'plan', 'thinkingSignature': signature,
+                        '_anthropicContentBlocks': [{'type': 'thinking', 'thinking': 'plan',
+                                                     'signature': signature}]}
+        projection = {
+            'content': 'answer',
+            'toolRounds': [round_record],
+            'segments': [
+                {'type': 'thinking', 'blockId': 'thinking:llm-0', 'text': 'plan',
+                 'signature': signature, 'llmRound': 0},
+                {'type': 'tool_use', 'blockId': 'tool:call', 'id': 'call', 'name': 'search_files',
+                 'input': {'q': 'x'}, 'result': {'content': 'hit', 'status': 'done'}, 'llmRound': 0},
+                {'type': 'text', 'blockId': 'text:terminal', 'text': 'answer', 'terminal': True},
+            ],
+            'apiRounds': [{'round': 1, 'usage': {'prompt_tokens': 3},
+                           'promptAdmission': {'action': 'admit', 'totalTokens': 3,
+                                               'measurementVersion': 'tofu.prompt-admission/v2'}}],
+        }
+        client.command('turn.append_settled', {'conversation_id': cid, 'user_id': 1,
+                       'command_id': cid + '-append', 'actor': 'assistant', 'kind': 'fixture',
+                       'projection': projection, 'created_at': 2}, cid + '-append')
+        root = f'/api/v4/conversations/{cid}'
+        snapshot = flask_client.get(root + '/sync', query_string={
+            'segmentPayload': 'refs', 'toolPayload': 'lazy'}).get_json()
+        turn = snapshot['turns'][0]
+        browser = turn['projection']
+        assert 'signature' not in json.dumps(browser['segments'])
+        assert 'thinkingSignature' not in browser['toolRounds'][0]
+        assert browser['apiRounds'][0]['promptAdmission'] == {'action': 'admit', 'totalTokens': 3}
+        # The generated client restores roundRef segments before TurnStore.
+        materialized = [
+            {**segment, 'input': browser['toolRounds'][0]['toolArgs'],
+             'result': {'content': 'hit', 'status': 'done'}}
+            if segment.get('roundRef') else segment
+            for segment in browser['segments']
+        ]
+        for segment in materialized:
+            segment.pop('roundRef', None)
+        edited = {**browser, 'segments': materialized, 'content': 'edited answer'}
+        response = flask_client.patch(f"{root}/turns/{turn['turnId']}", json={
+            'expectedProjectionRevision': turn['projectionRevision'], 'projection': edited})
+        assert response.status_code == 200, response.get_json()
+        stored = flask_client.get(f"{root}/turns/{turn['turnId']}").get_json()['turn']['projection']
+        assert stored['content'] == 'edited answer'
+        thinking = next(s for s in stored['segments'] if s['type'] == 'thinking')
+        assert thinking['signature'] == signature
+        assert stored['toolRounds'][0]['thinkingSignature'] == signature
+        assert stored['toolRounds'][0]['_anthropicContentBlocks'] == round_record['_anthropicContentBlocks']
+        assert stored['apiRounds'][0]['promptAdmission']['measurementVersion'] == 'tofu.prompt-admission/v2'
+    finally:
+        client.command('conversation.purge', {'conv_id': cid, 'user_id': 1}, cid + '-purge')
+
+
 def _command_snapshot(**metadata):
     source = _snapshot(tool_name='run_command', content='successful stdout\n' * 500)
     source['turns'][0]['projection']['toolRounds'][0]['results'] = [{
@@ -145,6 +217,50 @@ def _command_snapshot(**metadata):
         **metadata,
     }]
     return source
+
+
+def _producer_command_snapshot(tool):
+    """The exact result shape run_command/code_exec producers persist."""
+    source = _snapshot(tool_name=tool, content='$ make test\n' + 'ok\n' * 2_000 + '[exit code: 0]')
+    round_record = source['turns'][0]['projection']['toolRounds'][0]
+    round_record['results'] = [{
+        'toolName': tool, 'command': 'make test', 'description': 'run tests',
+        'timedOut': False, 'interrupted': False, 'output': 'ok\n' * 2_000,
+        'exitCode': '0', 'snippet': '$ make test', 'badge': 'done',
+    }]
+    source['turns'][0]['projection']['segments'][0]['name'] = tool
+    return source
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('tool', ['run_command', 'code_exec'])
+def test_producer_string_zero_exit_command_is_deferred_with_exact_detail(tool):
+    """Producers stamp the decimal they parsed from the executor marker."""
+    from lib.conversation_sync.tool_results import tool_result_from_turn
+    source = _producer_command_snapshot(tool)
+    before = copy.deepcopy(source)
+    lazy = snapshot_with_reference_tool_segments(source, owner_cache_scope='a' * 24, lazy_tool_results=True)
+    value = lazy['turns'][0]['projection']['toolRounds'][0]
+    assert value['_snapshotToolResult']['fields'] == ['toolContent', 'results']
+    assert 'toolContent' not in value and 'output' not in value['results'][0]
+    assert value['results'][0]['exitCode'] == '0'
+    assert value['results'][0]['badge'] == 'done'
+    detail = tool_result_from_turn(source['turns'][0], conversation_id='c', turn_id='t',
+                                   round_index=0, projection_revision=3)
+    assert detail['toolContent'] == before['turns'][0]['projection']['toolRounds'][0]['toolContent']
+    assert detail['results'] == before['turns'][0]['projection']['toolRounds'][0]['results']
+    assert source == before
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('exit_code', ['1', '-1', 'timeout', 'not-run', 'background', '?', ' 0', '00', '0.0'])
+def test_producer_string_nonzero_or_unknown_exit_stays_inline(exit_code):
+    source = _producer_command_snapshot('run_command')
+    source['turns'][0]['projection']['toolRounds'][0]['results'][0]['exitCode'] = exit_code
+    lazy = snapshot_with_reference_tool_segments(source, owner_cache_scope='a' * 24, lazy_tool_results=True)
+    value = lazy['turns'][0]['projection']['toolRounds'][0]
+    assert '_snapshotToolResult' not in value
+    assert value['results'][0]['output'] == 'ok\n' * 2_000
 
 
 @pytest.mark.unit
@@ -173,7 +289,8 @@ def test_successful_command_defers_both_output_mirrors_and_restores_exact_result
 
 @pytest.mark.unit
 @pytest.mark.parametrize('metadata', [
-    {'exitCode': 1}, {'exitCode': '0'}, {'exitCode': True}, {'exitCode': None},
+    {'exitCode': 1}, {'exitCode': '1'}, {'exitCode': True}, {'exitCode': None},
+    {'exitCode': 0.0}, {'exitCode': False},
     {'timedOut': True}, {'interrupted': True}, {'notRun': True},
     {'backgroundCompleted': True}, {'status': 'error'}, {'rejected': True},
     {'error': 'execution failed'}, {'_rejected': True}, {'rejection': 'approval denied'},

@@ -55,15 +55,6 @@ interface CheckpointPayload {
   items?: CheckpointItem[];
 }
 
-interface SecondPassMeta {
-  costCny?: number;
-}
-
-interface ReportMeta extends JsonObject {
-  costCny?: number;
-  secondPasses?: Record<string, SecondPassMeta | undefined>;
-}
-
 interface SessionStats {
   minutes?: number;
   words?: number;
@@ -73,12 +64,10 @@ type PaperXPWindow = Window & {
   _activePaperId?: string;
   _paperHash?: string;
   _i18nLang?: string;
-  t?: (key: string) => string;
+  t?: (key: string, params?: Readonly<Record<string, unknown>>) => string;
   renderMarkdown?: (markdown: string) => string;
-  formatCny?: (value: number) => string;
   showToast?: (message: string) => void;
   debugLog?: (message: string, level?: string) => void;
-  _renderReportFinishTag?: (meta: unknown) => string;
   _paperAskQuestion?: (text: string) => void;
   _startResearchJob?: (text: string) => void;
   _paperDeepenAfterRender?: (
@@ -97,11 +86,9 @@ type PaperXPWindow = Window & {
   _paperXpSet?: typeof paperXpSet;
   _paperXpAfterRender?: typeof paperXpAfterRender;
   _paperXpHandleInsightEvent?: typeof paperXpHandleInsightEvent;
-  _paperXpApplyMetaEvent?: typeof paperXpApplyMetaEvent;
   _paperXpDistribute?: typeof paperXpDistribute;
   _paperXpDistributeCheckpoints?: typeof paperXpDistributeCheckpoints;
   _paperXpHandleCheckpointsEvent?: typeof paperXpHandleCheckpointsEvent;
-  _paperXpCostBreakdown?: typeof paperXpCostBreakdown;
   _destroyPaperXP?: typeof destroyPaperXP;
 };
 
@@ -109,9 +96,17 @@ function globals(): PaperXPWindow {
   return featureRegistry as unknown as PaperXPWindow;
 }
 
-function translate(key: I18nKey, fallback: string = key): string {
+function translate(
+  key: I18nKey,
+  fallback: string = key,
+  params?: Readonly<Record<string, unknown>>,
+): string {
   const helper = globals().t;
-  return typeof helper === 'function' ? helper(key) : fallback;
+  if (typeof helper === 'function') return helper(key, params);
+  return params
+    ? fallback.replace(/\{([A-Za-z0-9_]+)\}/g, (token, name: string) => (
+      name in params ? String(params[name]) : token))
+    : fallback;
 }
 
 const store: Record<string, JsonObject | undefined> = Object.create(null) as Record<
@@ -443,57 +438,6 @@ export function paperXpHandleInsightEvent(
   return true;
 }
 
-export function paperXpApplyMetaEvent(
-  stream: JsonObject,
-  event: JsonObject,
-  view: XPView,
-): boolean {
-  if (event.type !== 'report_meta' || !event.meta) return false;
-  stream.meta = event.meta;
-  view.meta = event.meta;
-  try {
-    const old = document.getElementById(view.containerId || '')
-      ?.querySelector('.paper-report-finish-tag');
-    const render = globals()._renderReportFinishTag;
-    if (old && typeof render === 'function') {
-      const html = render(event.meta);
-      if (html) {
-        const wrapper = document.createElement('div');
-        wrapper.innerHTML = html;
-        if (wrapper.firstChild && old.parentNode) {
-          old.parentNode.replaceChild(wrapper.firstChild, old);
-        }
-      }
-    }
-  } catch (error: unknown) {
-    console.warn('[Paper:XP] report_meta finish-tag refresh failed (non-fatal):', error);
-  }
-  return true;
-}
-
-export function paperXpCostBreakdown(meta: ReportMeta | null | undefined): string {
-  if (!meta?.secondPasses) return '';
-  const format = (value: unknown): string | null => {
-    if (typeof value !== 'number' || value <= 0) return null;
-    return globals().formatCny?.(value) ?? `¥${value.toFixed(4)}`;
-  };
-  const parts: string[] = [];
-  const base = format(meta.costCny);
-  if (base) parts.push(`${translate('paper.xpCostBody')} ${base}`);
-  const names: Record<string, I18nKey> = {
-    insight: 'paper.xpPassInsight',
-    termfill: 'paper.xpPassTermfill',
-    checkpoints: 'paper.xpPassCheckpoints',
-    deepen: 'paper.xpPassDeepen',
-  };
-  Object.entries(meta.secondPasses).forEach(([key, row]) => {
-    const cost = format(row?.costCny);
-    const labelKey = names[key];
-    if (cost) parts.push(`${labelKey ? translate(labelKey) : key} ${cost}`);
-  });
-  return parts.join(' + ');
-}
-
 export function paperXpSessionSummary(
   stats: SessionStats | null | undefined,
   view: XPView,
@@ -503,9 +447,9 @@ export function paperXpSessionSummary(
   const words = Math.max(0, Math.round(stats.words || 0));
   const notes = paperXpGet<unknown[]>(view, '_paperNotes');
   const noteCount = Array.isArray(notes) ? notes.length : 0;
-  const message = globals()._i18nLang === 'zh'
-    ? `本次阅读约 ${minutes} 分钟 · 覆盖约 ${words} 词${noteCount ? ` · ${noteCount} 条批注` : ''}`
-    : `~${minutes} min read · ~${words} words covered${noteCount ? ` · ${noteCount} notes` : ''}`;
+  const message = translate('paper.xpReadingStats', '~{minutes} min read · ~{words} words covered',
+    { minutes, words })
+    + (noteCount ? translate('paper.xpReadingNotes', ' · {n} notes', { n: noteCount }) : '');
   const state = globals();
   if (typeof state.showToast === 'function') state.showToast(message);
   else state.debugLog?.(message, 'info');
@@ -543,11 +487,9 @@ export function installPaperXPGlobals(): void {
   target._paperXpSet = paperXpSet;
   target._paperXpAfterRender = paperXpAfterRender;
   target._paperXpHandleInsightEvent = paperXpHandleInsightEvent;
-  target._paperXpApplyMetaEvent = paperXpApplyMetaEvent;
   target._paperXpDistribute = paperXpDistribute;
   target._paperXpDistributeCheckpoints = paperXpDistributeCheckpoints;
   target._paperXpHandleCheckpointsEvent = paperXpHandleCheckpointsEvent;
-  target._paperXpCostBreakdown = paperXpCostBreakdown;
   target._destroyPaperXP = destroyPaperXP;
   if (!target._paperXpClickWired) {
     target._paperXpClickWired = true;

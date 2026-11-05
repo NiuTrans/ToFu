@@ -32,12 +32,18 @@ def proof(job, observed=1):
         fencing_token=job['fencingToken'], now_ms=observed)
 
 
+def horizon(factory, kind):
+    return factory().query('worker_job.claim_horizon', {'task_kinds': [kind]})['claimableInMs']
+
+
 def test_old_caller_timestamp_cannot_extend_an_expired_lease(semantic_authority):
     factory, _, _, kind, job = owned_claim(semantic_authority)
     # Even a permitted future observation cannot trigger early takeover.
     assert command(factory, 'worker_job.claim_next', dict(worker_id='rival',
         task_kinds=[kind], now_ms=wall_ms()+3600000, lease_ms=10000)) is None
+    assert 0 < horizon(factory, kind) <= 10000
     wait_until_ms(job['leaseDeadlineMs'])
+    assert horizon(factory, kind) == 0
     assert factory().query('worker_job.claim_state', proof(job))['ok'] is False
     assert command(factory, 'worker_job.heartbeat', dict(proof(job), lease_ms=60000))['ok'] is False
     assert command(factory, 'worker_job.complete', dict(proof(job), terminal_status='succeeded'))['ok'] is False
@@ -52,7 +58,10 @@ def test_native_restart_invalidates_and_recovers_an_unexpired_holder(semantic_au
     if semantic_authority[2] is None:
         pytest.skip('Native authority restart contract')
     factory, owner, engine, kind, job = owned_claim(semantic_authority)
+    assert 0 < horizon(factory, kind) <= 10000
     engine.crash_cycle()
+    # A lease from the previous authority lifecycle is claimable at once.
+    assert horizon(factory, kind) == 0
     saved = factory().query('worker_job.get', dict(task_id=job['taskId'], user_id=owner))
     assert saved == job
     assert factory().query('worker_job.claim_state', proof(job))['ok'] is False

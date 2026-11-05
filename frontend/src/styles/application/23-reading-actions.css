@@ -171,9 +171,22 @@
   white-space: nowrap;
 }
 
+/* The served request name is never clipped; it wraps only when it alone is
+ * wider than the footer row. */
 .conversation-surface .conversation-turn-footer .finish-tag.preset {
+  max-width: 100%;
   color: var(--text-secondary);
   font-weight: var(--weight-semibold);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* A mixed turn's first quota fact names the calls behind the reading; it
+ * likewise wraps only when it alone is wider than the footer row. */
+.conversation-surface .conversation-turn-footer .subscription-quota-tag {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .conversation-surface .conversation-turn-footer .finish-tag.timing {
@@ -239,10 +252,12 @@
   font-weight: var(--weight-semibold) !important;
 }
 
-/* Scroll history boundaries are not toolbar chrome. */
+/* Scroll history boundaries are not toolbar chrome. Lane boundaries are grid
+ * items of the shell (.chat-inner: [reading][rail]) and belong to the reading
+ * track; in the rail track their label stacked one glyph per line. */
 .conversation-surface .conversation-history-boundary {
   position: relative;
-  grid-column: 2;
+  grid-column: 1;
   min-width: 0;
   max-width: var(--msg-measure);
   min-height: 1px;

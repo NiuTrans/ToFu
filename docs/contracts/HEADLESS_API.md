@@ -167,8 +167,10 @@ A 429 also carries `Retry-After: <seconds>`.
 
 The headless analog of the UI's `/api/chat/start` + `/stream`. Reuses
 the same orchestrator — every Tofu capability (tool use, thinking,
-fallback chain, MCP, project tools, memory, swarm, scheduler) is
-available via `config`.
+fallback chain, MCP, project tools, memory, scheduler) is
+available via `config`, except the lanes that need a saved conversation
+(background commands, timers, local sub-agents; see "No saved
+conversation" below).
 
 **Body**
 
@@ -227,12 +229,85 @@ Alternative rejected: querying storage and silently falling back on a missing
 row would weaken real conversation ownership and frozen-wire consistency.
 Durable UI conversations keep their fail-closed declaration boundary.
 
+**No saved conversation.** `conversation_id` (or the minted `api-…`,
+`agent-…`, `compat-openai-…` / `compat-anthropic-…` label) only names the job.
+`/api/v1/chat/completions`, `/api/v1/agent/run` and the OpenAI/Anthropic
+compatible agent paths create their task with `saved_conversation=False`, so
+nothing the model starts may outlive the response:
+
+- shell commands always run in the foreground to completion; there is no
+  elapsed-time, steer or owner-requested handoff;
+- `run_command(background=true)`, `timer_create` and an agent
+  `schedule_create` targeting `current` or the request's own label are refused
+  before anything runs, with a typed `no_saved_conversation` tool error whose
+  `nextAction` names the in-request alternative;
+- local sub-agents cannot run: their lineage registers in, and their results
+  report into, a saved conversation. A `spawn_agents` call (reachable through
+  caller-supplied schemas) and `manage_agents` `assign` are refused the same
+  way, before any agent is created or reserved;
+- the tool surface says the same: `timer_create` is not offered, nor is any
+  tool whose every call registers in, reads from or reports into the request's
+  own saved conversation: the swarm family (`spawn_agents`,
+  `get_agent_result`, `send_agent_message`, `get_agent_messages`,
+  `set_approval_delegate`), the retained-agent family (`manage_agents`,
+  `list_agents`), exploration plans (`get_exploration`, `manage_exploration`),
+  working facts (`read_working_facts`, `record_working_fact`) and the project
+  mailbox (`send_project_message`, `get_project_messages`,
+  `consider_project_message`). A server-assembled tool surface therefore never
+  resolves the multi-agent backend to `local_swarm`. Each family declares those
+  names in `ToolSpec.saved_conversation_tools`, and the registry withholds them
+  before routing or Tool Search see them, so they are absent from both the wire
+  and the executable catalog; routed exposure is not the gate, because
+  searchable families bypass it. The working-facts context block is not
+  composed either. Owner- and task-scoped neighbours stay offered:
+  `schedule_*`/`timer_manage` (command, python and prompt jobs, or agent turns
+  in an existing conversation), the task's isolated-workspace
+  `integration_checkpoint`/`integration_submit`, and reads of other owned
+  conversations. The `run_command`
+  description and its `background` parameter state that nothing moves to the
+  background; `poll` describes only tasks in other conversations; `kill`, which
+  could stop nothing here, is not offered; and the agent-schedule target hint
+  omits `current`.
+
+Decision record. Problem: the task ran under a label that is never created,
+yet commands were handed to the background after 60 s and the model was told
+their completion "will be shown in the conversation"; the completion settled
+as undeliverable and the model lost the result. Decision: one marker, written
+only at task creation and read through `lib/tasks_pkg/conversation_delivery.py`
+by the handoff gate, the tool handlers and tool assembly. Swarm workers inside
+a saved conversation and ordinary conversations are unchanged. Alternatives
+rejected: keying on `_inline_messages` (swarm workers carry it inside a real
+parent conversation); silently running `background=true` in the foreground (a
+server or watcher started that way would hang the request, and the requested
+semantics would change unseen); keeping explicit background with poll-only
+retrieval as for empty-conversation tasks (the response ends when the model
+stops calling tools, orphaning the process and its result). Direct relays
+(`/api/v1/chat/stream-direct`, and compatible requests that declare `tools`)
+execute no server tool, so they never reach a deferred lane. Specs:
+`tests/api/test_headless_no_saved_conversation.py`.
+
+Sub-agent decision record. Problem: `spawn_agents` stayed offered, so the
+request received a launch receipt promising that completions "arrive
+automatically", while every worker failed within 0.1 s with `Conversation not
+found` because child registration needs the saved conversation the request
+does not have. Decision: until sub-agents get their own owner lifecycle for
+requests without a saved conversation, the swarm family is withheld and a
+stray launch is refused with the typed `no_saved_conversation` error and the
+next action to do the work directly in the request. Alternatives rejected:
+supporting workers with storage-free lineage (a new owner lifecycle for
+results, cancellation and delivery that outlives the response, out of scope
+here); offering `spawn_agents` with an "unavailable" description (its context
+guidance and routing would still advertise the local Swarm backend, and a tool
+whose only outcome is refusal invites a wasted round).
+
 `tools.toolSearch`, `tools.programmaticCalling`, and
 `orchestration.multiAgent` apply to every tool-capable provider: `auto` uses a
 verified native implementation where available and otherwise the local
 gateway, JavaScript, or Swarm backend. `orchestration.multiAgent` defaults to
 `full` (local Swarm workers with the parent's authority catalog, minus the
-leaf-worker denylist); `read_only` is the analysis-only lane. Multi-agent
+leaf-worker denylist); `read_only` is the analysis-only lane. The headless
+task routes above have no saved conversation and therefore no local Swarm
+backend; only a verified native multi-agent implementation can serve them. Multi-agent
 orchestration is permanently enabled — there is no user-facing `off`; a
 legacy persisted `off` normalizes to the `full` default. PTC and Multi-agent
 can be active in the
@@ -290,12 +365,38 @@ attached as a `tofu` field on chunks for non-text events
 (phase, tool_call, snapshots).
 
 Terminal success is evidence-based. A provider stream cut first emits a
-`phase` event explaining that the already-delivered prefix is being preserved
-while Tofu performs a bounded lossless continuation. If recovery is exhausted,
+`phase` event explaining that the cut partial reply is discarded while Tofu
+resends the same request (bounded retries). Compatible streams emit answer
+text only at completion, so discarded prose never reaches them. If recovery
+is exhausted,
 sync mode returns an HTTP error and stream mode emits an `error` object followed
 by `[DONE]`; neither mode fabricates `finish_reason: "stop"`. OpenAI- and
 Anthropic-compatible endpoints follow the same verdict, using their respective
 error channels instead of `stop` / `end_turn`.
+
+Problem: terminal compatibility projection drifted between the normal event path
+and a connection made after completion; late streams omitted finish metadata,
+usage and tool handoff. Decision: each compatibility adapter owns one terminal
+frame projection for both observations, behind the shared verified Turn verdict.
+A failed verdict retains its error channel and waiter cleanup; it never gains a
+success frame. OpenAI emits exactly one terminal chunk followed by `[DONE]`;
+Anthropic emits `message_delta` followed by `message_stop`, including when no
+terminal event remains in the replay page. A done event without a finish field
+uses verified task evidence. Content and tool calls remain narration-free.
+Alternatives rejected: independent late-response branches reproduce the drift;
+replaying raw task deltas would leak intermediate narration; changing execution
+or billing state to repair a wire projection would create a second authority.
+
+Anthropic terminal markers use the protocol's
+[stop-reason vocabulary](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons):
+internal `context_length` projects to `model_context_window_exceeded`, `max_turns`
+to `pause_turn`, other output/budget truncation (`length`, `max_tokens`,
+`budget_exceeded`, `incomplete`) to `max_tokens`, and `content_filter` to `refusal`.
+Unknown reasons cannot default to `end_turn`. Existing explicit interruption
+projection remains unchanged. These are adapter mappings of Tofu's verified
+evidence; they do not alter provider retry, continuation or settlement policy.
+Specifications: `tests/compat/test_terminal_projection_parity.py` and neighboring
+OpenAI/Anthropic compatibility tests.
 
 ### 3.2 Generic task lifecycle — `/api/v4/tasks/*`
 
@@ -471,8 +572,9 @@ GET /api/v4/capabilities
       "cursor_replay": "/api/v4/tasks/<task_id>/events?cursor=N"
     },
     "terminal_types": ["done"],
-    "interaction_types": ["approval_required","human_guidance_request",
-                          "stdin_request","write_approval_request"],
+    "interaction_types": ["approval_required","custom_tool_call",
+                          "human_guidance_request","stdin_request",
+                          "write_approval_request"],
     "categories": {
       "lifecycle": [{"type":"phase","purpose":"…","terminal":false,
                      "requires_response":false,"fields":{…},"since":1}, …],
@@ -492,7 +594,7 @@ its spec. The categories and the most important events:
 | `content` | `delta` | Incremental assistant output (`content` and/or `thinking`) — append to the live bubble |
 | `tool` | `tool_start`, `tool_progress`, `tool_result`, `tool_complete`, `tool_compacted` | Keyed by `toolCallId` + `roundNum` |
 | `context` | `round_usage`, `round_committed`, `messages_snapshot`, `compaction`, `compaction_done`, `memory_prefetch`, `project_external_edit` | Token accounting, durable checkpoints, context-window mgmt |
-| `interaction` | `human_guidance_request`, `write_approval_request`, `approval_required`, `stdin_request`, `stdin_resolved` | **Require a client response** before the task proceeds (see below) |
+| `interaction` | `human_guidance_request`, `write_approval_request`, `approval_required`, `stdin_request`, `stdin_resolved`, `custom_tool_call` | **Require a client response** before the task proceeds (see below) |
 | `flow` | `flow_iteration`, `flow_planner_done`, `flow_critic_msg`, `flow_new_turn`, `flow_complete` | FlowExecutor chat projection |
 | `swarm` | `swarm_phase`, `swarm_inbox_inject`, `swarm_agent_phase`, `swarm_agent_progress`, `swarm_agent_complete`, `swarm_agent_error`, `swarm_agent_tool_call` | Multi-agent orchestration |
 | `autopilot` | `autopilot_vu_event`, `autopilot_vu_done`, `autopilot_vu_cancel` | Autonomous-loop value units |
@@ -524,9 +626,28 @@ done       → finalize; if .error present, render the failure. STOP.
   dispatch available complete frames immediately; they do not wait to fill a
   transport chunk. Stream completion, generator close and cancellation release
   the owned response. These parser bounds do not cap the total stream lifetime.
-- Every event on the SSE/replay stream carries a monotonic `seq`; reconnect via
-  `/api/v4/tasks/{id}/events?cursor=<last_seq>` (or `/stream`) to resume with
-  no loss.
+- Every durable event on the SSE/replay stream carries a monotonic `seq`;
+  reconnect via `/api/v4/tasks/{id}/events?cursor=<last_seq+1>` (or `/stream`).
+  SDKs retain the largest valid integer sequence and do not advance for
+  missing, boolean or malformed values. A decimal SSE `id` supplies `seq` only
+  when the JSON payload has no `seq`. Named terminal frames end replay without
+  an extra status request.
+
+**SDK ownership decision.** Problem: monolithic client files duplicated event
+parsing and mixed public methods with response lifetimes; a borrowed HTTPX pool
+could override the SDK's credentials. Decision: public facades assemble explicit
+protocol, transport, stream and resource owners. Python readers share one event
+decoder; both languages consume the same stream fixtures and generated byte
+budgets. Complete blank-line-delimited frames dispatch JSON objects, multiple
+`data:` lines are joined, and unfinished EOF frames are discarded according to
+[SSE interpretation](https://html.spec.whatwg.org/multipage/server-sent-events.html#event-stream-interpretation).
+SDK-specific credentials, user agent and timeout apply per HTTPX request; only
+an internally created pool is closed by the SDK. Error bodies remain intact,
+with canonical kind and retry metadata projected by the protocol owner.
+Alternatives rejected: separate sync/async event semantics permit replay drift;
+mutating a shared client's defaults leaks configuration across SDK instances;
+closing a borrowed pool breaks its other consumers. Wire schemas and public
+resource methods remain unchanged. Owner map: `clients/AGENTS.md`.
 
 **Interaction events** pause the task until the client replies. Each carries a
 correlation id you echo back to the matching endpoint:
@@ -536,6 +657,11 @@ correlation id you echo back to the matching endpoint:
 | `human_guidance_request` | `guidanceId` | `POST /api/v4/chat/human-response` — `{guidanceId, response}` |
 | `stdin_request` | `stdinId` | `POST /api/v4/chat/stdin-response` — `{stdinId, input, eof?}` |
 | `write_approval_request` | `approvalId` | `POST /api/v4/project/write-approval` — `{approvalId, approved}` |
+| `custom_tool_call` | `callId` | `POST /api/v4/tasks/{id}/tool_result` — `{call_id, content, is_error?}` |
+
+`custom_tool_call` is emitted only for request-scoped client-mode tools
+([CUSTOM_TOOLS.md](../CUSTOM_TOOLS.md)); it also carries `roundNum`,
+`toolCallId`, `toolName` and `arguments`.
 
 A `stdin_resolved` event clears a pending `stdin_request` prompt. The
 `approval_required` event is a generic gate emitted by mode-based external
@@ -1001,11 +1127,11 @@ webhooks):
 
 ### 4.5 In-process façade (`import tofu`)
 
-The separate storage-free `tofu_agent.AgentRuntime` uses hardware-derived
-concurrency by default (`max_inflight=None` or `0`); positive explicit limits
-and `TOFU_AGENT_MAX_INFLIGHT` remain supported. `TOFU_RESOURCE_PROFILE=throughput`
-opts into foreground hardware utilization. See [developer runtime](../DEVELOPER_RUNTIME.md)
-for executor ownership, async observation and teardown.
+The separate storage-free `tofu_agent.AgentRuntime` runs every submitted
+execution by default (`max_inflight=None` or `0` is unlimited); a positive
+explicit limit or `TOFU_AGENT_MAX_INFLIGHT` is an operator cap. See
+[developer runtime](../DEVELOPER_RUNTIME.md) for executor ownership, async
+observation and teardown.
 
 When your code runs **in the same Python process** as Tofu (an embedding
 Flask/FastAPI app, a notebook, a worker that imported the package), use the

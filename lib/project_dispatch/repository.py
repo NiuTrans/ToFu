@@ -20,8 +20,8 @@ import uuid
 
 from lib.conversations.project_identity import normalize_project_path
 from lib.identity import PrincipalContext, require_user_id
+from lib.log import get_logger
 from lib.agent_core.storage_errors import StorageError
-from lib.turn_initiation import resolve_initiator
 
 CONTRACT = json.loads((Path(__file__).resolve().parents[2] /
                        'contracts/project_dispatch_v1.schema.json').read_text())
@@ -29,8 +29,30 @@ NAMESPACE = CONTRACT['namespace']
 LIMITS = CONTRACT['limits']
 
 
+logger = get_logger(__name__)
+
+
 class ProjectDispatchError(ValueError):
     """Malformed request, unavailable authority or conflicting durable evidence."""
+
+
+class PublicationResultChanged(ProjectDispatchError):
+    """The pinned review result is no longer the Worker Turn's current projection."""
+
+
+class SyntheticSource(ProjectDispatchError):
+    """The authorization source is an existing Turn that is not genuine human input."""
+
+
+class DispatchGrantRevoked(ProjectDispatchError):
+    """The grant was revoked, or withdrawn by a durable conversation Stop."""
+
+
+class DispatchContention(ProjectDispatchError):
+    """Bounded CAS attempts ended in conflicts or uncertain ACKs; retry the same command.
+
+    Other storage and integrity failures keep their own types.
+    """
 
 
 @lru_cache(maxsize=16)
@@ -65,10 +87,14 @@ def batch_requests(request):
         raise ProjectDispatchError('Batch requires distinct non-coordinator recipients')
     if request['authorizationSource']['conversationId'] != request['coordinatorId']:
         raise ProjectDispatchError('Authorization source must be in coordinator')
+    # An aggregate ceiling is optional; when the human declares one, every
+    # child must declare its share within it.
     for cap in ('maxTokens', 'maxModelRequests'):
-        if sum(worker['budget'][cap] for worker in workers) > request['budget'][cap]:
+        if cap in request['budget'] and (any(cap not in worker['budget'] for worker in workers)
+                or sum(worker['budget'][cap] for worker in workers) > request['budget'][cap]):
             raise ProjectDispatchError('Batch child budgets exceed aggregate ' + cap)
-    if any(worker['budget']['deadline'] > request['budget']['deadline'] for worker in workers):
+    if 'deadline' in request['budget'] and any(worker['budget'].get('deadline', float('inf')) > request['budget']['deadline']
+                                              for worker in workers):
         raise ProjectDispatchError('Batch child deadline exceeds aggregate deadline')
     common = {key: request[key] for key in ('projectPath', 'coordinatorId', 'authorizationSource')}
     children = []
@@ -148,21 +174,22 @@ def record_stop(owner, conversation_id, occurred_at, *, client=None):
         except StorageError as exc:
             if exc.code != 'database_conflict' and not exc.retryable:
                 raise
-    raise ProjectDispatchError('Concurrent/uncertain Stop watermark; retry the same Stop')
+    raise DispatchContention('Concurrent/uncertain Stop watermark; retry the same Stop')
 
 
 class ProjectDispatchRepository:
     """Durable evidence scoped by explicit owner and canonical project.
 
     Injected clients follow get_storage_client(write=False/True); conversations
-    follow ConversationRepository.get; turn_get follows get_turn(..., user_id=).
+    follow ConversationRepository.get; turn_get follows get_turn(..., user_id=);
+    attempt_get follows get_attempt(..., user_id=, include_execution_config=).
     binding_repository follows ProjectCoordinationRepository.read(project).
     clock returns Unix seconds (the request budget deadline uses that unit).
     """
 
     def __init__(self, owner: int, project: str, *, client=None,
                  conversations=None, turn_get=None, binding_repository=None,
-                 clock=None, attempt_get=None, workspace_get=None, storage_version=2):
+                 clock=None, attempt_get=None, workspace_get=None, turn_lister=None, storage_version=2):
         self.owner = require_user_id(owner, context='project dispatch')
         if not isinstance(project, str) or not project.strip() or len(project) > 4096:
             raise ProjectDispatchError('A bounded project path is required')
@@ -192,8 +219,10 @@ class ProjectDispatchRepository:
         self.turn_get = turn_get
 
         self.attempt_get = attempt_get
+        self.model_lease_open = None
 
         self.workspace_get = workspace_get
+        self.turn_lister = turn_lister
         self.dependency_graph_limit = LIMITS['assignmentsPerProject']
         self.binding_repository = binding_repository
         self.clock = clock if clock is not None else time.time
@@ -247,13 +276,17 @@ class ProjectDispatchRepository:
             if assignment['id'] in seen:
                 raise ProjectDispatchError('Duplicate dispatch identity')
             seen.add(assignment['id'])
-            _validate_schema(assignment.get('request'), 'request')
+            # The complete record/assignment schema above already validates its
+            # nested request and model attempts. Keep the semantic checks below
+            # on every read without walking those same schemas a second time.
 
             if assignment['request'].get('profile') is not None:
                 from .scope import validate_profile
                 validate_profile(assignment['request'])
             tools = assignment.get('toolAttempts', [])
-            if len(tools) > assignment['request'].get('profile', {}).get('maxToolCalls', 0):
+            profile = assignment['request'].get('profile')
+            tool_limit = profile.get('maxToolCalls') if profile is not None else 0
+            if tool_limit is not None and len(tools) > tool_limit:
                 raise ProjectDispatchError('Dispatch tool-attempt capacity exceeded')
             if any(item['tool_name'] not in assignment['request'].get('profile', {}).get('tools', []) for item in tools):
                 raise ProjectDispatchError('Dispatch tool occurrence exceeds its granted profile')
@@ -276,21 +309,25 @@ class ProjectDispatchRepository:
                 _positive_revision(grant['bindingRevision'])
             _validate_schema(self._admission(assignment), 'admission')
             attempts = assignment['modelAttempts']
-            if len(attempts) > assignment['request']['budget']['maxModelRequests']:
+            model_limit = assignment['request']['budget'].get('maxModelRequests')
+            if model_limit is not None and len(attempts) > model_limit:
                 raise ProjectDispatchError('Dispatch model-attempt capacity exceeded')
             occurrences = set()
             for attempt in attempts:
-                _validate_schema(attempt, 'modelAttempt')
                 occurrence = (attempt['root_task_id'], attempt['attempt_ordinal'])
                 if occurrence in occurrences:
                     raise ProjectDispatchError('Duplicate model occurrence')
                 occurrences.add(occurrence)
             execution = assignment['execution']
             if execution is not None:
-                if not isinstance(execution, dict) or set(execution) != {'turnId', 'attemptId'}:
+                if (not isinstance(execution, dict)
+                        or not {'turnId', 'attemptId'} <= set(execution)
+                        or set(execution) - {'turnId', 'attemptId', 'taskId'}):
                     raise ProjectDispatchError('Invalid dispatch execution association')
                 _identifier(execution['turnId'])
                 _identifier(execution['attemptId'])
+                if 'taskId' in execution:
+                    _identifier(execution['taskId'])
             review = assignment['review']
             if review is not None:
                 if (not isinstance(review, dict) or review.get('decision') not in
@@ -343,12 +380,77 @@ class ProjectDispatchRepository:
                     raise ProjectDispatchError('Batch child granter/binding epoch differs')
                 authority = current
 
+    def settle_ended_model_intents(self, assignment_id):
+        """Close durable model intents whose physical request provably ended.
+
+        A lost settlement observation (CAS exhaustion, storage outage, an
+        ambiguous intent ACK whose void is refused) or a process restart leaves
+        `dispatch_intent` rows that no live lease owns. Only a non-live
+        execution attempt plus no open process-local lease for the exact
+        (root, ordinal) qualifies; the receipt stays an unknown-usage lower bound.
+        """
+        row = self.read(assignment_id)
+        execution = row['execution']
+        if execution is None or not any(item['phase'] == 'dispatch_intent' for item in row['modelAttempts']):
+            return []
+        from lib.turn_lifecycle import LIVE_ATTEMPT_STATUSES
+        attempt = self.get_attempt(execution['attemptId'])
+        if (not isinstance(attempt, Mapping) or attempt.get('attemptId') != execution['attemptId']
+                or not attempt.get('status') or attempt['status'] in LIVE_ATTEMPT_STATUSES):
+            return []
+        lease_open = self.model_lease_open
+        if lease_open is None:
+            from lib.agent_core.execution_budget import model_lease_open as lease_open
+        closed = []
+
+        def close(assignment):
+            closed.clear()
+            for item in assignment['modelAttempts']:
+                if (item['phase'] == 'dispatch_intent'
+                        and not lease_open(item['root_task_id'], item['attempt_ordinal'])):
+                    item['phase'], item['usage_complete'] = 'settled', False
+                    closed.append('%s#%d' % (item['root_task_id'], item['attempt_ordinal']))
+        self.mutate(assignment_id, close)
+        if closed:
+            logger.warning('[ProjectDispatch] settled ended model intents as unknown usage '
+                           'assignment=%s attempt=%s intents=%s', assignment_id,
+                           execution['attemptId'], ','.join(closed))
+        return list(closed)
+
+    def restart_paused(self, assignment):
+        """Whether this execution is durably paused by service restart, not stopped."""
+        execution = assignment.get('execution')
+        if execution is None or assignment.get('review') is not None:
+            return False
+        attempt = self.get_attempt(execution['attemptId'])
+        if not isinstance(attempt, Mapping) or attempt.get('status') != 'interrupted':
+            return False
+        turn = self.turn_get(assignment['request']['recipientId'], execution['turnId'],
+                             user_id=self.owner, include_projection=False)
+        return (isinstance(turn, Mapping) and turn.get('status') == 'interrupted'
+                and (turn.get('settlement') or {}).get('cause') == 'server_restart')
+
     def get_attempt(self, attempt_id):
         getter = self.attempt_get
         if getter is None:
             from lib.turn_lifecycle import get_attempt
             getter = get_attempt
         return getter(attempt_id, user_id=self.owner)
+
+    def turn_list(self, conversation_id, **kwargs):
+        getter = self.turn_lister
+        if getter is None:
+            from lib.turn_lifecycle import list_turns
+            getter = list_turns
+        return getter(conversation_id, **kwargs)
+
+    def accepted_attempt_config(self, attempt_id):
+        """The owner's accepted execution config of one attempt (private to dispatch)."""
+        getter = self.attempt_get
+        if getter is None:
+            from lib.turn_lifecycle import get_attempt
+            getter = get_attempt
+        return getter(attempt_id, user_id=self.owner, include_execution_config=True)['config']
 
     def get_workspace(self, *args, **kwargs):
         getter = self.workspace_get
@@ -370,7 +472,7 @@ class ProjectDispatchRepository:
                 except StorageError as error:
                     if error.code != 'database_conflict' and not error.retryable:
                         raise
-            raise ProjectDispatchError('Concurrent/uncertain dispatch snapshot; retry reading')
+            raise DispatchContention('Concurrent/uncertain dispatch snapshot; retry reading')
         row = self.client().query('record.get', {'namespace': NAMESPACE, 'key': self.key})
         if row is None:
             return {'binding': copy.deepcopy(self.binding), 'assignments': []}, 0
@@ -406,7 +508,8 @@ class ProjectDispatchRepository:
                 raise ProjectDispatchError('Coordinator settlement is immutable')
             for old in original.get('requestBudgets', []):
                 current = next((row for row in value.get('requestBudgets', []) if row['id'] == old['id']), None)
-                if current is None or any(current[key] != old[key] for key in old if key not in ('accounts', 'modelAttempts')):
+                if current is None or any(current[key] != old[key] for key in old
+                                          if key not in ('accounts', 'modelAttempts', 'settledModelUsage', 'pendingDecision')):
                     raise ProjectDispatchError('Original request budget authority is immutable')
                 for account in old['accounts']:
                     actual = next((row for row in current['accounts'] if row['taskId'] == account['taskId']), None)
@@ -431,7 +534,7 @@ class ProjectDispatchRepository:
             except StorageError as exc:
                 if exc.code != 'database_conflict' and not exc.retryable:
                     raise
-        raise ProjectDispatchError('Concurrent/uncertain dispatch update; read before retrying')
+        raise DispatchContention('Concurrent/uncertain dispatch update; read before retrying')
 
     def _conversation(self, conversation_id):
         snapshot = self.conversations.get(conversation_id, user_id=self.owner,
@@ -461,12 +564,12 @@ class ProjectDispatchRepository:
             raise ProjectDispatchError('Current coordination binding epoch does not authorize dispatch')
         return binding['revision']
 
-    def _live_request(self, request, *, check_deadline=True):
+    def _live_request(self, request, *, check_deadline=True, value=None):
         if request['projectPath'] != self.project:
             raise ProjectDispatchError('Dispatch project must match canonical project exactly')
         if request['coordinatorId'] == request['recipientId'] and request.get('profile', {}).get('mode') != 'coordinator':
             raise ProjectDispatchError('Coordinator and recipient must be distinct')
-        if check_deadline and request['budget']['deadline'] <= self.clock():
+        if check_deadline and request['budget'].get('deadline') is not None and request['budget']['deadline'] <= self.clock():
             raise ProjectDispatchError('Dispatch grant expired')
         self._conversation(request['coordinatorId'])
         self._conversation(request['recipientId'])
@@ -477,7 +580,7 @@ class ProjectDispatchRepository:
         self.validate_human_source(source)
         if request.get('delegation') is not None or request.get('profile', {}).get('mode') in ('project', 'coordinator'):
             from .delegation import validate_source
-            validate_source(self, request, check_deadline=check_deadline)
+            validate_source(self, request, value=value)
         return binding_revision
 
     def validate_human_source(self, source):
@@ -486,33 +589,22 @@ class ProjectDispatchRepository:
 
         _positive_revision(source['projectionRevision'])
         turn = self.turn_get(source['conversationId'], source['turnId'], user_id=self.owner)
-        if (not isinstance(turn, Mapping) or turn.get('actor') != 'human'
+        if (not isinstance(turn, Mapping)
                 or turn.get('conversationId') != source['conversationId']
                 or turn.get('turnId') != source['turnId']
                 or type(turn.get('projectionRevision')) is not int
                 or turn['projectionRevision'] != source['projectionRevision']):
             raise ProjectDispatchError('Authorization source changed or is not human')
+        if turn.get('actor') != 'human':
+            raise SyntheticSource('Authorization source changed or is not human')
 
         if not evidence_owner_matches(turn, self.owner):
             raise ProjectDispatchError('Authorization source owner changed')
-        projection = turn.get('projection')
-        if not isinstance(projection, Mapping) or resolve_initiator(projection) != 'human':
-            raise ProjectDispatchError('Authorization projection is not genuine human input')
-        origin = projection.get('origin')
-        if origin is not None and (not isinstance(origin, Mapping) or origin.get('initiator') != 'human'
-                or any(origin.get(k) for k in ('sourceConversationId', 'brain', 'autopilotRunId',
-                                              'boardTaskId', 'scheduledTaskId'))):
-            raise ProjectDispatchError('Synthetic authorization origin denied')
-        synthetic = ('_peerMessage', '_fromConv', '_brainDispatch', '_brainEpic', '_boardTaskId',
-                     'boardTaskId', '_isVirtualUser', '_autopilotRunId', '_proactive',
-                     '_proactiveTaskId', '_timer', '_swarmAutoContinue', 'backgroundCommand',
-                     '_isCompactionSummary', '_isFlowReview', '_isFlowPlanner', '_flowRunId',
-                     '_programSynthetic')
-        if (resolve_initiator(turn) != 'human'
-                or any(projection.get(k) or turn.get(k) for k in synthetic)
-                or projection.get('role', 'user') != 'user'
-                or projection.get('actor', 'human') != 'human'):
-            raise ProjectDispatchError('Synthetic source cannot grant dispatch authority')
+        from lib.turn_initiation import require_human_turn
+        try:
+            require_human_turn(turn, user_id=self.owner)
+        except ValueError as exc:
+            raise SyntheticSource(str(exc)) from exc
 
     def command_identity(self, command_id):
         _identifier(command_id)
@@ -578,7 +670,7 @@ class ProjectDispatchRepository:
             if any(row['id'] in ids for row in value['assignments']):
                 raise ProjectDispatchError('Batch child identity already exists without manifest')
             created_at = self.clock()
-            if request['budget']['deadline'] <= created_at:
+            if request['budget'].get('deadline') is not None and request['budget']['deadline'] <= created_at:
                 raise ProjectDispatchError('Dispatch batch expired')
             epoch, assignments = None, []
             for member, child in zip(ids, children):
@@ -646,7 +738,7 @@ class ProjectDispatchRepository:
         Source, policy and physical attempt are server-issued and revalidated;
         synthetic callers cannot acquire this authority by supplying an owner.
         """
-        from .delegation import source_for_task, policy_for_task, check_allowance, issued_worker_policy
+        from .delegation import source_for_task, policy_for_task, validate_delegation_policy, issued_worker_policy
         from .continuation import original_delegation, original_granter, ensure_open
         principal, source, attempt = source_for_task(self, task)
         policy = policy_for_task(self, task, attempt)
@@ -664,7 +756,7 @@ class ProjectDispatchRepository:
         def check(value):
             source_for_task(self, task)
             ensure_open(value, expected['attemptId'])
-            check_allowance(self, value, request)
+            validate_delegation_policy(self, value, request)
         return self._authorize_request(copy.deepcopy(request), granter, self.command_identity(command_id), check=check)
 
     def _authorize_request(self, request, granter, assignment_id, *, check=None):
@@ -751,10 +843,18 @@ class ProjectDispatchRepository:
         _validate_schema(admission, 'admission')
         return admission
 
+    def stopped(self, assignment):
+        """Whether a durable Stop of its Coordinator or recipient followed the grant."""
+        return any(stopped_after(self.owner, conversation_id, assignment['grant']['createdAt'], client=self.client)
+                   for conversation_id in (assignment['request']['coordinatorId'], assignment['request']['recipientId']))
+
     def _check_stops(self, assignment):
-        if any(stopped_after(self.owner, conversation_id, assignment['grant']['createdAt'], client=self.client)
-               for conversation_id in (assignment['request']['coordinatorId'], assignment['request']['recipientId'])):
-            raise ProjectDispatchError('Grant withdrawn by durable conversation Stop')
+        for role, key in (('Coordinator', 'coordinatorId'), ('recipient', 'recipientId')):
+            conversation_id = assignment['request'][key]
+            if stopped_after(self.owner, conversation_id, assignment['grant']['createdAt'], client=self.client):
+                raise DispatchGrantRevoked(
+                    f'Grant withdrawn by durable conversation Stop in {role} conversation '
+                    f'{conversation_id} (assignment {assignment["id"]})')
 
     def validate_grant_binding(self, assignment):
         """Legacy records are evidence only; never manufacture a binding epoch."""
@@ -770,11 +870,15 @@ class ProjectDispatchRepository:
             raise ProjectDispatchError('Admission owner/project mismatch')
         value = self._load(self._selection(assignments=[admission['assignmentId']]))[0] if value is None else value
         assignment = self._find(value, admission['assignmentId'])
-        if admission != self._admission(assignment) or assignment['grant']['revoked']:
-            raise ProjectDispatchError('Admission tenant/recipient/revision mismatch or grant revoked')
+        if assignment['grant']['revoked']:
+            raise DispatchGrantRevoked(
+                f'Grant revoked (assignment {assignment["id"]}, Coordinator conversation '
+                f'{assignment["request"]["coordinatorId"]})')
+        if admission != self._admission(assignment):
+            raise ProjectDispatchError('Admission tenant/recipient/revision mismatch')
         self.validate_grant_binding(assignment)
         self._check_stops(assignment)
-        self._live_request(assignment['request'])
+        self._live_request(assignment['request'], value=value)
         return copy.deepcopy(assignment)
 
     def validate(self, admission):
@@ -806,20 +910,69 @@ class ProjectDispatchRepository:
             return value['assignments'][index]
         return self._change(update, selected=self._assignment_selection(assignment_id, capacity=check is not None))
 
-    def bind_execution(self, assignment_id, turn_id, attempt_id):
+    def bind_execution(self, assignment_id, turn_id, attempt_id, *, task_id=None):
         _identifier(turn_id)
         _identifier(attempt_id)
         association = {'turnId': turn_id, 'attemptId': attempt_id}
+        if task_id is not None:
+            _identifier(task_id)
+            association['taskId'] = task_id
         def bind(value):
             assignment = self._find(value, assignment_id)
             if assignment['execution'] is not None:
-                if assignment['execution'] != association:
+                current = {key: assignment['execution'][key]
+                           for key in association if key in assignment['execution']}
+                if current != association:
                     raise ProjectDispatchError('Execution association is immutable')
                 return assignment
             self.validate(self._admission(assignment))
             assignment['execution'] = association
             return assignment
         return self._change(bind, selected=self._assignment_selection(assignment_id))
+
+    def workspace_task_id(self, assignment):
+        execution = assignment.get('execution') or {}
+        if execution.get('taskId'):
+            return execution['taskId']
+        if execution:
+            predecessor = self.get_attempt(execution['attemptId'])
+            if isinstance(predecessor, Mapping) and predecessor.get('taskId'):
+                return predecessor['taskId']
+        return 'project-worker:' + assignment['id']
+
+    def continue_execution(self, assignment_id, previous, turn_id, attempt_id):
+        """Advance from one exact settled predecessor to its accepted successor."""
+        for value in (turn_id, attempt_id):
+            _identifier(value)
+        def advance(value):
+            assignment = self._find(value, assignment_id)
+            execution = assignment['execution']
+            if execution is None:
+                raise ProjectDispatchError('Dispatch continuation has no execution')
+            task_id = execution.get('taskId') or self.workspace_task_id(assignment)
+            association = {'turnId': turn_id, 'attemptId': attempt_id, 'taskId': task_id}
+            if execution == association:
+                return assignment
+            if execution != previous or assignment['review'] is not None:
+                raise ProjectDispatchError('Execution continuation source changed')
+            predecessor = self.get_attempt(previous['attemptId'])
+            successor = self.attempt_get(attempt_id, user_id=self.owner)
+            if (not isinstance(predecessor, Mapping)
+                    or predecessor.get('attemptId') != previous['attemptId']
+                    or predecessor.get('turnId') != previous['turnId']
+                    or predecessor.get('conversationId') != assignment['request']['recipientId']
+                    or predecessor.get('status') in ('pending', 'running')
+                    or not isinstance(successor, Mapping)
+                    or successor.get('attemptId') != attempt_id
+                    or successor.get('turnId') != turn_id
+                    or successor.get('conversationId') != assignment['request']['recipientId']
+                    or successor.get('taskId') not in ('', task_id, predecessor.get('taskId'))
+                    or (previous.get('taskId') or task_id) != task_id):
+                raise ProjectDispatchError('Execution continuation requires exact predecessor/successor evidence')
+            self.validate(self._admission(assignment))
+            assignment['execution'] = association
+            return assignment
+        return self._change(advance, selected=self._assignment_selection(assignment_id))
 
     def revoke(self, assignment_id, expected_revision):
         """Return the existing execution association for the caller's cancellation port."""
@@ -918,12 +1071,25 @@ class ProjectDispatchRepository:
                 row['review'].get('actor') != 'coordinator' or publication['subject'] !=
                 'coordinator:' + row['request']['delegation']['taskId']):
             raise ProjectDispatchError('Project worker publication requires its source Coordinator review')
-        if any(attempt['phase'] == 'dispatch_intent' or not attempt['usage_complete']
-               for attempt in row['modelAttempts']):
-            raise ProjectDispatchError('Unconfirmed paid execution cannot publish')
-        if any(attempt['phase'] not in CONTRACT['terminalToolPhases']
-               for attempt in row.get('toolAttempts', [])):
-            raise ProjectDispatchError('Unconfirmed tool execution cannot publish')
+        # A missing model usage receipt is a recorded lower bound and must not
+        # block delivery; an in-flight model call still means the result may change.
+        if any(attempt['phase'] == 'dispatch_intent' for attempt in row['modelAttempts']):
+            if self.settle_ended_model_intents(row['id']):
+                row = self.validate(binding)
+        blocking = next((attempt for attempt in row['modelAttempts']
+                         if attempt['phase'] == 'dispatch_intent'), None)
+        if blocking is not None:
+            raise ProjectDispatchError(
+                'In-flight paid execution cannot publish: model attempt %s#%d (task %s) phase=%s'
+                % (blocking['root_task_id'], blocking['attempt_ordinal'],
+                   blocking['attempt_task_id'], blocking['phase']))
+        blocking = next((attempt for attempt in row.get('toolAttempts', [])
+                         if attempt['phase'] not in CONTRACT['terminalToolPhases']), None)
+        if blocking is not None:
+            raise ProjectDispatchError(
+                'Unconfirmed tool execution cannot publish: tool attempt %s#%d %s %s phase=%s'
+                % (blocking['root_task_id'], blocking['tool_ordinal'], blocking['tool_name'],
+                   blocking['tool_call_id'], blocking['phase']))
         execution = row['execution']
         if execution is None:
             raise ProjectDispatchError('Publication has no execution association')
@@ -943,9 +1109,14 @@ class ProjectDispatchRepository:
                 or turn.get('actor') != 'assistant'
                 or turn.get('conversationId') != row['request']['recipientId']
                 or type(turn.get('projectionRevision')) is not int
-                or turn.get('projectionRevision') != publication['resultRevision']
                 or not all(evidence_owner_matches(item, self.owner) for item in (turn, attempt))):
             raise ProjectDispatchError('Publication execution/result identity changed')
+        if turn['projectionRevision'] != publication['resultRevision']:
+            # Same execution, later projection (e.g. a late background-command
+            # completion). The pin stays fail-closed; the reviewer re-affirms.
+            raise PublicationResultChanged(
+                f'Publication result revision changed: accepted {publication["resultRevision"]}, '
+                f'current {turn["projectionRevision"]}')
         return row
 
     def record_review(self, assignment_id, decision, note, result_revision, expected_revision):
@@ -973,4 +1144,4 @@ class ProjectDispatchRepository:
         return self._change(record, selected=self._assignment_selection(assignment_id))
 
 
-__all__ = ['ProjectDispatchRepository', 'ProjectDispatchError', 'batch_requests']
+__all__ = ['ProjectDispatchRepository', 'ProjectDispatchError', 'PublicationResultChanged', 'batch_requests']

@@ -6,8 +6,10 @@ or raised exception) to JSONL, then delegates to the REAL function.  Live
 record mode is enabled ONLY when ``TOFU_LLM_REPLAY=record`` AND
 ``TOFU_PARITY_LIVE=1``; it writes ``script.next.jsonl`` next to the scenario
 fixture and NEVER overwrites a committed ``script.jsonl`` — a new generation
-is reviewed and renamed by hand.  Everywhere else the mode is ``off`` and
-nothing is recorded.
+is reviewed and renamed by hand.  With a ``request_store`` it also stores the
+normalized request behind every digest (``request_store.py``) so the new
+generation's request changes are reviewable.  Everywhere else the mode is
+``off`` and nothing is recorded.
 """
 
 from __future__ import annotations
@@ -21,9 +23,11 @@ from lib.llm.stream_result import ensure_provider_stream_result
 
 from tests.support.llm_replay.normalize import (
     chat_request_proxy,
-    normalized_field_digests,
-    normalized_request_digest,
+    json_digest,
+    normalized_projection,
+    projection_field_digests,
 )
+from tests.support.llm_replay.request_store import store_request
 from tests.support.llm_replay.script import _EXCEPTION_ATTR_ALLOWLIST
 
 __all__ = ['Recorder', 'RECORD_OUTPUT_NAME']
@@ -58,9 +62,10 @@ def _serialize_result(result) -> dict[str, Any]:
 class Recorder:
     """Tee one transport triple into ``out_path`` (JSONL)."""
 
-    def __init__(self, out_path, *, cwd: str):
+    def __init__(self, out_path, *, cwd: str, request_store=None):
         self.out_path = Path(out_path)
         self.cwd = str(cwd)
+        self.request_store = request_store
         self._lock = threading.Lock()
 
     def _append(self, row: dict[str, Any]) -> None:
@@ -71,9 +76,13 @@ class Recorder:
                 handle.write(line + '\n')
 
     def _identity(self, body) -> dict[str, Any]:
+        projection = normalized_projection(body, cwd=self.cwd)
+        field_digests = projection_field_digests(projection)
+        if self.request_store is not None:
+            store_request(self.request_store, projection, field_digests)
         return {
-            'request_digest': normalized_request_digest(body, cwd=self.cwd),
-            'field_digests': normalized_field_digests(body, cwd=self.cwd),
+            'request_digest': json_digest(projection),
+            'field_digests': field_digests,
         }
 
     # ── stream ───────────────────────────────────────────────────────

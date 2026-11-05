@@ -34,7 +34,9 @@ function stringField(round: unknown, field: string): string {
 export const PROJECT_TOOL_PRESENTATION_NAMES: readonly string[] = Object.freeze([
   'read_files',
   'inspect_image',
+  'inspect_video',
   'list_dir',
+  'search_files',
   'grep_search',
   'find_files',
   'write_file',
@@ -205,7 +207,9 @@ export function toolRoundDisplay(round: unknown): ToolRoundDisplay {
 const PROJECT_ICON_KEYS: Readonly<Record<string, string>> = Object.freeze({
   read_files: 'file',
   inspect_image: 'zoomimg',
+  inspect_video: 'video',
   list_dir: 'folder',
+  search_files: 'search',
   grep_search: 'search',
   find_files: 'find',
   write_file: 'write',

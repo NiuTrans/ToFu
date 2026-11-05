@@ -252,7 +252,7 @@ class NativePreparedInvocation:
                 or not account.authorizes_model_owner(task,self.principal.require_owner(context='native Flow'))):
             raise NativeConfigurationError('native Flow fee owner differs from its shared account')
         task['_executionActualsComplete']=account.actuals_complete()
-        from lib.billing.cost import native_task_cost
+        from lib.billing.native_cost import native_task_cost
         native_task_cost(task,model=(task.get('config') or {}).get('model') or '')
 
     async def _run(self,request):
@@ -276,7 +276,7 @@ class NativePreparedInvocation:
             _ensure_execution_budget(request.task)
         if (self.pricing_resolver is not None and request.task.get('_billingUserId')
                 and request.task.get('_checkpointApiRounds')):
-            from lib.billing.cost import native_task_cost
+            from lib.billing.native_cost import native_task_cost
             request.task['_nativePricingRequired'] = True
             prefix = request.task['_checkpointApiRounds']
             if any(isinstance(row, dict) and not row.get('taskId') for row in prefix):
@@ -372,7 +372,7 @@ class NativePreparedInvocation:
             if result is not None:
                 raise TypeError('native terminal projector must return None')
             if self.fee_transfer_target is not None:
-                from lib.billing.cost import transfer_native_child_fees
+                from lib.billing.native_cost import transfer_native_child_fees
                 transfer_native_child_fees(self.fee_transfer_target, task)
 
         def complete(task):

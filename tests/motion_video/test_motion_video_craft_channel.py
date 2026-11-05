@@ -204,16 +204,21 @@ def test_film_summary_rolls_up_craft_usage():
     assert summary['craft_entries_read'] == ['a', 'b']
 
 
-def test_engine_passes_craft_reads_into_telemetry():
-    """The author returns craft_reads; the engine must actually forward it."""
-    import inspect
-
+def test_engine_passes_craft_reads_into_telemetry(tmp_path, monkeypatch):
+    """Author craft usage reaches the durable film quality record."""
+    import json
+    from pathlib import Path
     from lib.motion_video import engine
-    from tests._source_scan import strip_comments
-    src = strip_comments(inspect.getsource(engine), lang='python')
-    assert 'craft_reads=author_craft_reads' in src, (
-        'engine drops craft_reads before telemetry — job.json would report '
-        'the channel unused on every film')
+    from tests.motion_video.test_motion_video_workflow import _film, _offline_author
+
+    task, _ = _film(tmp_path, monkeypatch)
+    _offline_author(monkeypatch, task, craft_reads=['alpha-rule'])
+    engine.run_motion_task(task)
+    assert task['status'] == 'done', task.get('error')
+    assert task['scene_quality']
+    assert all(record['craft_reads'] == ['alpha-rule'] for record in task['scene_quality'])
+    manifest = json.loads((Path(task['workdir']) / 'job.json').read_text())
+    assert manifest['scene_quality'] == task['scene_quality']
 
 
 def test_craft_reads_survives_every_author_return_path():

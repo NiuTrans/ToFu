@@ -8,7 +8,7 @@ stay lazy so the pure graph interpreter can use deterministic runner fixtures.
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 import threading
@@ -219,21 +219,18 @@ class OrchestrationInvocationRunner:
                 'event': dict(event),
             })
 
+        # Only a concurrent sibling that lost the visible-output binding is mute.
+        visible_output = True
+
         def event_sink(event: dict) -> None:
 
             from lib.agent_core.publication import check_publication
             check_publication()
+            if not visible_output:
+                # A concurrent sibling owns the visible Turn's output; this
+                # child's result reaches the conversation at step_complete.
+                return
             kind = event.get('type')
-
-            if child is not None and kind in {'delta_reset', 'retry_reset', 'round_end', 'done'}:
-                # These boundaries run after provider ingress has drained.
-                # The exact same assembly as a normal checkpoint owns order;
-                # the graph cannot recreate it later from display previews.
-                from lib.tasks_pkg.invocation import invocation_output_projection
-                execution_owner._emit({'type': 'step_event', 'node_id': node_id,
-                            'role': role, 'emits': emits,
-                            'event': {'type': 'state',
-                                      **invocation_output_projection(child)}})
             if kind in {'round_start', 'round_end', 'delta_reset', 'retry_reset'}:
                 execution_owner._emit({'type': 'step_event', 'node_id': node_id,
                             'role': role, 'emits': emits, 'event': dict(event)})
@@ -324,7 +321,7 @@ class OrchestrationInvocationRunner:
                 return completion_writer.prepare(event)
 
         def execute(*, before_dispatch=None, recipient_runner=None, runtime_abort_check=None):
-            nonlocal entered, executing, execution_thread, execution_owner, runtime_abort
+            nonlocal entered, executing, execution_thread, execution_owner, runtime_abort, visible_output
             with preparation_lock:
                 if entered or closed or (durable_admission and not callable(before_dispatch)):
                     raise ValueError('Prepared graph child is closed, consumed or lacks durable admission')
@@ -338,20 +335,26 @@ class OrchestrationInvocationRunner:
                     runtime_abort = runtime_abort_check
                 entered = executing = True
                 execution_thread = threading.get_ident()
+            from lib.tasks_pkg.explained_wait import child_invocation_wait
+            bind_output = parent.get('_flowLiveOutputPort')
             try:
-                if before_dispatch is None:
-                    run_child_invocation(child)
-                else:
-                    def admit_registered_child():
-                        from lib.tasks_pkg.invocation_registration import registered_invocation_id
-                        invocation_id = registered_invocation_id(child)
-                        if invocation_id is None:
-                            before_dispatch()
-                        else:
-                            from lib.orchestration.invocation_recovery import RegisteredInvocationCompletion
-                            before_dispatch(invocation_id=invocation_id,
-                                            completion=completion_writer or RegisteredInvocationCompletion(child))
-                    run_child_invocation(child, before_dispatch=admit_registered_child)
+                with (bind_output(child) if callable(bind_output)
+                      else nullcontext(True)) as visible_output:
+                    if before_dispatch is None:
+                        with child_invocation_wait(parent, child):
+                            run_child_invocation(child)
+                    else:
+                        def admit_registered_child():
+                            from lib.tasks_pkg.invocation_registration import registered_invocation_id
+                            invocation_id = registered_invocation_id(child)
+                            if invocation_id is None:
+                                before_dispatch()
+                            else:
+                                from lib.orchestration.invocation_recovery import RegisteredInvocationCompletion
+                                before_dispatch(invocation_id=invocation_id,
+                                                completion=completion_writer or RegisteredInvocationCompletion(child))
+                        with child_invocation_wait(parent, child):
+                            run_child_invocation(child, before_dispatch=admit_registered_child)
                 return execution_owner._complete_invocation(child, conversation_worker=conversation_worker,
                     role=role, model_route=model_route)
             finally:
@@ -412,13 +415,12 @@ class OrchestrationInvocationRunner:
                                     or verdict.status.value == 'completed'):
             self._worker_context.accept(child)
             if parent.get('convId') and parent.get('_attemptId'):
-                parent['_goalWorkerCheckpoint'] = {
-                    'messages': self._worker_context.messages,
-                    'task_state': deepcopy(self._worker_context.task_state),
-                }
+                parent['_goalWorkerCheckpoint'] = self._worker_context.snapshot()
         elif role == 'virtual_user' and verdict.status.value == 'completed':
             self._worker_context.review(child.get('content') or '')
-        projection = {key: child[key] for key in (
+        # Detached plain values: the child's settled (immutable, shared) rows
+        # cannot cross into journal encoding, which rebuilds containers.
+        projection = {key: deepcopy(child[key]) for key in (
             'content', 'thinking', 'segments', 'toolRounds', 'finishReason',
             'streamState', 'error', 'model', 'modifiedFiles', 'modifiedFileList',
         ) if child.get(key) is not None}

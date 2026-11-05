@@ -19,7 +19,6 @@ NEGATIVE CONTROL (patches a COPY; shipped file stays byte-identical):
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -32,12 +31,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 JS_DIR = runtime_sections_dir()
 _MCP_SRC = os.path.join(JS_DIR, 'settings', 'mcp.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -142,8 +135,6 @@ def _run(js_path: str) -> str:
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_expired_credentials_surface_in_card():
     output = _run(_MCP_SRC)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -152,8 +143,6 @@ def test_expired_credentials_surface_in_card():
     print(output)
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NEUTER_without_expired_branch_shows_green():
     """Patch a COPY so credExpired is forced false — the expired card must then
     render the green ON badge and no update button, proving the expired branch

@@ -8,13 +8,17 @@ window.TradingApp = window.TradingApp || {};
 (function (F) {
   "use strict";
 
-  // ── Base path for API calls (handles reverse-proxy) ──
-  const BASE_PATH = (() => {
-    const p = window.location.pathname;
-    return p.replace(/\/trading\.html$/i, "").replace(/\/+$/, "");
-  })();
+  let host = null;
+  F.bindHost = function (ports) {
+    if (ports?.version !== 1 || typeof ports.api?.trading?.call !== "function"
+        || typeof ports.api?.trading?.raw !== "function"
+        || typeof ports.markdown?.parse !== "function"
+        || typeof ports.markdown?.sanitize !== "function") {
+      throw new Error("Trading requires the v1 frontend host ports");
+    }
+    host = ports;
+  };
 
-  F._API = BASE_PATH + "/api/v1/trading";
   F._$ = (id) => document.getElementById(id);
 
   // ── Shared mutable state ──
@@ -25,16 +29,14 @@ window.TradingApp = window.TradingApp || {};
     refreshTimer: null,
   };
 
-  // ── API helper ──
-  // Delegates to the unified window.Api client (Api.trading.call), which
-  // owns the URL and error contract. trading.html loads static/js/api.js
-  // before this file. Signature unchanged so existing callers — api(path,
-  // {method, body, headers, signal}) — work as-is.
+  // The host owns transport, API versioning, cancellation and wire envelopes.
   F.api = function (path, opts = {}) {
-    if (!window.Api || !window.Api.trading) {
-      return Promise.reject(new Error("Api client not loaded"));
-    }
-    return window.Api.trading.call(path, opts);
+    if (!host) return Promise.reject(new Error("Api client not loaded"));
+    return host.api.trading.call(path, opts);
+  };
+  F.apiRaw = function (path, opts = {}) {
+    if (!host) return Promise.reject(new Error("Api client not loaded"));
+    return host.api.trading.raw(path, opts);
   };
 
   // ── Toast notifications ──
@@ -98,19 +100,10 @@ window.TradingApp = window.TradingApp || {};
     }
   };
 
-  // ── HTML sanitizer ──
-  // ★ SECURITY: every renderMarkdown / simpleMarkdown result is injected via
-  //   innerHTML and the source is LLM-generated (brain analysis, decision /
-  //   autopilot rationales). It MUST be sanitized to prevent stored XSS.
-  //   trading.html loads static/vendor/purify.min.js (DOMPurify). If DOMPurify
-  //   somehow failed to load, we degrade SAFELY to fully-escaped text rather
-  //   than emitting raw HTML.
+  // Model-authored markup is sanitized through the locked host dependency.
+  // An unbound host fails closed to escaped text.
   F.sanitizeHtml = function (html) {
-    if (typeof DOMPurify !== "undefined" && typeof DOMPurify.sanitize === "function") {
-      return DOMPurify.sanitize(html);
-    }
-    console.warn("[Trading] DOMPurify unavailable — escaping HTML as a safe fallback");
-    return F.escHtml(html);
+    return host ? host.markdown.sanitize(html) : F.escHtml(html);
   };
 
   F.simpleMarkdown = function (md) {
@@ -127,13 +120,12 @@ window.TradingApp = window.TradingApp || {};
     return F.sanitizeHtml('<div class="markdown-body"><p>' + html + "</p></div>");
   };
 
-  // renderMarkdown: parse with 'marked' if loaded, then ALWAYS sanitize.
-  // Falls back to escaped text (never raw HTML) when marked is unavailable.
+  // Parse and sanitize through explicit ports; failures remain inert text.
   F.renderMarkdown = function (text) {
     if (!text) return "";
-    if (typeof marked !== "undefined") {
+    if (host) {
       try {
-        return F.sanitizeHtml(marked.parse(text));
+        return F.sanitizeHtml(host.markdown.parse(text));
       } catch (e) {
         console.warn("[Trading] marked.parse failed:", e.message);
       }

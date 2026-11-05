@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.device_waits/v1",
+  "title": "Device waits v1",
+  "description": "Owner-scoped durable waits for an offline device and the /api/v4/desktop/device-waits wire shapes (docs/modules/remote_execution.md, 'Waiting for an offline device'). A wait record lives in the waits namespace under '<owner>:<waitId>' for its whole lifetime; a pending pointer under '<owner>:<deviceKey>:<conversationId>' exists only while the wait is pending, so a device connection reads only the pending waits that name it. Pages follow the project dispatch history page bound (contracts/project_dispatch_v1.schema.json historyPage), the convention of get_project_workers and router instructions. The default pending view pages the pending index (device, then conversation order); includeClosed=true pages every record in registration order. A cursor continues only the view that returned it.",
+  "namespaces": {
+    "waits": "desktop.device_wait.v1",
+    "pending": "desktop.device_wait.pending.v1"
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "cursor": {"description": "Opaque: a waitId (history view) or '<deviceKey>:<conversationId>' (pending view), hence 32 + 1 + 256 characters at most.", "type": "string", "minLength": 1, "maxLength": 289},
+    "timestamp": {"type": "integer", "minimum": 0},
+    "deviceKey": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "agentId", "name", "key"],
+      "properties": {
+        "selector": {"type": "string", "minLength": 1, "maxLength": 256},
+        "agentId": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "name": {"anyOf": [{"type": "string", "maxLength": 256}, {"type": "null"}]},
+        "key": {"$ref": "#/$defs/deviceKey"}
+      }
+    },
+    "wake": {
+      "description": "Execution choices of the registering turn that the wake turn continues with: toolsConfig feeds the scheduler builder, overrides carry the device capability (desktopEnabled, project_remote) and schedulerEnabled. Internal: never projected over HTTP.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolsConfig", "overrides"],
+      "properties": {
+        "toolsConfig": {"type": "object"},
+        "overrides": {"type": "object"}
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentId", "connectionEpoch", "connectedAt", "commandId", "disposition", "deliveredAt"],
+      "properties": {
+        "agentId": {"$ref": "#/$defs/id"},
+        "connectionEpoch": {"type": "integer", "minimum": 1},
+        "connectedAt": {"$ref": "#/$defs/timestamp"},
+        "commandId": {"$ref": "#/$defs/id"},
+        "disposition": {"enum": ["started", "steered", "queued"]},
+        "deliveredAt": {"$ref": "#/$defs/timestamp"}
+      }
+    },
+    "closeReason": {
+      "enum": ["owner_cancelled", "conversation_deleted", "conversation_missing", "start_failed", null]
+    },
+    "wait": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "owner", "waitId", "state", "conversationId", "device", "reason", "wake",
+                   "source", "createdAt", "delivery", "closedAt", "closeReason"],
+      "properties": {
+        "version": {"const": 1},
+        "owner": {"type": "integer", "minimum": 1},
+        "waitId": {"$ref": "#/$defs/id"},
+        "state": {"enum": ["pending", "delivered", "cancelled", "failed"]},
+        "conversationId": {"$ref": "#/$defs/id"},
+        "device": {"$ref": "#/$defs/device"},
+        "reason": {"$ref": "#/$defs/reason"},
+        "wake": {"$ref": "#/$defs/wake"},
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["taskId", "turnId"],
+          "properties": {
+            "taskId": {"type": "string", "maxLength": 256},
+            "turnId": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}
+          }
+        },
+        "createdAt": {"$ref": "#/$defs/timestamp"},
+        "delivery": {"anyOf": [{"$ref": "#/$defs/delivery"}, {"type": "null"}]},
+        "closedAt": {"anyOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
+        "closeReason": {"$ref": "#/$defs/closeReason"}
+      }
+    },
+    "pendingPointer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "owner", "waitId", "conversationId", "deviceKey"],
+      "properties": {
+        "version": {"const": 1},
+        "owner": {"type": "integer", "minimum": 1},
+        "waitId": {"$ref": "#/$defs/id"},
+        "conversationId": {"$ref": "#/$defs/id"},
+        "deviceKey": {"$ref": "#/$defs/deviceKey"}
+      }
+    },
+    "publicWait": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["waitId", "state", "conversationId", "device", "reason", "createdAt", "delivery",
+                   "closedAt", "closeReason"],
+      "properties": {
+        "waitId": {"$ref": "#/$defs/id"},
+        "state": {"enum": ["pending", "delivered", "cancelled", "failed"]},
+        "conversationId": {"$ref": "#/$defs/id"},
+        "device": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["selector", "agentId", "name"],
+          "properties": {
+            "selector": {"type": "string", "minLength": 1, "maxLength": 256},
+            "agentId": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+            "name": {"anyOf": [{"type": "string", "maxLength": 256}, {"type": "null"}]}
+          }
+        },
+        "reason": {"$ref": "#/$defs/reason"},
+        "createdAt": {"$ref": "#/$defs/timestamp"},
+        "delivery": {"anyOf": [{"$ref": "#/$defs/delivery"}, {"type": "null"}]},
+        "closedAt": {"anyOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
+        "closeReason": {"$ref": "#/$defs/closeReason"}
+      }
+    },
+    "waitPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["waits", "nextCursor"],
+      "properties": {
+        "waits": {"type": "array", "items": {"$ref": "#/$defs/publicWait"}},
+        "nextCursor": {"anyOf": [{"$ref": "#/$defs/cursor"}, {"type": "null"}]}
+      }
+    },
+    "waitListQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "includeClosed": {"enum": ["true", "false"]},
+        "cursor": {"$ref": "#/$defs/cursor"}
+      }
+    },
+    "awaitDeviceArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device", "reason"],
+      "properties": {
+        "device": {
+          "type": "string", "minLength": 1, "maxLength": 256,
+          "description": "The device to wait for: its agent ID, or its name as shown in Settings → Devices."
+        },
+        "reason": {
+          "type": "string", "minLength": 1, "maxLength": 2000,
+          "description": "What must run on the device once it is online. It is repeated to you in the wake notice."
+        }
+      }
+    }
+  }
+}

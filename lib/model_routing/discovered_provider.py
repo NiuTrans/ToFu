@@ -9,7 +9,7 @@ proves that a wire deployment exists, not who created the model.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from lib.model_routing.offering_metadata import discovery_context_budget
@@ -21,11 +21,76 @@ from .inference import profile_from_metadata
 
 
 
+# Owner decision 2026-10-31: a provider created from a /models listing imports
+# at most this many models; the rest stay loadable on request through
+# lib.llm_dispatch.provider_catalog_sync.import_listed_models.
+DISCOVERY_RETAINED_MODEL_COUNT = 512
+
+
 def _stable_id(kind: str, *parts: object) -> str:
     digest = hashlib.sha256(
         "\x00".join(str(part) for part in parts).encode("utf-8")
     ).hexdigest()[:24]
     return f"byo-{kind}-{digest}"
+
+
+def _listed_rows(models: Iterable[object]) -> list[Mapping[str, Any]]:
+    rows: dict[str, Mapping[str, Any]] = {}
+    for row in models:
+        if isinstance(row, Mapping):
+            model_id = str(row.get("model_id") or "").strip()
+            if model_id and model_id not in rows:
+                rows[model_id] = row
+    return list(rows.values())
+
+
+def listed_model_count(models: Iterable[object]) -> int:
+    """Number of distinct model ids a discovery listing offers."""
+
+    return len(_listed_rows(models))
+
+
+def retain_discovered_models(
+    models: Sequence[Mapping[str, Any]],
+    *,
+    official_directory: Sequence[Mapping[str, Any]] = (),
+    keep_model_ids: Iterable[str] = (),
+) -> list[Mapping[str, Any]]:
+    """Choose the listing rows a newly created provider imports.
+
+    A listing within ``DISCOVERY_RETAINED_MODEL_COUNT`` is imported whole. A
+    larger one keeps the requested ids, then chat models Tofu already
+    registers, then other chat models, then the rest, each group in listing
+    order. Requested ids are never dropped.
+    """
+
+    rows = _listed_rows(models)
+    if len(rows) <= DISCOVERY_RETAINED_MODEL_COUNT:
+        return list(models)
+    from lib.model_catalog._creator_identity import merge_keys
+
+    def identity_keys(model_id: str, display_name: object = None) -> frozenset:
+        # Relays prefix arbitrary publisher namespaces (``meta-llama/``).
+        return merge_keys(model_id, display_name) | merge_keys(model_id.rsplit("/", 1)[-1])
+
+    registered: set[str] = set()
+    for model in official_directory:
+        if isinstance(model, Mapping) and model.get("model_id"):
+            registered |= identity_keys(str(model["model_id"]), model.get("display_name"))
+    requested = {str(model_id).strip() for model_id in keep_model_ids}
+
+    def rank(item: tuple[int, Mapping[str, Any]]) -> tuple:
+        index, row = item
+        model_id = str(row["model_id"]).strip()
+        capabilities = row.get("capabilities")
+        chat = not isinstance(capabilities, list) or "text" in capabilities
+        return (model_id not in requested, not chat,
+                not identity_keys(model_id) & registered, index)
+
+    present = sum(str(row["model_id"]).strip() in requested for row in rows)
+    kept = {index for index, _row in sorted(enumerate(rows), key=rank)[
+        :max(DISCOVERY_RETAINED_MODEL_COUNT, present)]}
+    return [row for index, row in enumerate(rows) if index in kept]
 
 
 def discovered_provider_id(brand: object, base_url: object) -> str:
@@ -82,8 +147,14 @@ def build_discovered_provider_bundle(
     models: Sequence[Mapping[str, Any]],
     protocol: str = "openai",
     official_directory: Sequence[Mapping[str, Any]] = (),
+    keep_model_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """Build a secret-free ProviderAccess creation payload from probe facts."""
+    """Build a secret-free ProviderAccess creation payload from probe facts.
+
+    An oversized listing contributes the part chosen by
+    :func:`retain_discovered_models`; ``keep_model_ids`` names models the
+    caller already selected.
+    """
 
     normalized_provider_id = _identifier(provider_id, field="provider_id")
     normalized_name = _identifier(display_name, field="display_name")
@@ -96,6 +167,8 @@ def build_discovered_provider_bundle(
             kind="discovered_provider_invalid",
             field="models",
         )
+    models = retain_discovered_models(
+        models, official_directory=official_directory, keep_model_ids=keep_model_ids)
 
     normalized_models: dict[str, dict[str, Any]] = {}
     from .catalog_identity import inherit_discovered_metadata
@@ -220,4 +293,10 @@ def build_discovered_provider_bundle(
     return bundle
 
 
-__all__ = ["build_discovered_provider_bundle", "discovered_provider_id"]
+__all__ = [
+    "DISCOVERY_RETAINED_MODEL_COUNT",
+    "build_discovered_provider_bundle",
+    "discovered_provider_id",
+    "listed_model_count",
+    "retain_discovered_models",
+]

@@ -19,22 +19,14 @@ Steps (original order, each with its own branch):
    "queued" while the next turn kept running). Fail-soft, info-logged
    when a slot is actually revived.
 
-2. **Swarm autocontinue chain reset on HUMAN turns.** A human-initiated
-   turn (NOT carrying ``cfg['_swarmAutoContinue']``) means the user is
-   back in the loop, so the consecutive-auto-continue ceiling starts
-   fresh. Auto-continue turns carry the marker and must NOT reset (that
-   is what bounds a runaway unattended loop). Fail-soft — a reset
-   failure logs at debug and never blocks the turn. See
-   ``lib/swarm/integration.py``.
-
-3. **Capability profile merge.** Named profile defaults merge UNDER the
+2. **Capability profile merge.** Named profile defaults merge UNDER the
    explicit cfg (explicit caller values always win); no-op when cfg has
    no 'profile' key or selects the empty 'default'. Applied BEFORE model
    resolution + tool assembly so every downstream consumer sees the
    merged values. Rebinds ``task['config']`` too (the inline original
    did both).
 
-4. **Cost experiment assignment.** When the server-side experiment is
+3. **Cost experiment assignment.** When the server-side experiment is
    enabled, deterministically assigns the conversation and overlays only the
    bounded MCP-exposure / working-set policy. Disabled is an exact no-op;
    explicit request overrides are excluded rather than overwritten.
@@ -105,16 +97,7 @@ def run_turn_prelude(task, cfg, tid):
             logger.warning('[Task %s] background receipt recovery deferred: %s',
                            tid, exc)
 
-    # ── 2. Swarm auto-continue chain reset on HUMAN turns ──
-    if not cfg.get('_swarmAutoContinue'):
-        try:
-            from lib.swarm.integration import (reset_autocontinue_chain,
-                                                swarm_key_for)
-            reset_autocontinue_chain(swarm_key_for(task))
-        except Exception as _e:
-            logger.debug('[Task %s] autocontinue chain reset failed: %s', tid, _e)
-
-    # ── 3. Capability profile: merge named profile defaults UNDER the
+    # ── 2. Capability profile: merge named profile defaults UNDER the
     #    explicit cfg (explicit caller values always win) ──
     from lib.agent_core.profiles import apply_profile, resolve_profile_name
     _profile_name = resolve_profile_name(cfg)
@@ -122,7 +105,7 @@ def run_turn_prelude(task, cfg, tid):
         cfg = apply_profile(cfg)
         task['config'] = cfg
 
-    # ── 4. Conversation-sticky cost experiment. Fail open: observability
+    # ── 3. Conversation-sticky cost experiment. Fail open: observability
     #    must never become a reason an otherwise valid chat request fails.
     try:
         from lib.cost_experiments.cost_experiments import apply_cost_experiment

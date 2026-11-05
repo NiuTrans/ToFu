@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { conversationLoadBudget } from './conversation-load-budget';
+import {
+  CONVERSATION_HISTORY_BYTE_GROWTH,
+  conversationLoadBudget,
+  nextHistoryPageBytes,
+} from './conversation-load-budget';
 
 describe('conversation transport working set', () => {
   it('requests a viewport-sized tail instead of all 96 turns', () => {
@@ -25,5 +29,34 @@ describe('conversation transport working set', () => {
     expect(conversationLoadBudget({ width: 1, height: 1 })).toEqual({
       windowLimit: 8, windowBytes: 256 * 1024,
     });
+  });
+});
+
+describe('chained history page budget', () => {
+  const viewport = 1024 * 1024;
+  const byteBound = (windowBytes: number) => ({ windowBytes, turns: 1, limit: 64, hasMore: true });
+
+  it('doubles after a page cut short by bytes, up to the growth limit', () => {
+    let budget = viewport;
+    const budgets = [];
+    for (let page = 0; page < 4; page += 1) {
+      budget = nextHistoryPageBytes(viewport, byteBound(budget));
+      budgets.push(budget);
+    }
+    expect(budgets).toEqual([2, 4, 4, 4].map(factor => factor * viewport));
+    expect(CONVERSATION_HISTORY_BYTE_GROWTH * viewport).toBe(4 * viewport);
+  });
+
+  it('returns to the viewport budget when the Turn count or history bounds the page', () => {
+    expect(nextHistoryPageBytes(viewport, { windowBytes: 4 * viewport, turns: 64, limit: 64, hasMore: true }))
+      .toBe(viewport);
+    expect(nextHistoryPageBytes(viewport, { windowBytes: 4 * viewport, turns: 1, limit: 64, hasMore: false }))
+      .toBe(viewport);
+  });
+
+  it('never exceeds the 16 MiB contract ceiling', () => {
+    const large = 8 * 1024 * 1024;
+    expect(nextHistoryPageBytes(large, byteBound(large))).toBe(16 * 1024 * 1024);
+    expect(nextHistoryPageBytes(16 * 1024 * 1024, byteBound(16 * 1024 * 1024))).toBe(16 * 1024 * 1024);
   });
 });

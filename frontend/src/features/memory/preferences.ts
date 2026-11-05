@@ -354,8 +354,9 @@ function refreshMemorySection(): void {
 }
 
 export async function populatePreferencesTab(): Promise<void> {
+  const owner = ensureLifecycle();
   await refreshPreferences();
-  refreshMemorySection();
+  if (!owner.signal.aborted) refreshMemorySection();
 }
 
 export async function refreshPreferences(): Promise<void> {

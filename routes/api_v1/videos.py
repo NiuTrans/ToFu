@@ -32,6 +32,7 @@ from lib.api_response import (
 )
 from lib.file_serving import send_file_conditional
 from lib.log import get_logger
+from lib.storage.errors import StorageError
 
 from .auth import request_user_id, require_auth
 
@@ -42,18 +43,6 @@ api_v1_videos_bp = Blueprint('api_v1_videos', __name__)
 __all__ = ['api_v1_videos_bp']
 
 _CHUNK = 1024 * 1024  # 1 MiB streaming chunks
-
-
-def _sniff_video_container(head: bytes) -> str | None:
-    """Magic-bytes container sniff: 'mp4' (mp4/mov/m4v), 'webm' (webm/mkv),
-    'avi', or None. Extension claims are NOT trusted — the payload decides."""
-    if len(head) >= 12 and head[4:8] == b'ftyp':
-        return 'mp4'
-    if head[:4] == b'\x1a\x45\xdf\xa3':
-        return 'webm'
-    if len(head) >= 12 and head[:4] == b'RIFF' and head[8:12] == b'AVI ':
-        return 'avi'
-    return None
 
 
 #: extension → the container family it must sniff as
@@ -134,7 +123,7 @@ def _receive_reserved_video(
         _cleanup(scratch_dir)
         logger.error('[videos] scratch read-back failed: %s', e, exc_info=True)
         return api_error('Failed to verify the upload', status=500)
-    container = _sniff_video_container(head)
+    container = va.sniff_video_container(head)
     if container is None or container != _EXT_CONTAINER.get(ext):
         _cleanup(scratch_dir)
         logger.warning('[videos] magic mismatch: ext=%s sniffed=%s', ext, container)
@@ -146,6 +135,10 @@ def _receive_reserved_video(
         attachment, duplicate = create_video(
             tmp_path, file.filename, user_id=owner_user_id,
             size_bytes=total)
+    except StorageError:
+        # The global boundary owns the storage taxonomy (503 + retry).
+        _cleanup(scratch_dir)
+        raise
     except Exception as exc:
         _cleanup(scratch_dir)
         logger.error('[videos] durable source creation failed: %s',

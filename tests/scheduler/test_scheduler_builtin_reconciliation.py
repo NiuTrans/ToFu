@@ -3,11 +3,59 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 
 import pytest
 
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize('stop_during_bootstrap', [False, True])
+def test_builtin_reconciliation_runs_on_owned_scheduler_before_claims(
+        monkeypatch, stop_during_bootstrap):
+    from lib.identity import PrincipalContext
+    from lib.scheduler import manager as module, timer
+
+    manager = module.ScheduledTaskManager()
+    entered, release, claimed = threading.Event(), threading.Event(), threading.Event()
+    initialized = []
+    resumed = []
+
+    def initialize_first():
+        assert threading.current_thread() is not threading.main_thread()
+        entered.set()
+        assert release.wait(5)
+        initialized.append('first')
+
+    monkeypatch.setattr(manager, '_ensure_default_daily_report_task', initialize_first)
+    for name in ('provider_probe', 'model_intelligence', 'optimizer', 'storage_backup', 'reserve_reclaim'):
+        monkeypatch.setattr(manager, f'_ensure_default_{name}_task',
+                            lambda name=name: initialized.append(name))
+    monkeypatch.setattr(manager, '_check_and_run_due_tasks', claimed.set)
+    monkeypatch.setattr(module, 'get_scheduler', lambda: manager)
+    monkeypatch.setattr(module, '_application_managed_storage_backups_enabled', lambda: True)
+    monkeypatch.setattr(timer, 'resume_active_timers', lambda: resumed.append(True) or 0)
+    monkeypatch.delenv('TOFU_DISABLE_SCHEDULER', raising=False)
+    principal = PrincipalContext.system(subject_id='scheduler-test', owner_user_id=7,
+                                        scopes={'scheduler:run'})
+    try:
+        assert module.start_scheduler_worker(principal=principal) is manager
+        assert resumed == [True], 'active timers still resume before startup returns'
+        assert entered.wait(2), 'builtin reconciliation must run on the owned worker'
+        assert not claimed.is_set(), 'due work must wait for builtin reconciliation'
+        if stop_during_bootstrap:
+            assert manager.stop(timeout=0) is False
+        release.set()
+        if not stop_during_bootstrap:
+            assert claimed.wait(3)
+    finally:
+        release.set()
+        assert manager.stop(timeout=3)
+    assert initialized == (['first'] if stop_during_bootstrap else [
+        'first', 'provider_probe', 'model_intelligence', 'optimizer',
+        'storage_backup', 'reserve_reclaim'])
+    assert claimed.is_set() is (not stop_during_bootstrap)
 
 
 def test_ensure_adopts_legacy_builtin_and_retires_new_duplicate():
@@ -214,20 +262,21 @@ def test_daily_report_task_rebuilds_exact_owner_maintenance_principal(
 def test_daily_report_task_is_dispatched_off_the_scheduler_tick(monkeypatch):
     from lib.scheduler.manager import ScheduledTaskManager
 
+    import threading
+
     manager = ScheduledTaskManager()
-    calls = []
-    monkeypatch.setattr(
-        manager, '_dispatch_maintenance_task',
-        lambda task: calls.append(('async', task['id'])))
+    runs = []
     monkeypatch.setattr(
         manager, '_run_and_record',
-        lambda task: calls.append(('inline', task['id'])))
+        lambda task: runs.append((task['id'], threading.current_thread())))
 
-    manager._dispatch_claimed_task({
+    assert manager._dispatch_claimed_task({
         'id': 'daily-report-task',
         'task_type': 'daily_report_backfill',
-    })
-    assert calls == [('async', 'daily-report-task')]
+    }) is True
+    assert manager.stop(timeout=5)
+    assert [task_id for task_id, _thread in runs] == ['daily-report-task']
+    assert runs[0][1] is not threading.current_thread()
 
 
 def test_missing_report_startup_hint_claims_outside_cron_window(monkeypatch):
@@ -314,3 +363,48 @@ def test_due_feed_does_not_truncate_after_one_thousand_tasks(monkeypatch):
     monkeypatch.setattr(manager, '_dispatch_claimed_task', lambda task: dispatched.append(task['id']))
     manager._check_and_run_due_tasks()
     assert dispatched == [task['id'] for task in tasks]
+
+
+@pytest.mark.parametrize('failing_step', ['claim', 'dispatch'])
+def test_one_failing_due_task_does_not_skip_later_due_tasks(monkeypatch, failing_step):
+    """A per-task storage fault must not consume later tasks' occurrences.
+
+    Cron occurrences match one minute and the next tick may fall in the next
+    minute, so a skipped row is a lost run, not a delayed one.
+    """
+    from lib.scheduler import manager as manager_module
+    from lib.storage import StorageError
+    tasks = [{'id': name, 'user_id': 1, 'task_type': 'command',
+              'schedule': '* * * * *', 'tools_config': {}}
+             for name in ('first', 'faulty', 'last')]
+
+    class Client:
+        def query(self, operation, payload):
+            assert operation == 'scheduler.task.list_all'
+            return tasks
+
+    def fail_for_faulty(task):
+        if task['id'] == 'faulty':
+            raise StorageError('database_timeout', 'Outcome uncertain', retryable=True)
+
+    monkeypatch.setattr(manager_module, '_scheduler_client', lambda **kwargs: Client())
+    monkeypatch.setattr(manager_module, 'cron_matches', lambda *args: True)
+    manager = manager_module.ScheduledTaskManager()
+    claimed, dispatched = [], []
+
+    def claim(task, now):
+        claimed.append(task['id'])
+        if failing_step == 'claim':
+            fail_for_faulty(task)
+        return True
+
+    def dispatch(task):
+        dispatched.append(task['id'])
+        if failing_step == 'dispatch':
+            fail_for_faulty(task)
+
+    monkeypatch.setattr(manager, '_claim_due_task', claim)
+    monkeypatch.setattr(manager, '_dispatch_claimed_task', dispatch)
+    manager._check_and_run_due_tasks()
+    assert claimed == ['first', 'faulty', 'last']
+    assert dispatched[-1] == 'last'

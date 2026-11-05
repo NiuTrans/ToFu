@@ -29,7 +29,8 @@ stream loop. Steps:
 
 **Abort semantics**: ``AbortedError`` is caught here, logs the
 user-abort line, stamps ``rs.exit_reason = 'user_abort'``, and
-returns 'break'. Every other exception re-raises so the outer
+returns 'break'. An ``AdmissionRefused`` is an AbortedError that is
+never a user Stop: it re-raises with every other exception so the outer
 fatal-handling path (handle_task_fatal) sees it unchanged.
 
 Returns 'break' when the caller must break out of the stream loop,
@@ -175,7 +176,10 @@ def run_llm_call_with_fallback(
             return 'break'
         return 'proceed'
     except Exception as e:
+        from lib.llm.llm_errors import AdmissionRefused
         from lib.tasks_pkg.event_delivery import EventDeliveryCancelled
+        if isinstance(e, AdmissionRefused):
+            raise
         if isinstance(e, (AbortedError, EventDeliveryCancelled)):
             if task.get('_executionLimitReason'):
                 from lib.agent_core.execution_budget import ModelBudgetAdmissionDenied

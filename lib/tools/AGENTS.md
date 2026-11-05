@@ -9,6 +9,8 @@ Read `docs/modules/tools_execution.md`.
 
 `result_projection_text.py` owns shared exact text framing for model views.
 Verify error reconstruction and artifact/gateway delivery with canonical retention.
+Partial-summary framing also verifies observation and launch-snapshot reconstruction,
+program inputs, aggregate budgets and backend restart in the partial-text suites.
 `nonretryable_batch_error` in result_envelope.py shares all-terminal classification;
 artifact query adapters preserve native canonical JSON behind typed model errors.
 Verify artifact failure policy/recovery, decoded results, and model budgets.
@@ -49,8 +51,16 @@ tool half-visible (callable but undocumented, or documented but unrouted):
    class, approval requirement, timeout, and result budget. Register a new static
    schema owner in `lib/tool_input_repair/_schema.py` so repair and error hints
    consume the same declarations; verify `test_all_static_schema_modules_are_indexed`.
+   Keep the `parameters` root a plain object (providers reject a root
+   `oneOf`/`anyOf`/`allOf`) and register a choice between arguments in
+   `lib.tools.contracts.ARGUMENT_ALTERNATIVES`; verify
+   `tests/tools/test_tool_schema_provider_compatibility.py`.
 3. Regenerate the inventory: `python3 scripts/gen_tool_inventory.py`
    (drift-gated by `make contracts-check`).
+   Supply `toolsInv.tool.<name>` descriptions in both
+   `frontend/src/i18n/locales/{en,zh}.json`, translate the derived locales
+   (`frontend/src/i18n/AGENTS.md`) and run `npm run generate:i18n`;
+   inventory tests reject missing localized descriptions.
 4. Verify: the focused handler test, then
    `pytest -q tests/tools/test_tool_registry_write_partition_ssot.py
    tests/tools/test_tool_inventory.py`.

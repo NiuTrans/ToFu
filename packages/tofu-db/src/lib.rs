@@ -82,6 +82,8 @@ mod generated_unicode_simple_fold;
 pub mod history;
 mod history_payload;
 mod indexed_stream;
+mod generated_request_inspector_projection;
+mod request_inspector_projection;
 mod integration_workspace;
 mod invocation;
 mod knowledge;
@@ -136,6 +138,7 @@ mod legacy_receipt;
 mod recent_project;
 pub mod release_signature;
 mod research;
+mod resource_exhaustion;
 pub mod resource_gate;
 pub mod resource_probe;
 mod rotation_barrier;
@@ -183,7 +186,7 @@ mod worker_job_migration;
 
 pub const FORMAT_VERSION: u32 = 1;
 mod authority_admission;
-pub use generated_tofudb_ir::{ACTIVE_LOG_MAX_BYTES, ACTIVE_LOG_ROTATE_BYTES};
+pub use generated_tofudb_ir::{ACTIVE_LOG_CHECKPOINT_BYTES, ACTIVE_LOG_ROTATE_BYTES};
 
 pub mod native_checkpoint_store;
 #[cfg(feature = "native-runtime-checkpoints")]

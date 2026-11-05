@@ -39,7 +39,10 @@ Canonicalisation rules (the load-bearing part)
                                        ensure_ascii re-serialisation false
                                        positive; a real arg change still shows).
   * OpenAI ``tool`` role ↔ Anthropic ``tool_result`` user block
-                                     → same ``(tool_use_id, content)``.
+                                     → same ``(tool_use_id, content)``; a
+                                       turn merging several results also
+                                       keeps one hash per result so a diff
+                                       names the result that changed.
   * thinking: OpenAI ``reasoning_content`` + ``thinking_signature`` ↔
     Anthropic ``{"type":"thinking",...}`` → same ``(thinking, signature)``.
 
@@ -52,13 +55,15 @@ message's own identity (first tool id / tool_use_id / role+content hash).
 
 Public API
 ==========
-  - ``capture_wire_message_evidence(messages) -> WireMessageEvidence`` — one
-    shared traversal for the three full-history fingerprints captured at the
-    live transport boundary.
+  - ``capture_wire_message_evidence(messages, sealed=None) -> WireMessageEvidence``
+    — one shared traversal for the three full-history fingerprints captured
+    at the live transport boundary; byte views hash the sealed slices.
   - ``canonical_messages(messages) -> list[dict]`` — envelope-agnostic per-msg
-    process-local fingerprints (``{key, fields:{field→int}}``).
+    process-local fingerprints (``{key, fields:{field→int}}``, plus
+    ``blocks`` for a turn merging several tool results).
   - ``diff_canonical(old, new, max_report=8) -> list[str]`` — the exact
-    ``key.field`` entries that changed (stable-key aligned).
+    ``key.field`` entries that changed (stable-key aligned; a merged
+    tool-result turn reports each changed result's own key).
   - ``static_prefix_hash(messages) -> str`` — hash of the leading
     system+first-user "static floor" (system+tools prefix proxy).
 """
@@ -73,6 +78,16 @@ from typing import Any
 import orjson
 
 from lib.log import get_logger
+from lib.tasks_pkg.wire_fingerprint_diff import (
+    diff_canonical as diff_canonical,
+    first_changed_index as first_changed_index,
+    first_changed_byte_index as first_changed_byte_index,
+    diff_byte_prefix as diff_byte_prefix,
+    diff_byte_field_prefix as diff_byte_field_prefix,
+    diff_byte_region as diff_byte_region,
+    diff_routing as diff_routing,
+)
+
 
 logger = get_logger(__name__)
 
@@ -179,14 +194,18 @@ def _text_of(content: Any) -> str:
 
 def _canonical_fields_and_tool_key(
     msg: dict,
-) -> tuple[dict[str, int], str | None]:
-    """Build canonical fields and any stable tool key in one message scan.
+) -> tuple[dict[str, int], str | None, tuple | None]:
+    """Build canonical fields, any stable tool key and per-result evidence
+    in one message scan.
 
     Handles both the OpenAI shape (role tool / assistant.tool_calls /
     reasoning_content+thinking_signature) and the translated Anthropic shape
     (user turn holding tool_result blocks / assistant.content holding
     tool_use + thinking blocks). The output field set is the SAME regardless
     of envelope so a protocol switch alone never registers as a change.
+
+    The third value is ``((result_key, hash), ...)`` for a user turn merging
+    two or more tool results, else ``None``.
     """
     item_type = msg.get('type', '')
     if item_type == 'function_call':
@@ -194,14 +213,14 @@ def _canonical_fields_and_tool_key(
                 + (msg.get('name') or '') + '\x03'
                 + _canon_args(msg.get('arguments')))
         fields = {'role': hash('assistant'), 'tool_calls': hash(spec)}
-        return fields, f'assistant/tool_call({msg.get("name") or "?"})'
+        return fields, f'assistant/tool_call({msg.get("name") or "?"})', None
     if item_type == 'function_call_output':
         output = msg.get('output')
         output_text = output if isinstance(output, str) else _text_of(output)
         spec = (msg.get('call_id') or '') + '\x03' + output_text
         fields = {'role': hash('toolresult'), 'tool_result': hash(spec)}
         key = f'tool_result({_tool_id_token(msg.get("call_id"))})'
-        return fields, key
+        return fields, key, None
     if item_type in ('reasoning', 'compaction'):
         try:
             opaque = json.dumps(_strip_cache_control(msg), sort_keys=True,
@@ -210,7 +229,7 @@ def _canonical_fields_and_tool_key(
             logger.debug('[WireFingerprint] opaque %s payload is not JSON serializable: %s',
                          item_type, exc)
             opaque = str(msg)
-        return {'role': hash(item_type), item_type: hash(opaque)}, None
+        return {'role': hash(item_type), item_type: hash(opaque)}, None, None
 
     role = msg.get('role', '')
     content = msg.get('content')
@@ -221,8 +240,14 @@ def _canonical_fields_and_tool_key(
     # must produce the SAME (role token + tool_result hash) so a protocol
     # switch alone is not a change. Canonical form: role='toolresult', and the
     # tool_result hash = the ordered list of ``(tool_use_id, inner_text)``.
+    # The merged turn's key names only its FIRST result, so a turn holding
+    # several results also keeps one ``(result_key, hash)`` pair per result;
+    # without it a change in any later result was blamed on the first one.
+    # A lone result carries no pairs: its key already names it, which keeps
+    # it identical to the OpenAI ``tool`` message.
     _tr_specs: list[str] | None = None
     tool_key: str | None = None
+    result_blocks: tuple | None = None
     if role == 'tool':
         result_text = content if isinstance(content, str) else _text_of(content)
         _tr_specs = [(msg.get('tool_call_id') or '') + '\x03'
@@ -232,18 +257,23 @@ def _canonical_fields_and_tool_key(
           and isinstance(content[0], dict)
           and content[0].get('type') == 'tool_result'):
         _tr_specs = []
-        tool_key = f'tool_result({_tool_id_token(content[0].get("tool_use_id"))})'
+        result_keys: list[str] = []
         for blk in content:
             if isinstance(blk, dict) and blk.get('type') == 'tool_result':
                 inner = blk.get('content')
                 inner_text = (
                     inner if isinstance(inner, str) else _text_of(inner))
-                _tr_specs.append((blk.get('tool_use_id') or '') + '\x03'
-                                 + inner_text)
+                tool_use_id = blk.get('tool_use_id')
+                _tr_specs.append((tool_use_id or '') + '\x03' + inner_text)
+                result_keys.append(
+                    f'tool_result({_tool_id_token(tool_use_id)})')
+        tool_key = result_keys[0]
+        if len(_tr_specs) > 1:
+            result_blocks = tuple(zip(result_keys, map(hash, _tr_specs)))
     if _tr_specs is not None:
         return ({'role': hash('toolresult'),
                  'tool_result': hash('\x01'.join(_tr_specs))},
-                tool_key)
+                tool_key, result_blocks)
 
     fields: dict[str, int] = {'role': hash(role)}
 
@@ -316,7 +346,7 @@ def _canonical_fields_and_tool_key(
         # canonical, envelope-independent representation.
         fields['thinking'] = hash(_think_text + '\x03' + _think_sig)
 
-    return fields, tool_key
+    return fields, tool_key, None
 
 
 def _tool_id_token(tool_id) -> str:
@@ -371,19 +401,24 @@ def canonical_key(entry: dict) -> str:
 
 def _canonical_message_entry(msg: dict) -> dict:
     """Build one canonical entry shared by every message fingerprint."""
-    fields, key = _canonical_fields_and_tool_key(msg)
+    fields, key, result_blocks = _canonical_fields_and_tool_key(msg)
     if key is None:
         key = _canonical_field_alignment_key(msg.get('role', ''), fields)
-    return {'key': key, 'fields': fields}
+    entry = {'key': key, 'fields': fields}
+    if result_blocks is not None:
+        entry['blocks'] = result_blocks
+    return entry
 
 
 def canonical_messages(messages: list) -> list[dict]:
     """Canonicalise a post-translation wire message list to fingerprints.
 
     Each retained entry is only ``{'key', 'fields': {field: int}}``; role and
-    tool identity are folded into ``key`` during construction. Envelope (OpenAI
-    vs Anthropic) is erased — the same conversation produces the same
-    fingerprints on either protocol.
+    tool identity are folded into ``key`` during construction. A user turn
+    merging several tool results also carries ``'blocks'``: one
+    ``(result_key, hash)`` pair per result, so ``diff_canonical`` can name the
+    result that changed. Envelope (OpenAI vs Anthropic) is erased — the same
+    conversation produces the same fingerprints on either protocol.
     """
     out: list[dict] = []
     for msg in messages or ():
@@ -391,81 +426,6 @@ def canonical_messages(messages: list) -> list[dict]:
             continue
         out.append(_canonical_message_entry(msg))
     return out
-
-
-def diff_canonical(old: list, new: list, max_report: int = 8) -> list[str]:
-    """Name the exact ``key.field`` entries that differ, stable-key aligned.
-
-    Compares the OVERLAPPING prefix by position but reports the STABLE key +
-    field, so a re-index shifts nothing as long as the same messages are
-    present in the same order. A message present in one list but absent in the
-    other (an actual prefix edit) is reported as ``+key`` / ``-key``. Capped at
-    ``max_report`` culprits (an ``…`` marks truncation).
-    """
-    changes: list[str] = []
-    n = min(len(old), len(new))
-    for i in range(n):
-        o = old[i] or {}
-        nw = new[i] or {}
-        of = o.get('fields') or {}
-        nf = nw.get('fields') or {}
-        key = nw.get('key') or o.get('key') or f'[{i}]'
-        for field in sorted(set(of) | set(nf)):
-            if of.get(field) != nf.get(field):
-                changes.append(f'{key}.{field}')
-                if len(changes) >= max_report:
-                    changes.append('…')
-                    return changes
-    if len(old) != len(new):
-        changes.append(f'len {len(old)}\u2192{len(new)}')
-    return changes
-
-
-def first_changed_index(old: list, new: list) -> int:
-    """Return the FIRST position where two canonical fingerprint lists differ.
-
-    Position-aware companion to ``diff_canonical`` (which reports stable keys,
-    not indices). Used by ``detect_cache_break`` to log WHERE in the wire
-    message list a prefix mutation lands, so a break can be classified by
-    whether the earliest changed index falls inside the PRIOR round's cached
-    prefix (an already-cached message rewritten in place) vs only in the fresh
-    tail. Compares the overlapping prefix by position; ``-1`` if no shared
-    position differs. A pure length change (no shared-position diff) also
-    returns ``-1`` — the caller inspects the length separately.
-    """
-    n = min(len(old), len(new))
-    for i in range(n):
-        o = old[i] or {}
-        nw = new[i] or {}
-        if (o.get('fields') or {}) != (nw.get('fields') or {}):
-            return i
-    return -1
-
-
-def first_changed_byte_index(old: list, new: list) -> int:
-    """FIRST position where two ``wire_byte_prefix`` lists differ by RAW bytes.
-
-    The TRUE-byte counterpart of ``first_changed_index`` (which walks the LOSSY
-    ``canonical_messages`` fingerprints). ``detect_cache_break`` needs the
-    changed POSITION to log whether a mutation landed inside the prior round's
-    cached-prefix boundary (an already-cached message rewritten in place → real
-    miss) or only in the freshly-appended tail (benign). But when the only
-    culprit is a ``<bytes>`` divergence (``canonical`` says "identical", raw
-    bytes differ — a ``reasoning_details`` rebuild, same-role merge, or
-    protocol switch), ``first_changed_index`` returns ``-1`` and the position
-    evidence collapses to a meaningless ``inside_prior_cached_prefix=False`` —
-    exactly the class where the position matters most. This walks the
-    ``[{'key','h'}]`` byte-hash lists so the byte-only case gets an honest
-    index. Compares the overlapping prefix by position; ``-1`` if no shared
-    position differs (a pure length change is inspected separately).
-    """
-    n = min(len(old), len(new))
-    for i in range(n):
-        o = old[i] or {}
-        nw = new[i] or {}
-        if o.get('h') != nw.get('h'):
-            return i
-    return -1
 
 
 def system_fingerprint(system: Any, tools: Any) -> dict[str, str]:
@@ -792,38 +752,25 @@ class WireMessageEvidence:
     field_bytes: list[dict]
 
 
-def _wire_message_byte_entry(
-    msg: dict,
-    *,
-    key: str,
-    clean: dict | None = None,
-) -> dict:
-    """Hash one message's marker-free serialized bytes."""
-    clean_message = (
-        _strip_cache_control(msg) if clean is None else clean
-    )
-    try:
-        raw = json.dumps(
-            clean_message, ensure_ascii=False, sort_keys=False)
-    except (TypeError, ValueError) as e:
-        logger.debug('[WireFP] wire_byte_prefix dump failed (%s) — '
-                     'using str() form', e)
-        raw = str(msg)
-    # This evidence lives only through the current process's FloorRetry/cache
-    # diagnostics and one previous-round baseline. A keyed runtime integer
-    # avoids another UTF-8 copy, MD5 digest and retained hex string.
-    return {'key': key, 'h': hash(raw)}
-
-
-_WIRE_JSON_ENCODER = json.JSONEncoder(ensure_ascii=False, sort_keys=False)
+# Message and field byte views hash compact UTF-8 JSON, the sealed provider
+# wire's own encoding (``lib.llm.request``), so the live capture reads the
+# sealed slices instead of serializing the history again. This evidence lives
+# only through the current process's FloorRetry/cache diagnostics and one
+# previous-round baseline: keyed runtime integers, never persisted digests.
+_WIRE_JSON_ENCODER = json.JSONEncoder(ensure_ascii=False, separators=(',', ':'))
 # ``JSONEncoder.encode`` keeps its circular-reference map and iterator local to
 # each call; the shared instance owns immutable configuration only, so parallel
 # requests do not share payload state. This avoids ``json.dumps`` constructing
 # the same configured wrapper once per complex top-level message field.
+_CACHE_CONTROL_JSON_KEY = b'"cache_control":'
+
+
+def _utf8(text: str) -> bytes:
+    return text.encode('utf-8', 'surrogatepass')
 
 
 def _dump_wire_json_value(value: Any) -> str:
-    """Match stdlib JSON exactly while bypassing its wrapper for primitives."""
+    """Compact stdlib JSON, bypassing its wrapper for primitives."""
     if isinstance(value, str):
         return json.encoder.encode_basestring(value)
     if value is None:
@@ -837,31 +784,6 @@ def _dump_wire_json_value(value: Any) -> str:
     return _WIRE_JSON_ENCODER.encode(value)
 
 
-def _wire_field_byte_entry(
-    msg: dict,
-    *,
-    key: str,
-    clean: dict | None = None,
-) -> dict:
-    """Hash each top-level field of one marker-free wire message."""
-    clean_message = (
-        _strip_cache_control(msg) if clean is None else clean
-    )
-    field_hashes: dict[Any, int] = {}
-    for field, value in clean_message.items():
-        try:
-            raw = _dump_wire_json_value(value)
-        except (TypeError, ValueError) as e:
-            logger.debug('[WireFP] wire_byte_field_prefix dump failed for '
-                         'field=%s (%s) — using str() form', field, e)
-            raw = str(value)
-        field_hashes[field] = hash(raw)
-    # A pure top-level field reorder changes serialized bytes while leaving
-    # every value stable. Keep that fact separately attributable.
-    field_hashes['__order__'] = hash(tuple(clean_message.keys()))
-    return {'key': key, 'fields': field_hashes}
-
-
 def _wire_message_and_field_byte_entries(
     msg: dict,
     *,
@@ -870,48 +792,44 @@ def _wire_message_and_field_byte_entries(
 ) -> tuple[dict, dict]:
     """Serialize each top-level value once for both raw-byte evidence views.
 
-    ``json.dumps(dict, ensure_ascii=False, sort_keys=False)`` is exactly an
-    insertion-ordered ``{key: value, ...}`` join using the same serialized
-    field values. Rebuilding it from those pieces removes the combined live
-    capture's second recursive serialization.  That serialization also proves
-    whether a ``cache_control`` JSON key exists: marker-free messages can reuse
-    the original graph, while the uncommon marker-bearing message is stripped
-    and serialized again. Invalid JSON and non-string top-level keys take the
-    conservative stripping path. Standalone APIs retain their independent
-    implementations and historical fallbacks.
+    Compact ``json.dumps(dict, ensure_ascii=False)`` is exactly an
+    insertion-ordered ``{"key":value,...}`` join of the same serialized field
+    values, so the whole-message view joins the field bytes instead of
+    serializing twice. That serialization also proves whether a
+    ``cache_control`` JSON key exists: marker-free messages reuse the original
+    graph, while the uncommon marker-bearing message is stripped and
+    serialized again. Invalid JSON and non-string top-level keys take the
+    conservative stripping path. The standalone APIs share this owner.
     """
     source = msg if clean is None else clean
     must_detect_cache_control = clean is None
-    cache_control_json_key = '"cache_control": '
     has_cache_control = False
     field_hashes: dict[Any, int] = {}
-    # Keep large ``raw_value`` strings as independent references until one
-    # final join. Building ``encoded_key + ': ' + raw_value`` first would copy
-    # every long field into an intermediate string and then copy it again when
-    # joining the whole message.
-    serialized_parts: list[str] = ['{']
+    # Keep large ``raw_value`` buffers as independent references until one
+    # final join instead of copying each into an intermediate member.
+    serialized_parts: list[bytes] = [b'{']
     has_serialized_field = False
     message_json_valid = True
     message_needs_direct_dump = False
     for field, value in source.items():
         try:
-            raw_value = _dump_wire_json_value(value)
+            raw_value = _utf8(_dump_wire_json_value(value))
         except (TypeError, ValueError) as exc:
             logger.debug(
                 '[WireFP] wire_byte_field_prefix dump failed for field=%s '
                 '(%s) — using str() form', field, exc)
-            raw_value = str(value)
+            raw_value = _utf8(str(value))
             message_json_valid = False
         if must_detect_cache_control and (
                 field == 'cache_control'
-                or cache_control_json_key in raw_value):
+                or _CACHE_CONTROL_JSON_KEY in raw_value):
             has_cache_control = True
         field_hashes[field] = hash(raw_value)
         if isinstance(field, str):
             if has_serialized_field:
-                serialized_parts.append(', ')
+                serialized_parts.append(b',')
             serialized_parts.extend((
-                json.encoder.encode_basestring(field), ': ', raw_value))
+                _utf8(json.encoder.encode_basestring(field)), b':', raw_value))
             has_serialized_field = True
         else:
             # Provider messages use string keys. Preserve stdlib json's wider
@@ -925,47 +843,73 @@ def _wire_message_and_field_byte_entries(
         return _wire_message_and_field_byte_entries(
             msg, key=key, clean=_strip_cache_control(msg))
 
+    # A pure top-level field reorder changes serialized bytes while leaving
+    # every value stable. Keep that fact separately attributable.
     field_hashes['__order__'] = hash(tuple(source.keys()))
     if message_json_valid and not message_needs_direct_dump:
-        serialized_parts.append('}')
-        raw_message = ''.join(serialized_parts)
+        serialized_parts.append(b'}')
+        raw_message = b''.join(serialized_parts)
     else:
         try:
-            raw_message = json.dumps(
-                source, ensure_ascii=False, sort_keys=False)
+            raw_message = _utf8(_WIRE_JSON_ENCODER.encode(source))
         except (TypeError, ValueError):
             logger.debug(
                 '[WireFP] wire_byte_prefix dump failed — using str() form')
-            raw_message = str(msg)
+            raw_message = _utf8(str(msg))
     return (
         {'key': key, 'h': hash(raw_message)},
         {'key': key, 'fields': field_hashes},
     )
 
 
-def capture_wire_message_evidence(messages: list) -> WireMessageEvidence:
+def _sealed_byte_entries(msg: dict, key: str, payload: bytes,
+                         view: memoryview, span) -> tuple[dict, dict] | None:
+    """Both byte views from one sealed item; None when it must be stripped.
+
+    A memoryview slice hashes exactly like the bytes it views, without a copy.
+    """
+    start, end, fields = span
+    if fields is None or payload.find(_CACHE_CONTROL_JSON_KEY, start, end) >= 0:
+        return None
+    field_hashes: dict[Any, int] = {
+        name: hash(view[start + field_start:start + field_end])
+        for name, field_start, field_end in fields}
+    field_hashes['__order__'] = hash(tuple(msg.keys()))
+    return ({'key': key, 'h': hash(view[start:end])},
+            {'key': key, 'fields': field_hashes})
+
+
+def capture_wire_message_evidence(messages: list, *,
+                                  sealed=None) -> WireMessageEvidence:
     """Capture all message-sized wire fingerprints in one shared traversal.
 
     Live transport needs the canonical semantic fingerprint, whole-message
     byte fingerprint, and top-level-field byte fingerprint together. Computing
     them independently repeated canonical-key construction and recursively
     stripped ``cache_control`` twice across the complete prompt. This owner
-    computes the canonical entry once and detects the uncommon marker while
-    serializing the raw fields already required for evidence. Only a message
-    that actually carries the marker is recursively stripped; marker-free
-    inputs stay read-only and allocation-free. Standalone helpers remain for
-    callers that need only one view.
+    computes the canonical entry once. ``sealed`` is ``(payload, spans)`` from
+    the request seal of exactly these items: a marker-free item hashes its
+    sealed slices and is not serialized again. Without it, or for the
+    uncommon marker-bearing item, the raw fields are serialized once and only
+    a message that actually carries the marker is recursively stripped.
     """
     canonical: list[dict] = []
     message_bytes: list[dict] = []
     field_bytes: list[dict] = []
-    for msg in messages or ():
+    payload, spans = sealed if sealed is not None else (b'', ())
+    view = memoryview(payload)
+    for index, msg in enumerate(messages or ()):
         if not isinstance(msg, dict):
             continue
         canonical_entry = _canonical_message_entry(msg)
         canonical.append(canonical_entry)
-        message_entry, field_entry = _wire_message_and_field_byte_entries(
-            msg, key=canonical_entry['key'])
+        entries = (_sealed_byte_entries(msg, canonical_entry['key'], payload,
+                                        view, spans[index])
+                   if index < len(spans) else None)
+        message_entry, field_entry = (
+            entries if entries is not None
+            else _wire_message_and_field_byte_entries(
+                msg, key=canonical_entry['key']))
         message_bytes.append(message_entry)
         field_bytes.append(field_entry)
     return WireMessageEvidence(
@@ -991,9 +935,9 @@ def wire_byte_prefix(messages: list) -> list[dict]:
     would be literally false, laundering a real content/serialization change
     into an "upstream eviction".
 
-    This hashes ``json.dumps(msg)`` of each message EXACTLY as the transport
-    serialises it (insertion order preserved via ``sort_keys=False``), stripping
-    ONLY ``cache_control``. Every other byte — ``reasoning_details``,
+    This hashes the compact JSON of each message EXACTLY as the transport
+    seals it (insertion order preserved), stripping ONLY ``cache_control``.
+    Every other byte — ``reasoning_details``,
     ``extra_content``, field order, the full base64 of an image — is included,
     so any canonical-invisible mutation shows up. Aligned by the SAME
     ``canonical_key`` as ``diff_canonical`` so a benign reindex does not
@@ -1015,34 +959,9 @@ def wire_byte_prefix(messages: list) -> list[dict]:
         if not isinstance(msg, dict):
             continue
         entry = _canonical_message_entry(msg)
-        out.append(_wire_message_byte_entry(msg, key=entry['key']))
+        out.append(_wire_message_and_field_byte_entries(
+            msg, key=entry['key'])[0])
     return out
-
-
-def diff_byte_prefix(old: list, new: list, max_report: int = 8) -> list[str]:
-    """Name the messages whose RAW serialized bytes differ, stable-key aligned.
-
-    The true-byte counterpart of ``diff_canonical``. Compares the overlapping
-    prefix by position (this round appends new tail messages we do not diff),
-    reporting the stable ``key`` of each byte-divergent message prefixed with
-    ``<bytes>`` so a downstream verdict can tell it apart from a canonical
-    (semantic) culprit. A message present in one list but not the other is a
-    length change. Capped at ``max_report`` (``…`` marks truncation).
-    """
-    changes: list[str] = []
-    n = min(len(old), len(new))
-    for i in range(n):
-        o = old[i] or {}
-        nw = new[i] or {}
-        if o.get('h') != nw.get('h'):
-            changes.append('<bytes>' + (nw.get('key') or o.get('key')
-                                        or f'[{i}]'))
-            if len(changes) >= max_report:
-                changes.append('…')
-                return changes
-    if len(old) != len(new):
-        changes.append(f'byte-len {len(old)}\u2192{len(new)}')
-    return changes
 
 
 def wire_byte_field_prefix(messages: list) -> list[dict]:
@@ -1057,7 +976,7 @@ def wire_byte_field_prefix(messages: list) -> list[dict]:
     ("reasoning_details rebuild / same-role merge / field reorder / protocol
     switch"), never a proven field.
 
-    This hashes EACH top-level key of the message separately (``json.dumps``,
+    This hashes EACH top-level key of the message separately (compact JSON,
     insertion order preserved, ONLY ``cache_control`` stripped) so
     ``diff_byte_field_prefix`` can name the EXACT ``key.field`` that flipped:
     ``{reasoning_details}`` (the build_body rebuild), ``{tool_calls}`` (arg
@@ -1075,40 +994,9 @@ def wire_byte_field_prefix(messages: list) -> list[dict]:
         if not isinstance(msg, dict):
             continue
         entry = _canonical_message_entry(msg)
-        out.append(_wire_field_byte_entry(msg, key=entry['key']))
+        out.append(_wire_message_and_field_byte_entries(
+            msg, key=entry['key'])[1])
     return out
-
-
-def diff_byte_field_prefix(old: list, new: list, max_report: int = 8) -> list[str]:
-    """Name the exact ``<bytes>key{field}`` entries that byte-diverged.
-
-    The field-granular counterpart of ``diff_byte_prefix``. Compares the
-    overlapping prefix by position; for each message whose per-field hash map
-    differs, reports one ``<bytes>{stable-key}{field}`` token per changed
-    field (so a downstream verdict can name the ACTIONABLE field —
-    ``reasoning_details`` / ``tool_calls`` / ``content`` / ``__order__``).
-    Capped at ``max_report`` culprits (``…`` marks truncation). A length change
-    of the compared prefix is reported as ``byte-field-len A→B``.
-    """
-    changes: list[str] = []
-    n = min(len(old), len(new))
-    for i in range(n):
-        o = old[i] or {}
-        nw = new[i] or {}
-        of = o.get('fields') or {}
-        nf = nw.get('fields') or {}
-        if of == nf:
-            continue
-        key = nw.get('key') or o.get('key') or f'[{i}]'
-        for field in sorted(set(of) | set(nf)):
-            if of.get(field) != nf.get(field):
-                changes.append(f'<bytes>{key}{{{field}}}')
-                if len(changes) >= max_report:
-                    changes.append('…')
-                    return changes
-    if len(old) != len(new):
-        changes.append(f'byte-field-len {len(old)}\u2192{len(new)}')
-    return changes
 
 
 def wire_byte_region(system: Any, tools: Any) -> dict[str, str]:
@@ -1156,25 +1044,6 @@ def wire_byte_region(system: Any, tools: Any) -> dict[str, str]:
     return {'system': _md5(_sys_raw), 'tools': _md5(_tools_raw)}
 
 
-def diff_byte_region(old: dict | None, new: dict | None) -> list[str]:
-    """Name which hoisted region(s) diverged at the RAW-byte level.
-
-    Compares ``wire_byte_region`` outputs. Returns ``<bytes>system`` /
-    ``<bytes>tools`` for each field whose true bytes changed, so a downstream
-    verdict tells a hoisted-region byte divergence apart from a lossy
-    ``system_fingerprint`` ``<hoisted>`` culprit and from a per-message
-    ``<bytes>`` culprit. ``.get(...)`` defaults keep pre-change (missing) state
-    inert — a mid-deploy round with no stored region never cries wolf.
-    """
-    if not old or not new:
-        return []
-    changes: list[str] = []
-    for fld in ('system', 'tools'):
-        if old.get(fld) != new.get(fld):
-            changes.append('<bytes>' + fld)
-    return changes
-
-
 def static_prefix_hash(messages: list) -> str:
     """Hash the leading static floor (system message(s) + first user turn).
 
@@ -1214,7 +1083,7 @@ def _canon_beta(anthropic_beta: Any) -> str:
 
 
 def routing_fingerprint(*, key_hash: Any = '', anthropic_beta: Any = '',
-                        endpoint: Any = '') -> dict[str, str]:
+                        endpoint: Any = '', affinity: Any = '') -> dict[str, str]:
     """Fingerprint the request's CACHE-NAMESPACE-determining routing attributes.
 
     THE LAST BLIND SPOT. ``canonical_messages`` / ``system_fingerprint`` /
@@ -1234,32 +1103,16 @@ def routing_fingerprint(*, key_hash: Any = '', anthropic_beta: Any = '',
     and instead NAME a client cache-namespace switch. ``key_hash`` is the
     already-salted+truncated non-secret discriminator ``_sse_core`` computes;
     the beta header is normalized order-independently so a token reorder is not
-    a false flip. Any field absent → ''.
+    a false flip. ``affinity`` is ``lib.llm.cache_affinity.cache_affinity_evidence``:
+    the wire slots that carried the lineage's cache-affinity key plus a short
+    digest of it. Hops past Tofu's key (gateway account, provider shard) pick
+    the cache domain from that key. Any field absent → ''.
 
-    Returns ``{'key': str, 'beta': str, 'endpoint': str}``.
+    Returns ``{'key': str, 'beta': str, 'endpoint': str, 'affinity': str}``.
     """
     return {
         'key': '' if key_hash is None else str(key_hash),
         'beta': _canon_beta(anthropic_beta),
         'endpoint': '' if endpoint is None else str(endpoint),
+        'affinity': '' if affinity is None else str(affinity),
     }
-
-
-def diff_routing(old: dict | None, new: dict | None) -> list[str]:
-    """Name which cache-namespace attribute(s) flipped between rounds.
-
-    Compares two ``routing_fingerprint`` outputs. Returns a stable-ordered list
-    of ``<ns>key`` / ``<ns>beta`` / ``<ns>endpoint`` for each attribute whose
-    value changed — the precise, false-positive-free signal that a byte-
-    identical prefix was routed to a DIFFERENT gateway cache namespace (→ a
-    client-caused cold miss). A missing side (mid-deploy: no prior routing
-    captured, or non-Claude / capture failure) is inert — returns ``[]`` so it
-    never cries wolf before the fingerprint exists.
-    """
-    if not old or not new:
-        return []
-    changes: list[str] = []
-    for fld in ('key', 'beta', 'endpoint'):
-        if old.get(fld) != new.get(fld):
-            changes.append('<ns>' + fld)
-    return changes

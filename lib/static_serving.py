@@ -130,13 +130,18 @@ def register_static_route(
 
     async def static_route(filename: str) -> Response:
         resolved_timeout = timeout() if callable(timeout) else timeout
-        return await serve_static_request(
+        response = await serve_static_request(
             filename,
             offload=offload,
             timeout=float(resolved_timeout),
             logger=logger,
             range_allows=range_allows,
         )
+        # Sandboxed artifact frames have opaque origins. Public font bytes
+        # must support anonymous CORS while the frame keeps its isolation.
+        if filename.lower().endswith(('.woff2', '.woff', '.ttf')):
+            response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
 
     app.add_url_rule(
         '/static/<path:filename>',

@@ -224,7 +224,7 @@ def test_visible_question_is_already_answerable(monkeypatch, batch):
     from lib.tasks_pkg import human_guidance
     from lib.tasks_pkg.human_gate_registry import OwnedHumanGateRegistry
     from lib.tasks_pkg.handlers.misc import _human as handler
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(human_guidance, 'human_gate_registry', registry)
     published = []
     def emit(task, event):

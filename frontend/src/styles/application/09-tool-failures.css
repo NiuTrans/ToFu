@@ -6,6 +6,13 @@
   border-color: color-mix(in srgb, var(--text-secondary) 22%, transparent);
   opacity: 0.75;
 }
+/* ── Queued tool round — announced while the model streams, not yet
+      started on its worker; becomes the running row at handler entry. ── */
+.ptool-badge-queued {
+  background: var(--chip-neutral-bg);
+  color: var(--chip-neutral-color);
+  border: 1px solid var(--chip-neutral-border);
+}
 .ptool-badge-interrupted {
   background: var(--chip-warn-bg);
   color: var(--chip-warn-color);

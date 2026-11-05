@@ -187,6 +187,34 @@ def test_old_tabs_wrong_versions_and_duplicate_slots_fail(subject):
     with pytest.raises(ValueError):decide(subject,note=' ')
 
 
+def test_caller_faults_are_typed_bad_requests_with_their_field(subject):
+    from lib.error_envelope import BadRequest
+
+    def rejected_field(change):
+        with pytest.raises(BadRequest) as caught:
+            change()
+        return caught.value.field
+
+    finish(subject)
+    assert rejected_field(lambda: turns.update_review('turn-review', subject.turn_id, {
+        'action': 'requirements', 'unexpected': True}, principal=PRINCIPAL)) == ''
+    assert rejected_field(lambda: configure(subject, outputs=slots(subject) * 2)) == 'outputs'
+    assert rejected_field(lambda: configure(subject, criteria=[
+        {'id': 'same', 'kind': 'requirement', 'text': 'A'},
+        {'id': 'same', 'kind': 'requirement', 'text': 'B'}])) == 'criteria'
+    configure(subject, criteria=[{'id': 'privacy', 'kind': 'constraint', 'text': 'No personal data'}])
+    view = read(subject)
+    answer = {'id': 'answer', 'version': view['outputs'][0]['version']}
+    assert rejected_field(lambda: decide(subject, outputBindings=[answer, answer])) == 'outputBindings'
+    assert rejected_field(lambda: decide(subject, selected=['answer'])) == 'outputBindings'
+    every_output = ['answer', 'report']
+    assert rejected_field(lambda: decide(subject, selected=every_output, note=' ')) == 'note'
+    fact = {'id': 'fact-a', 'revision': 1}
+    assert rejected_field(lambda: decide(
+        subject, selected=every_output, factBindings=[fact, fact])) == 'factBindings'
+    assert read(subject)['decisionsRevision'] == view['decisionsRevision']
+
+
 def test_requirement_and_answer_changes_racing_decision_are_stale(subject,monkeypatch):
     finish(subject); configure(subject); decide(subject)
     original=turns.TurnReview.put

@@ -19,7 +19,10 @@ Usage: python3 designs/ui-gallery/verify.py   (exits non-zero on failure)
 import socketserver
 import sys
 import threading
+from io import BytesIO
 from pathlib import Path
+
+from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -76,6 +79,31 @@ def boxes(page, selector: str) -> list[dict]:
         " return {x: r.x, y: r.y, w: r.width, h: r.height}; })"
         " .filter(b => b.w > 0 && b.h > 0)",
     )
+
+
+def check_mobile_capture(page, theme: str) -> None:
+    """Verify real document scrolling and paint past the first viewport."""
+    marker = page.evaluate("""() => {
+        const marker = document.createElement('div');
+        marker.id = 'gallery-capture-witness';
+        marker.style.cssText = 'width:8px;height:8px;background:rgb(253,17,231)';
+        document.querySelector('.gal > footer').append(marker);
+        window.scrollTo({top: document.documentElement.scrollHeight, behavior: 'instant'});
+        const rect = marker.getBoundingClientRect();
+        const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+        return {x: Math.floor(x + scrollX), y: Math.floor(y + scrollY),
+            scrollY, visible: document.elementFromPoint(x, y) === marker};
+    }""")
+    check(f"320px gallery scrolls to its footer ({theme})",
+          marker["scrollY"] > 0 and marker["visible"], str(marker))
+    with Image.open(BytesIO(page.screenshot(full_page=True))) as screenshot:
+        image = screenshot.convert("RGB")
+        x, y = marker["x"], marker["y"]
+        painted = (0 <= x < image.width and 0 <= y < image.height
+                   and image.getpixel((x, y)) == (253, 17, 231))
+        check(f"320px full-page capture paints its footer ({theme})", painted,
+              f"marker={marker}, image={image.size}")
+    page.locator('#gallery-capture-witness').evaluate('el => el.remove()')
 
 
 def main() -> None:
@@ -142,6 +170,7 @@ def main() -> None:
                 overflow = mobile.evaluate("document.documentElement.scrollWidth")
                 check(f"320px no horizontal overflow ({theme})", overflow <= 320,
                       f"scrollWidth={overflow}")
+                check_mobile_capture(mobile, theme)
             mobile.close()
 
             # ── 4. Dialog behavior ──────────────────────────────────

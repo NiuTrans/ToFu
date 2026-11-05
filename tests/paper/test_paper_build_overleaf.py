@@ -463,7 +463,9 @@ def test_unstarted_chunk_failure_drains_siblings_and_closes_spool(monkeypatch):
         nonlocal starts
         if thread.name.startswith('paper-mcp-read'):
             starts += 1
-            if starts == 2:
+            # The demand executor re-reserves a refused start once for the
+            # same Future. Refuse both starts so this chunk stays unstarted.
+            if starts in (2, 3):
                 raise RuntimeError('unstarted chunk read')
         return original_start(thread)
 

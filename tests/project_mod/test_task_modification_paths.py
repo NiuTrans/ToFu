@@ -39,7 +39,8 @@ def test_large_history_projection_has_bounded_warm_allocations(journal, monkeypa
     # Warm the complete read path, including recovery's lazy imports, before
     # measuring steady-state projection allocations. Cold reads are tested below.
     mods.get_task_modification_paths(root, 'task', conv_id='conv', limit=1)
-    monkeypatch.setattr(mods, '_load_from_disk', lambda *_: pytest.fail('warm reread'))
+    for name in ('_load_from_disk', '_read_history'):
+        monkeypatch.setattr(mods, name, lambda *a, **kw: pytest.fail('warm reread'))
     monkeypatch.setattr(mods.undo_payloads, 'hydrate_record',
                         lambda *_: pytest.fail('diagnostics hydrated content'))
     tracemalloc.start()

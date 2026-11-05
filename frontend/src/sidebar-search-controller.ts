@@ -16,6 +16,9 @@ export interface SidebarSearchHit {
   matchField: string;
   matchSnippet?: string | null;
   matchRole?: string | null;
+  /** The matching live main-lane Turn and its lane ordinal; null for title/id/archive hits. */
+  matchTurnId?: string | null;
+  matchTurnOrdinal?: number | null;
   conversation: SearchConversation;
 }
 export interface SidebarSearchPage {

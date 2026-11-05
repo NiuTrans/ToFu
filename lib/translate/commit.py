@@ -8,6 +8,9 @@ blobs, and process-local serialization are deliberately outside this module.
 The turn projection revision is the concurrency boundary.  A stale writer
 re-reads the latest projection and reapplies only its translation-owned fields,
 so unrelated terminal metadata and sibling enrichment cannot be clobbered.
+An accepted input's send verdict is first-verdict-wins instead
+(``record_input_translation_verdict``): it never rewrites a settled verdict or
+edited text.
 """
 
 from __future__ import annotations
@@ -261,6 +264,14 @@ def commit_translation_to_turn(
     return _with_storage_retry(_attempt_commit, description="translation commit")
 
 
+def _translation_failure_marker(reason: Any, error: Any) -> dict[str, Any]:
+    return {
+        "reason": str(reason or "unknown")[:120],
+        "error": str(error or "")[:300],
+        "at": int(time.time()),
+    }
+
+
 def mark_turn_translation_failed(
     conversation_id: str,
     turn_id: str,
@@ -290,11 +301,8 @@ def mark_turn_translation_failed(
             # from a superseded attempt — never regress a finished turn.
             if projection.get("_translateDone") is True:
                 return {"turn": turn, "conversationRevision": None}
-            projection["_translateFailed"] = {
-                "reason": str(reason or "unknown")[:120],
-                "error": str(error or "")[:300],
-                "at": int(time.time()),
-            }
+            projection["_translateFailed"] = _translation_failure_marker(
+                reason, error)
             try:
                 result = update_turn_projection(
                     conversation_id,
@@ -390,10 +398,118 @@ def mark_turn_translation_complete(
     return _with_storage_retry(_attempt_mark, description="translation mark")
 
 
+def input_translation_verdict_recorded(projection: Mapping[str, Any]) -> bool:
+    """Whether an input Turn projection already carries its send verdict.
+
+    Durable projections fold the legacy ``_translateDone`` /
+    ``_translateFailed`` keys into ``translation`` on write; both shapes and
+    the ``originalContent`` a content translation leaves behind count.
+    """
+    translation = projection.get("translation")
+    if isinstance(translation, Mapping) and (
+            translation.get("status") in {"completed", "skipped", "failed"}
+            or translation.get("sendFailure")):
+        return True
+    return (projection.get("_translateDone") is True
+            or bool(projection.get("_translateFailed"))
+            or isinstance(projection.get("originalContent"), str))
+
+
+def record_input_translation_verdict(
+    conversation_id: str,
+    turn_id: str,
+    *,
+    authored_text: str,
+    user_id: Any,
+    translated_text: str | None = None,
+    model: str | None = None,
+    failure_reason: str | None = None,
+) -> dict[str, Any]:
+    """Record an accepted input's first send-translation verdict; return its Turn.
+
+    The attempt's worker records the verdict before its first model request,
+    so authority pinned to the input Turn's projection revision (a Coordinator
+    request account) is bound to the final Turn. First verdict wins: a Turn
+    that already carries a verdict, or whose content is no longer
+    ``authored_text`` (a human edit), is returned unchanged rather than
+    overwritten with a translation of superseded text.
+    """
+    if (translated_text is None) == (failure_reason is None):
+        raise ValueError("Exactly one of translated_text or failure_reason is required")
+
+    def _attempt_record() -> dict[str, Any]:
+        latest_conflict: LifecycleConflict | None = None
+        for attempt in range(_MAX_PROJECTION_ATTEMPTS):
+            turn = get_turn(conversation_id, turn_id, user_id=user_id)
+            projection = turn.get("projection") or {}
+            if (input_translation_verdict_recorded(projection)
+                    or projection.get("content") != authored_text):
+                logger.info(
+                    "[Translate] input verdict already settled conv=%s turn=%s",
+                    conversation_id[:8], turn_id[:8],
+                )
+                return turn
+            if translated_text is not None:
+                updated, _ = _merge_translation(
+                    projection,
+                    field="content",
+                    translated_text=translated_text,
+                    model=model,
+                    segment_translations=None,
+                )
+            else:
+                updated = deepcopy(dict(projection))
+                updated["_translateFailed"] = _translation_failure_marker(
+                    failure_reason, "")
+            try:
+                result = update_turn_projection(
+                    conversation_id,
+                    turn_id,
+                    projection=updated,
+                    expected_projection_revision=turn["projectionRevision"],
+                    user_id=user_id,
+                    preserve_activity=True,
+                )
+            except LifecycleConflict as exc:
+                if exc.code != "stale_projection":
+                    raise
+                latest_conflict = exc
+                if attempt + 1 < _MAX_PROJECTION_ATTEMPTS:
+                    timed_call('storage_backoff', time.sleep, 0.02 * (attempt + 1))
+                continue
+            revision = result.get("conversationRevision")
+            try:
+                from lib.conversations import notify_conv_changed
+
+                notify_conv_changed(conversation_id, rev=revision, user_id=user_id)
+            except Exception as exc:  # persistence succeeded; notification is repairable
+                logger.debug(
+                    "[Translate] input verdict invalidation failed conv=%s turn=%s: %s",
+                    conversation_id[:8], turn_id[:8], exc,
+                )
+            if translated_text is not None:
+                logger.info(
+                    "[Translate] committed field=content conv=%s turn=%s revision=%s",
+                    conversation_id[:8], turn_id[:8], revision,
+                )
+            else:
+                logger.warning(
+                    "[Translate] recorded failure verdict conv=%s turn=%s reason=%s",
+                    conversation_id[:8], turn_id[:8], failure_reason,
+                )
+            return result["turn"]
+        assert latest_conflict is not None
+        raise latest_conflict
+
+    return _with_storage_retry(_attempt_record, description="input translation verdict")
+
+
 __all__ = [
     "commit_translation_to_turn",
     "mark_turn_translation_complete",
     "mark_turn_translation_failed",
+    "input_translation_verdict_recorded",
+    "record_input_translation_verdict",
     "_is_retryable_storage_error",
     "_merge_translation",
     "_stamp_segment_translations",

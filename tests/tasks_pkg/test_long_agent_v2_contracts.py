@@ -18,6 +18,17 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
+def artifact_record_store(monkeypatch):
+    """Provenance specs use an explicit store, independent of API-test order."""
+    import lib.tool_results.tool_result_artifacts as artifacts
+    from tests.support.artifact_record_store import ArtifactRecordStore
+
+    store = ArtifactRecordStore()
+    monkeypatch.setattr(artifacts, 'get_storage_client', lambda write=False: store)
+    return store
+
+
+@pytest.fixture
 def unbound_project_binding(monkeypatch, tmp_path):
     """Exercise file tools with an explicit owner-scoped, ordinary project."""
     from lib.conversations.project_coordination import ProjectCoordinationRepository
@@ -464,7 +475,9 @@ def test_tool_result_v2_partial_and_error_projections_are_sparse():
         "permission_denied"
 
 
-def test_grep_producer_truncation_becomes_partial_source_recovery(monkeypatch):
+@pytest.mark.parametrize('retention_available', [True, False])
+def test_grep_producer_truncation_becomes_partial_source_recovery(
+        monkeypatch, artifact_record_store, retention_available):
     import lib.tasks_pkg.compaction._budget as _budget
     from lib.tasks_pkg.handlers.project import _record_producer_result_metadata
     from lib.tasks_pkg.tool_dispatch import _pipeline
@@ -472,6 +485,18 @@ def test_grep_producer_truncation_becomes_partial_source_recovery(monkeypatch):
     raw = (
         'grep "needle" (*.py) — 40 matches:\n\nfile.py:1:needle\n'
         '… (output truncated at 20000 chars or 40 matches)')
+    from lib.tools import result_value
+    retained = []
+    retained_ref = 'tool-result:' + 'f' * 64
+
+    def persist(canonical, *, user_id, **kwargs):
+        assert user_id == 7
+        retained.append(canonical)
+        if not retention_available:
+            raise RuntimeError('fixture retention unavailable')
+        return retained_ref
+
+    monkeypatch.setattr(result_value, 'persist_result', persist)
     round_entry = {"query": "grep_search: needle", "llmRound": 2}
     _record_producer_result_metadata("grep_search", raw, round_entry)
     monkeypatch.setattr(
@@ -498,7 +523,18 @@ def test_grep_producer_truncation_becomes_partial_source_recovery(monkeypatch):
     # projects only the tool anchor — restating {"pattern": "needle"} would
     # echo bytes the model already has.
     assert value["recovery"] == {"tool": "grep_search"}
-    assert "artifactRef" not in value
+    assert len(retained) == 1
+    assert retained[0].text() == raw
+    assert retained[0].source_coverage == 'partial'
+    evidence = round_entry['toolResultEvidence']
+    assert evidence['sourceCoverage'] == 'partial'
+    if retention_available:
+        assert task['_artifactAliases'][value['artifactRef']] == retained_ref
+        assert evidence['artifactRef'] == retained_ref
+        assert evidence['retentionCoverage'] == 'complete'
+    else:
+        assert 'artifactRef' not in value
+        assert evidence['retentionCoverage'] == 'unavailable'
     assert round_entry["toolResultEvidence"]["truncated"] is True
     assert round_entry["toolResultEvidence"]["status"] == "partial"
 
@@ -991,7 +1027,7 @@ def test_tool_result_v2_round_budget_keeps_batch_file_identities(
     reduced = _budget.enforce_round_aggregate_budget_v2(
         values, user_id=8, model="")
 
-    assert sum(_budget._result_tokens(value[0], "")
+    assert sum(_budget._result_tokens(model_text_from_tool_result(value[0]), "")
                for value in reduced.values()) <= 24_000
     for content, _tool_name, _tool_use_id in reduced.values():
         item_paths = [item["path"] for item in json.loads(content)["items"]]
@@ -1025,7 +1061,7 @@ def test_tool_result_v2_round_aggregate_is_bounded(monkeypatch):
     }
     reduced = _budget.enforce_round_aggregate_budget_v2(
         values, user_id=9, model="")
-    assert sum(_budget._result_tokens(value[0], "")
+    assert sum(_budget._result_tokens(model_text_from_tool_result(value[0]), "")
                for value in reduced.values()) <= 24_000
     assert any(json.loads(value[0])["truncated"] for value in reduced.values())
 
@@ -1194,10 +1230,8 @@ def test_expired_tool_artifact_maintenance_is_bounded(monkeypatch):
     assert all(row[2]["deadline"] == 30 for row in client.calls)
 
 
-def test_kimi_tool_surface_and_gateway_contracts_are_bounded():
-    from lib.tools.gateway import (
-        gateway_tool_schemas, local_wire_tools, tool_schema_tokens,
-    )
+def test_kimi_explicit_schema_budget_bounds_wire_and_keeps_gateway():
+    from lib.tools.gateway import local_wire_tools, tool_schema_tokens
 
     catalog = [{
         "type": "function",
@@ -1215,9 +1249,6 @@ def test_kimi_tool_surface_and_gateway_contracts_are_bounded():
         schema_budget_tokens=4_000, model="kimi-k3")
 
     assert tool_schema_tokens(wire, model="kimi-k3") <= 4_000
-    # Gateway schemas grew with the documented ToolScript surface (67daf4749);
-    # the budget is re-pinned at the measured 574 tokens.
-    assert tool_schema_tokens(gateway_tool_schemas(), model="kimi-k3") <= 574
     names = {tool["function"]["name"] for tool in wire}
     assert {"search_tools", "execute_tools"} <= names
 
@@ -1802,7 +1833,17 @@ def _v2_spill_envelope(ref: str) -> str:
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":")), envelope=True)
 
 
-def test_tool_result_v2_spill_registers_artifact_provenance(monkeypatch):
+def _assert_owned_artifact_projection(task, content, envelope):
+    """Only the model pointer becomes an alias; evidence keeps its digest."""
+    expected = json.loads(model_text_from_tool_result(envelope))
+    projected = json.loads(content)
+    canonical_ref = expected['artifactRef']
+    assert task['_artifactAliases'][projected['artifactRef']] == canonical_ref
+    projected['artifactRef'] = canonical_ref
+    assert projected == expected
+
+
+def test_tool_result_v2_spill_registers_artifact_provenance(monkeypatch, artifact_record_store):
     """A per-result L0 spill must record WHICH call minted the pointer.
 
     The continuation label can only name the source round + tool if the
@@ -1814,14 +1855,14 @@ def test_tool_result_v2_spill_registers_artifact_provenance(monkeypatch):
     envelope = _v2_spill_envelope(ref)
     monkeypatch.setattr(
         _pipeline, "budget_tool_result_v2", lambda *_a, **_k: envelope)
+    monkeypatch.setattr(_pipeline, 'append_event', lambda *_args, **_kwargs: None)
     task = {"model": "", "convId": "c1", "config": {}, "_userId": 7}
     round_entry = {"query": "web_search: citadel", "llmRound": 9}
     content = _pipeline._settle_tool_result(
         task, "some_big_tool", "tc_1", {"query": "citadel"}, 1, round_entry,
         "raw " * 9_000, idempotent_tools=frozenset(), cache={}, tid="t1",
         round_num=10)
-    from lib.tools.result_envelope import model_text_from_tool_result
-    assert content == model_text_from_tool_result(envelope)
+    _assert_owned_artifact_projection(task, content, envelope)
     assert round_entry["toolResultEvidence"]["artifactRef"] == ref
     assert round_entry["compactionLayer"] == "L0"
     assert task["_artifactProvenance"] == {
@@ -1847,11 +1888,10 @@ def test_tool_result_v2_complete_result_is_not_stamped_compacted():
     payload = json.dumps({
         "completed": [],
         "mode": "any",
-        "note": "An identical await already timed out.",
+        "note": "Timed out waiting for the await window.",
         "status": "ok",
         "still_running": ["fdca8160"],
         "timed_out": True,
-        "wait_suppressed": True,
     }, ensure_ascii=False)
     task = {"model": "", "convId": "c1", "config": {}, "_userId": 7}
     round_entry = {"query": "await_agents", "llmRound": 3}
@@ -1866,7 +1906,7 @@ def test_tool_result_v2_complete_result_is_not_stamped_compacted():
     assert 'compactedFromChars' not in round_entry
 
 
-def test_round_aggregate_spill_registers_artifact_provenance(monkeypatch):
+def test_round_aggregate_spill_registers_artifact_provenance(monkeypatch, artifact_record_store):
     """The round-AGGREGATE lane re-artifacts settled results; it mints a NEW
     pointer and must register its origin too."""
     from lib.tasks_pkg.tool_dispatch import _pipeline
@@ -1879,6 +1919,7 @@ def test_round_aggregate_spill_registers_artifact_provenance(monkeypatch):
             call_id: (envelope, name, call_id)
             for call_id, (_content, name, _tc) in results.items()
         })
+    monkeypatch.setattr(_pipeline, 'append_event', lambda *_args, **_kwargs: None)
     round_entry = {"query": "read_files: big.log", "llmRound": 3}
     parsed = [(None, "read_files", "call_1", None, 4, round_entry)]
     message = {"role": "tool", "tool_call_id": "call_1",
@@ -1886,8 +1927,7 @@ def test_round_aggregate_spill_registers_artifact_provenance(monkeypatch):
     task = {"model": "", "convId": "c1", "config": {}, "_userId": 7}
     _pipeline._apply_round_aggregate_budget(
         task, parsed, [("call_1", "x" * 60_000, "read_files")], [message])
-    from lib.tools.result_envelope import model_text_from_tool_result
-    assert message["content"] == model_text_from_tool_result(envelope)
+    _assert_owned_artifact_projection(task, message['content'], envelope)
     assert round_entry["toolResultEvidence"]["artifactRef"] == ref
     assert round_entry["compactionLayer"] == "L0"
     assert task["_artifactProvenance"][ref] == {

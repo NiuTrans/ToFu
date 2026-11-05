@@ -114,6 +114,18 @@ def test_read_terminal_results_are_not_relabelled_cancelled(handoff):
     session.on_settled.assert_not_called()
 
 
+@pytest.mark.parametrize('wave,waiting', [('launch', True), ('previous', False)])
+def test_presented_but_unacknowledged_result_remains_delivery_dependency(handoff, wave, waiting):
+    task, session = handoff
+    session.get_status.return_value = {'child': {'role': 'coder', 'status': 'completed'}}
+    task['_swarm_inject_pending'] = [{'agent_id': 'child', 'swarm_run_id': wave,
+                                      'value': 'evidence'}]
+    prepare_swarm_turn_end(task, user_id=7, finish_reason='stop')
+    assert ('_waiting_on' in task) == waiting
+    if waiting:
+        assert task['_waiting_on']['agents'][0]['state'] == 'awaiting_integration'
+
+
 @pytest.mark.parametrize('done_commits, diagnostics_commit', [
     (True, True), (True, False), (False, False)])
 def test_real_finalizer_wakes_only_after_done_commit(
@@ -139,7 +151,7 @@ def test_real_finalizer_wakes_only_after_done_commit(
     monkeypatch.setattr(_finalize, '_settle_post_loop_finish_reason',
                         lambda *a, **kw: 'stop')
     monkeypatch.setattr(_finalize, '_check_suspicious_completion', lambda *a, **kw: [])
-    monkeypatch.setattr(_finalize, '_build_done_event_base',
+    monkeypatch.setattr(_finalize, 'build_done_event',
                         lambda *a, **kw: {'type': 'done', 'finishReason': 'stop'})
     monkeypatch.setattr(_finalize, 'persist_task_result',
                         lambda *a, **kw: observed.append('persist') or diagnostics_commit)

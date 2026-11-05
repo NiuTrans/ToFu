@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import json
 import contextlib
+import errno
 import os
 from pathlib import Path
 import signal
@@ -163,8 +164,17 @@ def main(arguments: list[str] | None = None) -> int:
             output = streams.enter_context(log.open('ab', buffering=0))
             errors = (streams.enter_context(stream_paths[0].open('ab', buffering=0))
                       if stream_paths else subprocess.STDOUT)
-            process = subprocess.Popen(command, cwd=working_directory, stdin=subprocess.DEVNULL,
-                                       stdout=output, stderr=errors)
+            try:
+                process = subprocess.Popen(command, cwd=working_directory, stdin=subprocess.DEVNULL,
+                                           stdout=output, stderr=errors)
+            except OSError as error:
+                if not stream_paths or os.name == 'nt' or error.errno != errno.ENOEXEC:
+                    raise
+                # execvp(3) and every POSIX shell run a file without a recognized
+                # header as a sh script; the shell receives the argv only as data.
+                process = subprocess.Popen(['/bin/sh', '-c', 'exec "$0" "$@"', *command],
+                                           cwd=working_directory, stdin=subprocess.DEVNULL,
+                                           stdout=output, stderr=errors)
         owner = psutil.Process()
         while process.poll() is None:
             if ((deadline is not None and time.monotonic() >= deadline) or ready.with_name('stop').exists()

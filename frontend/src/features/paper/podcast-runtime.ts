@@ -1,6 +1,7 @@
 import { featureRegistry } from '../../feature-registry';
 import { destroyPodcastArtifact } from './podcast-artifact';
 import type { I18nKey } from '../../i18n';
+import { createPaperTaskObserver, type PaperTaskSnapshot } from './push-transport';
 import {
   adoptMediaModel,
   adoptServerClocks,
@@ -8,16 +9,17 @@ import {
 } from './media-model-ui';
 
 type LooseObject = Record<string, any>;
+type MediaState = LooseObject & { status: string; lastEventAt: number };
 type MediaWindow = Window & Record<string, any>;
 
 function globals(): MediaWindow {
   return featureRegistry as unknown as MediaWindow;
 }
 
-function podcast(): LooseObject {
+function podcast(): MediaState {
   const state = globals()._podcast;
   if (!state) throw new Error('Podcast view state is unavailable');
-  return state as LooseObject;
+  return state as MediaState;
 }
 
 function errorMessage(error: unknown): string {
@@ -46,12 +48,31 @@ function render(): void { requiredPresentationPort('_pcRender')(); }
 function renderProgress(): void { requiredPresentationPort('_pcRenderProgress')(); }
 function renderActivity(): void { requiredPresentationPort('_pcRenderActivity')(); }
 
+export const podcastTaskObserver = createPaperTaskObserver({
+  channel: 'paper', pollIntervalMs: 1200,
+  state: podcast,
+  taskId: () => podcast().taskId,
+  read: async (taskId, cursor) => paperApi()?.podcastPoll(taskId, cursor),
+  consume: consumePodcastEvent,
+  snapshot(response) {
+    const state = podcast();
+    adoptServerClocks(state, response);
+    state.progress = response.progress || state.progress;
+  },
+  terminal: settlePodcastTask,
+  lost() {
+    const state = podcast();
+    state.taskId = '';
+    state.status = 'lost';
+    render();
+  },
+  presentation: { render, progress: renderProgress, activity: renderActivity },
+  warn: (error) => console.warn('[Paper:Podcast] poll failed:', error),
+});
+
 export function resetPodcastRun(): void {
   const state = podcast();
-  globals().paperDetachPush?.(state);
-  state._seqSeen = -1;
-  state._replayCursor = 0;
-  state.pollFails = 0;
+  podcastTaskObserver.reset();
   if (state.sleepTimerId) window.clearTimeout(state.sleepTimerId);
   state.sleepTimerId = 0;
   state.sleepDeadline = 0;
@@ -68,36 +89,11 @@ export function resetPodcastRun(): void {
   state.etaSec = 0;
 }
 
-export function stopPodcastPoll(): void {
-  const state = podcast();
-  if (state.pollTimer) window.clearTimeout(state.pollTimer);
-  state.pollTimer = null;
-}
-
-export function stopPodcastTick(): void {
-  const state = podcast();
-  if (state.tickTimer) window.clearInterval(state.tickTimer);
-  state.tickTimer = null;
-}
-
-export function stopPodcastPolling(): void {
-  const state = podcast();
-  stopPodcastPoll();
-  stopPodcastTick();
-  globals().paperDetachPush?.(state);
-}
-
-export function startPodcastTick(): void {
-  const state = podcast();
-  if (state.tickTimer) return;
-  state.tickTimer = window.setInterval(renderActivity, 1000);
-}
-
 export async function initPodcastTab(_force?: boolean): Promise<void> {
   const state = podcast();
   const host = document.getElementById('paperPodcastContent');
   if (!host) return;
-  stopPodcastPolling();
+  podcastTaskObserver.stop();
   state.paperHash = String(globals()._paperHash ?? '');
   const initHash = state.paperHash;
   if (state.sleepTimerId) window.clearTimeout(state.sleepTimerId);
@@ -132,13 +128,12 @@ export async function initPodcastTab(_force?: boolean): Promise<void> {
     if (state.paperHash !== initHash) return;
     if (lookup?.ok && lookup.found && lookup.running) {
       state.taskId = lookup.task_id;
-      state.cursor = 0;
       state.status = 'generating';
       if (lookup.model) adoptMediaModel('podcast', lookup.model);
       resetPodcastRun();
       adoptServerClocks(state, lookup);
       render();
-      schedulePodcastPoll();
+      podcastTaskObserver.schedule();
       return;
     }
     if (lookup?.ok && lookup.found && lookup.interrupted) {
@@ -199,105 +194,24 @@ export function consumePodcastEvent(event: LooseObject): boolean | undefined {
   return undefined;
 }
 
-export function attachPodcastPush(): void {
+function settlePodcastTask(response: PaperTaskSnapshot): void {
   const state = podcast();
-  const taskId = state.taskId;
-  if (!taskId) return;
-  globals().paperAttachPush?.(state, taskId, {
-    channel: 'paper',
-    isCurrent: () => state.taskId === taskId,
-    onEvent: (event: LooseObject) => {
-      if (state.taskId !== taskId) return;
-      state.lastEventAt = Date.now();
-      const changed = globals().paperIngestEvent?.(
-        state, event, (_target: LooseObject, row: LooseObject) => consumePodcastEvent(row),
-      );
-      if (changed) render(); else renderProgress();
-      renderActivity();
-      if (['done', 'error', 'aborted'].includes(String(event.type))) {
-        void pollPodcastOnce();
-      }
-    },
-  });
-}
-
-export function schedulePodcastPoll(): void {
-  const state = podcast();
-  stopPodcastPoll();
-  attachPodcastPush();
-  const delay = Number(globals()._PODCAST_POLL_MS) || 1200;
-  state.pollTimer = window.setTimeout(() => void pollPodcastOnce(), delay);
-}
-
-export function failPodcastPoll(): void {
-  const state = podcast();
-  state.pollFails = Number(state.pollFails || 0) + 1;
-  const limit = Number(globals()._PC_POLL_FAIL_LIMIT) || 5;
-  if (state.pollFails >= limit) {
-    stopPodcastPolling();
-    state.taskId = '';
+  if (response.status === 'done') {
+    state.data = response;
+    adoptMediaModel('podcast', response.model || '');
+    state.status = response.scriptOnly ? 'script_only' : 'done';
+  } else if (response.status === 'aborted') {
+    state.status = 'idle';
+  } else if (response.error?.kind === 'worker_lost') {
     state.status = 'lost';
-    render();
-    return;
+  } else {
+    state.status = 'error';
+    state.errorText = response.error?.detail
+      || (typeof response.error === 'string' ? response.error : '')
+      || translate('paper.podcastFailed', 'Podcast generation failed');
   }
-  schedulePodcastPoll();
-}
-
-export async function pollPodcastOnce(): Promise<void> {
-  const state = podcast();
-  const taskId = state.taskId;
-  if (!taskId || state.pollBusy) return;
-  state.pollBusy = true;
-  try {
-    const transport = await paperApi()?.podcastPoll(taskId, state.cursor);
-    // The API transport owns v4 envelope decoding on Response.json().
-    const response = transport?.ok ? await transport.json() : null;
-    if (state.taskId !== taskId) return;
-    if (!response?.ok) {
-      failPodcastPoll();
-      return;
-    }
-    state.pollFails = 0;
-    const replay = globals().taskReplayIngestPage?.(
-      state,
-      response,
-      (_target: LooseObject, event: LooseObject) => consumePodcastEvent(event),
-      state.cursor,
-    ) ?? { accepted: 0, nextCursor: state.cursor, changed: false };
-    if (replay.accepted) state.lastEventAt = Date.now();
-    adoptServerClocks(state, response);
-    state.cursor = replay.nextCursor;
-    state.progress = response.progress || state.progress;
-    if (response.done) {
-      if (response.status === 'done') {
-        state.data = response;
-        adoptMediaModel('podcast', response.model || '');
-        state.status = response.scriptOnly ? 'script_only' : 'done';
-      } else if (response.status === 'aborted') {
-        state.status = 'idle';
-      } else if (response.error?.kind === 'worker_lost') {
-        state.status = 'lost';
-      } else {
-        state.status = 'error';
-        state.errorText = response.error?.detail
-          || (typeof response.error === 'string' ? response.error : '')
-          || translate('paper.podcastFailed', 'Podcast generation failed');
-      }
-      state.taskId = '';
-      stopPodcastPolling();
-      render();
-      return;
-    }
-    if (replay.changed) render(); else renderProgress();
-    if (state.status === 'generating') startPodcastTick();
-    renderActivity();
-    schedulePodcastPoll();
-  } catch (error: unknown) {
-    console.warn('[Paper:Podcast] poll failed:', error);
-    if (state.taskId === taskId) failPodcastPoll();
-  } finally {
-    state.pollBusy = false;
-  }
+  state.taskId = '';
+  render();
 }
 
 export async function generatePodcast(force = false): Promise<void> {
@@ -340,9 +254,8 @@ export async function generatePodcast(force = false): Promise<void> {
     }
     if (response?.ok && response.task_id) {
       state.taskId = response.task_id;
-      state.cursor = 0;
       renderProgress();
-      schedulePodcastPoll();
+      podcastTaskObserver.schedule();
       return;
     }
     state.status = 'error';
@@ -363,7 +276,7 @@ export async function abortPodcast(): Promise<void> {
     try { await paperApi()?.podcastAbort(state.taskId); }
     catch (error: unknown) { console.warn('[Paper:Podcast] abort failed:', error); }
   }
-  stopPodcastPolling();
+  podcastTaskObserver.stop();
   state.taskId = '';
   state.status = 'idle';
   render();
@@ -373,7 +286,7 @@ export function destroyPodcastRuntime(): void {
   destroyPodcastArtifact();
   const state = globals()._podcast as LooseObject | undefined;
   if (!state) return;
-  stopPodcastPolling();
+  podcastTaskObserver.stop();
   if (state.sleepTimerId) window.clearTimeout(state.sleepTimerId);
   state.sleepTimerId = 0;
   state.sleepDeadline = 0;
@@ -382,20 +295,9 @@ export function destroyPodcastRuntime(): void {
 
 export function installPodcastRuntime(): void {
   const target = globals();
-  target._pcResetRun = resetPodcastRun;
-  target._pcStopPoll = stopPodcastPoll;
-  target._pcStopPolling = stopPodcastPolling;
-  target._pcStartTick = startPodcastTick;
-  target._pcStopTick = stopPodcastTick;
   target._initPodcastTab = initPodcastTab;
-  target._pcSchedulePoll = schedulePodcastPoll;
-  target._pcAttachPush = attachPodcastPush;
-  target._pcConsumeEvent = consumePodcastEvent;
-  target._pcPollFail = failPodcastPoll;
-  target._pcPollOnce = pollPodcastOnce;
   target._podcastGenerate = generatePodcast;
   target._podcastAbort = abortPodcast;
-  target._destroyPodcastRuntime = destroyPodcastRuntime;
 }
 
 installPodcastRuntime();

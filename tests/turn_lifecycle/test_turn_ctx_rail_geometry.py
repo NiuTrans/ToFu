@@ -12,8 +12,10 @@ That predicate asks about the WINDOW. The space the rail actually lands in is::
 
 The sidebar has FOUR widths (0 collapsed / 280 plain / 332 rail-collapsed /
 430 has-rail) and the drawer's
-``body.ri-open .chat-container{margin-right:min(860px,95vw)}``
-removes up to another ~860px. Measured in a real browser across all 64
+``body.ri-open .chat-container{margin-right:var(--inspector-panel-width)}``
+removes up to another ``min(860px,50vw)`` (docs/RENDER_CONTRACT.md, "Inspector
+and composer reading"; it was ``min(860px,95vw)`` when the sweep below was
+measured). Measured in a real browser across all 64
 combinations (8 widths × 4 sidebar states × drawer open/closed) BEFORE the fix:
 
     shown-but-clipped : 35 / 64   (bar 33, hover panel 35)
@@ -112,6 +114,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.support.context_rail_probe import with_rail_probe_host
+
 pytestmark = [pytest.mark.visual, pytest.mark.slow]
 
 #: All three shipped themes. The measure cap used to live ONLY in the tofu
@@ -172,8 +176,8 @@ _PROSE = (
 
 #: Plant one SHORT user turn carrying that snapshot, through the production
 #: renderer (`renderTurnCtxNote`) — never a hand-written copy of its markup.
-_PLANT = """() => {
-    const inner = document.querySelector('.chat-inner');
+_PLANT = with_rail_probe_host("""() => {
+    const inner = __RAIL_PROBE_HOST__;
     if (!inner) return 'no .chat-inner';
     const __resolve = (name) => window.TofuModules.resolveAction(name);
     const renderTurnCtxNote = __resolve('renderTurnCtxNote');
@@ -205,7 +209,7 @@ _PLANT = """() => {
                 + parts.fold
                 + '<div class="message-body"><div class="md-content user-content">'
                 + %s + '</div></div>'
-                + '</div>' + parts.rail;
+                + '</div>' + __RAIL_PROBE_PART__(parts.rail);
     inner.appendChild(d);
     /* Conversation-scoped chrome, through its PRODUCTION builders — never a
      * hand-written copy: the gauge from context-bar.js (rAF-coalesced, the
@@ -243,7 +247,7 @@ _PLANT = """() => {
         buildTurnNav({id:'__probe_conv'});
     }
     return 'ok';
-}""" % (_FAT_SNAPSHOT, repr(_PROSE))
+}""" % (_FAT_SNAPSHOT, repr(_PROSE)))
 
 #: Measure the pane and every rail element inside the probe turn.
 _PROBE = """() => {
@@ -448,9 +452,9 @@ _COLLAPSE = """() => {
     });
 }"""
 
-#: The rail is out of flow (styles.css `.turn-ctx` is absolutely
-#: positioned into the track's box, `max-height:100%`), so it contributes
-#: NOTHING to the row's height — collapsed or expanded. The probe bubble is
+#: The rail is out of flow (styles.css `.turn-ctx` is an absolutely
+#: positioned track whose card is bounded by the track and the pane), so it
+#: contributes NOTHING to the row's height — collapsed or expanded. The probe bubble is
 #: a few lines of prose (~110px), so `msg == body` to within borders and
 #: grid rounding; 8px of slack catches an in-flow rail being re-admitted
 #: (which would add 60–300px) without flaking on sub-pixel rounding.
@@ -482,14 +486,38 @@ _MIN_MEASURE_PX = 700
 #: the rail from every pane in 1056–1367 for no geometric reason.
 _RAIL_MIN_PANE = 1056
 
-#: Floor under the composer width (the CSS `.input-inner{min-width}`). Below
-#: this the track math would squeeze the band to a useless sliver in hopeless
-#: drawer panes (drawer 780 + wide sidebar on a small window) and the status
-#: strip's gauge/dots would spill out of it. Not a tunable: it is the smallest
-#: width that keeps the textarea usable and the strip cells inside the track,
-#: and it must match the stylesheet or assertion #8 goes red precisely in the
-#: states the floor governs.
+#: Floor under the composer width (the CSS `.input-inner{min-width}`). Not a
+#: tunable: it is the smallest width that keeps the textarea usable and the
+#: strip cells inside the track, and it must match the stylesheet. With the
+#: Inspector open the floor is lifted (`body.ri-open .input-inner{min-width:0}`):
+#: the composer fits the remaining pane instead of running under the drawer
+#: (docs/RENDER_CONTRACT.md, "Inspector and composer reading").
 _COMPOSER_FLOOR_PX = 300
+
+
+#: The geometry writers run on CSS transitions (sidebar, Inspector drawer),
+#: ResizeObserver (`--rail-w` mirror) and rAF (`--toolbar-w`). A state is
+#: settled when no CSS transition runs and two consecutive frames agree on the
+#: probed boxes and the composer's mirrored inline variables. Fixed sleeps
+#: sampled stale frames whenever the host was loaded.
+_SETTLED = """() => {
+    const box = (el) => { if (!el) return ''; const r = el.getBoundingClientRect();
+        return [r.left, r.top, r.width, r.height].join(','); };
+    const msg = document.querySelector('.message.__probe');
+    const band = document.querySelector('.input-inner');
+    const key = [box(document.querySelector('.chat-container')), box(band), box(msg),
+                 box(msg && msg.querySelector('.turn-ctx')), band ? band.style.cssText : ''].join('|');
+    const moving = document.getAnimations().some(
+        (a) => 'transitionProperty' in a && a.playState === 'running');
+    const settled = !moving && window.__railSweepSettle === key;
+    window.__railSweepSettle = key;
+    return settled;
+}"""
+
+
+def _settle(page):
+    page.evaluate("() => { window.__railSweepSettle = null; }")
+    page.wait_for_function(_SETTLED, polling='raf')
 
 
 def _sweep(page):
@@ -498,24 +526,24 @@ def _sweep(page):
     for theme in _THEMES:
         page.evaluate("(t) => document.documentElement.setAttribute('data-theme', t)",
                       theme)
-        page.wait_for_timeout(120)
+        _settle(page)
         for drawer in (False, True):
             page.evaluate(
                 "async (name) => window.TofuModules.invokeFeature(name, [], () => {})",
                 'toggleDebug' if drawer else 'closeDebug')
-            page.wait_for_timeout(200)
+            _settle(page)
             for sb_label, setup in _SIDEBAR_STATES:
                 page.evaluate("() => { const s = document.querySelector('.sidebar');"
                               " if (s) { %s; } }" % setup)
                 for w in _WIDTHS:
                     page.set_viewport_size({'width': w, 'height': 900})
-                    page.wait_for_timeout(70)
+                    _settle(page)
                     for expanded in (False, True):
                         if expanded:
                             page.evaluate(_EXPAND)
                         else:
                             page.evaluate(_COLLAPSE)
-                        page.wait_for_timeout(50)
+                        _settle(page)
                         m = page.evaluate(_PROBE)
                         if m is None:
                             # The probe is deliberately synthetic. Lazy panel
@@ -525,7 +553,7 @@ def _sweep(page):
                             replanted = page.evaluate(_PLANT)
                             assert replanted == 'ok', (
                                 f'could not restore geometry probe: {replanted}')
-                            page.wait_for_timeout(50)
+                            _settle(page)
                             m = page.evaluate(_PROBE)
                         assert m is not None, 'probe turn vanished from the DOM'
                         m['drawer'] = drawer
@@ -622,12 +650,11 @@ def test_rail_never_clipped_in_any_pane_state(page):
 
     # ── 8. COMPOSER WIDTH TRACK (right edge): the band's width is the
     #      CSS `.input-inner` max-width, floored at _COMPOSER_FLOOR_PX (the
-    #      CSS min-width) for HOPELESS panes — drawer open beside a wide
-    #      sidebar can drop the pane below 100px, where the track math would
-    #      squeeze the composer to a useless sliver and the strip cells
-    #      would spill out. The CSS branches on whether the rail is granted:
+    #      CSS min-width) while the Inspector is closed; with it open the
+    #      composer fits the remaining pane, however narrow. The CSS
+    #      branches on whether the rail is granted:
     #        • railW == 0 (no rail): width = min(52 + msgMeasure, pane − 48)
-    #          with a 300px usability floor for hopeless drawer panes.
+    #          with the 300px usability floor only when the drawer is closed.
     #        • railW > 0 (rail granted): the reading-track term is capped at
     #          pane − 48 − railW − railGap, so the composer spans avatar +
     #          text column and its right edge rides the TEXT's right edge,
@@ -666,8 +693,8 @@ def test_rail_never_clipped_in_any_pane_state(page):
     def _expected_composer(r):
         rail_w = r.get('railW', 0)
         if rail_w <= 0:
-            return max(_COMPOSER_FLOOR_PX,
-                       min(52 + r['msgMeasure'], r['paneWidth'] - 48))
+            floor = 0 if r['drawer'] else _COMPOSER_FLOOR_PX
+            return max(floor, min(52 + r['msgMeasure'], r['paneWidth'] - 48))
         return max(_COMPOSER_FLOOR_PX, r['toolbarW'] + 52)
     composer_off = [r for r in rows
                     if r['composerW'] > 0 and r['measure'] > 0
@@ -707,9 +734,14 @@ def test_rail_never_clipped_in_any_pane_state(page):
     #      restored DOM move fails the parent check in every state. ──
     strip_misaligned = [r for r in rows
                         if not r['stripInCard'] or not r['stripWithinTrack']]
+    # Containment is promised where the composer keeps its usability floor
+    # (the width that keeps the strip cells inside the track). With the
+    # Inspector open the composer fits the remaining pane instead, and below
+    # the one-row strip's own content (~165px) visible chrome cannot fit.
     chrome_escaped = [r for r in rows
-                      if (r['gaugeShown'] and not r['gaugeInStripRect'])
-                      or (r['navShown'] and not r['navInStripRect'])]
+                      if r['composerW'] >= _COMPOSER_FLOOR_PX
+                      and ((r['gaugeShown'] and not r['gaugeInStripRect'])
+                           or (r['navShown'] and not r['navInStripRect']))]
     chrome_overlaps = [r for r in rows
                        if r['gaugeOverlapMsg'] or r['navOverlapMsg']
                        or r['gaugeOverlapProse'] or r['navOverlapProse']]
@@ -862,8 +894,8 @@ def test_rail_never_clipped_in_any_pane_state(page):
         'the composer desynced from the message column in %d state(s) — '
         'its width must follow the rail-grant branch (railW==0: max(toolbarW,'
         ' measure) + 52 capped at pane − 48; railW>0: the reading track '
-        'capped at pane − 48 − railW − railGap), floored at %dpx for '
-        'hopeless drawer panes:\n  '
+        'capped at pane − 48 − railW − railGap), floored at %dpx unless the '
+        'Inspector is open, where it fits the remaining pane:\n  '
         % (len(composer_off), _COMPOSER_FLOOR_PX)
         + '\n  '.join(
             'theme=%-5s drawer=%s sidebar=%-14s vw=%-5d composer=%.0f expected≈%.0f (measure=%.0f tw=%.0f pane=%.0f rail=%.0f/%.0f)'

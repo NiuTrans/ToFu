@@ -47,17 +47,18 @@ def test_default_entry_is_interactive_studio_without_setup_modal(browser, live_s
         _dismiss_onboarding_modals(page)
         page.locator('#evolutionBtn').click()
         expect(page.locator('.evo-studio')).to_be_visible(timeout=20000)
-        expect(page.locator('.evo-mission-hud')).to_be_visible()
-        expect(page.locator('.evo-office-live')).to_be_visible()
-        assert page.locator('wa-drawer[open]').count() == 0
+        expect(page.locator('.evo-hud-top')).to_be_visible()
+        expect(page.locator('.evo-stage-canvas')).to_be_visible()
+        # The world itself is the entry: no setup window opens by itself.
+        expect(page.locator('.evo-window')).to_be_hidden()
         assert not page.locator('.exp-create-form').count()
         assert not any('/evolution/programs' in request for request in requests)
-        page.locator('.evo-mission-route li').nth(1).locator('button').click()
-        expect(page.locator('#evo-room-drawer')).to_have_attribute('open', '')
-        expect(page.locator('.evo-room-intro-actions button')).to_be_visible()
-        page.locator('.evo-room-intro-actions button').click()
+        # Without a goal the quest banner invites one and opens the briefing with focus in it.
+        quest = page.locator('.evo-quest')
+        expect(quest).to_have_attribute('data-hud', 'create')
+        quest.click()
+        expect(page.locator('.evo-game')).to_have_attribute('data-window', 'briefing')
         expect(page.locator('#evo-objective')).to_be_focused()
-        assert page.locator('wa-drawer[open]').count() == 0
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
         page.screenshot(path=str(tmp_path / f'studio-entry-{width}.png'), full_page=True)
         assert not errors
@@ -81,16 +82,21 @@ def test_notebook_loads_no_studio_or_other_page_graph(browser, live_server):
         expect(objective).to_have_value('Retain the unsent notebook goal')
         assert page.evaluate("document.querySelector('.exp-create-form') === window.notebookForm")
         requested = lambda key: any(url.endswith('/' + manifest[key]['file']) for url in requests)
+        # Shared sheets (fonts) may serve both pages; the studio's own sheet must wait for the studio.
+        studio_css = [css for css in manifest['frontend/src/features/evolution/studio-entry.ts']['css']
+                      if css not in manifest['frontend/src/features/evolution/programs/page.ts'].get('css', [])]
+        assert studio_css
+        styled = lambda: any(url.endswith('/' + css) for css in studio_css for url in requests)
         assert requested('frontend/src/features/evolution/programs/page.ts')
         for key in ['studio-entry.ts', 'view.ts', 'research/page.ts']:
             assert not requested('frontend/src/features/evolution/' + key)
-        assert page.evaluate("customElements.get('wa-drawer') === undefined")
-        assert not page.locator('style[data-evolution-components]').count()
+        assert not styled(), 'the notebook never loads the studio stylesheet'
         page.evaluate("location.hash='/evolution/runs'")
         expect(page.locator('.evo-studio')).to_be_visible(timeout=20000)
-        page.wait_for_function("customElements.get('wa-drawer') !== undefined")
-        assert requested('frontend/src/features/evolution/studio-entry.ts')
-        assert page.locator('style[data-evolution-components]').count() == 1
+        assert requested('frontend/src/features/evolution/studio-entry.ts') and styled()
+        page.wait_for_function("getComputedStyle(document.querySelector('.evo-hud-top')).position === 'absolute'")
+        # The game screen is plain DOM and canvas: it registers no component library.
+        assert page.evaluate("['wa-drawer', 'wa-button', 'wa-tooltip'].every(name => customElements.get(name) === undefined)")
         page.evaluate("location.hash='/chat'")
         expect(page.locator('#userInput')).to_be_visible()
         assert page.locator('#evolutionPageContainer').evaluate('(root)=>root.childElementCount') == 0
@@ -121,7 +127,7 @@ def test_studio_css_failure_stays_visible_and_reload_restores_graph(browser, liv
         alert = page.locator('#evolutionPageContainer .ui-alert--error')
         expect(alert).to_be_visible(timeout=20000)
         assert not page.locator('.evo-studio').count()
-        assert page.evaluate("customElements.get('wa-drawer') === undefined")
+        assert not page.locator('.evo-stage-canvas').count(), 'no half-styled world is mounted'
         assert page.locator('#evolutionPageContainer').get_attribute('aria-busy') is None
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
         page.screenshot(path=str(tmp_path / f'evolution-route-failure-{width}.png'))
@@ -136,7 +142,7 @@ def test_studio_css_failure_stays_visible_and_reload_restores_graph(browser, liv
         page.locator('#evolutionPageContainer button').click()
         _dismiss_onboarding_modals(page)
         expect(page.locator('.evo-studio')).to_be_visible(timeout=20000)
-        page.wait_for_function("customElements.get('wa-drawer') !== undefined")
+        page.wait_for_function("getComputedStyle(document.querySelector('.evo-hud-top')).position === 'absolute'")
         assert not errors
     finally:
         page.close()

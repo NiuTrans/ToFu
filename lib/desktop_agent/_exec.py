@@ -1,19 +1,19 @@
 """
 Desktop Agent — local command execution handler.
 
-Contains ``_SHELL_META_RE`` and ``cmd_run_local`` (run a shell command on
-the local machine, avoiding ``shell=True`` when possible). Both synchronous and
-streamed execution use the existing independent command supervisor; it owns
-descendant retirement after caller death. The caller owns live stream projection
-and exact explicit timeouts.
+Contains ``_build_args`` and ``cmd_run_local`` (run a shell command on the
+local machine). A command that POSIX tokenization proves to be one literal
+simple command runs as exactly that argv without a shell; anything else runs
+under an explicit ``/bin/sh -c`` (``cmd.exe /c`` on Windows), never
+``shell=True``. Both synchronous and streamed execution use the existing
+independent command supervisor; it owns descendant retirement after caller
+death. The caller owns live stream projection and exact explicit timeouts.
 """
 
 import os
 import math
 import tempfile
 from pathlib import Path
-import re
-import shlex
 import subprocess
 import threading
 import time
@@ -23,30 +23,98 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 
-# Shell metacharacters that require shell=True for correct behaviour
-_SHELL_META_RE = re.compile(r'[|&;<>()$`\\"\'\ \n*?\[#~]')
+# Unquoted, these make the shell rather than this module decide the words:
+# operators, expansions, patterns, tilde, comments, braces and negation.
+_SHELL_SYNTAX_CHARACTERS = frozenset('|&;<>()$`*?[{}~#!')
+
+# Reserved words and builtins of POSIX sh, dash and bash. In command position
+# they are shell grammar or shell state, so only the shell may run them, even
+# where an executable of the same name exists (echo, test, kill, pwd).
+_SHELL_COMMAND_NAMES = frozenset({
+    '!', '{', '}', '[[', ']]', 'case', 'coproc', 'do', 'done', 'elif', 'else',
+    'esac', 'fi', 'for', 'function', 'if', 'in', 'select', 'then', 'time',
+    'until', 'while', '.', ':', '[', 'alias', 'bg', 'bind', 'break', 'builtin',
+    'caller', 'cd', 'chdir', 'command', 'compgen', 'complete', 'compopt',
+    'continue', 'declare', 'dirs', 'disown', 'echo', 'enable', 'eval', 'exec',
+    'exit', 'export', 'false', 'fc', 'fg', 'getopts', 'hash', 'help', 'history',
+    'jobs', 'kill', 'let', 'local', 'logout', 'mapfile', 'newgrp', 'popd',
+    'printf', 'pushd', 'pwd', 'read', 'readarray', 'readonly', 'return', 'set',
+    'shift', 'shopt', 'source', 'suspend', 'test', 'times', 'trap', 'true',
+    'type', 'typeset', 'ulimit', 'umask', 'unalias', 'unset', 'wait',
+})
+
+
+def _literal_simple_command(command):
+    """Return the exact argv of one literal POSIX simple command, else None.
+
+    Words are space/tab-separated runs of plain characters, backslash escapes
+    and single or double quotes without expansion; quoted metacharacters are
+    data. Anything else returns None so the shell interprets it: operators,
+    redirections and here-documents, ``$``/backtick expansion, patterns,
+    tilde, comments, braces, ``!``, newlines and line continuations, a
+    ``NAME=value`` prefix, control characters, unterminated quoting, an empty
+    command name, and reserved words or builtins in command position.
+    """
+    words, word, quote = [], None, None
+    characters = iter(command)
+    for char in characters:
+        if quote == "'":
+            if char == "'":
+                quote = None
+            else:
+                word.append(char)
+        elif quote == '"':
+            if char in '$`':
+                return None
+            if char == '"':
+                quote = None
+            elif char == '\\':
+                escaped = next(characters, '\n')
+                if escaped == '\n':
+                    return None
+                word.append(escaped if escaped in '$`"\\' else char + escaped)
+            else:
+                word.append(char)
+        elif char in ' \t':
+            if word is not None:
+                words.append(''.join(word))
+                word = None
+        elif (char in _SHELL_SYNTAX_CHARACTERS or char < ' ' or char == '\x7f'
+              or (char == '=' and not words)):
+            return None
+        else:
+            word = [] if word is None else word
+            if char in '\'"':
+                quote = char
+            elif char == '\\':
+                escaped = next(characters, '\n')
+                if escaped == '\n':
+                    return None
+                word.append(escaped)
+            else:
+                word.append(char)
+    if quote is not None:
+        return None
+    if word is not None:
+        words.append(''.join(word))
+    if not words or not words[0] or words[0] in _SHELL_COMMAND_NAMES:
+        return None
+    return words
 
 
 def _build_args(command):
-    """Build the argv for *command* without shell=True.
+    """Build the argv for *command*; only a proven literal command skips the shell.
 
-    Security: avoids shell=True when the command is a simple executable
-    invocation (no pipes, redirects, globs, etc.).  When shell features
-    *are* needed, the command is passed as a single argument to an
-    explicit ``['/bin/sh', '-c', ...]`` invocation so that the
-    argument vector is never ambiguously parsed.
+    Security: a lone simple command whose words are literal after POSIX
+    tokenization runs as exactly that argv, so its quoted metacharacters stay
+    data, no shell interprets it, and its own exit status or signal is the
+    result. Everything else is the single ``-c`` operand of an explicit
+    ``/bin/sh`` and reports that shell's status. Windows always uses
+    ``cmd.exe /c``: its grammar and builtins are not POSIX.
     """
-    needs_shell = bool(_SHELL_META_RE.search(command))
-    if needs_shell:
-        # Use explicit shell invocation instead of shell=True so
-        # that *command* is a single, unambiguous argument to sh.
-        from lib.compat import get_shell_args
-        return get_shell_args(command)
-    # Simple command — split into argv list, no shell involved.
-    # On Windows, use posix=False so that backslash paths and
-    # double-quote quoting are handled correctly.
-    from lib.compat import IS_WINDOWS
-    return shlex.split(command, posix=not IS_WINDOWS)
+    from lib.compat import IS_WINDOWS, get_shell_args
+    argv = None if IS_WINDOWS else _literal_simple_command(command)
+    return get_shell_args(command) if argv is None else argv
 
 
 def command_timeout(value):
@@ -221,12 +289,21 @@ class _StreamedProcess:
             output_paths = [directory / name for name in ('stdout', 'stderr')]
             for path in output_paths:
                 path.touch()
-            worker = desktop_worker_command(args, cwd=self._cwd or Path.cwd(),
+            cwd = self._cwd or os.getcwd()
+            if not os.path.isabs(cwd):
+                # The worker runs from the source root; a relative cwd names the agent's.
+                cwd = os.path.join(os.getcwd(), cwd)
+            environment = dict(os.environ)
+            if os.name != 'nt':
+                # A POSIX shell exports PWD naming its working directory; direct
+                # argv commands get the same instead of the agent's stale value.
+                environment['PWD'] = os.path.realpath(cwd)
+            worker = desktop_worker_command(args, cwd=cwd,
                 ready=self._ready, stdout=output_paths[0], stderr=output_paths[1],
                 status=self._status, parent_pid=os.getpid(),
                 parent_birth=psutil.Process().create_time())
             self._proc = subprocess.Popen(worker, stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment,
                 cwd=Path(__file__).resolve().parents[2], start_new_session=os.name != 'nt')
             if os.name == 'nt':
                 from lib.paper.builds.windows_job import WindowsJob

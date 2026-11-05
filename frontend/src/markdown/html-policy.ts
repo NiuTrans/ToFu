@@ -16,23 +16,17 @@ export function projectMarkdownHtml(parsed: string, environment: MarkdownRenderE
   if (parsed.includes('setting:') || parsed.includes('page:')) {
     parsed = parsed.replace(
       /<a href="(setting|page):([A-Za-z0-9_-]+)"[^>]*>([\s\S]*?)<\/a>/g,
-      (_, scheme, key, label) => '<button type="button" class="md-ui-jump" data-tofu-action="'
-        + (scheme === 'page' ? 'jumpToPage' : 'jumpToSetting') + "('" + key + "')\">" + label + '</button>',
+      (_, scheme, key, label) => `<button type="button" class="md-ui-jump" value="${scheme}:${key}">${label}</button>`,
     );
   }
   parsed = explainWorkspaceLinks(parsed, environment.document, environment.basePath, environment.text);
-  let html = environment.sanitizer.sanitize(parsed);
+  // data-* is the application's delegated control channel (data-tofu-action*,
+  // preview and Turn/block identity); authored markup never carries it.
+  let html = environment.sanitizer.sanitize(parsed, { ALLOW_DATA_ATTR: false });
+  html = html.replace(/<button type="button" class="md-ui-jump" value="(setting|page):([A-Za-z0-9_-]+)">/g,
+    (_, scheme, key) => '<button type="button" class="md-ui-jump" data-tofu-action="'
+      + (scheme === 'page' ? 'jumpToPage' : 'jumpToSetting') + "('" + key + "')\">");
 
-  // Local agent workspace paths are not browser attachments. Preserve supported
-  // remote/upload images; explain inaccessible files rather than requesting 404s.
-  html = html.replace(/<img\b[^>]*>/gi, tag => {
-    const src = /\ssrc=["']([^"']*)["']/i.exec(tag)?.[1] ?? '';
-    if (/^(https?:\/\/|blob:|data:image\/|\/?(?:api|static|uploads)\/)/i.test(src)
-        || (environment.basePath && src.startsWith(environment.basePath + '/'))) return tag;
-    const alt = /\salt=["']([^"']*)["']/i.exec(tag)?.[1] ?? '';
-    return '<span class="md-inaccessible-attachment" role="note">Inaccessible attachment: '
-      + escapeHtml(alt || src) + '. This local workspace file is not a published image asset. Publish or upload it to view it here.</span>';
-  });
   if (environment.basePath) {
     html = html.replace(/(<(?:img|a)\b[^>]*?\s(?:src|href)=["'])(\/(?:api|static|uploads)\/)/g,
       '$1' + environment.basePath + '$2');

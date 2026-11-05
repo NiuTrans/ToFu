@@ -21,6 +21,7 @@ import time
 
 from quart import Blueprint, request
 
+from lib.error_envelope import BadRequest
 from lib.api_response import (
     api_bad_request, api_forbidden, api_internal_error, api_not_found, api_ok,
     api_payload,
@@ -300,8 +301,8 @@ def browser_access_put():
                 client_id=revoke.get('client_id') or revoke.get('clientId') or '',
                 profile=revoke.get('profile') or '')
         return api_ok(get_access_policy(user_id))
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
 
 
 @api_v1_browser_bp.route('/api/v1/browser/adapters', methods=['GET'])

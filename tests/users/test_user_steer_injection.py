@@ -196,6 +196,24 @@ class UserSteerInjectionTest(unittest.TestCase):
             'deliveryState': 'queued', 'queueId': rows[0]['queueId'],
         }])
 
+    def test_salvaged_timer_steer_moves_the_timer_receipt_to_queued(self):
+        """A timer that steered its continuation recorded ``steered``; when the
+        attempt ends before consuming it, the timer must say ``queued`` too."""
+        from unittest.mock import patch
+        from lib.tasks_pkg.orchestrator._finalize import _salvage_undelivered_steer
+        task = self._task()
+        task['_steer_inject_pending'] = [{
+            'value': 'timer continuation',
+            'blockId': 'injection:user-steer:timer:tmr_late',
+            'injectionId': 'timer:tmr_late',
+            '_user_msg': {'role': 'user', 'content': 'timer continuation'},
+            'config': {'model': 'm'},
+        }]
+        with patch('lib.scheduler.timer.record_requeued_continuation') as receipt:
+            self.assertEqual(_salvage_undelivered_steer(task), 1)
+        receipt.assert_called_once_with(
+            'timer:tmr_late', user_id=TEST_OWNER_USER_ID)
+
     def test_salvage_enqueue_failure_does_not_claim_queued(self):
         from unittest.mock import patch
         from lib.tasks_pkg.orchestrator._finalize import _salvage_undelivered_steer

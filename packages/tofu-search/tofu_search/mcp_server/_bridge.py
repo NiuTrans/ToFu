@@ -9,11 +9,13 @@ import asyncio
 import contextvars
 import os
 import threading
+from dataclasses import replace
 from typing import Any, Callable, TypeVar
 
 import anyio
 
 from tofu_search._worker_executor import DemandThreadPoolExecutor
+from tofu_search.config import bind_call_config, get_config
 from tofu_search.log import get_logger
 
 logger = get_logger(__name__)
@@ -72,26 +74,35 @@ def bridge_snapshot() -> dict[str, int]:
 
 async def run_blocking(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     """Await a demand worker and drain it when request cancellation wins."""
+    stopped = threading.Event()
+    config = get_config()
+    inherited_stop = config.local_rerank_cancel_event
+
+    class RequestStop:
+        def is_set(self):
+            return stopped.is_set() or (inherited_stop is not None and inherited_stop.is_set())
+
+    def invoke():
+        with bind_call_config(replace(config, local_rerank_cancel_event=RequestStop())):
+            return fn(*args, **kwargs)
+
     context = contextvars.copy_context()
-    future = _executor().submit(context.run, fn, *args, **kwargs)
+    future = _executor().submit(context.run, invoke)
     waiter = asyncio.wrap_future(future)
-    cancellation = None
-    # MCP's AnyIO scopes and direct asyncio Task.cancel both retain ownership.
-    with anyio.CancelScope(shield=True):
-        while True:
-            try:
-                result = await asyncio.shield(waiter)
-                break
-            except asyncio.CancelledError as error:
-                if waiter.done():
-                    if cancellation is not None:
+    try:
+        return await asyncio.shield(waiter)
+    except asyncio.CancelledError as cancellation:
+        stopped.set()
+        # Observe both AnyIO scope cancellation and direct Task.cancel first;
+        # only retirement is shielded. Repeated Stop cannot detach the worker.
+        with anyio.CancelScope(shield=True):
+            while True:
+                try:
+                    await asyncio.shield(waiter)
+                    break
+                except asyncio.CancelledError as error:
+                    if waiter.done():
                         raise cancellation from error
-                    raise
-                cancellation = error
-            except BaseException as error:
-                if cancellation is not None:
+                except BaseException as error:
                     raise cancellation from error
-                raise
-        if cancellation is not None:
-            raise cancellation
-        return result
+        raise

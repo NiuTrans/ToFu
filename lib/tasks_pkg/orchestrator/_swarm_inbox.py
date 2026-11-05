@@ -52,8 +52,8 @@ def drain_and_inject_inbox(
     round_num: int,
     tid: str,
 ) -> None:
-    """Drain swarm/peer/steer inboxes and inject as ONE coalesced user
-    message before the next LLM call.
+    """Drain dedicated inbox lanes into one coalesced user message.
+    Task-local project advice uses the generic visible injection writer.
 
     Mutates ``messages`` (appends the coalesced user message when any
     lane produced payloads) and ``task`` (SWARM_INBOX_INJECT event +
@@ -95,9 +95,6 @@ def drain_and_inject_inbox(
                 _swarm_key,
                 exclude_modes=['peer-msg', 'user-steer',
                                'background-command'])
-            if _swarm_items:
-                task.setdefault('_swarm_inject_pending', []).extend(
-                    item for item in _swarm_items if item.get('value'))
             _peer_items = ([] if _peer_owned
                            else _drain_inbox(_peer_key, modes=['peer-msg']))
             # Human steer messages (the operator interjecting into their
@@ -121,16 +118,16 @@ def drain_and_inject_inbox(
             # Otherwise every available completion joins this model round.
             _bgcmd_items = ([] if task.get('_bgcmd_delivery_event') is not None else
                 _drain_inbox(_swarm_key, modes=['background-command']))
-            # Project path-overlap advice exists only on the live task.  It is
-            # consumed before this model round or discarded at settlement;
-            # it never enters the durable inbox/feed projections.
+            # Project path-overlap advice is task-local, never durable inbox/feed
+            # state. Once appended, the ordinary note projection records what
+            # entered context; it does not turn advice into a delivery/ACK lane.
             _project_items = list(
                 task.pop('_projectOverlapAdvisories', []) or ())
             _inbox_items = (list(_swarm_items) + list(_peer_items)
                             + list(_steer_items) + list(_bgcmd_items)
                             + _project_items)
             if _inbox_items:
-                # Coalesce ALL drained items into a single user
+                # Coalesce dedicated inbox lanes into a single user
                 # message — one message with N <swarm-update>
                 # blocks instead of N adjacent user messages.
                 # Reasons:
@@ -140,13 +137,56 @@ def drain_and_inject_inbox(
                 #      user-role message — no _isMeta flag, no
                 #      <system-reminder> wrapper.  Mirrors Claude
                 #      Code's <task-notification> approach.
-                _payloads = [it.get('value', '') for it in _inbox_items
+                # In the owner's Global Router an owner message steered into
+                # the reply names its steer_id so route_to_project can forward
+                # it verbatim (docs/ROUTER.md R2); everything else is unchanged.
+                _steer_carriers = {}
+                if _steer_items:
+                    from lib.router.forwarding import owner_steer_carriers
+                    _steer_carriers = owner_steer_carriers(task, _steer_items)
+                _payloads = [(_steer_carriers.get(it.get('injectionId'))
+                              if it.get('mode') == 'user-steer' else None)
+                             or it.get('value', '')
+                             for it in (list(_swarm_items) + list(_peer_items)
+                                        + list(_steer_items) + list(_bgcmd_items))
                              if it.get('value')]
-                if _payloads:
-                    append_injection(
-                        messages, 'inbox_delivery', '\n\n'.join(_payloads),
-                        task=task, round_num=round_num,
-                        contains_human_steer=bool(_steer_items))
+                _project_payloads = [it['value'] for it in _project_items if it.get('value')]
+                if _payloads or _project_payloads:
+                    if _payloads:
+                        before_append = len(messages)
+                        try:
+                            append_injection(
+                                messages, 'inbox_delivery', '\n\n'.join(_payloads),
+                                task=task, round_num=round_num,
+                                contains_human_steer=bool(_steer_items),
+                                display_owner='inbox-lanes')
+                        except Exception:
+                            if len(messages) == before_append:
+                                # Nothing entered model context. Restore the
+                                # existing queue; do not make these items ACK-ready.
+                                from lib.agent_inbox import enqueue
+                                for key, mode, items in (
+                                    (_swarm_key, 'swarm-update', _swarm_items),
+                                    (_peer_key, 'peer-msg', _peer_items),
+                                    (_swarm_key, 'user-steer', _steer_items),
+                                    (_swarm_key, 'background-command', _bgcmd_items),
+                                ):
+                                    for item in items:
+                                        enqueue(key, item.get('value', ''), mode=mode,
+                                                priority=item.get('priority', 'later'),
+                                                extra=item)
+                                task.setdefault('_projectOverlapAdvisories', [])[:0] = _project_items
+                            raise
+                        # Presentation is not consumption: until the verified
+                        # provider-return flush, this carrier must not enter a
+                        # published continuation checkpoint.
+                        from lib.tasks_pkg.model_replay import UNVERIFIED_INBOX_DELIVERY
+                        task[UNVERIFIED_INBOX_DELIVERY] = True
+                        if _swarm_items:
+                            # Only a carrier actually appended can later be
+                            # acknowledged by the verified provider-return boundary.
+                            task.setdefault('_swarm_inject_pending', []).extend(
+                                item for item in _swarm_items if item.get('value'))
                     # Items already partitioned by the two drains above:
                     # ``_swarm_items`` (sub-agent results, carry agent_id)
                     # and ``_peer_items`` (Pillar #6, carry queueId). They
@@ -165,20 +205,6 @@ def drain_and_inject_inbox(
                             'agentId': it.get('agent_id', ''),
                             'text': it.get('value') or '',
                         } for it in _swarm_items]
-                        append_event(task, build_event(
-                            EventType.SWARM_INBOX_INJECT,
-                            roundNum=round_num + 1,
-                            count=len(_swarm_items),
-                            agentIds=[it.get('agent_id', '')
-                                      for it in _swarm_items],
-                            # Carry the actual <swarm-update> payloads
-                            #   in full so the frontend can render an
-                            #   in-timeline ptool-panel row showing exactly
-                            #   what the model received — not just a count.
-                            #   Bounds belong to the presentation owner; slicing
-                            #   XML here loses the closing result tag and report.
-                            previews=_swarm_previews,
-                        ))
                         # Display-only sidecar accumulation (shape mirrors
                         # the peer/steer inject records). Persisted by the
                         # sync layer as the underscore field
@@ -251,13 +277,45 @@ def drain_and_inject_inbox(
                         task.setdefault(
                             '_bgcmd_inject_pending', []).extend(_bgcmd_items)
 
+                    if _project_payloads:
+                        # Advice has no dedicated receipt. Its recorder must
+                        # neither hide it nor discard already-appended lanes'
+                        # sidecars/confirmation handles when recording fails.
+                        try:
+                            append_injection(
+                                messages, 'inbox_delivery', '\n\n'.join(_project_payloads),
+                                task=task, round_num=round_num)
+                        except Exception:
+                            # append_injection rolls back its own carrier. Keep
+                            # task-local advice for a later boundary, not an ACK.
+                            task.setdefault('_projectOverlapAdvisories', [])[:0] = _project_items
+                            _project_payloads = []
+                            logger.error(
+                                '[Task %s] overlap advice display failed; retained for retry',
+                                tid, exc_info=True)
+
+                    if _swarm_items:
+                        # append_event captures the Turn source immediately.
+                        # Retain the sidecar AND all deferred lane receipts
+                        # first, so observer failure cannot erase either.
+                        append_event(task, build_event(
+                            EventType.SWARM_INBOX_INJECT,
+                            roundNum=round_num + 1,
+                            count=len(_swarm_items),
+                            agentIds=[it.get('agent_id', '')
+                                      for it in _swarm_items],
+                            # Preserve the complete XML/report; presentation
+                            # bounds must not strip the closing result tag.
+                            previews=_swarm_previews,
+                        ))
+
                     logger.info(
-                        '[Task %s] injected %d inbox item(s) '
-                        '(%d swarm, %d peer, %d steer, %d bgcmd) as 1 user '
-                        'message at round %d',
-                        tid, len(_payloads), len(_swarm_items),
+                        '[Task %s] injected %d inbox/advice item(s) '
+                        '(%d swarm, %d peer, %d steer, %d bgcmd, %d advice) '
+                        'at round %d',
+                        tid, len(_payloads) + len(_project_payloads), len(_swarm_items),
                         len(_peer_items), len(_steer_items),
-                        len(_bgcmd_items), round_num + 1)
+                        len(_bgcmd_items), len(_project_payloads), round_num + 1)
     except Exception as _e:
         logger.error(
             '[Task %s] swarm inbox drain/inject failed at round %d: %s '

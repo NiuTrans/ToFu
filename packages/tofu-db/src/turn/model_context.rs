@@ -1,9 +1,12 @@
 //! Main-lane context selection with revision-proven text continuations.
 //! Reads compact authority indexes before materializing only the new suffix.
+//! Header walks stream one engine index page at a time: the v2 digest covers
+//! every header through the target while only the response page is retained,
+//! so lane length is never a ceiling (docs/TOFUDB_CONTEXT_READ.md).
 use super::*;
-use sha2::{Digest, Sha256};
 mod frontier;
 mod sha_state;
+use sha_state::ShaState;
 pub(crate) use frontier::{before_header_write, certify as certify_frontier};
 
 #[cfg(test)]
@@ -27,63 +30,98 @@ fn header_encoding(header: &Value) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Bounded ordered scan through the exact target. A certified prefix supplies
-/// its checked count and ordinal; absence starts at the beginning of the lane.
-fn scan_headers(
-    database: &AuthorityDatabase,
-    transaction: &mut AuthorityTransaction,
-    conversation: &str,
-    from: Option<u64>,
-    target_ordinal: u64,
-    target_id: &str,
-    prefix_count: usize,
-) -> io::Result<Option<Vec<Value>>> {
-    let prefix = lane_prefix(conversation, "main")?;
-    let (begin, _) = EntityKey::prefix_range(
-        transaction.tenant_id(),
-        transaction.owner_user_id(),
-        TURN_LANE_COMPACTION_INDEX_NAMESPACE,
-        &prefix,
-    )?;
-    let mut start = match from {
-        Some(ordinal) => lane_compaction_index_key(transaction, conversation, "main", ordinal)?,
-        None => begin,
-    };
-    let end = lane_compaction_index_key(transaction, conversation, "main", target_ordinal)?
-        .exact_range()?
-        .1;
-    let mut headers = Vec::new();
-    for _ in 0..MAX_SCAN_PAGES {
-        let entries = database.entity_scan(transaction, &start, &end, INDEX_PAGE_ROWS)?;
-        if entries.is_empty() {
-            break;
-        }
-        start = after_key(
-            &entries.last().unwrap().0,
-            transaction,
-            TURN_LANE_COMPACTION_INDEX_NAMESPACE,
-        )?;
-        for (key, bytes) in entries {
-            let header: Value = serde_json::from_slice(&bytes)
-                .map_err(|_| invalid_data("context header is malformed"))?;
-            #[cfg(test)]
-            SCANNED_HEADERS.with(|count| count.set(count.get() + 1));
-            let found = header.get("turnId").and_then(Value::as_str) == Some(target_id);
-            headers.push(header);
-            if prefix_count.saturating_add(headers.len()) > MAX_LIST_ROWS {
-                return Ok(None);
-            }
-            if found {
-                if key
-                    != lane_compaction_index_key(transaction, conversation, "main", target_ordinal)?
-                {
-                    return Err(invalid_data("Model context target order changed"));
-                }
-                return Ok(Some(headers));
-            }
-        }
+fn cursor_outside() -> io::Error {
+    invalid_input("context page cursor is outside the selected suffix")
+}
+
+/// One compact main-lane header; `target` marks the exact target Turn.
+struct Header {
+    key: EntityKey,
+    value: Value,
+    target: bool,
+}
+
+impl Header {
+    fn is(&self, turn_id: Option<&str>) -> bool {
+        turn_id.is_some() && self.value.get("turnId").and_then(Value::as_str) == turn_id
     }
-    Err(invalid_data("Model context target order changed"))
+}
+
+/// Ordered main-lane headers from `start` (the lane head when absent) through
+/// the exact target. It holds one engine index page and has no page-count
+/// cap: the lane's own history is the only length.
+struct HeaderWalk {
+    next: EntityKey,
+    end: EntityKey,
+    target_key: EntityKey,
+    page: std::vec::IntoIter<(EntityKey, Vec<u8>)>,
+    finished: bool,
+}
+
+impl HeaderWalk {
+    fn new(
+        transaction: &AuthorityTransaction,
+        conversation: &str,
+        start: Option<EntityKey>,
+        target_ordinal: u64,
+    ) -> io::Result<Self> {
+        let target_key =
+            lane_compaction_index_key(transaction, conversation, "main", target_ordinal)?;
+        let next = match start {
+            Some(key) => key,
+            None => {
+                EntityKey::prefix_range(
+                    transaction.tenant_id(),
+                    transaction.owner_user_id(),
+                    TURN_LANE_COMPACTION_INDEX_NAMESPACE,
+                    &lane_prefix(conversation, "main")?,
+                )?
+                .0
+            }
+        };
+        let end = target_key.clone().exact_range()?.1;
+        Ok(Self {
+            next,
+            end,
+            target_key,
+            page: Vec::new().into_iter(),
+            finished: false,
+        })
+    }
+
+    /// The next header, or None after the target. Exhausting the range before
+    /// the target means the target moved within this snapshot.
+    fn next(
+        &mut self,
+        database: &AuthorityDatabase,
+        transaction: &mut AuthorityTransaction,
+        target_id: &str,
+    ) -> io::Result<Option<Header>> {
+        if self.finished {
+            return Ok(None);
+        }
+        if self.page.as_slice().is_empty() {
+            let entries = database.entity_scan(transaction, &self.next, &self.end, INDEX_PAGE_ROWS)?;
+            let Some((last, _)) = entries.last() else {
+                return Err(invalid_data("Model context target order changed"));
+            };
+            self.next = after_key(last, transaction, TURN_LANE_COMPACTION_INDEX_NAMESPACE)?;
+            self.page = entries.into_iter();
+        }
+        let (key, bytes) = self.page.next().expect("a scanned header page is nonempty");
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| invalid_data("context header is malformed"))?;
+        #[cfg(test)]
+        SCANNED_HEADERS.with(|count| count.set(count.get() + 1));
+        let target = value.get("turnId").and_then(Value::as_str) == Some(target_id);
+        if target {
+            if key != self.target_key {
+                return Err(invalid_data("Model context target order changed"));
+            }
+            self.finished = true;
+        }
+        Ok(Some(Header { key, value, target }))
+    }
 }
 
 fn read_turn(
@@ -99,9 +137,8 @@ fn read_turn(
                 crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES,
             )
             .map_err(|error| {
-                if error.io_error_kind() == Some(io::ErrorKind::OutOfMemory) {
-                    io::Error::new(
-                        io::ErrorKind::OutOfMemory,
+                if error.io_error_kind().is_some_and(crate::resource_exhaustion::is_refusal_kind) {
+                    crate::resource_exhaustion::domain_bound(
                         "turn response exceeds its bounded streamed payload",
                     )
                 } else {
@@ -117,12 +154,146 @@ fn response(value: Value) -> io::Result<crate::response_json::EncodedResponse> {
     let encoded = crate::response_json::EncodedResponse::from_value(value)
         .map_err(|_| invalid_data("turn response cannot be encoded"))?;
     if encoded.len() > crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "turn response exceeds its bounded streamed payload",
         ));
     }
     Ok(encoded)
+}
+
+/// One bounded response page of the selected suffix, filled in lane order
+/// after the caller's cursor. The target was read in this snapshot and is
+/// moved in once.
+struct Page<'a> {
+    conversation: &'a str,
+    target_id: &'a str,
+    target: Option<(Value, usize)>,
+    after: Option<&'a str>,
+    limit: usize,
+    turns: Vec<Value>,
+    bytes: usize,
+    full: bool,
+}
+
+impl<'a> Page<'a> {
+    fn new(
+        conversation: &'a str,
+        target_id: &'a str,
+        target: Option<(Value, usize)>,
+        after: Option<&'a str>,
+        continuation: Option<&Value>,
+    ) -> Self {
+        let continuation_bytes = continuation.map_or(0, |value| {
+            serde_json::to_vec(value)
+                .map(|encoded| encoded.len())
+                .unwrap_or(crate::model_continuation::MAX_PROJECTION_BYTES)
+        });
+        // Reserve the actual continuation plus metadata; keep the baseline
+        // budget consistent with the SQL authority and the wire contract.
+        let limit = (crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES
+            - crate::model_continuation::MAX_PROJECTION_BYTES
+            - 128 * 1024)
+            .min(
+                crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES
+                    .saturating_sub(continuation_bytes + 128 * 1024),
+            );
+        Self {
+            conversation,
+            target_id,
+            target,
+            after,
+            limit,
+            turns: Vec::new(),
+            bytes: 0,
+            full: false,
+        }
+    }
+
+    /// Consume the next selected header: pass the cursor, then materialize
+    /// Turns until the first one that no longer fits ends the page.
+    fn offer(
+        &mut self,
+        database: &AuthorityDatabase,
+        transaction: &mut AuthorityTransaction,
+        header: &Header,
+    ) -> io::Result<()> {
+        if self.after.is_some() {
+            if header.is(self.after) {
+                if header.target {
+                    return Err(cursor_outside());
+                }
+                self.after = None;
+            }
+            return Ok(());
+        }
+        if self.full {
+            return Ok(());
+        }
+        let id = header
+            .value
+            .get("turnId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid_data("context header lacks identity"))?;
+        let (value, bytes) = if id == self.target_id {
+            self.target
+                .take()
+                .ok_or_else(|| invalid_data("context target repeats"))?
+        } else {
+            read_turn(database, transaction, self.conversation, id)?
+                .ok_or_else(|| invalid_data("context Turn disappeared"))?
+        };
+        if !self.turns.is_empty() && self.bytes.saturating_add(bytes) > self.limit {
+            self.full = true;
+            return Ok(());
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.turns.push(value);
+        Ok(())
+    }
+
+    fn respond(
+        self,
+        covered: u64,
+        proof_count: u64,
+        digest: String,
+        continuation_status: &str,
+        continuation: Option<Value>,
+    ) -> io::Result<crate::response_json::EncodedResponse> {
+        if self.after.is_some() {
+            return Err(cursor_outside());
+        }
+        let next_turn_id = if self.full {
+            self.turns
+                .last()
+                .and_then(|row| row.get("turnId"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        let eligible = self.turns.iter().all(|row| {
+            match row
+                .get("projection")
+                .and_then(|value| value.get("attachments"))
+            {
+                None | Some(Value::Null) => true,
+                Some(Value::Array(refs)) => refs.is_empty(),
+                _ => false,
+            }
+        });
+        let mut result = json!({
+            "supported": true, "covered": covered,
+            "nextTurnId": next_turn_id,
+            "continuationStatus": continuation_status,
+            "historyProof": {"version": 2, "count": proof_count, "digest": digest},
+            "proofEligible": eligible,
+        });
+        // Move the private payloads; json! would serialize borrowed expressions to
+        // another Value, cloning every tool-result string in the selected history.
+        result["turns"] = Value::Array(self.turns);
+        result["continuation"] = continuation.unwrap_or(Value::Null);
+        response(result)
+    }
 }
 
 pub(crate) fn read(
@@ -140,6 +311,10 @@ pub(crate) fn read(
     if target.get("laneId").and_then(Value::as_str) != Some("main") {
         return response(json!({"supported": false})).map(Some);
     }
+    let target_ordinal = target
+        .get("ordinal")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("context target ordinal is malformed"))?;
     let mut target = Some((target, target_bytes));
     let mut cached: Option<Value> = if replay {
         crate::model_continuation::execute(
@@ -163,221 +338,182 @@ pub(crate) fn read(
         transaction,
         conversation_id,
         turn_id,
+        target_ordinal,
         after_turn_id,
         &mut target,
         &mut cached,
     )? {
         return Ok(Some(response));
     }
-    let target_ordinal = target
-        .as_ref()
-        .unwrap()
-        .0
-        .get("ordinal")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| invalid_data("context target ordinal is malformed"))?;
-    let Some(headers) = scan_headers(
+    read_uncertified(
         database,
         transaction,
         conversation_id,
-        None,
-        target_ordinal,
         turn_id,
-        0,
-    )?
-    else {
-        return response(json!({"supported":false})).map(Some);
-    };
+        target_ordinal,
+        replay,
+        after_turn_id,
+        target,
+        cached,
+    )
+    .map(Some)
+}
+
+/// Full-prefix validation: one streamed digest walk over every header. The
+/// checkpoint anchor (its proof count) decides coverage when the walk reaches
+/// it; uncovered history is paged as it streams by. Only when a stale anchor
+/// leaves the lane head uncovered is the page walked again, from its start.
+#[allow(clippy::too_many_arguments)]
+fn read_uncertified(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    turn_id: &str,
+    target_ordinal: u64,
+    replay: bool,
+    after_turn_id: Option<&str>,
+    mut target: Option<(Value, usize)>,
+    cached: Option<Value>,
+) -> io::Result<crate::response_json::EncodedResponse> {
     let proof = cached.as_ref().and_then(|value| value.get("historyProof"));
-    let prior_count = proof
-        .and_then(|value| value.get("count"))
+    let version2 = proof
+        .and_then(|value| value.get("version"))
         .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok());
+        == Some(2);
+    let proof_digest = proof
+        .and_then(|value| value.get("digest"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let terminal = cached
         .as_ref()
         .and_then(|value| value.get("turns"))
         .and_then(Value::as_array)
         .filter(|values| values.len() == 1)
-        .and_then(|values| values.first());
-    let usable = proof
-        .and_then(|value| value.get("version"))
+        .and_then(|values| values.first())
+        .cloned();
+    // Lane index of the checkpoint terminal; it can cover a prefix only when
+    // the walk reaches it before the target.
+    let anchor = proof
+        .and_then(|value| value.get("count"))
         .and_then(Value::as_u64)
-        == Some(2)
-        && prior_count.is_some_and(|count| count < headers.len() - 1)
-        && terminal.is_some();
+        .filter(|_| version2 && terminal.is_some());
     let mut continuation_status = if !replay {
         "replay_disabled"
     } else if cached.is_none() {
         "checkpoint_missing"
     } else if proof.is_none() {
         "legacy_checkpoint"
-    } else if proof
-        .and_then(|value| value.get("version"))
-        .and_then(Value::as_u64)
-        != Some(2)
-    {
+    } else if !version2 {
         "legacy_proof"
-    } else if !usable {
+    } else {
         "checkpoint_not_before_target"
-    } else {
-        "history_changed"
     };
-    let mut digest = Sha256::new();
-    let mut prior_matches = false;
-    for (index, header) in headers[..headers.len() - 1].iter().enumerate() {
-        if usable && prior_count == Some(index) {
-            prior_matches = proof
-                .and_then(|value| value.get("digest"))
-                .and_then(Value::as_str)
-                == Some(format!("{:x}", digest.clone().finalize()).as_str());
-        }
-        digest.update(header_encoding(header)?);
-    }
-    let mut covered = 0;
-    if prior_matches {
-        continuation_status = "terminal_changed";
-        let count = prior_count.unwrap();
-        let witness = terminal.unwrap();
-        if headers[count].get("turnId") == witness.get(0) {
-            let final_id = witness
-                .get(0)
-                .and_then(Value::as_str)
-                .ok_or_else(|| invalid_data("context witness is malformed"))?;
-            if let Some((value, _)) = read_turn(database, transaction, conversation_id, final_id)? {
-                let row = value
-                    .as_object()
-                    .ok_or_else(|| invalid_data("context terminal is malformed"))?;
-                if crate::model_continuation::settled_witness(row) == *witness {
-                    covered = count + 1;
-
-                    continuation_status = "available";
-                }
-            }
-        }
-    }
-    let continuation = if covered > 0
-        || cached
-            .as_ref()
-            .is_some_and(|value| value.get("historyProof").is_none())
-    {
-        cached
-    } else {
-        None
-    };
-    let proof_count = headers.len() - 1;
-    finish_response(
-        database,
-        transaction,
-        conversation_id,
-        turn_id,
-        after_turn_id,
-        target,
-        &headers[covered..],
-        covered,
-        proof_count,
-        format!("{:x}", digest.finalize()),
-        continuation_status,
-        continuation,
-    )
-    .map(Some)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn finish_response(
-    database: &AuthorityDatabase,
-    transaction: &mut AuthorityTransaction,
-    conversation_id: &str,
-    turn_id: &str,
-    after_turn_id: Option<&str>,
-    mut target: Option<(Value, usize)>,
-    selected: &[Value],
-    covered: usize,
-    proof_count: usize,
-    digest: String,
-    continuation_status: &str,
-    continuation: Option<Value>,
-) -> io::Result<crate::response_json::EncodedResponse> {
-    let start = match after_turn_id {
-        Some(cursor) => selected
-            .iter()
-            .position(|header| header.get("turnId").and_then(Value::as_str) == Some(cursor))
-            .map(|position| position + 1)
-            .filter(|position| *position < selected.len())
-            .ok_or_else(|| invalid_input("context page cursor is outside the selected suffix"))?,
-        None => 0,
-    };
-    let continuation_bytes = continuation.as_ref().map_or(0, |value| {
-        serde_json::to_vec(value)
-            .map(|encoded| encoded.len())
-            .unwrap_or(crate::model_continuation::MAX_PROJECTION_BYTES)
+    let legacy = cached
+        .as_ref()
+        .is_some_and(|value| value.get("historyProof").is_none());
+    let mut page = anchor.is_none().then(|| {
+        Page::new(
+            conversation_id,
+            turn_id,
+            target.take(),
+            after_turn_id,
+            cached.as_ref().filter(|_| legacy),
+        )
     });
-    let mut turns = Vec::new();
-    let mut page_bytes = 0_usize;
-    let mut next_turn_id = None;
-    // Reserve the actual continuation plus metadata; keep the baseline
-    // budget consistent with the SQL authority and the wire contract.
-    let page_limit = (crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES
-        - crate::model_continuation::MAX_PROJECTION_BYTES
-        - 128 * 1024)
-        .min(
-            crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES
-                .saturating_sub(continuation_bytes + 128 * 1024),
-        );
-    for header in &selected[start..] {
-        let id = header
-            .get("turnId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid_data("context header lacks identity"))?;
-        let (value, bytes) = if id == turn_id {
-            target
-                .take()
-                .ok_or_else(|| invalid_data("context target repeats"))?
-        } else {
-            read_turn(database, transaction, conversation_id, id)?
-                .ok_or_else(|| invalid_data("context Turn disappeared"))?
-        };
-        if !turns.is_empty() && page_bytes.saturating_add(bytes) > page_limit {
-            next_turn_id = turns
-                .last()
-                .and_then(|row: &Value| row.get("turnId"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+    let mut walk = HeaderWalk::new(transaction, conversation_id, None, target_ordinal)?;
+    let mut state = ShaState::default();
+    let mut index = 0_u64;
+    let mut covered = 0_u64;
+    let mut cursor_key = None;
+    while let Some(header) = walk.next(database, transaction, turn_id)? {
+        match page.as_mut() {
+            Some(page) => page.offer(database, transaction, &header)?,
+            None if header.is(after_turn_id) => {
+                if header.target {
+                    return Err(cursor_outside());
+                }
+                cursor_key = Some(header.key.clone());
+            }
+            None => {}
+        }
+        if header.target {
             break;
         }
-        page_bytes = page_bytes.saturating_add(bytes);
-        turns.push(value);
-    }
-    let eligible = turns.iter().all(|row| {
-        match row
-            .get("projection")
-            .and_then(|value| value.get("attachments"))
-        {
-            None | Some(Value::Null) => true,
-            Some(Value::Array(refs)) => refs.is_empty(),
-            _ => false,
+        if anchor == Some(index) {
+            continuation_status = "history_changed";
+            if proof_digest.as_deref() == Some(state.digest().as_str()) {
+                continuation_status = "terminal_changed";
+                let witness = terminal.as_ref().expect("an anchor has its terminal witness");
+                if header.value.get("turnId") == witness.get(0) {
+                    let final_id = witness
+                        .get(0)
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| invalid_data("context witness is malformed"))?;
+                    if let Some((value, _)) =
+                        read_turn(database, transaction, conversation_id, final_id)?
+                    {
+                        let row = value
+                            .as_object()
+                            .ok_or_else(|| invalid_data("context terminal is malformed"))?;
+                        if crate::model_continuation::settled_witness(row) == *witness {
+                            covered = index + 1;
+                            continuation_status = "available";
+                        }
+                    }
+                }
+            }
+            if covered > 0 {
+                if cursor_key.is_some() {
+                    return Err(cursor_outside());
+                }
+                page = Some(Page::new(
+                    conversation_id,
+                    turn_id,
+                    target.take(),
+                    after_turn_id,
+                    cached.as_ref(),
+                ));
+            }
         }
-    });
-    let mut result = json!({
-        "supported": true, "covered": covered,
-        "nextTurnId": next_turn_id,
-        "continuationStatus": continuation_status,
-        "historyProof": {"version": 2, "count": proof_count, "digest": digest},
-        "proofEligible": eligible,
-    });
-    // Move the private payloads; json! would serialize borrowed expressions to
-    // another Value, cloning every tool-result string in the selected history.
-    result["turns"] = Value::Array(turns);
-    result["continuation"] = continuation.unwrap_or(Value::Null);
-    response(result)
+        state.update(&header_encoding(&header.value)?)?;
+        index += 1;
+    }
+    let page = match page {
+        Some(page) => page,
+        None => {
+            // A proof-bearing checkpoint is never legacy: no continuation is returned.
+            let start = match after_turn_id {
+                Some(_) => Some(after_key(
+                    &cursor_key.ok_or_else(cursor_outside)?,
+                    transaction,
+                    TURN_LANE_COMPACTION_INDEX_NAMESPACE,
+                )?),
+                None => None,
+            };
+            let mut page = Page::new(conversation_id, turn_id, target.take(), None, None);
+            let mut rewalk = HeaderWalk::new(transaction, conversation_id, start, target_ordinal)?;
+            while !page.full {
+                let Some(header) = rewalk.next(database, transaction, turn_id)? else {
+                    break;
+                };
+                page.offer(database, transaction, &header)?;
+            }
+            page
+        }
+    };
+    let continuation = if covered > 0 || legacy { cached } else { None };
+    page.respond(covered, index, state.digest(), continuation_status, continuation)
 }
 
 /// A certificate authenticates only headers before its terminal. We still
 /// materialize and verify that terminal and every new header from one snapshot.
+#[allow(clippy::too_many_arguments)]
 fn read_certified_suffix(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
     conversation: &str,
     target_id: &str,
+    target_ordinal: u64,
     after: Option<&str>,
     target: &mut Option<(Value, usize)>,
     cached: &mut Option<Value>,
@@ -388,13 +524,6 @@ fn read_certified_suffix(
     let Some(cert) = frontier::load(database, transaction, conversation, "main")? else {
         return Ok(None);
     };
-    let target_ordinal = target
-        .as_ref()
-        .unwrap()
-        .0
-        .get("ordinal")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| invalid_data("context target ordinal is malformed"))?;
     if cert.ordinal >= target_ordinal || !cert.matches(checkpoint) {
         return Ok(None);
     }
@@ -410,45 +539,27 @@ fn read_certified_suffix(
     {
         return Ok(None);
     }
-    let Some(headers) = scan_headers(
-        database,
-        transaction,
-        conversation,
-        Some(cert.ordinal),
-        target_ordinal,
-        target_id,
-        cert.count,
-    )?
-    else {
-        return response(json!({"supported":false})).map(Some);
+    let start = lane_compaction_index_key(transaction, conversation, "main", cert.ordinal)?;
+    let mut walk = HeaderWalk::new(transaction, conversation, Some(start), target_ordinal)?;
+    let Some(first) = walk.next(database, transaction, target_id)? else {
+        return Ok(None);
     };
-    if headers
-        .first()
-        .and_then(|h| h.get("turnId"))
-        .and_then(Value::as_str)
-        != Some(cert.terminal_id.as_str())
-    {
+    if !first.is(Some(cert.terminal_id.as_str())) {
         return Ok(None);
     }
     let mut state = cert.state;
-    for header in &headers[..headers.len() - 1] {
-        state.update(&header_encoding(header)?)?;
+    state.update(&header_encoding(&first.value)?)?;
+    let mut count = cert.count + 1;
+    let mut page = Page::new(conversation, target_id, target.take(), after, Some(checkpoint));
+    while let Some(header) = walk.next(database, transaction, target_id)? {
+        page.offer(database, transaction, &header)?;
+        if !header.target {
+            state.update(&header_encoding(&header.value)?)?;
+            count += 1;
+        }
     }
-    finish_response(
-        database,
-        transaction,
-        conversation,
-        target_id,
-        after,
-        target.take(),
-        &headers[1..],
-        cert.count + 1,
-        cert.count + headers.len() - 1,
-        state.digest(),
-        "available",
-        cached.take(),
-    )
-    .map(Some)
+    page.respond(cert.count + 1, count, state.digest(), "available", cached.take())
+        .map(Some)
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-"""Demand context reads preserve physical startup errors and joined ownership."""
+"""Demand context reads recover unpublished startup and retain joined ownership."""
 import threading
 
 import pytest
@@ -49,17 +49,24 @@ def test_nonwaiting_shutdown_retains_accepted_work_until_joined_close():
 
 @pytest.mark.parametrize('failed_start', [1, 2])
 @pytest.mark.parametrize('error_type', [RuntimeError, OSError])
-def test_worker_start_failure_withdraws_only_unstarted_job(monkeypatch, failed_start, error_type):
+def test_transient_worker_start_failure_recovers_owned_read_once(monkeypatch, failed_start, error_type):
     executor = DemandContextProviderExecutor(max_workers=2, queue_capacity=2)
     original = threading.Thread.start
     calls = 0
     entered = threading.Event()
     release = threading.Event()
+    read_entered = threading.Event()
+    read_release = threading.Event()
     effects = []
     def blocking():
         entered.set()
         assert release.wait(5)
         return 'accepted'
+    def read():
+        effects.append('owned read')
+        read_entered.set()
+        assert read_release.wait(5)
+        return 'recovered'
     def start(thread):
         nonlocal calls
         if thread.name.startswith('context-provider'):
@@ -74,12 +81,74 @@ def test_worker_start_failure_withdraws_only_unstarted_job(monkeypatch, failed_s
             if failed_start == 2:
                 active = executor.submit(blocking)
                 assert entered.wait(1)
+            future = executor.submit(read)
+            assert read_entered.wait(1), 'unpublished startup recovery stranded the read'
+            # This same returned Future stays incomplete only while its owned
+            # callable is blocked, not until the provider request deadline.
+            assert future.running() and not future.done()
+            assert calls == failed_start + 1
+            assert effects == ['owned read']
+            read_release.set()
+            assert future.result(timeout=1) == 'recovered'
+            assert effects == ['owned read']
+            assert executor.snapshot()['queued'] == 0
+        if active is not None:
+            assert not active.done(), 'startup recovery disturbed the accepted predecessor'
+        assert executor.submit(lambda: 'independent').result(timeout=1) == 'independent'
+    finally:
+        read_release.set()
+        release.set()
+        executor.shutdown()
+    if active is not None:
+        assert active.result(timeout=0) == 'accepted'
+    assert effects == ['owned read']
+    assert executor.snapshot()['residentThreads'] == 0
+
+
+@pytest.mark.parametrize('failed_start', [1, 2])
+@pytest.mark.parametrize('error_type', [RuntimeError, OSError])
+def test_worker_start_failure_withdraws_only_unstarted_job(monkeypatch, failed_start, error_type):
+    executor = DemandContextProviderExecutor(max_workers=2, queue_capacity=2)
+    original = threading.Thread.start
+    calls = 0
+    entered = threading.Event()
+    release = threading.Event()
+    effects = []
+    failures = []
+    def blocking():
+        entered.set()
+        assert release.wait(5)
+        return 'accepted'
+    def start(thread):
+        nonlocal calls
+        if thread.name.startswith('context-provider'):
+            calls += 1
+            # Refusal requires both provisional attempts to fail. A once-only
+            # startup fault is recovered before this callable can enter.
+            if calls in (failed_start, failed_start + 1):
+                error = error_type(f'injected physical start failure {len(failures) + 1}')
+                failures.append(error)
+                raise error
+        return original(thread)
+    active = None
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(threading.Thread, 'start', start)
+            if failed_start == 2:
+                active = executor.submit(blocking)
+                assert entered.wait(1)
             failed = executor.submit(lambda: effects.append('unstarted'))
-            assert failed.done()
-            with pytest.raises(error_type, match='injected physical start failure'):
-                failed.result()
+            assert failed.done(), 'unrecovered startup failure left an orphaned Future'
+            assert not failed.cancelled(), 'physical refusal lost its typed failure'
+            with pytest.raises(error_type, match='injected physical start failure 2') as raised:
+                failed.result(timeout=0)
+            assert calls == failed_start + 1 and len(failures) == 2
+            assert raised.value is failures[1]
+            assert raised.value.__cause__ is failures[0]
             assert effects == []
             assert executor.snapshot()['queued'] == 0
+        if active is not None:
+            assert not active.done(), 'startup refusal disturbed the accepted predecessor'
         # Accepted predecessor can remain blocked while a fresh read succeeds.
         assert executor.submit(lambda: 'recovered').result(timeout=1) == 'recovered'
     finally:
@@ -87,6 +156,7 @@ def test_worker_start_failure_withdraws_only_unstarted_job(monkeypatch, failed_s
         executor.shutdown()
     if active is not None:
         assert active.result(timeout=0) == 'accepted'
+    assert effects == []
     assert executor.snapshot()['residentThreads'] == 0
 
 

@@ -14,6 +14,7 @@ import threading
 from typing import Callable
 
 from lib.log import get_logger
+from lib.tools.execution_timing import timing_phase
 
 logger = get_logger(__name__)
 _condition = threading.Condition()
@@ -76,17 +77,22 @@ def _drain_until_done(requested):
             if requested.done or lane.owner == owner:
                 return
             if lane.owner is not None or not lane.pending[0].ready:
-                _condition.wait()
+                with timing_phase('post_commit_wait'):
+                    _condition.wait()
                 continue
             lane.owner = owner
         try:
             while True:
                 with _condition:
-                    if not lane.pending or not lane.pending[0].ready:
+                    # Do not borrow a later caller's listener latency after
+                    # fulfilling this request. Its publisher can take ownership
+                    # next; nested publications remain in our outer pending deque.
+                    if requested.done or not lane.pending or not lane.pending[0].ready:
                         break
                     ticket = lane.pending.popleft()
                 try:
-                    ticket.callback()
+                    with timing_phase('post_commit_callback'):
+                        ticket.callback()
                 except Exception:
                     logger.warning('Optional project post-commit effect failed', exc_info=True)
                 finally:

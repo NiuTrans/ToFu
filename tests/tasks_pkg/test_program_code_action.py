@@ -75,15 +75,17 @@ def test_named_call_does_not_grant_unknown_tool_authority(world):
     assert not calls
 
 
-@pytest.mark.parametrize('tier, config, reason', [
-    ('batch', {}, 'batch_tier'),
-    ('program', {}, 'batch_tier'),
-    ('program', {'tools':{'programmaticCalling':'auto'}}, 'batch_tier'),
-    ('program', {'tools':{'programmaticCalling':'off'}}, 'mode_off'),
+@pytest.mark.parametrize('tier, config, override, reason', [
+    ('batch', {}, None, 'batch_tier'),
+    ('program', {}, 'batch', 'batch_tier'),
+    ('program', {'tools':{'programmaticCalling':'auto'}}, 'batch', 'batch_tier'),
+    ('program', {'tools':{'programmaticCalling':'off'}}, None, 'mode_off'),
 ])
-def test_operator_disabled_program_never_reaches_guest(world, monkeypatch, tier, config, reason):
+def test_operator_disabled_program_never_reaches_guest(world, monkeypatch, tier, config, override, reason):
     task, calls, _, run = world
     task['_ptc_local']['tier'] = tier
+    if override:
+        monkeypatch.setenv('TOFU_PTC_TIER', override)
     monkeypatch.setattr(tool_gateway, '_execute_program', lambda *a, **kw: pytest.fail('disabled program executed'))
     result = run({'code':'return await tools.read_rows({});'}, config)
     assert result['error']['code'] == 'program_disabled'
@@ -91,10 +93,19 @@ def test_operator_disabled_program_never_reaches_guest(world, monkeypatch, tier,
     assert not calls
 
 
-@pytest.mark.parametrize('mode', [None, 'auto', 'off'])
-def test_legacy_program_cannot_bypass_policy_and_json_batch_still_executes_once(world, monkeypatch, mode):
+@pytest.mark.parametrize('mode, override, authoring_fallback, reason', [
+    ('off', None, False, 'mode_off'),
+    (None, 'batch', False, 'batch_tier'),
+    ('auto', None, True, 'authoring_failures'),
+])
+def test_legacy_program_cannot_bypass_policy_and_json_batch_still_executes_once(
+        world, monkeypatch, mode, override, authoring_fallback, reason):
     task, calls, _, _ = world
     task.pop('_ptc_local')
+    if override:
+        monkeypatch.setenv('TOFU_PTC_TIER', override)
+    if authoring_fallback:
+        task['_toolScriptBatchFallback'] = True
     cfg = {} if mode is None else {'tools': {'programmaticCalling': mode}}
     monkeypatch.setattr(tool_gateway, '_execute_program',
                         lambda *a, **kw: pytest.fail('disabled program reached VM'))
@@ -108,6 +119,7 @@ def test_legacy_program_cannot_bypass_policy_and_json_batch_still_executes_once(
 
     failure = invoke('legacy-code', {'program': 'return await tools.read_rows({});'})
     assert failure['program']['error']['code'] == 'program_disabled'
+    assert failure['program']['error']['reason'] == reason
     assert not calls and not task.get('programRuns')
     batch = {'calls': [{'name': 'read_rows', 'arguments': {}}], 'execution': 'parallel'}
     first = invoke('json-batch', batch)

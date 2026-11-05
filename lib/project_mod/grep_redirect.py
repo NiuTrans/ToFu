@@ -13,14 +13,16 @@ shim is retired):
   1. ``rg`` translation (``grep_rg_translate.translate_grep_to_rg``): the
      whole grep argv is replaced by a proven-equivalent ripgrep argv
      (``RIPGREP_CONFIG_PATH=/dev/null`` neutralized). This is the 5x+ FUSE
-     fast path grep_search sells, now covering regex patterns, single
+     fast path search_files sells, now covering regex patterns, single
      files, context, counts-excluded, and most GNU flags — not just
-     literal recursive scans.
+     literal recursive scans. The argv is re-quoted plan-time text, so it
+     is used only when no grep argv word expands at runtime.
   2. GNU fallback: only the program word is replaced with
      ``<prog> --exclude-dir=... [-I]`` — the same descent guards the
      retired helper injected — so arbitrary GNU options keep their native
      stdout, stderr, and exit-code behaviour with zero translation risk.
 
+Literal heredoc bodies are data, not segments, and stay byte-identical.
 When the caller supplies no authoritative timeout, the splice is wrapped in
 the host-probed coreutils ``timeout`` (exit 124 on expiry, partial output
 already streamed), replacing the helper's internal deadline.
@@ -42,6 +44,7 @@ from lib.project_mod.command_analysis import (
     _REDIR_BARE_RE,
     _REDIR_FUSED_RE,
     _grep_segment_reads_filesystem,
+    _literal_heredoc_body_view,
     _shell_words,
     _split_pipeline_spans,
 )
@@ -92,6 +95,32 @@ def _timeout_binary_args(binary):
     return result
 
 
+_TIMEOUT_BINARY_CACHE: dict[str, str] = {}
+
+
+def resolve_timeout_binary():
+    """``shutil.which('timeout')`` per server ``PATH`` value (process-local).
+
+    Every run_command asks twice (grep planning and the scanner-segment
+    guard). ``which`` stats each PATH entry, several of which sit on network
+    filesystems here; an unchanged PATH resolves to the same binary, so a hit
+    re-validates with one ``os.access``. A PATH change or a vanished binary
+    resolves afresh; an absent binary is never cached.
+    """
+    path_value = os.environ.get('PATH', os.defpath)
+    cached = _TIMEOUT_BINARY_CACHE.get(path_value)
+    if cached is not None and os.access(cached, os.X_OK):
+        return cached
+    binary = shutil.which('timeout')
+    if len(_TIMEOUT_BINARY_CACHE) >= 4:
+        _TIMEOUT_BINARY_CACHE.clear()
+    if binary:
+        _TIMEOUT_BINARY_CACHE[path_value] = binary
+    else:
+        _TIMEOUT_BINARY_CACHE.pop(path_value, None)
+    return binary
+
+
 def _default_timeout_wrap():
     """Env-driven segment deadline for direct (non-run_command) planners."""
     try:
@@ -100,7 +129,7 @@ def _default_timeout_wrap():
         seconds = 40.0
     if seconds <= 0:
         return None
-    binary = shutil.which('timeout')
+    binary = resolve_timeout_binary()
     if not binary:
         return None
     return (binary, _timeout_binary_args(binary), int(seconds))
@@ -165,6 +194,36 @@ def _gnu_splice_replacement(program_text, timeout_prefix):
     return ' '.join(parts)
 
 
+# Unquoted pathname-glob, brace and tilde characters; ``$`` and backtick
+# expand inside double quotes too.
+_UNQUOTED_EXPANSION_CHARS = frozenset('*?[{~')
+
+
+def _expands_at_runtime(raw):
+    """True when shell word *raw* expands at runtime, so its plan-time
+    decoded text is not necessarily the argv value grep would receive."""
+    quote = None
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif char == '\\':
+            index += 1              # the escaped character is literal
+        elif char in '$`':
+            return True
+        elif quote == '"':
+            if char == '"':
+                quote = None
+        elif char in '\'"':
+            quote = char
+        elif char in _UNQUOTED_EXPANSION_CHARS:
+            return True
+        index += 1
+    return False
+
+
 def _rg_splice_replacement(rg_argv, timeout_prefix):
     parts = ['RIPGREP_CONFIG_PATH=/dev/null']
     if timeout_prefix:
@@ -201,8 +260,11 @@ def plan_grep_redirect(command, cwd, timeout_wrap=None):
     used_rg = False
     use_rg = os.environ.get('TOFU_GREP_RG', '1') != '0'
 
-    for seg_start, seg_end in _split_pipeline_spans(command):
-        segment = command[seg_start:seg_end]
+    # Spans and words come from the heredoc-body view; replacements apply to
+    # the original command at the same offsets.
+    view = _literal_heredoc_body_view(command)
+    for seg_start, seg_end in _split_pipeline_spans(view):
+        segment = view[seg_start:seg_end]
         words = _shell_words(segment)
         if not words:
             continue
@@ -248,9 +310,13 @@ def plan_grep_redirect(command, cwd, timeout_wrap=None):
         # the untouched tail; rg would read stdin without them, so only the
         # GNU splice (program-word-only replacement) is safe there.
         tail_may_carry_operands = argv_end < len(words)
+        # "$t", `cmd`, *.py, {a,b} and ~ survive only as original shell text:
+        # the GNU splice keeps it, the re-quoted rg argv would freeze it.
+        expands_at_runtime = any(
+            _expands_at_runtime(segment[w.start:w.end]) for w in grep_words)
 
         rg_argv = None
-        if use_rg and not tail_may_carry_operands:
+        if use_rg and not tail_may_carry_operands and not expands_at_runtime:
             try:
                 rg_argv = grep_rg_translate.translate_grep_to_rg(
                     program_word.text, argv_texts, cwd, sorted(IGNORE_DIRS))

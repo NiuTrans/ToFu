@@ -100,6 +100,25 @@ worktrees, failed tasks and conflicts remain untouched. **Alternatives rejected:
 blind deletion loses artifacts; committing every project ignores opt-in; removing
 freshness/exclusion allows overlapping writers to corrupt delivery.
 
+**Problem:** publication permission was checked before recognizing an empty
+task delta, leaving completed read-only tasks blocked and retaining their
+clones. A removed checkout recreated as a file-history bootstrap directory
+also inherited the parent repository's Git identity and stayed retained.
+**Decision:** prove an ordinary checkpoint equals its immutable baseline before
+waiving publication permission for terminal bookkeeping. Changed checkpoints
+and conflict repair retain their publication fences. Retire a source only after
+the pinned checkpoint and durable completed receipt are verified. Revisit a
+retained path when its Git marker disappears; an unregistered directory with
+only empty directories and the file-history bootstrap marker is reconstructible.
+A different repository, registered worktree, symlink or durable file retains it.
+**Alternatives rejected:** deleting failed/conflicted sources loses recovery
+evidence; a blanket permission bypass could publish unauthorized writes; Git
+discovery without checking the checkout root mistakes the parent for the source.
+The paired regression fixtures change both the empty task and bootstrap-only
+placeholder from one retained directory to zero, while unauthorized changed
+tasks and a placeholder containing an experiment keep their one source. No
+retention timer, retry policy or extra delivery state is introduced.
+
 A recovery ref and durable pre-publication receipt precede file mutation. A lost
 final ACK is reconciled by comparing target snapshot bytes on task-delta paths,
 without replaying an already-applied patch. Later unrelated edits do not affect
@@ -109,9 +128,29 @@ Historical committed receipts remain historical facts; they are not relabelled.
 
 ## Conflict recovery
 
-The same durable integration worker retries transient writer/storage contention
-and input movement after the synchronous first attempt. No additional queue,
-model loop or detached waiting job is introduced. `origin.delivery.retry` follows
+Problem: one workspace lookup, checkpoint or publication exception aborted the
+whole recovery page and postponed unrelated deliveries. Decision: isolate each
+row's recovery, retain its existing durable debt and continue the same page.
+The existing paged worker revisits it; a page-read failure still reaches the
+worker's storage backoff. Alternatives: a second retry queue duplicates state;
+marking failed rows delivered would discard evidence. No new rows, refs or
+retention policy are introduced. The three fault cases in
+`tests/project_mod/test_delivery_recovery_isolation.py` each deliver the healthy
+row on the first pass, the failed row on the next, and perform no third-pass
+publication.
+
+The same durable integration worker retries transient writer/storage contention,
+input movement and Git spawn failures (EAGAIN, EINTR or ENOMEM with their typed
+OSError cause preserved) after the synchronous first attempt. No additional queue,
+model loop or detached waiting job is introduced. A failed capture keeps pending intent
+with `phase=checkpoint_spawn_retry`; its next durable resume re-captures through the
+existing writer lease and never trusts an empty or partial checkpoint. A legacy
+`blocked` checkpoint receipt recording exactly those spawn errors is re-attempted by
+that same pass, including after restart. Other capture failures remain blocked with
+their diagnostic and require the existing owner-scoped retry; an unchanged blocked
+receipt is not recaptured or published merely because it happens to name a checkpoint.
+Conflict/input retry evidence retains its existing separate recovery path.
+`origin.delivery.retry` follows
 `workspace_delivery_retry_v1.schema.json`: conflict fingerprints use registered
 baseline/checkpoint and current entries of task-delta paths. Unchanged conflict
 inputs skip repeated merge computation. Committing unchanged workspace bytes or
@@ -122,6 +161,34 @@ Conflict names are capped at 64 and 4,096 encoded bytes, with count/truncation
 metadata. One replaceable owner/task input ref pins the immutable dossier;
 failed receipt admission restores the previous ref. Unchanged snapshots reuse
 pinned evidence rather than creating timestamp-only retry objects.
+
+### Delivery polls compare trees
+
+Problem: every poll committed its capture of the live canonical checkout, but
+reuse of the pinned conflict source matched only when the whole checkout was
+unchanged. In a shared checkout other sessions keep editing, so each poll of a
+blocked task left one unreachable `Tofu checkpoint: <task>` commit whose parent
+is the canonical HEAD; the recheck after a merge minted another. A copy of
+Tofu's repository on 2026-10-27 held 63,012 such commits among 89,465
+unreachable loose objects (133 tasks since 2026-10-13, about 6,000 a day,
+75-160 s apart per task), which kept `git gc --auto` running on every commit
+(see "Automatic Git maintenance never runs inside commands" in
+[`runbooks/GIT_WORKSPACE_GUARD.md`](runbooks/GIT_WORKSPACE_GUARD.md)).
+
+Decision: captures are trees (`task_delta_delivery._canonical_tree`). The
+source commit is minted only for a no-change receipt or before a merge, under
+the same reuse rule; the recheck compares trees. Fingerprints are unchanged,
+because `ls-tree` of a tree equals `ls-tree` of its commit. Trees and blobs of
+canonical changes are still written: they are content-addressed and shared by
+all tasks.
+
+Alternatives rejected: deterministic commit dates still mint a commit per
+distinct capture (12,568 distinct task/tree/parent triples in that copy) and
+change checkpoint metadata; recording every poll's capture in the receipt
+changes `workspace_delivery_retry_v1.schema.json`. Verify
+`test_blocked_polls_after_unrelated_canonical_edits_mint_no_commits` and
+`test_delivery_mints_only_commits_its_refs_keep` in
+`tests/project_mod/test_continuous_delivery.py`.
 
 Failure notifications bound their UTF-8 narrative to the existing 720-byte
 Project Brain limit before storage admission; the durable delivery receipt

@@ -131,6 +131,15 @@ class NativeGateway:
         self._pending_lock = threading.RLock()
         self._lock = asyncio.Lock()
         self._closed = False
+        self._concurrent = False
+        # run_command directories planned for the latest response (model call
+        # ID -> admission ID), the commands whose approval verdict is settled
+        # and the ones whose handler entered.
+        self._command_dirs = []
+        self._command_ids = {}
+        self._decided_commands = set()
+        self._entered_commands = set()
+        self._command_lock = threading.Lock()
         self._response_round = None
         self._response_prepared = {}
         self.response_retained_bytes = 0
@@ -144,6 +153,18 @@ class NativeGateway:
         self._progress = NativeGatewayProgress(self, limits, feedback_bytes)
         return self._progress
 
+    def select_concurrent_dispatch(self):
+        """Every call of a round starts at once (owner decision 2026-10-28).
+
+        Writes no longer share the ordered lane. ``prepare_response`` binds
+        the canonical call order the native scheduler keeps for same-target
+        mutations and ``todo_write``, and freezes run_command directories.
+        """
+        with self._pending_lock:
+            if self._closed or self._response_round is not None:
+                raise ValueError('native concurrent dispatch is selected before any response')
+            self._concurrent = True
+
     def callbacks(self):
         return {name: self.execute for name in self.permissions}
 
@@ -155,12 +176,14 @@ class NativeGateway:
                 raise ValueError('native recovery has no settled unentered tool batch')
             entries = {}
             for queue in self._response_prepared.values():
-                for parsed, assistant, _ in queue:
+                for parsed, assistant, _, identity in queue:
                     item = parsed[0]
-                    identity = assistant['tool_calls'][0]['id']
                     if identity in entries:
                         raise ValueError('native recovery occurrence is ambiguous')
-                    entries[identity] = (item[1], item[2], item[4], item[5], assistant['tool_calls'][0])
+                    # Rust names the model's call; execution keeps the
+                    # admission identity bound at settlement.
+                    entries[identity] = (item[1], item[2], item[4], item[5],
+                                         dict(assistant['tool_calls'][0], id=identity))
             if len(entries) != len(calls) or any(call.get('id') not in entries for call in calls):
                 raise ValueError('native recovery requires the complete prepared batch')
             occurrences = []
@@ -202,6 +225,9 @@ class NativeGateway:
         self._identity(request)
         if self.permissions[request.name] == 'read':
             raise ValueError('native approval is not an application write')
+        if not self._resolve_command(request.call_id):
+            self._settle_command(request.call_id, False)
+            return 'denied'
         arguments, caller = request.arguments, request.caller
         proof = self._proof(request.name, arguments, caller)
         with self._pending_lock:
@@ -239,9 +265,40 @@ class NativeGateway:
                     self._pending.pop(request.call_id)
                     self._bytes -= len(proof)
                     self._release_prepared(reservation)
+            self._settle_command(request.call_id, reservation.authority is not None)
+
+    def _resolve_command(self, model_call_id):
+        """Settle an inheriting command's directory before its own decision.
+
+        Rust decides a round's approvals one at a time in call order, so each
+        earlier sibling is already decided or never will be; an undecided one
+        never moved the sticky directory. False when Stop won.
+        """
+        with self._pending_lock:
+            plan, call_id = self._command_dirs, self._command_ids.get(model_call_id)
+            if call_id is None:
+                return True
+            planned = [planned_id for planned_id, _ in plan]
+            undecided = [earlier for earlier in planned[:planned.index(call_id)]
+                         if earlier not in self._decided_commands]
+            self._decided_commands.update(undecided)
+        for earlier in undecided:
+            plan.settle(earlier, False)
+        return plan.resolve(call_id, self.task)
+
+    def _settle_command(self, model_call_id, approved):
+        """Publish a planned command's approval verdict to the commands inheriting its directory."""
+        with self._pending_lock:
+            plan, call_id = self._command_dirs, self._command_ids.get(model_call_id)
+            if call_id is None or call_id in self._decided_commands:
+                return
+            self._decided_commands.add(call_id)
+        plan.settle(call_id, approved)
 
     async def execute(self, request: ToolRequest):
         self._identity(request)
+        if self._concurrent:
+            return await self._execute_callback(request)
         if request.name in self.parallel_names:
             from lib.tasks_pkg.tool_dispatch.api import parallel_tool_names
             if request.name not in parallel_tool_names(self.task, [request.name]):
@@ -326,6 +383,8 @@ class NativeGateway:
             self._response_prepared.clear()
             self._response_round = None
             self.response_retained_bytes = 0
+            self._command_dirs, self._command_ids = [], {}
+            self._decided_commands, self._entered_commands = set(), set()
             if self._recovery_effects is not None:
                 self._recovery_effects.close()
                 self._recovery_effects = None
@@ -342,7 +401,14 @@ class NativeGateway:
             raise ValueError('native sibling declaration ownership changed')
         calls=result.evidence.get('model_calls')
         if not isinstance(calls,list):raise ValueError('native sibling declaration is missing')
+        if (result.tool_order is not None) != self._concurrent:
+            raise ValueError('native call order composition differs')
         if self.task['abort_event'].is_set():
+            if result.tool_order is not None:
+                with self._pending_lock:
+                    self._command_dirs, self._command_ids = [], {}
+                    self._decided_commands, self._entered_commands = set(), set()
+                result.tool_order.bind({})  # Stop already won; no call is admitted.
             return  # Accounting already settled; stopped calls never get tool rows.
         original=json.loads(json.dumps(calls,allow_nan=False))
         from lib.tools.contracts import compile_execution_contract_documents, validate_tool_arguments_from_documents
@@ -367,14 +433,34 @@ class NativeGateway:
         announcements={}
         def retain_entry(task,entry,event,name,number):
             announcements[id(entry)]=(entry,event,name,number)
+        # Callbacks name the model's own call IDs; parsing may normalize them.
+        model_ids=[call.get('id') for call in assistant['tool_calls']]
         parsed,_=parse_tool_calls(assistant,self.task,result.request.round,
             len(self.task.get('toolRounds') or []),self.project_enabled,
             tool_entry_publisher=retain_entry)
         if len(parsed)!=len(proofs):raise ValueError('native sibling parser lost an occurrence')
+        from lib.tasks_pkg.tool_dispatch.api import repair_prepared_call_ids
+        # Approval precedes pipeline admission here, so a recycled model ID
+        # takes its admission identity before any receipt is bound to it.
+        repair_prepared_call_ids(self.task,parsed,result.request.round,self.project_path)
+        for item in parsed:
+            event=(announcements.get(id(item[5])) or (None,None))[1]
+            if isinstance(event,dict) and event.get('toolCallId')!=item[2]:
+                event['toolCallId']=item[2]
+        order,command_dirs,command_ids={},[],{}
+        if self._concurrent:
+            from lib.tasks_pkg.tool_dispatch.api import plan_concurrent_round
+            # Proofs above keep the model's arguments; execution receives the
+            # occurrence with its working_dir frozen in call order.
+            order,command_dirs=plan_concurrent_round(self.task,parsed,self.project_path)
+            model_of={item[2]:model for item,model in zip(parsed,model_ids)}
+            order={model_of[call]:[model_of[earlier] for earlier in before]
+                   for call,before in order.items()}
+            command_ids={model_of[call]:call for call,_ in command_dirs}
         prepared=defaultdict(deque)
-        for proof,item,call in zip(proofs,parsed,assistant['tool_calls']):
+        for proof,item,call,model in zip(proofs,parsed,assistant['tool_calls'],model_ids):
             prepared[proof].append(([item],{'role':'assistant','content':'','tool_calls':[call]},
-                announcements.get(id(item[5]))))
+                announcements.get(id(item[5])),model))
         from lib.tasks_pkg.event_delivery import retained_snapshot_bytes
         charge=(sum(len(proof) for proof in proofs)+retained_snapshot_bytes(
             assistant,[call[:5]+call[6:] for call in parsed])) if parsed else 0
@@ -386,6 +472,25 @@ class NativeGateway:
             self._response_round=result.request.round
             self._response_prepared=dict(prepared)
             self.response_retained_bytes=charge
+            self._command_dirs,self._command_ids=command_dirs,command_ids
+            self._decided_commands,self._entered_commands=set(),set()
+        if result.tool_order is not None:
+            result.tool_order.bind(order)
+
+    def _command_finished(self, call_id, row):
+        """Re-assert the call-order sticky cwd as each planned command finishes.
+
+        Concurrent commands each record their own directory as they start; the
+        last one to finish leaves the directory sequential execution would.
+        A command refused before its handler never moved the directory.
+        """
+        from lib.tasks_pkg.tool_dispatch.api import restore_command_sticky_cwd
+        with self._command_lock:
+            with self._pending_lock:
+                if row.get('status') != 'rejected':
+                    self._entered_commands.add(call_id)
+                planned, entered = list(self._command_dirs), set(self._entered_commands)
+            restore_command_sticky_cwd(self.task, planned, entered)
 
     def _release_prepared(self, reservation):
         prepared, reservation.prepared = reservation.prepared, None
@@ -471,13 +576,13 @@ class NativeGateway:
                 identity = (request.call_id if isinstance(request, ApprovalRequest)
                             else request.model_call_id or request.call_id)
                 if identity is None:
-                    parsed,assistant,announcement=prepared.popleft()
+                    parsed,assistant,announcement,_=prepared.popleft()
                 else:
-                    match = next((item for item in prepared if item[0][0][2] == identity), None)
+                    match = next((entry for entry in prepared if entry[3] == identity), None)
                     if match is None:
                         raise ValueError('native callback occurrence differs from its model declaration')
                     prepared.remove(match)
-                    parsed,assistant,announcement=match
+                    parsed,assistant,announcement,_=match
                 if not prepared:
                     del self._response_prepared[proof]
                 if not self._response_prepared:
@@ -521,6 +626,8 @@ class NativeGateway:
                 raise ValueError('Application approved round identity changed')
         call = assistant['tool_calls'][0]
         parsed_id = parsed[0][2]
+        with self._pending_lock:
+            planned_command = any(call_id == parsed_id for call_id, _ in self._command_dirs)
         if approved is not None:
             from lib.tasks_pkg.tool_dispatch._approval import approval_receipt_authority
             # The shared decision already minted a live exact receipt. Keep its
@@ -540,10 +647,14 @@ class NativeGateway:
             if call_id == parsed_id:
                 execution_status = canonical.execution_status
 
-        execute_tool_pipeline(self.task, parsed, json.loads(self.configuration),
-            self.project_path, self.project_enabled, json.loads(self.tool_list),
-            messages, self.search_results, round_num, self.model, publish_direct_gateway_siblings=False,
-            internal_result_sink=SimpleNamespace(capture=capture_outcome) if self._progress is not None else None)
+        try:
+            execute_tool_pipeline(self.task, parsed, json.loads(self.configuration),
+                self.project_path, self.project_enabled, json.loads(self.tool_list),
+                messages, self.search_results, round_num, self.model, publish_direct_gateway_siblings=False,
+                internal_result_sink=SimpleNamespace(capture=capture_outcome) if self._progress is not None else None)
+        finally:
+            if planned_command:
+                self._command_finished(parsed_id, parsed[0][5])
         results = [item for item in messages if item.get('role') == 'tool']
         if len(results) != 1 or results[0].get('tool_call_id') != parsed_id:
             raise RuntimeError('canonical gateway did not settle one exact tool result')

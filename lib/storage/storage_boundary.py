@@ -10,6 +10,8 @@ import json
 import socket
 import subprocess
 
+from runtime_guards import pid_is_alive
+
 
 _DRIVERS = frozenset({'sqlite3', 'psycopg', 'psycopg2'})
 _BANNED_CALLS = frozenset({
@@ -437,12 +439,10 @@ def _owner_record(path: Path, *, kind: str) -> dict[str, object]:
             record['active'] = True
             record['status'] = 'running_foreign_host'
             return record
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            record['status'] = 'stale'
-        else:
+        if pid_is_alive(pid):
             record['active'] = True
+        else:
+            record['status'] = 'stale'
     except (OSError, ValueError, KeyError, TypeError, IndexError,
             json.JSONDecodeError):
         record['status'] = 'unverifiable'

@@ -24,7 +24,11 @@ var _VLM_STORAGE_KEY = 'tofu_vlm_pending';
 /** Save current pendingPdfTexts + VLM task state to sessionStorage. */
 function _vlmSaveState() {
   try {
-    var items = pendingPdfTexts.map(function(p) {
+    // An in-flight upload cannot resume after reload (its File is gone), and an
+    // archive chip is only a label for an already-mounted project root.
+    var items = pendingPdfTexts.filter(function(p) {
+      return p && p.method !== 'parsing' && !p._archive;
+    }).map(function(p) {
       return {
         name: p.name, text: p.text, pages: p.pages,
         textLength: p.textLength, isScanned: p.isScanned,
@@ -494,7 +498,9 @@ async function handlePDFUpload(file) {
       "[PDF] Backend parse failed for '%s':",
       file.name, err.message, err,
     );
-    // Remove this PDF's placeholder entry on failure
+    // Remove this PDF's placeholder entry on failure; a send that captured it
+    // stops waiting and drops it.
+    pdfObj.method = "failed";
     const failIdx = pendingPdfTexts.indexOf(pdfObj);
     if (failIdx >= 0) pendingPdfTexts.splice(failIdx, 1);
     renderImagePreviews();
@@ -610,13 +616,12 @@ function _looksLikeVideo(f) {
   return _VIDEO_EXTS.has(_getFileExt(f.name || ''));
 }
 
-// ── Project-archive drop (ChatGPT-style: drop a .zip/.tar.gz of source) ──
-// An archive is a FOLDER, not a file: its value is the tree (\\input{chapters/…},
-// figure paths), so it is extracted server-side into a managed workspace and
-// mounted as a project root — never flattened into an attachment blob. Extraction
-// reuses the hardened lib.paper.archive (zip-slip/link defense, 512-file/64-MiB
-// budget); the mount reuses the tested set_paths path. This is what lets a
-// dropped Overleaf/arXiv TeX export go straight to a COMPILABLE project.
+// ── Archive drop (ChatGPT-style: drop a .zip/.tar.gz on the composer) ──
+// The archive is stored verbatim in a fresh managed workspace directory that
+// is then mounted as a project root; nothing is extracted. The model unpacks
+// it with its own workspace tools when the task needs the contents, so an
+// upload is one sequential write whatever its member count. The mount reuses
+// the tested set_paths path.
 var _ARCHIVE_EXTS = new Set([
   '.zip', '.tar', '.tgz', '.tbz2', '.txz', '.gz', '.bz2', '.xz',
 ]);
@@ -631,6 +636,20 @@ function _isArchiveFile(f) {
     || n.endsWith('.tar.bz2') || n.endsWith('.tar.xz');
 }
 
+var _ARCHIVE_MIME_EXTS = {
+  'application/zip': '.zip', 'application/x-zip-compressed': '.zip',
+  'application/x-tar': '.tar', 'application/gzip': '.gz',
+  'application/x-gzip': '.gz', 'application/x-bzip2': '.bz2',
+  'application/x-xz': '.xz',
+};
+/** The server keys the stored archive on its suffix; restore one from MIME. */
+function _archiveUploadName(f) {
+  const name = f.name || 'archive';
+  const lowered = name.toLowerCase();
+  if (_ARCHIVE_EXTS.has(_getFileExt(lowered))) return name;
+  return name + (_ARCHIVE_MIME_EXTS[(f.type || '').toLowerCase()] || '.zip');
+}
+
 /** Format an approximate byte count for the chip meta line. */
 function _fmtBytes(b) {
   b = Math.max(0, Math.round(b || 0));
@@ -640,63 +659,72 @@ function _fmtBytes(b) {
 }
 
 /**
- * Drop / pick a source archive on the composer. Shows a chip immediately,
- * extracts server-side into a managed workspace, then mounts the extracted
- * folder as a project root (reusing _addDropDirAsRoot → set_paths) and — when
- * the archive holds a TeX main document — fires the paper-preview discovery
- * hint so the panel can offer a compile immediately.
+ * Drop / pick an archive on the composer. Shows a chip immediately, stores the
+ * archive unextracted in a managed workspace directory, then mounts that
+ * directory as a project root (reusing _addDropDirAsRoot → set_paths). The
+ * chip stays `parsing` until the mount settles: a send waits for it because
+ * the turn captures project roots before submission.
  */
 async function handleArchiveUpload(f) {
+  const uploadName = _archiveUploadName(f);
+  const controller = new AbortController();
   const chip = {
-    name: f.name || 'archive.zip',
-    text: '', pages: 0, textLength: 0, isScanned: false,
-    method: 'parsing',               // drives the shared progress bar text
+    name: uploadName,
+    text: '', pages: 0, textLength: f.size || 0, isScanned: false,
+    method: 'parsing',
     kind: 'archive', _archive: true,
     _docIcon: Icon('archive', 22),
+    _uploadAbort: controller,
   };
   pendingPdfTexts.push(chip);
   renderImagePreviews();
   const fd = new FormData();
-  fd.append('file', f, f.name || 'archive.zip');
+  fd.append('file', f, uploadName);
   let data;
   try {
-    data = await Api.media.expandArchive(fd);
+    data = await Api.media.storeArchive(fd, { signal: controller.signal });
     if (!data || data.ok === false || !data.path)
-      throw new Error((data && (data.error || data.message)) || 'extraction failed');
+      throw new Error((data && (data.error || data.message)) || 'upload failed');
   } catch (e) {
+    chip.method = 'failed';
+    delete chip._uploadAbort;
     const idx = pendingPdfTexts.indexOf(chip);
     if (idx >= 0) pendingPdfTexts.splice(idx, 1);
     renderImagePreviews();
+    if (chip._removed) return;
     const msg = String((e && e.message) || e);
     if (typeof showToast === 'function') showToast(t('archive.failed'), 'error', chip.name + ': ' + msg, 6000);
-    else debugLog('Archive extract failed: ' + chip.name + ' — ' + msg, 'error');
+    else debugLog('Archive upload failed: ' + chip.name + ' — ' + msg, 'error');
     return;
   }
-  const texCount = (data.texMainCandidates || []).length;
+  delete chip._uploadAbort;
   Object.assign(chip, {
-    method: 'archive',
-    textLength: data.bytes || 0,
-    pages: data.files || 0,
-    _fileCount: data.files || 0,
-    _texCount: texCount,
+    textLength: data.bytes || chip.textLength,
+    name: data.archiveName || chip.name,
     _path: data.path,
-    name: data.directory || chip.name,
+    _archivePath: data.archivePath,
   });
+  if (!chip._removed) {
+    // Primary root if none yet, else an extra root; existing roots are kept.
+    try {
+      if (typeof _addDropDirAsRoot === 'function') await _addDropDirAsRoot(data.path);
+      debugLog(t('archive.stored', { name: chip.name }), 'success');
+    } catch (e) {
+      debugLog('Archive stored but project mount failed: ' + ((e && e.message) || e), 'warn');
+    }
+  }
+  chip.method = 'archive';
   renderImagePreviews();
-  // Mount the extracted folder as a project root (primary if none yet, else an
-  // extra root) so the model can actually read/compile the tree. Reuses the
-  // tested set_paths apply path and preserves existing roots.
-  try {
-    if (typeof _addDropDirAsRoot === 'function') await _addDropDirAsRoot(data.path);
-  } catch (e) {
-    debugLog('Archive extracted but project mount failed: ' + ((e && e.message) || e), 'warn');
+}
+
+// Send gate: the turn captures project roots before submission, so an archive
+// still uploading or mounting would be invisible to the model in this turn.
+async function _waitForPendingArchives() {
+  const deadline = Date.now() + 2 * 60 * 1000;
+  while (pendingPdfTexts.some(p => p && p._archive && p.method === 'parsing')) {
+    if (Date.now() > deadline) break;
+    await new Promise(r => setTimeout(r, 100));
   }
-  // An extracted TeX project feeds the paper-preview cold-start hint.
-  if (texCount && typeof runtimeScope !== 'undefined'
-      && runtimeScope._paperPreviewDiscover && runtimeScope.activeConvId) {
-    try { runtimeScope._paperPreviewDiscover(runtimeScope.activeConvId, { path: data.path }); } catch (_e) { /* hint only */ }
-  }
-  debugLog(t('archive.extracted', { n: data.files || 0 }) + (texCount ? ' · ' + t('archive.texFound', { n: texCount }) : ''), 'success');
 }
 
 function _fmtVideoDur(s) {
@@ -839,6 +867,9 @@ async function _waitForPendingVideos() {
 }
 
 // ── Document upload (Word, Excel, PPT, plain text) → server-side parse ──
+// Optimistic like PDFs: the chip appears at once in the `parsing` state (a send
+// waits for it), removing the chip aborts the request, and a failure removes
+// the chip with a visible reason. Indexing a large text can take a long time.
 async function handleDocUpload(file) {
   const pEl = document.getElementById("pdfProgress"),
     pText = document.getElementById("pdfProgressText"),
@@ -856,26 +887,41 @@ async function handleDocUpload(file) {
                    '.csv':Icon('fileSheet',22), '.json':Icon('fileCode',22), '.xml':Icon('fileCode',22), '.py':Icon('fileCode',22), '.js':Icon('fileCode',22),
                    '.html':Icon('fileCode',22), '.yaml':Icon('cog',22), '.yml':Icon('cog',22)};
   const icon = iconMap[ext] || Icon('file',22);
+  const controller = new AbortController();
+  const docObj = {
+    name: file.name || uploadName, text: "", pages: 0, textLength: 0,
+    isScanned: false, method: "parsing", _docIcon: icon,
+    _uploadAbort: controller,
+  };
+  pendingPdfTexts.push(docObj);
+  renderImagePreviews();
 
   try {
     const formData = new FormData();
     formData.append("file", file, uploadName);
-    const data = await Api.media.upload(formData);
+    const data = await Api.media.upload(formData, { signal: controller.signal });
     const attachment = data && data.attachment;
     if (!attachment || !attachment.attachmentId)
       throw new Error((data && data.error) || "Attachment indexing failed");
-
-    const docObj = {
-      ...attachment,
-      name: attachment.name || file.name,
+    delete docObj._uploadAbort;
+    if (docObj._removed) {
+      // Removed while the response was already in flight: release the copy.
+      docObj.method = "failed";
+      void Api.media.remove(attachment.attachmentId).catch((error) => {
+        debugLog('Document attachment cleanup failed: ' + error.message, 'warn');
+      });
+      pEl.style.display = "none";
+      return;
+    }
+    // Mutate in place: a send that captured the chip mid-upload holds this object.
+    Object.assign(docObj, attachment, {
+      name: attachment.name || docObj.name,
       text: "",
       pages: attachment.pages || 1,
       textLength: attachment.textChars || 0,
       isScanned: false,
       method: attachment.method || ext,
-      _docIcon: icon,
-    };
-    pendingPdfTexts.push(docObj);
+    });
     renderImagePreviews();
     _vlmSaveState();  // Persist doc upload for refresh recovery
 
@@ -888,6 +934,15 @@ async function handleDocUpload(file) {
     debugLog(`Doc parsed: ${file.name} — ${sizeStr}, method: ${data.method}`, "success");
     setTimeout(() => { pEl.style.display = "none"; }, 2500);
   } catch (err) {
+    delete docObj._uploadAbort;
+    docObj.method = "failed";
+    const failIdx = pendingPdfTexts.indexOf(docObj);
+    if (failIdx >= 0) pendingPdfTexts.splice(failIdx, 1);
+    renderImagePreviews();
+    if (docObj._removed) {
+      pEl.style.display = "none";
+      return;
+    }
     console.warn("[Doc] Parse failed:", err.message);
     pText.textContent = `⚠️ Failed to parse "${file.name}": ${err.message}`;
     pFill.style.width = "0%";
@@ -917,14 +972,14 @@ function renderImagePreviews() {
               : "";
       const methodLabel = pdf.method === "vlm" ? "VLM" : (pdf._archive ? "ZIP" : "TEXT");
       const docIcon = pdf._docIcon || Icon('file',22);
-      // An archive chip reports the extracted tree (files + size) and any TeX
-      // mains found, not a text parse; while extracting it carries the shared
-      // parsing spinner via the global progress bar.
+      // An archive chip reports its stored size, not a text parse.
       const archiveMeta = pdf._archive
         ? (pdf.method === 'parsing'
-            ? t('archive.extracting')
-            : `${pdf._fileCount || 0} ${t('archive.files')} · ${sizeStr}${pdf._texCount ? ' · ' + t('archive.texBadge', { n: pdf._texCount }) : ''}`)
-        : `${pdf.pages}p · ${sizeStr}${badge}`;
+            ? t('archive.uploading')
+            : `${sizeStr} · ${t('archive.notExtracted')}`)
+        : (pdf.method === 'parsing'
+            ? t('upload.processing')
+            : `${pdf.pages}p · ${sizeStr}${badge}`);
       return `<div class="img-preview pdf-text-card${pdf._archive ? ' archive-card' : ''}" data-tofu-action="previewPendingPdfText(${i})"><div class="pdf-text-card-inner"><div class="pdf-text-icon">${docIcon}</div><div class="pdf-text-info"><div class="pdf-text-name" title="${escapeHtml(pdf.name)}">${escapeHtml(pdf.name.length > 20 ? pdf.name.slice(0, 18) + "…" : pdf.name)}</div><div class="pdf-text-meta">${archiveMeta}</div>${vlmBadge}</div></div><button class="remove-img" data-tofu-action="event.stopPropagation();removePdfText(${i})">✕</button><div class="img-size">${methodLabel}</div></div>`;
     })
     .join("");
@@ -1091,7 +1146,11 @@ document.addEventListener('drop', (e) => {
 }, true);  // capture: run before the full-page file-drop handler
 function removePdfText(i) {
   const entry = pendingPdfTexts[i];
-  if (entry) entry._vlmAlive = false; // Kill VLM polling for this entry
+  if (entry) {
+    entry._vlmAlive = false; // Kill VLM polling for this entry
+    entry._removed = true;
+    entry._uploadAbort?.abort();
+  }
   if (entry?._vlmTaskId && Api.pdf?.vlmCancel) {
     void Api.pdf.vlmCancel(entry._vlmTaskId).catch((error) => {
       debugLog('VLM task cancellation failed: ' + error.message, 'warn');

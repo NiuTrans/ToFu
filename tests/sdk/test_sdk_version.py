@@ -11,8 +11,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_python_sdk_release_identity(monkeypatch):
-    monkeypatch.syspath_prepend(str(ROOT / 'clients/python'))
+def test_python_sdk_release_identity():
     from tofu_sdk import Tofu, __version__
     from tofu_sdk.async_client import AsyncTofu
 

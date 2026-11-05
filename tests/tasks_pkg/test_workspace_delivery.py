@@ -760,7 +760,7 @@ def test_background_command_captures_execution_view_without_parent_task(
     task = _task(workspace['root'])
     delivery.bind_worker_workspace(task)
     seen = {}
-    def start(*, task, config, command, execute):
+    def start(*, task, config, command, execute, credentials=None):
         # The long-lived callback must not pin parent messages/tool rounds.
         assert all(cell.cell_contents is not task for cell in execute.__closure__ or ())
         command_task = BackgroundCommandTask(task)

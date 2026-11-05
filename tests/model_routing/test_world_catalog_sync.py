@@ -53,6 +53,12 @@ def test_newly_shipped_models_land_in_empty_authority():
     assert _has_model(document, 'gemini-3.8-flash')
     assert _has_model(document, 'claude-fable-5-1')
     assert _has_model(document, 'muse-spark-1.3')
+    assert _has_model(document, 'deepseek-v4.1-flash-1017')
+    snapshot = next(row for row in document['models']
+                    if row['model_id'] == 'deepseek-v4.1-flash-1017')
+    assert snapshot['registration_state'] == 'ready'
+    assert snapshot['registration_metadata']['release_date'] == '2026-10-17'
+    assert snapshot['lifecycle'] == 'dated_snapshot'
     creators = {row['creator_id'] for row in document['creators']}
     assert {'openai', 'anthropic', 'google', 'meta'} <= creators
     # Registry-only sync: provider supply collections stay untouched.
@@ -259,7 +265,7 @@ def test_retired_template_models_are_pruned_from_registry():
     assert followup['pruned'] == 0
     assert not _has_model(repository.get(boundary).document, 'gpt-6-astra-pro')
     # deepseek-chat is GLOBALLY retired (official 2026-07-24; the stale
-    # Meituan-gateway authorship was removed 2026-09-06): never inserted.
+    # YourProvider-gateway authorship was removed 2026-09-06): never inserted.
     assert not _has_model(repository.get(boundary).document, 'deepseek-chat')
 
 
@@ -267,7 +273,7 @@ def test_no_template_authors_a_retired_identity():
     """Anti-oscillation invariant: retired is global.
 
     deepseek-chat/deepseek-reasoner flipped in and out of the registry when
-    deepseek.json retired them while meituan.json still authored them — the
+    deepseek.json retired them while yourprovider.json still authored them — the
     UI's retired chip advised removal, a PUT wiped the rows, and the next
     boot sync re-inserted them.  No shipped template may author an offering
     whose canonical identity any template retires; the sync's catalogue

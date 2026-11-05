@@ -31,8 +31,10 @@ def artifact_bundle():
     source = root/'frontend/src/runtime/sections/artifacts.js'
     # Shipping imports are relative to composed runtime/app-runtime.js. Compile
     # the actual adapter/typed presenter graph rather than eval ESM as classic JS.
-    contents = 'const runtimeScope = window;\n' + source.read_text().replace(
-        "'../rich-response/artifact-delivery'", repr(str(root/'frontend/src/rich-response/artifact-delivery.ts')))
+    contents = 'const runtimeScope = window;\n' + source.read_text()
+    for owner in ('artifact-delivery', 'artifact-review'):
+        contents = contents.replace(f"'../rich-response/{owner}'",
+                                    repr(str(root/f'frontend/src/rich-response/{owner}.ts')))
     with compiled_typescript(source, contents=contents) as bundle:
         yield bundle
 
@@ -104,6 +106,7 @@ const { window, check, report } = setup({
       return { artifacts: [] };
     } } },
     ConversationSurfacePresentation: {
+      isMounted: () => true,
       setArtifacts(conversationId, byTurn) {
         applied.push([conversationId, byTurn.size]);
       },

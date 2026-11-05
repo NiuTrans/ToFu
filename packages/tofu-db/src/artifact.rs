@@ -173,7 +173,7 @@ fn materialize_blob(
     )?;
     let mut output = Vec::new();
     output.try_reserve_exact(reference.logical_bytes as usize)
-        .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+        .map_err(crate::resource_exhaustion::reservation_error)?;
     while let Some(chunk) = reader.next_chunk()? {
         if output.len().saturating_add(chunk.len()) > maximum {
             return Err(invalid_data(

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="tofu">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Tofu · 长任务交互设计</title>
+  <link rel="stylesheet" href="../../frontend/src/styles/application/00-design-tokens.css">
+  <link rel="stylesheet" href="../../frontend/src/styles/application/11-tofu-theme-foundation.css">
+  <link rel="stylesheet" href="prototype.css">
+  <script src="prototype.js" defer></script>
+</head>
+<body>
+  <div class="design-bar">
+    <span><strong>交互设计稿</strong><span class="design-note"> · 全部为示例数据，不连接真实任务</span></span>
+    <div><label for="scenario">查看状态</label><select id="scenario"><option value="waiting">等待决定</option><option value="running">正在执行</option><option value="delivered">成果已生成</option><option value="interrupted">执行中断</option><option value="stopped">已停止</option></select><button id="reset" class="quiet">重置</button></div>
+  </div>
+  <div class="app">
+    <aside class="sidebar" aria-label="项目与会话">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">◇</span><strong>Tofu</strong><span class="brand-tools" aria-hidden="true">⌕ &nbsp; ⚙</span></div>
+      <button class="new-work" data-action="demo"><span aria-hidden="true">＋</span><span id="newWorkLabel">新对话</span></button>
+      <div class="sidebar-columns">
+        <nav class="projects" aria-label="项目">
+          <p class="eyebrow">项目</p>
+          <button class="project" data-action="demo"><i class="project-icon">TO</i><span>tofu</span></button>
+          <button class="project selected" aria-current="true"><i class="project-icon research-icon">研</i><span>自动科研</span></button>
+          <button class="project" data-action="demo"><i class="project-icon papers-icon">文</i><span>论文阅读</span></button>
+          <button class="project" data-action="demo"><i class="project-icon">HA</i><span>harness</span></button>
+          <div class="project-footer">＋ 新建项目</div>
+        </nav>
+        <div class="conversation-list">
+          <button class="coordinator" data-action="coordinator"><span class="coordinator-icon" aria-hidden="true">⌘</span><span><strong>项目负责人</strong><small>3 项工作 · 1 项待你处理</small></span></button>
+          <nav class="list-tabs" aria-label="当前项目内容"><button data-view="chat" class="selected">对话</button><button data-view="workbench">工作</button></nav>
+          <p class="eyebrow">今天</p>
+          <button class="conversation selected" data-action="current"><strong class="task-title">长上下文记忆研究</strong><small><span class="state-dot"></span><span class="state-label">待你选择实验路线</span></small></button>
+          <button class="conversation" data-action="demo"><strong>梳理评测数据集</strong><small>阶段报告已生成</small></button>
+          <button class="conversation" data-action="demo"><strong>论文阅读与讨论</strong><small>关于检索覆盖率的几个问题</small></button>
+          <p class="eyebrow past-label">更早</p>
+          <button class="conversation" data-action="demo"><strong>复现基线结果</strong><small>已结束 · 查看实验记录</small></button>
+          <p class="sidebar-footnote">同一项目中的对话与工作</p>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <button class="mobile-nav quiet" data-action="navigation" aria-label="打开导航">☰</button>
+        <div class="breadcrumb"><span>自动科研</span><span aria-hidden="true">/</span><strong class="task-title">长上下文记忆研究</strong></div>
+        <nav class="feature-nav" aria-label="工作视图"><button data-action="paper">论文</button><button data-view="workbench">工作室</button><button data-action="demo">知识库</button></nav>
+      </header>
+      <section id="chatView" aria-label="任务对话">
+        <div class="task-strip"><div><span class="state-dot"></span><button class="text-button state-label" data-action="attention" title="跳到最新问题或任务回执">待你选择实验路线</button><span class="strip-phase">比较方案</span></div><button class="text-button" data-view="workbench">打开工作台 <span aria-hidden="true">↗</span></button></div>
+        <div class="chat-scroll" id="chatScroll">
+          <div class="reading-column">
+            <div class="user-message">帮我研究长上下文记忆方案，比较已有论文，找出值得验证的方向，再做实验。</div>
+            <article class="assistant-message">
+              <div class="speaker"><span class="tofu-avatar" aria-hidden="true">T</span><strong>Tofu</strong><span>持续任务</span></div>
+              <p>我会先梳理方法和证据，再比较候选方向，最后用实验检验。资料、讨论和结果都会保留在这项工作里。</p>
+              <div class="accepted-line"><span aria-hidden="true">✓</span> 已关联当前项目与会话 <button class="text-button" data-action="scope">查看目标与范围</button></div>
+            </article>
+            <details class="process-fold"><summary><span class="process-mark" aria-hidden="true">✓</span> 文献检索与初步比较 <span>阶段记录</span></summary><p>示例记录：材料已整理，候选方法已归类。完整工具调用与原始证据从这里展开；它们不会逐条占据主对话。</p></details>
+            <article class="assistant-message milestone">
+              <div class="speaker"><span class="tofu-avatar" aria-hidden="true">T</span><strong>Tofu</strong><span>阶段汇报 · 保留当时的结论</span></div>
+              <h1>先验证“能否找回”，再比较成本。</h1>
+              <p>当前可以沿两条路线继续：压缩上下文，或把信息放到可检索的外部记忆。建议先检验外部记忆在跨文档问题上的召回，再判断效率收益是否值得。</p>
+              <p class="qualification">这是待实验检验的方向，现有文献比较还不足以证明效果。</p>
+              <div class="artifact-row"><button class="artifact" data-document="comparison"><span class="file-icon" aria-hidden="true">▤</span><span><strong>文献与方法对照</strong><small>来源、适用条件与证据缺口</small></span><span aria-hidden="true">↗</span></button><button class="artifact" data-document="protocol"><span class="file-icon" aria-hidden="true">▤</span><span><strong>候选实验草案</strong><small>两条路线 · 尚未执行</small></span><span aria-hidden="true">↗</span></button></div>
+            </article>
+            <div class="decision-slot"></div>
+            <section class="state-notice" data-state-notice hidden></section>
+            <div id="chatUpdates" class="message-updates"></div>
+          </div>
+        </div>
+        <form class="composer chat-composer" id="chatComposer">
+          <div class="composer-meta"><span>▱ 自动科研</span><button type="button" class="text-button" data-action="target">补充任务要求</button><details class="control-menu"><summary>任务控制</summary><div><button type="button" data-action="pause">本轮结束后暂停</button><button type="button" data-action="stop" class="danger-text">停止整个任务</button></div></details></div>
+          <div class="scope-chip" id="chatScope" hidden><span>针对：<span class="task-title">长上下文记忆研究</span></span><button type="button" data-action="clear-target" aria-label="取消任务定向">×</button></div>
+          <label class="sr-only" for="chatInput">发送消息</label><textarea id="chatInput" rows="2" placeholder="继续讨论，或为这项工作补充要求…"></textarea>
+          <div class="composer-bottom"><span class="model-label">✳ Claude Opus 5.5 <span aria-hidden="true">⌄</span></span><span class="compose-mode" id="composeMode">普通对话</span><button type="submit" class="send" aria-label="发送消息">↑</button></div>
+        </form>
+      </section>
+      <section id="workbenchView" aria-label="任务工作台" hidden>
+        <div class="workbench-scroll">
+          <header class="workbench-header"><div><div class="eyebrow">自动科研 <span aria-hidden="true">/</span> 持续工作</div><h1 class="task-title">长上下文记忆研究</h1><p>比较已有方法，形成可检验的方向与实验结果。</p></div><button class="button" data-view="chat">← 返回对话</button></header>
+          <div class="workbench-status"><span><span class="state-dot"></span><strong class="state-label">待你选择实验路线</strong></span><span class="pause-label" hidden>本轮结束后暂停</span><details class="control-menu"><summary>任务控制</summary><div><button data-action="pause">本轮结束后暂停</button><button data-action="stop" class="danger-text">停止整个任务</button></div></details></div>
+          <nav class="work-tabs" role="tablist" aria-label="任务内容"><button id="tab-overview" role="tab" aria-selected="true" aria-controls="panel-overview" data-tab="overview">概览</button><button id="tab-literature" role="tab" aria-selected="false" tabindex="-1" aria-controls="panel-literature" data-tab="literature">文献与证据</button><button id="tab-experiments" role="tab" aria-selected="false" tabindex="-1" aria-controls="panel-experiments" data-tab="experiments">实验</button><button id="tab-results" role="tab" aria-selected="false" tabindex="-1" aria-controls="panel-results" data-tab="results">成果</button><button id="tab-history" role="tab" aria-selected="false" tabindex="-1" aria-controls="panel-history" data-tab="history">过程记录</button></nav>
+          <div class="workbench-columns">
+            <div class="work-content">
+              <section id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" tabindex="0">
+                <article class="research-brief"><div class="document-kicker"><span>当前判断</span><span class="outline-tag">待实验检验</span></div><h2>优先检验外部记忆的召回边界。</h2><p class="lead">信息存得下，并不意味着需要时找得回。下一步先检查跨文档问题上的证据召回，再比较质量与成本。</p><div class="evidence-note"><span>依据与限制</span><p>示例材料指出两类不同的失效方式：压缩可能遗漏细节，检索可能遗漏相关片段。需要在同一组问题上比较，才能判断取舍。</p><button class="text-button" data-document="comparison">查看方法对照与来源 ↗</button></div></article>
+                <section class="comparison"><div class="section-heading"><h2>两条候选路线</h2><button class="text-button" data-tab="experiments">查看实验草案 ↗</button></div><div class="comparison-head"><span>方向</span><span>要验证什么</span><span>现有条件</span></div><button class="comparison-row" data-document="protocol"><strong><span class="option-letter">A</span> 外部记忆</strong><span>跨文档证据能否被找回</span><span>可复用评测集</span></button><button class="comparison-row" data-document="protocol"><strong><span class="option-letter">B</span> 上下文压缩</strong><span>压缩后关键细节是否丢失</span><span>需要补充对照</span></button><p class="caption">先选择验证路线；未执行的实验不显示结果。</p></section>
+                <section class="milestones"><h2>推进到哪里了</h2><ol><li class="done"><span>✓</span><div><strong>整理文献</strong><small>已形成方法对照</small></div></li><li class="current"><span>•</span><div><strong>比较方案</strong><small id="milestoneCaption">等待选择实验路线</small></div></li><li><span>○</span><div><strong>实验验证</strong><small>依据选择继续</small></div></li><li><span>○</span><div><strong>审查与交付</strong><small>逐项检查目标</small></div></li></ol></section>
+              </section>
+              <section id="panel-literature" role="tabpanel" aria-labelledby="tab-literature" tabindex="0" hidden><h2>文献与证据</h2><p class="muted">每条材料都保留它支持什么、尚不能说明什么。</p><div class="source-list"><button data-document="comparison"><span class="source-number">01</span><span><strong>外部记忆与检索 · 示例材料</strong><small>支持方法分类，不能证明本任务上的效果</small></span><span>↗</span></button><button data-document="comparison"><span class="source-number">02</span><span><strong>上下文压缩 · 示例材料</strong><small>关注细节保留与压缩强度的关系</small></span><span>↗</span></button></div><p class="caption">设计稿中的材料和结论均为合成示例。</p></section>
+              <section id="panel-experiments" role="tabpanel" aria-labelledby="tab-experiments" tabindex="0" hidden><h2>最小验证实验</h2><p class="lead">在同一批跨文档问题上，比较原始上下文与候选方法。</p><dl class="protocol"><dt>观察对象</dt><dd>关键证据的召回与回答正确性</dd><dt>对照</dt><dd>保留原始上下文的基线</dd><dt>需要固定</dt><dd>数据、问题集、模型与评分方式</dd><dt>可能的判断</dt><dd>支持方向、否定方向，或证据不足</dd></dl><div class="state-notice">这是实验草案。选择路线后才能安排执行。</div><button class="button" data-document="protocol">检查完整草案</button></section>
+              <section id="panel-results" role="tabpanel" aria-labelledby="tab-results" tabindex="0" hidden><h2>成果</h2><p class="muted">阶段产物可以随时查看；产出与验收分开呈现。</p><div class="source-list"><button data-document="comparison"><span class="file-icon">▤</span><span><strong>文献与方法对照</strong><small>阶段产物 · 已生成</small></span><span>↗</span></button><button data-document="report"><span class="file-icon">▤</span><span><strong>研究简报</strong><small id="reportState">草稿 · 尚未完成实验</small></span><span>↗</span></button></div></section>
+              <section id="panel-history" role="tabpanel" aria-labelledby="tab-history" tabindex="0" hidden><h2>过程记录</h2><p class="muted">保留执行与人工操作记录，展开查看原始依据。</p><ol class="history-list"><li><strong>目标已接收</strong><p>关联自动科研项目和来源对话。</p></li><li><strong>文献与方法对照已生成</strong><p>形成候选方向，尚未得到实验结果。</p></li><li><strong>需要选择实验路线</strong><p>提出推荐与替代路线，等待明确选择。</p></li></ol><div id="historyUpdates"></div><details class="process-fold"><summary>查看工具与执行记录</summary><p>接入时复用现有 Turn 与任务记录；本设计稿不包含真实工具执行。</p></details></section>
+            </div>
+            <aside class="work-context" aria-label="下一步与任务交流"><div class="decision-slot compact"></div><section class="state-notice" data-state-notice hidden></section><section class="task-discussion"><div class="section-heading"><h2>与这项工作交流</h2><button class="text-button" data-view="chat">完整对话 ↗</button></div><p class="context-intro">这里的补充会回到同一份任务记录。</p><div id="workUpdates" class="message-updates"><p class="muted">还没有补充要求。</p></div><form class="composer small-composer" id="workComposer"><label class="sr-only" for="workInput">补充任务要求</label><textarea id="workInput" rows="3" placeholder="例如：先只考虑开源方法…"></textarea><div class="composer-bottom"><span class="caption">针对当前任务</span><button type="submit" class="send" aria-label="发送任务补充">↑</button></div></form></section><details class="quiet-details"><summary>目标、验收与用量</summary><p>目标：比较已有方法，得到可检验的方向。</p><p>验收：引用可追溯；实验可复现；明确未解决问题。</p><p>用量仅在有记录时展示。此处没有真实消耗数据。</p></details></aside>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <dialog id="reader" class="reader"><header><span id="readerType">阶段产物</span><button class="quiet" data-action="close-reader" aria-label="关闭预览">×</button></header><div id="readerBody"></div><footer><button class="button" data-action="reader-to-workbench">在工作台查看</button><button class="text-button" data-action="quote">引用到任务交流</button></footer></dialog>
+  <dialog id="newTask" class="new-task-dialog"><form id="newTaskForm"><header><h2>交代一项目标</h2><button type="button" class="quiet" data-action="close-new" aria-label="关闭新目标">×</button></header><p class="muted">沿用当前项目。你可以先说目标，再逐步补充。</p><label for="objective">你想完成什么？</label><textarea id="objective" rows="4" required placeholder="例如：比较这个方向的论文，给出值得验证的方案。"></textarea><div class="template-buttons"><button type="button" data-template="literature">文献调研</button><button type="button" data-template="experiment">实验验证</button></div><details><summary>范围与验收（可选）</summary><label for="acceptance">希望交付什么、需要满足什么</label><textarea id="acceptance" rows="3" placeholder="可补充材料范围、交付物和验收要求。"></textarea></details><p class="caption">演示表单：提交后查看目标预览，不连接真实执行。</p><button type="submit" class="button primary">开始持续推进</button></form></dialog>
+  <dialog id="navigation" class="navigation-dialog"><header><strong>自动科研</strong><button class="quiet" data-action="close-nav" aria-label="关闭导航">×</button></header><button class="button" data-view="chat">返回对话</button><button class="button" data-view="workbench">打开工作台</button><button class="button" data-action="new">新目标</button></dialog>
+  <div id="toast" role="status" class="toast" hidden></div>
+  <span id="announcement" class="sr-only" role="status" aria-live="polite"></span>
+</body>
+</html>

@@ -2,6 +2,9 @@
 
 Map: `docs/modules/ingest_media.md`; scientific validity lives in
 `docs/RESEARCH_CYCLE.md`, compilation in `docs/PAPER_BUILDS.md`.
+Paired quality/effort measurement: `docs/RESEARCH_EVALUATION.md`,
+`quality_comparison.py` and `benchmarks/research_quality_compare.py`; verify
+the quality comparison, efficiency comparison and benchmark CLI suites.
 
 - `program.py` normalizes `contracts/research_program_v1.schema.json` and
   derives readiness. `workspace.py` owns revision CAS and server-written
@@ -75,6 +78,9 @@ Map: `docs/modules/ingest_media.md`; scientific validity lives in
   workspace CAS publishes its root. Verify `test_research_source_index.py`
   and `test_research_source_publication.py` for publication/ACK failures. Full
   paged source consumption/backfill uses `test_research_paged_sources.py`.
+  `PreparedSourceIndex` shares reachable-node preparation with pending indexes;
+  `test_research_index_preparation.py` covers exact storage readback, retained
+  node work, independent branch overlap, caller context and joined failures.
 - `progress_index.py` prepares run/basis-scoped pending source/job tries;
   `test_research_progress_index.py` guards delta parity, scope, ACK and restart.
   `progress_checkpoint.py` binds index deltas to published receipt heads; verify

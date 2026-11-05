@@ -49,6 +49,7 @@ from lib.project_mod.command_analysis import (
     _classify_git_invocation,
     git_invocation_parts,
 
+    git_apply_option_evidence,
     git_command_words,
     git_integration_option_evidence,
     git_worktree_lifecycle,
@@ -426,6 +427,9 @@ def command_diagnostics(command: str) -> dict:
                 entry['riskyOptions'] = list(dict.fromkeys(option_evidence.risky_options))[:16]
                 entry['hasUnknownOptions'] = bool(option_evidence.unknown_options)
                 entry['hasExternalExecution'] = bool(option_evidence.external_options)
+            elif verb == 'apply':
+                risky_options = git_apply_option_evidence(args).risky_options
+                entry['riskyOptions'] = list(dict.fromkeys(risky_options))[:16]
             segments.append(entry)
         else:
             omitted += 1

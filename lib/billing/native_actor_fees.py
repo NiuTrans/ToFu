@@ -54,7 +54,7 @@ def _validator():
 
 
 def decode(evidence, *, owner_user_id, root_task_id, actor_task_id):
-    from lib.billing.cost import native_task_cost
+    from lib.billing.native_cost import native_task_cost
     try:
         _validator().validate(evidence)
         if (type(owner_user_id) is not int or type(evidence['owner_user_id']) is not int
@@ -91,7 +91,7 @@ def decode(evidence, *, owner_user_id, root_task_id, actor_task_id):
 
 
 def capture(child):
-    from lib.billing.cost import NativeChildFeeGrant
+    from lib.billing.native_cost import NativeChildFeeGrant
     grant = child.get('_nativeChildFeeGrant')
     if child.get('_nativePricingRequired') is not True and grant is None:
         return None  # Legacy/unpriced is absent evidence, never a zero-fee proof.

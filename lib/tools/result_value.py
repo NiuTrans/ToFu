@@ -125,6 +125,9 @@ def tool_result_failure_verdict(content):
     Only the outer operation owns its verdict. A completed batch can retain
     failed children, and partial source/retention coverage is not execution failure.
     """
+    from lib.tools.result_envelope import ToolResultEnvelopeV2
+    if isinstance(content, ToolResultEnvelopeV2):
+        content = content.to_envelope_text()
     value = (content if isinstance(content, CapturedToolResult)
              else getattr(content, 'canonical', None))
     if isinstance(value, CapturedToolResult):
@@ -139,6 +142,9 @@ def tool_result_failure_verdict(content):
 
 
 def capture_result(content: Any, *, execution_status=None, source_coverage=None):
+    from lib.tools.result_envelope import ToolResultEnvelopeV2
+    if isinstance(content, ToolResultEnvelopeV2):
+        content = content.to_envelope_text()
     existing = content if isinstance(content, CapturedToolResult) else getattr(content, 'canonical', None)
     if isinstance(existing, CapturedToolResult):
         changes = {}
@@ -233,16 +239,28 @@ def posthook_result(content, hook):
     return TrustedResultText(projection, canonical=value, envelope=envelope)
 
 def _text_chunks(text: str):
-    """Slice on code-point boundaries without splitting a UTF-8 byte sequence."""
-    start = size = 0
-    for index, char in enumerate(text):
-        width = len(char.encode('utf-8'))
-        if size + width > _ARTIFACT_TEXT_CHUNK_BYTES and index > start:
-            yield text[start:index]
-            start, size = index, 0
-        size += width
-    if start < len(text):
-        yield text[start:]
+    """Slice on code-point boundaries without splitting a UTF-8 byte sequence.
+
+    Each chunk is the longest code-point prefix of the remaining text whose
+    UTF-8 encoding fits the chunk size, and at least one code point. The text
+    is encoded once; a cut backs off continuation bytes (``0b10xxxxxx``) to
+    the lead byte of the straddling code point.
+    """
+    data = text.encode('utf-8')
+    start, total = 0, len(data)
+    while total - start > _ARTIFACT_TEXT_CHUNK_BYTES:
+        end = start + _ARTIFACT_TEXT_CHUNK_BYTES
+        while end > start and data[end] & 0xC0 == 0x80:
+            end -= 1
+        if end == start:
+            # One code point is wider than the chunk size: it becomes a chunk.
+            end += 1
+            while end < total and data[end] & 0xC0 == 0x80:
+                end += 1
+        yield data[start:end].decode('utf-8')
+        start = end
+    if start < total:
+        yield data[start:].decode('utf-8')
 
 
 def persist_result(value, *, user_id, now_ms=None):

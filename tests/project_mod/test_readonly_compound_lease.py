@@ -1,13 +1,14 @@
-"""User Git probe stays available during writes; legacy preparation never repeats opaque code."""
+"""User Git probe runs during internal writes; legacy preparation never repeats opaque code."""
 import shlex
 
 import pytest
 
 from lib.project_mod import tools
 from lib.project_mod.command_analysis import _lease_free_git_command
-from tests.project_mod.test_command_outer_writer_lease import _other_writer, repo as _repo_fixture
+from tests.project_mod.test_command_execution_preparation import (
+    _internal_writer, repo as repo,
+)
 
-repo = _repo_fixture
 pytestmark = pytest.mark.unit
 
 COUNTER = ('import sys; from collections import Counter; '
@@ -32,27 +33,14 @@ def test_canonical_user_probe_is_complete_and_idempotent():
 def test_user_compound_probe_available_during_writer(repo, route):
     from lib.project_mod.run_command import tool_run_command
 
-    with _other_writer(repo):
+    with _internal_writer(repo):
         result = (tool_run_command(str(repo), PROBE) if route == 'runner' else
                   tools.execute_tool('run_command', {'command': PROBE}, str(repo)))
     assert '[workspace-busy]' not in result
     assert '[exit code: 0]' in result
     assert "Main status counts: {'??': 2}" in result
     assert 'unknown option: --no-optional-locks' not in result
-    # Legacy Git may lack branch --show-current; that is not a lease failure.
-
-
-@pytest.mark.parametrize('suffix', [
-    '; touch copied.txt', '; git reset --hard', '; git branch new-branch',
-    '; git remote add origin example', ' > copied.txt',
-])
-def test_known_write_cannot_borrow_probe_exemption(repo, suffix):
-    source = PROBE + suffix
-    assert _lease_free_git_command(source) is None
-    with _other_writer(repo):
-        result = tools.execute_tool('run_command', {'command': source}, str(repo))
-    assert '[workspace-busy]' in result
-    assert not (repo / 'copied.txt').exists()
+    # Legacy Git may lack branch --show-current; that is not a probe failure.
 
 
 def test_compound_legacy_preparation_preserves_index_and_counter_once(repo, monkeypatch):

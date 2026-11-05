@@ -1,4 +1,5 @@
 /** Memory-modal presentation for the shared bounded skill-package installer. */
+import { chooseSkillDestination } from '../skills/library';
 import { featureRegistry } from '../../feature-registry';
 import type { I18nKey } from '../../i18n';
 import {
@@ -11,7 +12,7 @@ import {
 type MemoryInstallBindings = Window & {
   Api?: {
     skills?: {
-      install(form: FormData): Promise<SkillPackageInstallResponse | null>;
+      install(form: FormData, projectPath?: string): Promise<SkillPackageInstallResponse | null>;
     };
   };
   t?: (key: I18nKey, values?: Record<string, unknown>) => string;
@@ -76,13 +77,18 @@ function installedMessage(body: SkillPackageInstallBody): string {
   return message;
 }
 
+let installProjectPath = '';
 const installer = createSkillPackageInstaller({
   install: (form) => {
     const api = bindings().Api?.skills;
     if (!api) throw new Error('Skills API is not ready');
-    return api.install(form);
+    return api.install(form, installProjectPath);
   },
-  pickScope: () => selectedScope(),
+  pickScope: async (file) => {
+    const destination = await chooseSkillDestination(file.name);
+    installProjectPath = destination?.projectPath || '';
+    return destination?.scope || null;
+  },
   showInvalidFile: () => {
     showMemoryInstallToast(translate('memory.notZip'), true);
   },

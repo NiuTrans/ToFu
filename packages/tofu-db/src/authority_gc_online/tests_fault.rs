@@ -556,10 +556,13 @@ fn online_gc_rewrite_old_segment_removal_fault_preserves_live_blocks() {
     let seed = rewrite_seed(true);
     let trace = epoch_trace(&seed.vfs, 2);
     let control_writes = control_write_indexes(&trace);
+    // The checkpoint left the fallback slot on the retired WAL generation,
+    // so the epoch's loose deletion first republishes both slots (rule S8);
+    // the rewrite then publishes and stabilizes its catalog.
     assert_eq!(
         control_writes.len(),
-        2,
-        "rewrite epoch publishes and stabilizes CONTROL: {trace:?}"
+        3,
+        "loose deletion stabilizes, rewrite publishes and stabilizes CONTROL: {trace:?}"
     );
 
     let (vfs, database) = open_fork(&seed.vfs);
@@ -833,12 +836,14 @@ fn marked_epoch_for_test(
         suspects_directory,
         suspects_next: None,
         temp_candidate_next: None,
-        orphan_candidate_next: None,
         segment_dead_next: BTreeMap::new(),
         confirmed_loose: Vec::new(),
+        unlinked_loose: Vec::new(),
         confirmed_temp: None,
         rewrite_victim: None,
         compaction_ids: Vec::new(),
+        compaction_failure: None,
+        copy_failure: None,
         confirmed_loose_planned: false,
         rewrite_planned: false,
         compaction_planned: false,
@@ -846,10 +851,11 @@ fn marked_epoch_for_test(
         reclaimed_bytes: 0,
         reclaimed_blocks: 0,
         temporary_files_removed: 0,
-        orphan_segments_removed: 0,
         segments_rewritten: 0,
         segments_retired: 0,
         compacted_blocks: 0,
+        compaction_segments: 0,
+        redundant_copies_removed: 0,
         consolidations: 0,
         consolidated_victims: 0,
         consolidation: None,
@@ -937,5 +943,48 @@ fn every_online_epoch_rewrite_sync_loss_keeps_control_slots_reopenable() {
             1,
             "old segment retired, replacement published: {operation:?} occurrence={occurrence}"
         );
+    }
+}
+
+/// Rule S8 under faults. In the pruned-history fixture the fallback slot
+/// names the pruned manifest, so the deleting epoch republishes both CONTROL
+/// slots before its first loose unlink. After a fault at every operation of
+/// that epoch, a crash image that still holds two valid slots must recover
+/// from the older one too; reopening must recover the value, and a fresh
+/// collector must converge with both slots recoverable.
+#[test]
+fn every_online_epoch_fallback_stabilization_fault_keeps_both_slots_recoverable() {
+    use super::tests_fallback_slot::{durable_slots, key, pruned_history_authority, recover_from_fallback};
+    let seed = Arc::new(DeterministicVfs::new(None));
+    seed.create_dir(Path::new("/data")).unwrap();
+    seed.sync_directory(Path::new("/")).unwrap();
+    drop(pruned_history_authority(seed.clone()));
+    seed.crash().unwrap();
+    let trace = epoch_trace(&seed, 2);
+    assert_eq!(control_write_indexes(&trace).len(), 1, "the deleting epoch stabilizes once: {trace:?}");
+    assert!(trace.contains(&Operation::RemoveFile));
+    let cases = fault_cases(&trace);
+    eprintln!("fallback stabilization fault matrix: {} cases / {} operations", cases.len(), trace.len());
+
+    for (operation, occurrence, action) in cases {
+        let case = format!("{operation:?} occurrence={occurrence} action={action:?}");
+        let (vfs, database, _collector) =
+            exercise_epoch_fault(&seed, 2, operation, occurrence, action);
+        vfs.arm_fault(None).unwrap();
+        let image = vfs.fork_durable().unwrap();
+        if durable_slots(&image).len() == 2 {
+            let (_, value) = recover_from_fallback(&image)
+                .unwrap_or_else(|error| panic!("{case}: the older slot lost its roots: {error}"));
+            assert_eq!(value, b"value-v3", "{case}");
+        }
+        let database = crash_and_reopen(&vfs, database);
+        assert_live_value(&database, &key(), b"value-v3");
+        let mut collector = OnlineGarbageCollector::new(test_budget());
+        run_epoch(&mut collector, &database);
+        run_epoch(&mut collector, &database);
+        assert_live_value(&database, &key(), b"value-v3");
+        let (_, value) = recover_from_fallback(&vfs)
+            .unwrap_or_else(|error| panic!("{case}: converged slots lost their roots: {error}"));
+        assert_eq!(value, b"value-v3", "{case}");
     }
 }

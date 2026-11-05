@@ -15,7 +15,7 @@ export function mountGoalConversation(host:HTMLElement,ports:{
   const drafts=new Map<string,string>();
   const attempts=new Map<string,{content:string;key:string;kind:'message'|'followup'}>();
   const abort=new AbortController();
-  host.innerHTML=`<header class="evo-conversation-heading"><span class="evo-conversation-avatar" aria-hidden="true">T</span><div><p>${text('coordinator')}</p><h2>${text('conversationTitle')}</h2></div></header><p class="evo-conversation-objective"></p><p class="evo-conversation-state" role="status"></p><button type="button" class="evo-button evo-conversation-question" data-studio-action="details" hidden>${text('askHuman')} ↗</button><button type="button" class="evo-button evo-conversation-older" data-dialogue="older">${text('earlierMessages')}</button><div class="evo-conversation-log" aria-label="${text('conversationTitle')}"></div><p class="evo-conversation-error" role="alert" hidden></p><p class="evo-conversation-notice" role="status"></p><div class="evo-conversation-recovery"></div><form class="evo-conversation-form"><label for="evo-message">${text('messageLabel')}</label><textarea id="evo-message" name="message" rows="3" maxlength="4000" required placeholder="${text('messagePlaceholder')}"></textarea><div class="evo-conversation-actions"><button class="evo-button evo-primary" type="submit">${text('sendMessage')} ↗</button><button type="button" class="evo-button" data-dialogue="followup">${text('executeFollowup')}</button></div><p class="evo-conversation-hint">${text('messageHint')}</p></form>`;
+  host.innerHTML=`<p class="evo-conversation-state" role="status"></p><button type="button" class="evo-button evo-conversation-older" data-dialogue="older">${text('earlierMessages')}</button><div class="evo-conversation-log" role="log" aria-label="${text('coordinator')}"></div><p class="evo-conversation-error" role="alert" hidden></p><p class="evo-conversation-notice" role="status"></p><div class="evo-conversation-recovery"></div><form class="evo-conversation-form"><label class="evo-sr-only" for="evo-message">${text('messageLabel')}</label><textarea id="evo-message" name="message" rows="3" maxlength="4000" required></textarea><div class="evo-conversation-actions"><button class="evo-button evo-primary" type="submit">${text('sendMessage')}</button><button type="button" class="evo-button" data-dialogue="followup">${text('executeFollowup')}</button></div></form>`;
   const q=<T extends HTMLElement>(selector:string)=>host.querySelector<T>(selector)!;
   const input=q<HTMLTextAreaElement>('textarea');
   function remember(){if(run){drafts.delete(run.run_id);drafts.set(run.run_id,input.value);while(drafts.size>8)drafts.delete(drafts.keys().next().value!);}}
@@ -27,8 +27,7 @@ export function mountGoalConversation(host:HTMLElement,ports:{
   }
   function render(){
     if(disposed)return;
-    q('.evo-conversation-objective').textContent=run?.objective||copy('roomNoGoal');
-    q('.evo-conversation-state').textContent=copy(!state?'conversationLoading':state.coordinator.status==='running'?'coordinatorThinking':state.coordinator.status==='needs_attention'?'coordinatorBlocked':'conversationReady');
+    q('.evo-conversation-state').textContent=copy(!state?'conversationLoading':state.coordinator.status==='running'?'coordinatorThinking':state.coordinator.status==='needs_attention'?'coordinatorBlocked':'idle');
     const timeline=entries.map(event=>{
       const receipt=state?.delivery[String(event.seq)];
       const role=event.origin==='user'?'messageYou':event.kind==='reply'?'coordinator':'activityRecord';
@@ -37,13 +36,13 @@ export function mountGoalConversation(host:HTMLElement,ports:{
       return `<article class="evo-message" data-key="event-${event.seq}" data-origin="${event.origin}"><header><strong>${text(role)}</strong><small>#${event.seq}</small></header>${['message','reply'].includes(event.kind)?body:`<details><summary>${text('event_'+event.kind)}</summary>${body}</details>`}${receipt?`<footer class="evo-message-receipt" data-status="${receipt.status}"><span>${text('receipt_'+receipt.status)}</span>${receipt.note?`<p>${esc(receipt.note)}</p>`:''}</footer>`:''}</article>`;
     }).join('');
     const log=q('.evo-conversation-log'),followTail=!loading&&log.scrollHeight-log.clientHeight-log.scrollTop<80;
-    patch(log,timeline||`<div class="evo-conversation-empty"><h3>${text('conversationEmptyTitle')}</h3><p>${text('conversationEmpty')}</p></div>`);
+    patch(log,timeline||'<p class="evo-empty-mark">—</p>');
     if(followTail)log.scrollTop=log.scrollHeight;
     q('.evo-conversation-older').hidden=!earlier;q<HTMLButtonElement>('.evo-conversation-older').disabled=loading;
     q('.evo-conversation-error').textContent=error;q('.evo-conversation-error').hidden=!error;
     q('.evo-conversation-notice').textContent=notice;
     const followup=state?.followup;
-    patch(q('.evo-conversation-recovery'),`${run&&attempts.has(run.run_id)&&!busy?`<button type="button" class="evo-button" data-dialogue="retry">${text('retryMessage')}</button>`:''}${state?.coordinator.status==='needs_attention'||notice===copy('wakePending')?`<button type="button" class="evo-button" data-dialogue="recover">${text('checkCoordinator')}</button>`:''}${followup?.status==='submitted'?`<button type="button" class="evo-button" data-dialogue="openFollowup">${text('openFollowup')} ↗</button>`:''}`);
+    patch(q('.evo-conversation-recovery'),`${run&&attempts.has(run.run_id)&&!busy?`<button type="button" class="evo-button" data-dialogue="retry">${text('retryMessage')}</button>`:''}${state?.coordinator.status==='needs_attention'||notice===copy('wakePending')?`<button type="button" class="evo-button" data-dialogue="recover">${text('checkCoordinator')}</button>`:''}${followup?.status==='submitted'?`<button type="button" class="evo-button" data-dialogue="openFollowup">${text('openFollowup')}</button>`:''}`);
     const terminal=!!run&&['completed','failed','needs_attention','cancelled'].includes(run.status);
     q('[data-dialogue=followup]').hidden=!terminal||!!followup;
     host.querySelectorAll<HTMLButtonElement>('.evo-conversation-actions button').forEach(button=>button.disabled=!run||busy);
@@ -70,7 +69,7 @@ export function mountGoalConversation(host:HTMLElement,ports:{
         attempts.delete(id);drafts.delete(id);
         if(disposed||run?.run_id!==id)return;
         input.value='';entries=[...entries.filter(e=>e.seq!==response.update.seq),response.update].sort((a,b)=>a.seq-b.seq).slice(-128);
-        notice=copy(response.coordinator.status==='pending'?'wakePending':'messageSaved');render();
+        notice=response.coordinator.status==='pending'?copy('wakePending'):'';render();
         await ports.refresh();
       }
     }catch(reason){
@@ -103,10 +102,9 @@ export function mountGoalConversation(host:HTMLElement,ports:{
   }
   input.addEventListener('input',remember);host.addEventListener('submit',submit);host.addEventListener('click',click);
   return {
-    update(next:EvolutionRun|undefined,page?:GoalCoordination,readError='',questionCount=0){
+    update(next:EvolutionRun|undefined,page?:GoalCoordination,readError=''){
       if(disposed)return;
       if(run?.run_id!==next?.run_id){remember();entries=[];state=undefined;earlier=false;error='';notice='';input.value=next?drafts.get(next.run_id)||'':'';}
-      q('.evo-conversation-question').hidden=questionCount===0;
       run=next;if(page)merge(page);if(readError)error=readError;render();
     },
     dispose(){disposed=true;abort.abort();drafts.clear();attempts.clear();input.removeEventListener('input',remember);host.removeEventListener('submit',submit);host.removeEventListener('click',click);},

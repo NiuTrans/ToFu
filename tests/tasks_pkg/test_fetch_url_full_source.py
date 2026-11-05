@@ -190,8 +190,15 @@ def test_real_four_megabyte_chunk_boundary_retains_tail():
     source = 'A' * (4 * 1024 * 1024 - 2) + '🙂' + 'TAIL_RECORD=61'
     result = CapturedToolResult((ResultPart('text', source),))
     ref = persist_result(result, user_id=17)
-    hits = ToolResultArtifactRepository().search(
-        user_id=17, artifact_ref=ref, query='TAIL_RECORD')
+    repository = ToolResultArtifactRepository()
+    hits = repository.search(user_id=17, artifact_ref=ref, query='TAIL_RECORD')
+    # One page scans for at most the contract's scanSeconds and then returns a
+    # continuation; a slow host reaches the tail on a later page, not never.
+    for _ in range(64):
+        if hits['items'] or not hits.get('nextCursor'):
+            break
+        hits = repository.search(user_id=17, artifact_ref=ref, query='TAIL_RECORD',
+                                 cursor=hits['nextCursor'])
     assert hits['items']
     assert hits['items'][0]['path'] == ['/parts/1']
 

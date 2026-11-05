@@ -287,21 +287,28 @@ fn diff_value(
         }
         (Value::Object(before), Value::Object(after)) => diff_objects(before, after, path, operations)?,
         (Value::Array(before), Value::Array(after)) => {
-            let shared = before.len().min(after.len());
-            for index in 0..shared {
-                path.push(PathPart::Array(index));
-                diff_value(&before[index], &after[index], path, operations)?;
+            let (start, evicted) = evicted_run(before, after);
+            for _ in 0..evicted {
+                path.push(PathPart::Array(start));
+                push_operation(operations, json!({"op": "remove", "path": path_json(path)}))?;
                 path.pop();
             }
-            if after.len() < before.len() {
+            let retained = before.len() - evicted;
+            let shared = retained.min(after.len());
+            for index in start..shared {
+                path.push(PathPart::Array(index));
+                diff_value(&before[index + evicted], &after[index], path, operations)?;
+                path.pop();
+            }
+            if after.len() < retained {
                 push_operation(
                     operations,
                     json!({"op": "truncate", "path": path_json(path), "length": after.len()}),
                 )?;
-            } else if after.len() > before.len() {
+            } else if after.len() > retained {
                 push_operation(
                     operations,
-                    json!({"op": "append", "path": path_json(path), "value": &after[before.len()..]}),
+                    json!({"op": "append", "path": path_json(path), "value": &after[retained..]}),
                 )?;
             }
         }
@@ -311,6 +318,43 @@ fn diff_value(
         )?,
     }
     Ok(())
+}
+
+/// Items re-sent when `after[i]` is diffed against `before[offset + i]`.
+fn unaligned_items(before: &[Value], after: &[Value], offset: usize) -> usize {
+    let retained = &before[offset..];
+    let overlap = retained.len().min(after.len());
+    let changed = retained[..overlap]
+        .iter()
+        .zip(&after[..overlap])
+        .filter(|(before, after)| before != after)
+        .count();
+    changed + (after.len() - overlap)
+}
+
+/// `(start, count)`: the first divergence and the run a bounded window evicted
+/// there, mirroring the Python producer. Full sliding windows (activity
+/// timeline, trace status history) shift every later index per new row; the
+/// run starts at the head or behind rows the window retains (an error, a
+/// compaction receipt). The count is zero unless it re-sends fewer items than
+/// the index alignment. Items before `start` are equal; the caller diffs from
+/// there.
+fn evicted_run(before: &[Value], after: &[Value]) -> (usize, usize) {
+    let shared = before.len().min(after.len());
+    let Some(start) = (0..shared).find(|&index| before[index] != after[index]) else {
+        return (shared, 0);
+    };
+    let Some(evicted) =
+        (1..before.len() - start).find(|&offset| before[start + offset] == after[start])
+    else {
+        return (start, 0);
+    };
+    let (before, after) = (&before[start..], &after[start..]);
+    if evicted + unaligned_items(before, after, evicted) < unaligned_items(before, after, 0) {
+        (start, evicted)
+    } else {
+        (start, 0)
+    }
 }
 
 fn diff_objects(
@@ -427,6 +471,87 @@ mod tests {
         assert!(operation_kinds.contains("truncate"));
         assert!(operation_kinds.contains("remove"));
         assert!(operation_kinds.contains("set"));
+        assert_eq!(
+            apply_projection_patch(Some(before.as_object().unwrap()), &patch).unwrap(),
+            *after.as_object().unwrap(),
+        );
+    }
+
+    #[test]
+    fn full_window_eviction_removes_the_head_instead_of_rewriting_rows() {
+        let row = |index: u64| json!({"id": format!("status:{index}"), "count": 1, "tEnd": 1000 + index});
+        let rows = (0..128).map(row).collect::<Vec<_>>();
+        let mut updated_tail = rows[127].clone();
+        updated_tail["count"] = json!(2);
+        let mut retained = rows[1..127].to_vec();
+        retained.extend([updated_tail, row(128)]);
+        let before = json!({"timingTrace": {"statusHistory": rows}});
+        let after = json!({"timingTrace": {"statusHistory": retained}});
+        let patch = build_projection_patch(
+            before.as_object().unwrap(),
+            after.as_object().unwrap(),
+            7,
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            patch["operations"],
+            json!([
+                {"op": "remove", "path": ["timingTrace", "statusHistory", 0]},
+                {"op": "set", "path": ["timingTrace", "statusHistory", 126, "count"], "value": 2},
+                {"op": "append", "path": ["timingTrace", "statusHistory"], "value": [row(128)]},
+            ]),
+        );
+        assert_eq!(
+            apply_projection_patch(Some(before.as_object().unwrap()), &patch).unwrap(),
+            *after.as_object().unwrap(),
+        );
+    }
+
+    #[test]
+    fn eviction_behind_a_retained_head_removes_only_the_evicted_rows() {
+        let row = |index: u64| json!({"id": format!("activity:{index}"), "seq": index});
+        let rows = (0..128).map(row).collect::<Vec<_>>();
+        let mut retained = vec![rows[0].clone()];
+        retained.extend(rows[3..].iter().cloned());
+        retained.push(row(128));
+        let before = json!({"activityTimeline": {"entries": rows}});
+        let after = json!({"activityTimeline": {"entries": retained}});
+        let patch = build_projection_patch(
+            before.as_object().unwrap(),
+            after.as_object().unwrap(),
+            7,
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            patch["operations"],
+            json!([
+                {"op": "remove", "path": ["activityTimeline", "entries", 1]},
+                {"op": "remove", "path": ["activityTimeline", "entries", 1]},
+                {"op": "append", "path": ["activityTimeline", "entries"], "value": [row(128)]},
+            ]),
+        );
+        assert_eq!(
+            apply_projection_patch(Some(before.as_object().unwrap()), &patch).unwrap(),
+            *after.as_object().unwrap(),
+        );
+    }
+
+    #[test]
+    fn rotation_keeps_index_alignment_when_eviction_would_resend_more() {
+        let before = json!({"items": ["a", "b", "c", "d"]});
+        let after = json!({"items": ["d", "a", "b", "c"]});
+        let patch = build_projection_patch(
+            before.as_object().unwrap(),
+            after.as_object().unwrap(),
+            1,
+            2,
+        )
+        .unwrap();
+        let operations = patch["operations"].as_array().unwrap();
+        assert_eq!(operations.len(), 4);
+        assert!(operations.iter().all(|operation| operation["op"] == "set"));
         assert_eq!(
             apply_projection_patch(Some(before.as_object().unwrap()), &patch).unwrap(),
             *after.as_object().unwrap(),

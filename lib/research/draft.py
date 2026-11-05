@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from lib.identity import require_user_id
+from lib.error_envelope import BadRequest
 from lib.llm.llm_json import extract_json
 from lib.log import audit_log, get_logger
 
@@ -144,21 +145,21 @@ def draft_protocol(
     clean_direction = str(direction or '').strip()[:2_000]
     clean_idea_id = str(idea_id or '').strip()[:160]
     if not clean_direction or not clean_idea_id:
-        raise ValueError('direction and idea_id are required')
+        raise BadRequest('direction and idea_id are required', field='idea_id')
     norm_lang = 'zh' if lang == 'zh' else 'en'
     if source_task_id is None:
         artifacts = load_research_artifacts(clean_direction, norm_lang, user_id=user_id)
     else:
         if not isinstance(source_task_id, str) or not source_task_id:
-            raise ValueError('source_task_id must identify a saved research task')
+            raise BadRequest('source_task_id must identify a saved research task', field='source_task_id')
         from .records import load_idea_source
         artifacts = load_idea_source(source_task_id, user_id=user_id,
             direction=clean_direction, lang=norm_lang, idea_id=clean_idea_id)
     if not artifacts.get('found'):
-        raise ValueError('no persisted research artifacts for this direction')
+        raise BadRequest('no persisted research artifacts for this direction', field='direction')
     idea = _find_idea(artifacts.get('accepted'), clean_idea_id)
     if idea is None:
-        raise ValueError('unknown idea_id for this direction')
+        raise BadRequest('unknown idea_id for this direction', field='idea_id')
     gap = _find_gap(artifacts.get('open_gaps'), str(idea.get('linked_gap_id') or ''))
 
     from lib.llm.stream_result import require_verified_provider_stream_result

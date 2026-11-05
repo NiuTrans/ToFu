@@ -28,7 +28,6 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -39,7 +38,6 @@ from tests._paper_vite import compiled_typescript
 pytestmark = pytest.mark.unit
 
 QA_TS = os.path.join(ROOT, 'frontend', 'src', 'features', 'paper', 'qa.ts')
-ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 _BODY = r"""
@@ -171,8 +169,6 @@ def _run_qa_contract(qa_js: str) -> None:
     )
 
 
-@pytest.mark.skipif(not shutil.which('node') or not os.path.isfile(ESBUILD),
-                    reason='node + vite test bundler dev dependency required')
 def test_vite_paper_qa_contract():
     with compiled_typescript(
         QA_TS,

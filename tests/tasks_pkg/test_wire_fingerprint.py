@@ -162,7 +162,7 @@ def test_common_text_shapes_skip_generic_recursive_normalization(monkeypatch):
     ]
 
     for message in messages:
-        fields, _tool_key = (
+        fields, _tool_key, _result_blocks = (
             fingerprint_module._canonical_fields_and_tool_key(message))
         assert fields
 
@@ -235,11 +235,11 @@ def test_combined_capture_joins_serialized_fields_without_preconcat(monkeypatch)
     ['nested', {'value': 1}],
 ])
 def test_wire_value_fast_path_matches_stdlib_json(value):
-    """Primitive shortcuts must preserve the exact raw-byte comparison."""
+    """Primitive shortcuts preserve the sealed wire's compact JSON exactly."""
     import lib.tasks_pkg.wire_fingerprint as fingerprint_module
 
     assert fingerprint_module._dump_wire_json_value(value) == json.dumps(
-        value, ensure_ascii=False, sort_keys=False)
+        value, ensure_ascii=False, separators=(',', ':'))
 
 
 def test_shared_wire_json_encoder_is_parallel_reentrant():
@@ -256,7 +256,7 @@ def test_shared_wire_json_encoder_is_parallel_reentrant():
             fingerprint_module._WIRE_JSON_ENCODER.encode, values))
 
     expected = [json.dumps(
-        value, ensure_ascii=False, sort_keys=False) for value in values]
+        value, ensure_ascii=False, separators=(',', ':')) for value in values]
     assert actual == expected
 
 
@@ -276,16 +276,18 @@ def test_combined_capture_invalid_json_keeps_standalone_fallback_parity():
 
 
 def test_prepare_request_uses_one_combined_message_capture(monkeypatch):
-    """The live transport boundary does not restore three history scans."""
+    """The live transport boundary does not restore three history scans, and
+    its byte views hash the sealed slices without serializing again."""
     import lib.tasks_pkg.wire_fingerprint as fingerprint_module
     from lib.llm._sse_core import prepare_request
 
     real_capture = fingerprint_module.capture_wire_message_evidence
     captured = []
 
-    def _capture(messages):
+    def _capture(messages, **kwargs):
         captured.append(messages)
-        return real_capture(messages)
+        assert kwargs['sealed'] is not None
+        return real_capture(messages, **kwargs)
 
     monkeypatch.setattr(
         fingerprint_module, 'capture_wire_message_evidence', _capture)
@@ -301,6 +303,10 @@ def test_prepare_request_uses_one_combined_message_capture(monkeypatch):
         fingerprint_module, 'wire_byte_field_prefix',
         lambda *_args, **_kwargs: pytest.fail(
             'prepare_request must use combined capture'))
+    monkeypatch.setattr(
+        fingerprint_module, '_dump_wire_json_value',
+        lambda *_args, **_kwargs: pytest.fail(
+            'marker-free sealed messages are never serialized again'))
 
     plan = prepare_request(
         {'model': 'gpt-4o', 'messages': [
@@ -313,6 +319,7 @@ def test_prepare_request_uses_one_combined_message_capture(monkeypatch):
     )
 
     assert len(captured) == 1
+    monkeypatch.undo()
     expected = real_capture(captured[0])
     assert plan.raw_dumper.wire_fp == expected.canonical
     assert plan.raw_dumper.wire_bytes == expected.message_bytes
@@ -501,3 +508,120 @@ def test_static_prefix_hash_stable_and_sensitive():
     changed_sys = [{'role': 'system', 'content': 'sys-CHANGED'},
                    {'role': 'user', 'content': 'u'}]
     assert static_prefix_hash(base) != static_prefix_hash(changed_sys)
+
+
+# ── MERGED TOOL RESULTS: the culprit is the block that changed ──
+#
+# Incident mvywcu5qqy5ocy round 3: the Anthropic translation merges one
+# round's tool results into ONE user message. L1 compaction replaced only the
+# second of three image results, yet the culprit named the merged message's
+# FIRST block (the load_skill result). Tool ids keep the production 12-char
+# tails the culprit label is built from.
+
+_SKILL_ID = 'toolu_01AbCd5yozUTuvU9X1'
+_IMAGE_IDS = ('toolu_01EfGhKq3vB8xLm2Np', 'toolu_01IjKlZydohm1sPTGD',
+              'toolu_01MnOpWt7cR4yHs9Fj')
+_COMPACTED_IMAGE = '[image omitted by context compaction]'
+
+
+def _image_result(index):
+    return [{'type': 'text', 'text': f'image {index}'},
+            {'type': 'image_url',
+             'image_url': {'url': f'data:image/png;base64,IMG{index}'}}]
+
+
+def _openai_tool_round(*, compacted=()):
+    """One round of API-form messages: four parallel tool results."""
+    ids = (_SKILL_ID,) + _IMAGE_IDS
+    calls = [{'id': call_id, 'type': 'function',
+              'function': {'name': 'load_skill' if call_id == _SKILL_ID
+                           else 'inspect_image', 'arguments': '{}'}}
+             for call_id in ids]
+    results = [{'role': 'tool', 'tool_call_id': _SKILL_ID,
+                'content': 'skill body'}]
+    for index, call_id in enumerate(_IMAGE_IDS, start=1):
+        results.append({'role': 'tool', 'tool_call_id': call_id,
+                        'content': (_COMPACTED_IMAGE if call_id in compacted
+                                    else _image_result(index))})
+    return ([{'role': 'user', 'content': 'go'},
+             {'role': 'assistant', 'content': '', 'tool_calls': calls}]
+            + results)
+
+
+def _anthropic_wire(openai_messages):
+    from lib.llm.anthropic_outbound import openai_body_to_anthropic
+    body = openai_body_to_anthropic(
+        {'model': 'claude-opus-4-8', 'max_tokens': 1024,
+         'messages': copy.deepcopy(openai_messages)})
+    return body['messages']
+
+
+def test_merged_tool_result_names_only_the_changed_block():
+    before = _anthropic_wire(_openai_tool_round())
+    after = _anthropic_wire(_openai_tool_round(compacted=(_IMAGE_IDS[1],)))
+    # The translation really merged all four results into one wire message.
+    assert [block['type'] for block in before[-1]['content']] == (
+        ['tool_result'] * 4)
+
+    assert _diff(before, after) == ['tool_result(Zydohm1sPTGD).tool_result']
+
+
+def test_merged_tool_result_names_every_changed_block_in_order():
+    before = _anthropic_wire(_openai_tool_round())
+    after = _anthropic_wire(_openai_tool_round(
+        compacted=(_IMAGE_IDS[2], _IMAGE_IDS[1])))
+
+    assert _diff(before, after) == ['tool_result(Zydohm1sPTGD).tool_result',
+                                    'tool_result(Wt7cR4yHs9Fj).tool_result']
+
+
+def test_both_envelopes_name_the_same_changed_tool_result():
+    """Separate OpenAI ``tool`` messages and the merged Anthropic form blame
+    the same block; neither falls back to the first result of the batch."""
+    expected = ['tool_result(Zydohm1sPTGD).tool_result']
+    before = _openai_tool_round()
+    after = _openai_tool_round(compacted=(_IMAGE_IDS[1],))
+
+    assert _diff(before, after) == expected
+    assert _diff(_anthropic_wire(before), _anthropic_wire(after)) == expected
+
+
+def test_single_tool_result_entry_is_identical_across_envelopes():
+    """Block evidence never makes a protocol switch alone look like a change."""
+    openai_tool = {'role': 'tool', 'tool_call_id': _SKILL_ID,
+                   'content': 'skill body'}
+    anthropic_turn = {'role': 'user', 'content': [
+        {'type': 'tool_result', 'tool_use_id': _SKILL_ID,
+         'content': 'skill body'}]}
+
+    assert canonical_messages([openai_tool]) == canonical_messages(
+        [anthropic_turn])
+    assert set(canonical_messages([anthropic_turn])[0]) == {'key', 'fields'}
+
+
+def test_merged_tool_result_position_stays_a_wire_message_index():
+    """Block attribution does not change position evidence: the first changed
+    index still counts wire messages, matching the raw-byte index."""
+    before = _anthropic_wire(_openai_tool_round())
+    after = _anthropic_wire(_openai_tool_round(compacted=(_IMAGE_IDS[1],)))
+    merged_index = len(before) - 1
+
+    assert first_changed_index(canonical_messages(before),
+                               canonical_messages(after)) == merged_index
+    assert first_changed_byte_index(wire_byte_prefix(before),
+                                    wire_byte_prefix(after)) == merged_index
+    assert [entry['key'] for entry in canonical_messages(after)] == [
+        entry['key'] for entry in wire_byte_prefix(after)]
+
+
+def test_nc_message_level_evidence_blames_the_first_block():
+    """NEGATIVE CONTROL: without per-block evidence the merged message can
+    only be named by its first block — the incident's misattribution."""
+    before = canonical_messages(_anthropic_wire(_openai_tool_round()))
+    after = canonical_messages(_anthropic_wire(
+        _openai_tool_round(compacted=(_IMAGE_IDS[1],))))
+    for entry in before + after:
+        entry.pop('blocks', None)
+
+    assert diff_canonical(before, after) == [
+        'tool_result(5yozUTuvU9X1).tool_result']

@@ -167,9 +167,11 @@ def test_provider_terminal_outcomes_never_fabricate_success(runtime, monkeypatch
             'tool_calls': [tool_call()]}, compatibility_finish_reason='stop', usage={},
             state=ProviderStreamState.MALFORMED_STREAM if finish == 'malformed' else ProviderStreamState.PREMATURE_CLOSE,
             malformed_frame_count=int(finish == 'malformed'))
-    import lib.tasks_pkg.stream_handler._analyse as analyse
     import lib.tasks_pkg.stream_handler._budget as retry_budget
-    monkeypatch.setattr(analyse, '_PREMATURE_RETRY_MAX_CLASSIC', 2)
+    import lib.tasks_pkg.stream_handler._tool_recovery as tool_recovery
+    import lib.tasks_pkg.stream_handler._transport_recovery as transport_recovery
+    for recovery_owner in (tool_recovery, transport_recovery):
+        monkeypatch.setattr(recovery_owner, '_PREMATURE_RETRY_MAX_CLASSIC', 2)
     monkeypatch.setattr(retry_budget, '_interruptible_sleep', lambda *a: None)
     scripted_provider(monkeypatch, runtime, [value] * 4)
     result = agent_for(runtime).run()
@@ -312,10 +314,16 @@ def test_artifact_tool_uses_common_contract_and_tool_evidence(runtime, monkeypat
                for m in runtime.calls[1]['messages'])
 
 
+@pytest.mark.parametrize('programmatic', ['auto', 'on'])
 @pytest.mark.parametrize('invalid_batch', [False, True])
-def test_child_gateway_executes_only_scoped_catalog_and_disables_redelegation(runtime, monkeypatch, invalid_batch):
+def test_child_gateway_executes_only_scoped_catalog_and_disables_redelegation(
+        runtime, monkeypatch, invalid_batch, programmatic):
     import json
+    monkeypatch.delenv('TOFU_PTC_TIER', raising=False)
     runtime.parent['config']['contextExperiments'] = {'orchestration': {'multiAgent': 'read_only'}}
+    # The child inherits the parent's programmatic policy; the default 'auto'
+    # and explicit 'on' both expose JavaScript programs (execute_program).
+    runtime.parent['config']['tools.programmaticCalling'] = programmatic
     calls = [{'name': TOOL['function']['name'], 'arguments': {}}]
     if invalid_batch:
         calls.append({'name': 'ungranted_tool', 'arguments': {}})
@@ -397,13 +405,16 @@ def test_pretool_durability_failure_refuses_execution(runtime, monkeypatch):
     assert not runtime.tool_calls
 
 
-def test_shutdown_during_tool_keeps_unknown_outcome_fence(runtime, monkeypatch):
+def test_shutdown_during_tool_resumes_with_notice_and_never_reruns_the_tool(runtime, monkeypatch):
     from threading import Event
     from lib.tasks_pkg.executor._finalize import _finalize_tool_round
-    from lib.swarm.restart_recovery import checkpoint_recovery_error
+    from lib.swarm.restart_recovery import (
+        checkpoint_recovery_error, settle_interrupted_tool_round)
     from types import SimpleNamespace
     runtime.parent['abort_event'] = Event()
+    executions = []
     def tool(task, tc, name, call_id, args, round_num, row, *_rest):
+        executions.append(call_id)
         task['aborted'] = True
         task['_abort_reason'] = 'server_shutdown'
         task['abort_event'].set()
@@ -411,12 +422,38 @@ def test_shutdown_during_tool_keeps_unknown_outcome_fence(runtime, monkeypatch):
         return call_id, 'interrupted with unknown external outcome', False
     runtime.parent['_tool_env'] = SimpleNamespace(resolve=lambda name: tool)
     agent = agent_for(runtime)
+    persisted = []
+    checkpoint = agent._checkpoint
+    def capture(*, final=False):
+        # Recovery reads the final durable checkpoint; cleanup empties memory.
+        if final:
+            persisted.append({'messages': deepcopy(agent.messages),
+                              'result': agent.result.to_dict()})
+        return checkpoint(final=final)
+    agent._checkpoint = capture
     result = agent.run()
     assert result.status == 'interrupted'
     assert result.recovery_reason == 'server_shutdown'
     assert result.checkpoint_phase == 'tools_in_flight'
-    assert checkpoint_recovery_error({'messages': agent.messages,
-        'result': result.to_dict()}) == 'restart_tool_outcome_unknown'
+    row = persisted[-1]
+    assert row['result']['checkpoint_phase'] == 'tools_in_flight'
+    assert checkpoint_recovery_error(row) == ''
+    settled = settle_interrupted_tool_round(row)
+    interrupted = next(message for message in settled if message.get('role') == 'tool')
+    assert interrupted['content'].startswith('interrupted with unknown external outcome')
+    assert 'Tofu recovery notice: A server restart' in interrupted['content']
+
+    runtime.parent['abort_event'] = Event()
+    resumed = agent_for(runtime)
+    resumed.restore_checkpoint(settled, result.rounds_used + 1, result.to_dict())
+    scripted_provider(monkeypatch, runtime, [reply('Checked the state; re-ran nothing blindly.')])
+    outcome = resumed.run()
+    assert outcome.status == 'completed', outcome.error_message
+    assert executions == [interrupted['tool_call_id']]
+    sent = [message for message in runtime.calls[-1]['messages']
+            if message.get('role') == 'tool']
+    assert [message['tool_call_id'] for message in sent] == [interrupted['tool_call_id']]
+    assert 'Tofu recovery notice' in str(sent[0]['content'])
 
 
 @pytest.mark.parametrize('prior', [None, {
@@ -570,19 +607,76 @@ def test_token_only_requests_snapshot_cost_once_through_repeated_resume(runtime,
     assert resumed.run().cost_usd == pytest.approx(0.275)
 
 
+def test_filesystem_freeze_never_stops_a_child_and_it_completes(runtime, monkeypatch):
+    """2026-11-02 (conv mvxih2silbup7r): a 27-minute filesystem freeze silenced
+    five workers, and the stall verdict landed the moment their blocked I/O
+    returned. A stale mount is an explained wait and silence before its
+    recovery never counts, so the worker simply continues and completes."""
+    import lib.fs_keepalive as fs_keepalive
+    import lib.tasks_pkg.manager._stream as stream
+    from lib.tasks_pkg.manager import reap_stuck_running_tasks
+    from tests.support.chat_tasks import isolated_reaper_registry
+    import time
+
+    monkeypatch.setenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', '300')
+    reaper_view = isolated_reaper_registry(monkeypatch)
+    frozen = {'mount': False}
+    monkeypatch.setattr(fs_keepalive, 'filesystem_unresponsive', lambda: frozen['mount'])
+
+    def dispatch(body, **kwargs):
+        runtime.calls.append(deepcopy(body))
+        if len(runtime.calls) == 1:
+            return reply('Investigating', [tool_call()])
+        child = runtime.children[0]
+        stale = time.time() - 4000  # the whole freeze passed without an event
+        child.update(_t_last_event=stale, _dispatch_heartbeat=stale)
+        reaper_view[child['id']] = child
+        frozen['mount'] = True
+        assert reap_stuck_running_tasks() == 0, 'a stale mount explains the silence'
+        frozen['mount'] = False
+        monkeypatch.setattr(fs_keepalive, 'filesystem_resumed_at',
+                            lambda: (time.monotonic(), time.time()))
+        assert reap_stuck_running_tasks() == 0, 'silence before recovery never counts'
+        assert not kwargs['abort_check']()
+        kwargs['on_content']('Recovered and finished')
+        return reply('Recovered and finished')
+
+    monkeypatch.setattr(stream, 'dispatch_stream', dispatch)
+    result = agent_for(runtime).run()
+    child = runtime.children[0]
+    assert result.status == 'completed', result.error_message
+    assert 'Recovered and finished' in result.final_answer
+    assert '_invocationStopReason' not in child and not child['aborted']
+    assert len(runtime.calls) == 2 and len(runtime.tool_calls) == 1
+
+
 @pytest.mark.parametrize('exception', [False, True])
 def test_silent_provider_internal_stall_fails_and_keeps_receipts(runtime, monkeypatch, exception):
+    """The reaper judges a silent child exactly like a root turn.
+
+    Its verdict reaches the child as a typed stall through the child's own
+    invocation owner; the parent and its receipts stay untouched.
+    """
     import lib.tasks_pkg.manager._stream as stream
     from lib.llm.llm_errors import AbortedError
-    from lib.swarm.liveness import ProgressBeacon
+    from lib.tasks_pkg.manager import reap_stuck_running_tasks
     from lib.turn_verdict import derive_task_verdict
+    from tests.support.chat_tasks import isolated_reaper_registry
     import time
+
+    monkeypatch.setenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', '300')
+    reaper_view = isolated_reaper_registry(monkeypatch)
 
     def silent(body, **kwargs):
         runtime.calls.append(deepcopy(body))
         if len(runtime.calls) == 1:
             kwargs['on_content']('Partial findings')
             return reply('Partial findings', [tool_call()])
+        child = runtime.children[0]
+        stale = time.time() - 400  # both clocks past the shared 300s threshold
+        child.update(_t_last_event=stale, _dispatch_heartbeat=stale)
+        reaper_view[child['id']] = child
+        assert reap_stuck_running_tasks() == 1
         end = time.monotonic() + 3
         while not kwargs['abort_check']():
             assert time.monotonic() < end, 'guard did not stop silent provider'
@@ -593,7 +687,6 @@ def test_silent_provider_internal_stall_fails_and_keeps_receipts(runtime, monkey
 
     monkeypatch.setattr(stream, 'dispatch_stream', silent)
     agent = agent_for(runtime)
-    agent.progress_beacon = ProgressBeacon(stall_timeout=0.05)
     result = agent.run()
     child = runtime.children[0]
     verdict = derive_task_verdict(child)
@@ -604,8 +697,8 @@ def test_silent_provider_internal_stall_fails_and_keeps_receipts(runtime, monkey
     assert child['finishReason'] == 'error'
     assert child['error']['context'] == 'invocation-guard'
     assert 'stalled' in child['error']['detail'].lower()
-    assert '0.05s' in result.error_message
-    assert child['_invocationStopEvidence']['silentSeconds'] >= 0.05
+    assert 'stall threshold 300s' in result.error_message
+    assert child['_invocationStopEvidence']['silentSeconds'] >= 399
     assert child['aborted'] and child['abort_event'].is_set()
     assert len(runtime.calls) == 2 and len(runtime.tool_calls) == 1
     assert result.total_tokens >= 23
@@ -631,8 +724,7 @@ def test_silent_provider_internal_stall_fails_and_keeps_receipts(runtime, monkey
 @pytest.mark.parametrize('reason', ['stalled', 'deadline', 'stop'])
 def test_exception_after_guard_preserves_authority(runtime, monkeypatch, reason):
     import lib.tasks_pkg.child_invocation as owner
-    from lib.tasks_pkg.invocation import invocation_abort_requested
-    from lib.swarm.liveness import ProgressBeacon
+    from lib.tasks_pkg.invocation import invocation_abort_requested, stop_stalled_invocation
     from lib.llm.llm_errors import AbortedError
     import time
 
@@ -642,10 +734,7 @@ def test_exception_after_guard_preserves_authority(runtime, monkeypatch, reason)
         elif reason == 'stop':
             runtime.stop.set()
         else:
-            beacon = ProgressBeacon(stall_timeout=0)
-            beacon.touch(child['id'])
-            child['_invocationProgressBeacon'] = beacon
-            child['_invocationProgressKey'] = child['id']
+            assert stop_stalled_invocation(child, silent_seconds=400, stall_timeout=300)
         assert invocation_abort_requested(child)
         raise AbortedError('Transport cancellation')
 
@@ -661,8 +750,9 @@ def test_root_silent_provider_guard_fails_with_physical_abort_and_tool_receipts(
     import time
     import lib.tasks_pkg.orchestrator._run as runner
     import lib.tasks_pkg.manager._stream as stream
-    from lib.tasks_pkg.invocation import execute_invocation, ROOT_INVOCATION_POLICY
-    from lib.swarm.liveness import ProgressBeacon
+    from lib.tasks_pkg.invocation import (
+        execute_invocation, ROOT_INVOCATION_POLICY, stop_stalled_invocation,
+    )
     from lib.turn_verdict import derive_task_verdict
     task = runtime.parent
     original = runner.assemble_round_tools
@@ -672,15 +762,14 @@ def test_root_silent_provider_guard_fails_with_physical_abort_and_tool_receipts(
             return [TOOL], True
         return original(cfg, current, mcfg)
     monkeypatch.setattr(runner, 'assemble_round_tools', assemble)
-    beacon = ProgressBeacon(stall_timeout=0.05)
-    task['_invocationProgressBeacon'] = beacon
-    task['_invocationProgressKey'] = task['id']
-    beacon.touch(task['id'])
     def provider(body, **kwargs):
         runtime.calls.append(deepcopy(body))
         if len(runtime.calls) == 1:
             kwargs['on_content']('Paid partial output')
             return reply('Paid partial output', [tool_call()])
+        # The common pipeline settles the shared judge's verdict the same way
+        # for a root invocation as for a child.
+        assert stop_stalled_invocation(task, silent_seconds=400, stall_timeout=300)
         end = time.monotonic() + 3
         while not kwargs['abort_check']():
             assert time.monotonic() < end
@@ -702,6 +791,7 @@ def test_root_silent_provider_guard_fails_with_physical_abort_and_tool_receipts(
 
 @pytest.mark.parametrize('owner_stop', [False, True])
 def test_master_driver_stall_cannot_impersonate_owner_stop(runtime, monkeypatch, owner_stop):
+    """The driver backstop delivers the shared verdict; an owner Stop still wins."""
     import time
     from lib.swarm.master import MasterOrchestrator
     from lib.swarm.liveness import ProgressBeacon
@@ -721,10 +811,16 @@ def test_master_driver_stall_cannot_impersonate_owner_stop(runtime, monkeypatch,
         if len(runtime.calls) == 1:
             kwargs['on_content']('Partial work receipt')
             return reply('Partial work receipt', [tool_call()])
-        # Driver has judged silence before the child's next provider poll.
+        # The bound child's task clocks are past the beacon's window: the
+        # driver judges silence before the child's next provider poll.
+        child = runtime.children[0]
+        stale = time.time() - 1
+        child.update(_t_last_event=stale, _dispatch_heartbeat=stale)
+        assert [row[0] for row in master._beacon.stalled_agents()] == [spec.id]
         master._stop_stalled = True
         if owner_stop:
             runtime.stop.set()
+        master._deliver_stall_verdicts()
         end = time.monotonic() + 3
         while not kwargs['abort_check']():
             assert time.monotonic() < end
@@ -749,14 +845,13 @@ def test_internal_stop_envelope_survives_canonical_error_serialization(reason):
     import threading
     import time
     from lib.error_envelope import from_json, to_json
-    from lib.tasks_pkg.invocation import invocation_abort_requested
+    from lib.tasks_pkg.invocation import invocation_abort_requested, stop_stalled_invocation
     from lib.tasks_pkg.orchestrator._finalize import _settle_post_loop_finish_reason
-    from lib.swarm.liveness import ProgressBeacon
     from lib.turn_verdict import derive_task_verdict
 
     task = {'id': 'cold-stop', 'aborted': False, 'abort_event': threading.Event()}
     if reason == 'stalled':
-        task['_invocationProgressBeacon'] = ProgressBeacon(stall_timeout=0)
+        assert stop_stalled_invocation(task, silent_seconds=400, stall_timeout=300)
     else:
         task['_invocationDeadline'] = time.monotonic() - 1
     assert invocation_abort_requested(task)

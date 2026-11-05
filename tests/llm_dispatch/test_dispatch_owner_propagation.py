@@ -111,7 +111,8 @@ def test_unstarted_request_failure_settles_once_and_preserves_siblings(monkeypat
         nonlocal starts
         if thread.name.startswith(prefix):
             starts += 1
-            if starts == 2:
+            # Request 1's start and its one startup recovery both fail.
+            if starts in (2, 3):
                 raise RuntimeError('injected unstarted request')
         return original(thread)
 

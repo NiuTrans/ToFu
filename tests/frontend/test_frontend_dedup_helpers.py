@@ -118,8 +118,6 @@ def _run():
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_dedup_helpers_escape_and_clipboard():
     output = _run()
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]

@@ -88,6 +88,18 @@ class ToolContext:
     # conversation's lifetime (e.g. the multi-root path hint). Empty for
     # one-off / stateless assembly (tests, compat adapters).
     conv_id: str = ''
+    # Headless request task whose conversation id is only a job label
+    # (lib.tasks_pkg.conversation_delivery): deferred-completion tools are
+    # withheld or described as unavailable, and the assembler withholds every
+    # ``ToolSpec.saved_conversation_tools`` name.
+    no_saved_conversation: bool = False
+    # Whether this task's own conversation receives its deferred completions
+    # (conversation_delivery_available). False for a task without a
+    # conversation: no timer continuation or ``current`` schedule, and command
+    # prose never promises automatic delivery. Read it through
+    # ``delivers_deferred_completions``, which also honours
+    # ``no_saved_conversation``.
+    completion_delivery: bool = True
 
     # ── Multi-tenant plugin visibility allow-list ──
     # Which third-party (``source='plugin'``) tool specs this task may see.
@@ -154,6 +166,12 @@ class ToolContext:
         return not bool(self.cfg.get('_storageFreeRuntime'))
 
     @property
+    def delivers_deferred_completions(self) -> bool:
+        """Whether timer continuations and command completions reach this task."""
+        return (self.completion_delivery and not self.no_saved_conversation
+                and self.durable_state_available)
+
+    @property
     def multiroot_active(self) -> bool:
         """True when more than one workspace root is configured for this task.
 
@@ -177,7 +195,7 @@ class ToolContext:
         """True when this task has a project attached (``project_enabled``).
 
         Read by the project spec builder (:func:`_build_project_or_code_exec`)
-        to gate the project tool family (grep_search / find_files /
+        to gate the project tool family (search_files / find_files /
         write_file / apply_diff / … / run_command).
 
         This is deliberately live on every assembly: attaching a project adds
@@ -412,7 +430,8 @@ class ToolSpec:
     # (declared, not configured per deployment — see
     # ``declared_tool_timeout_ms``). On expiry the call's runtime context is
     # asked to cancel cooperatively and the late result is replaced with the
-    # canonical timeout sentinel; the pool ceiling stays the outer bound.
+    # canonical timeout sentinel. The collector's per-call outer bound is the
+    # larger of this declaration and the ordinary pool ceiling.
     timeout_ms_by_name: dict[str, int] = field(default_factory=dict)
     # Observe final sealed model inputs without retaining transcripts. The
     # returned bounded receipt commits only after a successful physical request.
@@ -429,6 +448,13 @@ class ToolSpec:
     # entry-point discovery always clears this provenance marker.
     host_owned: bool = False
     discovery_policy_by_name: dict[str, str] = field(default_factory=dict)
+    # Appended for positional compatibility. Names (declared in provides)
+    # whose every call registers in, reads from or reports into the request's
+    # own saved conversation. A request without one
+    # (``ToolContext.no_saved_conversation``) never receives them: they join
+    # neither its wire nor its executable catalog, whatever routing or Tool
+    # Search would otherwise expose. Handlers still refuse a stray call.
+    saved_conversation_tools: frozenset[str] = field(default_factory=frozenset)
 
 
 # ── Module-level registry ─────────────────────────────────
@@ -507,7 +533,8 @@ def _register_tool_spec_unlocked(spec: ToolSpec, *, replace: bool) -> None:
             f'ToolSpec {spec.key!r} has a handler but no dispatch names')
     for policy_name in (
             'idempotent_tools', 'programmatic_tools', 'confirmation_tools',
-            'unchanged_receipt_tools', 'auto_approval_tools'):
+            'unchanged_receipt_tools', 'auto_approval_tools',
+            'saved_conversation_tools'):
         undeclared = set(getattr(spec, policy_name)) - set(spec.provides)
         if undeclared:
             raise ValueError(
@@ -667,14 +694,21 @@ def all_specs() -> list[ToolSpec]:
         return list(_TOOL_SPECS)
 
 
-def declared_tool_timeout_ms(tool_name: str) -> int | None:
-    """Return the tool's OWN declared execution deadline, or ``None``.
+def declared_tool_timeout_ms(tool_name: str, arguments=None, tool_schemas=None) -> int | None:
+    """Resolve the admitted schema's wait bound, then fixed declarations.
 
-    ``None`` means the call is governed by the pool ceiling only. Ratified
-    human-wait tools (``_SERIAL_BLOCKING_TOOLS``) never declare one; the
-    executor re-checks that exemption per call. Duplicate declarations for
-    one name are impossible by construction (name-collision arbitration).
+    ``arguments=None`` resolves the schema's declared maximum. Execution passes
+    its exact admitted schemas and arguments; no role-gated catalog is rebuilt.
     """
+    if arguments is not None and not isinstance(arguments, Mapping):
+        raise TypeError('tool arguments must be a mapping')
+    schema = next((tool for tool in tool_schemas or ()
+                   if tool.get('function', {}).get('name') == tool_name), None)
+    if schema is not None:
+        from lib.tools.execution_deadlines import wait_execution_timeout_ms
+        timeout = wait_execution_timeout_ms(schema, arguments=arguments)
+        if timeout is not None:
+            return timeout
     with _SPEC_LOCK:
         for spec in _TOOL_SPECS:
             value = spec.timeout_ms_by_name.get(tool_name)
@@ -1124,11 +1158,25 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
             if pin or is_active_mcp:
                 ctx.frontend_selected_tool_names.add(name)
 
+    def _without_saved_conversation_tools(
+            spec: ToolSpec, contributed: list[dict]) -> list[dict]:
+        # Applied before the catalog records anything, so neither routing,
+        # Tool Search nor an exact-name call can reach a withheld tool.
+        if not (ctx.no_saved_conversation and spec.saved_conversation_tools):
+            return contributed
+        return [tool for tool in contributed
+                if _schema_name(tool) not in spec.saved_conversation_tools]
+
     def _wire_visible(spec: ToolSpec, exposed: bool) -> bool:
         if not exposed:
             return False
+        # Routing narrows eager families only. Every discovery backend already
+        # defers a searchable family, and with Tool Search off there is no
+        # discovery path that could recover one routed away.
         if (selected_native is None or spec.key in selected_native
-                or spec.source == 'plugin'):
+                or spec.source == 'plugin'
+                or spec.discovery_policy == 'searchable'
+                or 'searchable' in spec.discovery_policy_by_name.values()):
             return True
         ctx.omitted_spec_keys.add(spec.key)
         logger.debug('[Task %s] native spec key=%s hidden by routed exposure',
@@ -1151,7 +1199,8 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
             logger.error('[ToolRegistry] spec %s build failed: %s',
                          spec.key, e, exc_info=True)
             contributed = []
-        contributed = _validated_contribution(spec, contributed)
+        contributed = _without_saved_conversation_tools(
+            spec, _validated_contribution(spec, contributed))
         _record_contribution(spec, contributed, exposed)
         if _wire_visible(spec, exposed):
             tool_list.extend(contributed)
@@ -1174,7 +1223,8 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
             logger.error('[ToolRegistry] spec %s build failed: %s',
                          spec.key, e, exc_info=True)
             contributed = []
-        contributed = _validated_contribution(spec, contributed)
+        contributed = _without_saved_conversation_tools(
+            spec, _validated_contribution(spec, contributed))
         _record_contribution(spec, contributed, exposed)
         if _wire_visible(spec, exposed):
             tool_list.extend(contributed)

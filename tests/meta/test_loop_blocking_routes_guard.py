@@ -78,6 +78,18 @@ _OFFLOAD_TOKENS = {
     ],
 }
 
+# Request-route minting reads the routing document from storage, opens
+# secret envelopes on disk, resolves DNS for egress checks and takes the
+# dispatcher lock. 2026-11-02: OpenAI-compatible gateway traffic ran it
+# on-loop in compat_openai.chat_completions; py-spy caught the loop thread
+# there in 30/40 samples, /api/health hung >10s and the browser showed the
+# "server unreachable" banner every few seconds. Inside any async def under
+# routes/ these may ONLY be referenced within asyncio.to_thread(...).
+_ROUTE_MINT_HELPERS = frozenset({
+    'mint_compatible_request_route',
+    'mint_native_request_route',
+})
+
 # Anti-empty-scan floor: daily_report.py must contain at least this many
 # to_thread-wrapped references to guarded helpers (today: 25). A broken
 # AST scan or a wholesale revert trips this even if no bare call exists.
@@ -119,6 +131,39 @@ def _guarded_helper_name(node):
     if isinstance(node, ast.Attribute):
         return node.attr if node.attr in _GUARDED_HELPERS else ''
     return ''
+
+
+def _scan_async_refs(src, filename, guarded):
+    """Return (violations, wrapped_count) for names in ``guarded``.
+
+    A reference inside an async def is accepted only when it lies within an
+    asyncio.to_thread(...) call span.
+    """
+    tree = ast.parse(src, filename=filename)
+    violations = []
+    wrapped = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        spans = _to_thread_spans(node)
+        for sub in ast.walk(node):
+            name = (sub.id if isinstance(sub, ast.Name)
+                    else sub.attr if isinstance(sub, ast.Attribute) else '')
+            if name not in guarded:
+                continue
+            if any(a <= sub.lineno <= b for a, b, _ in spans):
+                wrapped += 1
+            else:
+                violations.append(sub.lineno)
+    return violations, wrapped
+
+
+def _route_sources():
+    for dirpath, _dirs, files in os.walk(os.path.join(ROOT, 'routes')):
+        for name in sorted(files):
+            if name.endswith('.py'):
+                rel = os.path.relpath(os.path.join(dirpath, name), ROOT)
+                yield rel, _read(rel)
 
 
 def _scan_daily_report(src):
@@ -170,6 +215,24 @@ class TestLoopBlockingRoutesGuard(unittest.TestCase):
             f'only {wrapped} to_thread-wrapped helper refs found in '
             f'{_DAILY_REPORT} (< {_MIN_WRAPPED_REFS}) — the offloads were '
             'removed wholesale, or the AST scan sees nothing (drift)')
+
+    def test_route_minting_always_offloaded(self):
+        violations = []
+        wrapped_total = 0
+        for rel, src in _route_sources():
+            found, wrapped = _scan_async_refs(src, rel, _ROUTE_MINT_HELPERS)
+            violations.extend(f'{rel}:{n}' for n in found)
+            wrapped_total += wrapped
+        self.assertEqual(
+            violations, [],
+            'request-route minting referenced on-loop (outside '
+            'asyncio.to_thread) at ' + ', '.join(violations)
+            + ' — it does storage, secret-file and DNS I/O and stalls the '
+            'event loop, freezing /api/health and the push socket')
+        self.assertGreater(
+            wrapped_total, 0,
+            'no offloaded route-mint references under routes/ — the scan '
+            'sees nothing (drift)')
 
     def test_sibling_offload_tokens(self):
         stale = []

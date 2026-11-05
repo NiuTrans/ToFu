@@ -3,11 +3,13 @@ from pathlib import Path
 import os
 import subprocess
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 
 
 def test_candidates_beyond_64_remain_selectable(page, tmp_path):
+    require_node_modules('vite')
     root = Path(__file__).resolve().parents[2]
     bundle = tmp_path / 'discovery.js'
     subprocess.run([os.environ.get('PLAYWRIGHT_NODEJS_PATH') or 'node',

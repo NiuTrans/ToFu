@@ -39,6 +39,7 @@ from lib.slides.contracts import (
     normalise_slide_size,
     normalise_slide_style,
     normalise_slide_topic,
+    normalise_slide_material,
 )
 from lib.production.llm_policy import (
     abort_check_from_event,
@@ -50,7 +51,8 @@ from lib.production.research import (
     RESEARCH_RESUME_TTL_S,
     evidence_checkpoint_version,
 )
-from lib.production.stages import Stage, StageAborted, run_stages
+from lib.production.stages import Stage, StageAborted
+from lib.production.workflows import AgentToolWorkflow, WorkflowNode, run_workflow
 
 logger = get_logger(__name__)
 
@@ -81,7 +83,7 @@ _VISUAL_QA_CACHE_NAME = '.tofu-slide-visual-qa.json'
 _VISUAL_QA_CACHE_VERSION = 'slide-visual-qa-v1'
 _MAX_VISUAL_QA_CACHE_BYTES = 512 * 1024
 _MAX_VISUAL_QA_FINDINGS = 64
-_OUTLINE_CHECKPOINT_VERSION = 'slide-outline-v3'
+_OUTLINE_CHECKPOINT_VERSION = 'slide-outline-v4'
 _DIRECTOR_LENSES = (
     ('evidence-editorial',
      'Prioritize concrete evidence, native charts/diagrams, annotated imagery, '
@@ -116,7 +118,14 @@ def _raise_if_aborted(ctx: dict, stage: str) -> None:
 
 def _run_research(ctx: dict) -> dict:
     from lib.production.research import research_topic
-    return research_topic(ctx['topic'])
+    # Caller-supplied evidence is the authority for this deck: the short
+    # topic only steers web research, and the material itself is what the
+    # outline and page authors must ground every number and claim in.
+    research = research_topic(ctx['topic'])
+    material = str(ctx.get('material') or '').strip()
+    if material:
+        research['supplied_material'] = material
+    return research
 
 
 # ── Stage: outline ────────────────────────────────────────
@@ -126,12 +135,39 @@ _OUTLINE_JSON_RE = re.compile(r'\{.*\}', re.DOTALL)
 
 def _build_outline_prompt(topic: str, *, lang: str, max_pages: int,
                           scenarios_doc: str, style_hint: str,
-                          research_doc: str = '', research_as_of: str = '') -> str:
+                          research_doc: str = '', research_as_of: str = '',
+                          material: str = '') -> str:
+    from lib.design_sys.themes import classify_scenario, design_bible_text
+
+    scenario_hint = classify_scenario(topic + ' ' + style_hint)
+    audience_guidance = design_bible_text(
+        scenario_hint, include_general=False, limit=1800)
     research_block = ((
         '## Grounded research cards (cite source ids in content_notes)\n'
         + research_doc + '\n\n') if research_doc else (
         '## Research status\nNo grounded cards were available. Do not invent '
         'specific facts, dates, quotations or statistics.\n\n'))
+    if material:
+        research_block += (
+            '## Caller-supplied source material (AUTHORITATIVE — read fully)\n'
+            'This is the primary evidence for this deck. Treat its facts, '
+            'figures, dates and attributions as ground truth: reproduce them '
+            'faithfully, do NOT replace them with numbers from web research '
+            'cards or from memory, and do NOT invent or inflate any metric. '
+            'Where the material marks something a team result, keep that '
+            'attribution; where a number is absent, use a qualitative '
+            'statement instead of inventing one.\n'
+            + material + '\n\n')
+    research_block += (
+        '## Audience and evidence guidance\n'
+        'The following scenario is a provisional hint; the actual user request '
+        'and supplied template take precedence. Research talks must separate '
+        'claims, experimental conditions and limitations. Interview/work decks '
+        'must distinguish personal contribution from team outcomes and retain '
+        'the measurement basis. Never infer personal achievements from public '
+        'web sources. Missing evidence requires a qualitative statement or an '
+        'explicit unresolved question, never invented numbers.\n'
+        + audience_guidance + '\n\n')
     if lang == 'zh':
         return (
             f'你是一名演示文稿总编。为主题《{topic}》设计一份演示 deck 的大纲。\n'
@@ -399,7 +435,8 @@ def _run_outline(ctx: dict) -> dict:
         topic, lang=lang, max_pages=ctx.get('max_pages', _DEFAULT_PAGES),
         scenarios_doc=scenarios_doc, style_hint=ctx.get('style') or '',
         research_doc=signal_doc + format_research_cards(research),
-        research_as_of=str(research.get('as_of') or ''))
+        research_as_of=str(research.get('as_of') or ''),
+        material=str(research.get('supplied_material') or ''))
     lenses = _DIRECTOR_LENSES if mode == 'director' else (('standard', ''),)
     candidates: list[dict] = []
     rejected: list[str] = []
@@ -1542,6 +1579,11 @@ def _run_page_visual_reviews(ctx: dict, previews: list, *, theme, vqa,
         return []
     abort_check = _context_abort_check(ctx)
     max_429_attempts = ctx.get('max_429_attempts')
+    from lib.slides.review_context import build_review_context
+    outline = _effective_outline(ctx['artifacts'])
+    review_contexts = [build_review_context(
+        outline, page_index=index, request=ctx.get('topic') or '')
+        for index in range(len(previews))]
     results: list[dict | None] = [None] * len(previews)
     identities: list[str | None] = [None] * len(previews)
     pending_items = []
@@ -1549,7 +1591,8 @@ def _run_page_visual_reviews(ctx: dict, previews: list, *, theme, vqa,
         _raise_if_aborted(ctx, 'visual QA')
         try:
             identity = vqa.qa_frame_input_sha256(
-                png, theme=theme, subject='幻灯片页面', model=qa_model)
+                png, theme=theme, subject='幻灯片页面', model=qa_model,
+                review_context=review_contexts[index])
         except (OSError, ValueError) as exc:
             logger.debug('[Slides:qa] page %d cache identity unavailable: %s',
                          index + 1, exc)
@@ -1573,6 +1616,7 @@ def _run_page_visual_reviews(ctx: dict, previews: list, *, theme, vqa,
             return vqa.qa_frame(
                 png, theme=theme, label=f'page-{index + 1:02d}',
                 subject='幻灯片页面', model=qa_model,
+                review_context=review_contexts[index],
                 abort_check=abort_check,
                 max_429_attempts=max_429_attempts,
                 owner_user_id=ctx.get('owner_user_id'),
@@ -1630,6 +1674,7 @@ def _run_visual_qa(ctx: dict) -> dict:
     from lib.json_store import write_text_atomic
     from lib.design_sys.contact_sheet import build_contact_sheet
     from lib.slides.visual_repair import recover_visual_repair, VisualRepairTransaction
+    from lib.slides.review_context import build_review_context
 
     recover_visual_repair(ctx['deck_dir'])
     avail, reason = vqa.visual_qa_available()
@@ -1654,11 +1699,14 @@ def _run_visual_qa(ctx: dict) -> dict:
     qa_directory = os.path.join(ctx['deck_dir'], '.tofu-qa')
     os.makedirs(qa_directory, exist_ok=True)
 
-    def review(path, *, key, label, subject):
+    def review(path, *, key, label, subject, page_index=None):
         _raise_if_aborted(ctx, 'visual QA')
+        review_context = build_review_context(
+            outline, page_index=page_index, request=ctx.get('topic') or '')
         try:
             identity = vqa.qa_frame_input_sha256(
-                path, theme=theme, subject=subject, model=qa_model)
+                path, theme=theme, subject=subject, model=qa_model,
+                review_context=review_context)
         except (OSError, ValueError):
             identity = None
         result = (_cached_visual_result(cache['entries'].get(key), identity)
@@ -1666,6 +1714,7 @@ def _run_visual_qa(ctx: dict) -> dict:
         if result is None:
             result = vqa.qa_frame(
                 path, theme=theme, label=label, subject=subject, model=qa_model,
+                review_context=review_context,
                 abort_check=abort_check, max_429_attempts=ctx.get('max_429_attempts'),
                 owner_user_id=ctx.get('owner_user_id'),
                 provider_pin_id=ctx.get('provider_pin_id') or '')
@@ -1744,7 +1793,8 @@ def _run_visual_qa(ctx: dict) -> dict:
                 try:
                     render_page_png(trial, index, trial_png, scale=2.0)
                     checked = review(trial_png, key=f'page:{index}',
-                                     label=f'page-{index + 1:02d}', subject='幻灯片页面')
+                                     label=f'page-{index + 1:02d}', subject='幻灯片页面',
+                                     page_index=index)
                 except StageAborted:
                     raise
                 except Exception as exc:
@@ -1841,7 +1891,7 @@ def _gate_export(ctx: dict, artifact: dict) -> list:
 
 # ── Public entry ──────────────────────────────────────────
 
-def slides_recipe_stages(creative_mode: str = 'director') -> list:
+def slides_workflow(creative_mode: str = 'director') -> AgentToolWorkflow:
     """Fresh Stage objects on EVERY call.
 
     Module-level ``Stage('render', _run_render, …)`` constants froze their
@@ -1852,7 +1902,7 @@ def slides_recipe_stages(creative_mode: str = 'director') -> list:
     Building the graph here resolves each seam at call time, after any patch.
     """
     creative_mode = normalise_creative_mode(creative_mode)
-    return [Stage('research', _run_research,
+    stages = [Stage('research', _run_research,
                   resume_ttl_s=_RESEARCH_RESUME_TTL_S,
                   checkpoint_version=_RESEARCH_CHECKPOINT_VERSION),
             Stage('outline', _run_outline, gate=_gate_outline, retry=1,
@@ -1860,15 +1910,39 @@ def slides_recipe_stages(creative_mode: str = 'director') -> list:
                       f'{_OUTLINE_CHECKPOINT_VERSION}-{creative_mode}')),
             Stage('design', _run_design),
             Stage('outline_gate', _run_outline_gate),
-            Stage('author', _run_author, gate=_gate_author, retry=1),
+            Stage('author', _run_author, gate=_gate_author, retry=1,
+                  checkpoint_version='slide-author-evidence-v2'),
             Stage('assets', _run_assets),
             Stage('render', _run_render, gate=_gate_render, retry=1),
             Stage('layout_qa', _run_layout_qa, gate=_gate_layout_qa,
                   retry=1),
             Stage('visual_qa', _run_visual_qa, gate=_gate_visual_qa,
-                  checkpoint_version='slide-visual-repair-v2'),
+                  checkpoint_version='slide-visual-evidence-v3'),
             Stage('export', _run_export, gate=_gate_export, retry=1,
                   checkpoint_version='slide-native-export-v2')]
+    execution = {
+        'research': 'deterministic', 'outline': 'model',
+        'design': 'deterministic', 'outline_gate': 'human',
+        'author': 'model', 'assets': 'deterministic',
+        'render': 'deterministic', 'layout_qa': 'model',
+        'visual_qa': 'model', 'export': 'deterministic',
+    }
+    outputs = {
+        'author': {'type': 'object', 'required': ['page_files'],
+                   'properties': {'page_files': {'type': 'array', 'items': {'type': 'string'}}}},
+        'render': {'type': 'object', 'required': ['previews'],
+                   'properties': {'previews': {'type': 'array', 'items': {'type': 'string'}}}},
+        'export': {'type': 'object', 'required': ['pptx_path'],
+                   'properties': {'pptx_path': {'type': 'string', 'minLength': 1}}},
+    }
+    return AgentToolWorkflow('slides.deck', '1', tuple(
+        WorkflowNode(stage, execution[stage.name], outputs.get(stage.name, {'type': 'object'}))
+        for stage in stages))
+
+
+def slides_recipe_stages(creative_mode: str = 'director') -> list:
+    """Raw domain stages for inspection; execution enters slides_workflow."""
+    return [node.stage for node in slides_workflow(creative_mode).nodes]
 
 
 def build_deck_from_topic(topic: str, workdir: str, *, lang: str = 'zh',
@@ -1879,6 +1953,7 @@ def build_deck_from_topic(topic: str, workdir: str, *, lang: str = 'zh',
                           owner_user_id: int | None = None,
                           tenant_id: str | None = None,
                           image_urls: list | None = None,
+                          material: str = '',
                           interactive_outline: bool = False,
                           task_id: str = '',
                           template_id: str = '',
@@ -1894,6 +1969,7 @@ def build_deck_from_topic(topic: str, workdir: str, *, lang: str = 'zh',
     # root absolute once at the public boundary.
     workdir = os.path.abspath(workdir)
     topic = normalise_slide_topic(topic)
+    material = normalise_slide_material(material)
     style = normalise_slide_style(style)
     model = normalise_slide_model(model)
     creative_mode = normalise_creative_mode(creative_mode)
@@ -1903,7 +1979,8 @@ def build_deck_from_topic(topic: str, workdir: str, *, lang: str = 'zh',
     size = normalise_slide_size(size)
     deck_dir = os.path.join(workdir, 'deck')
     os.makedirs(deck_dir, exist_ok=True)
-    ctx = {'topic': topic, 'workdir': workdir, 'deck_dir': deck_dir,
+    ctx = {'topic': topic, 'material': material, 'workdir': workdir,
+           'deck_dir': deck_dir,
            'lang': lang, 'style': style, 'size': size,
            'max_pages': max_pages, 'model': model or None,
            'creative_mode': creative_mode,
@@ -1932,8 +2009,8 @@ def build_deck_from_topic(topic: str, workdir: str, *, lang: str = 'zh',
         ctx['provider_pin_id'] = route.pin_id
         if not ctx.get('qa_model'):
             ctx['qa_model'] = route.routed_model
-        artifacts = run_stages(
-            slides_recipe_stages(creative_mode), ctx, state_path=state_path,
+        artifacts = run_workflow(
+            slides_workflow(creative_mode), ctx, state_path=state_path,
             emit=emit, abort_check=abort_check)
     export = artifacts['export']
     author = artifacts.get('author') or {}

@@ -1,0 +1,14 @@
+{
+  "brand": "demonroute",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "demonroute",
+  "category": "relay",
+  "name": "DemonRoute",
+  "base_url": "https://api.demonroute.com/v1",
+  "catalog_source": {"url": "https://api.demonroute.com/api/pricing", "checked_at": "2026-10-31"},
+  "catalog_mode": "curated",
+  "offering_recipes": [
+    {"model_id": "Qwen/Qwen3-Coder-Next", "capabilities": ["text"]},
+    {"model_id": "openai/gpt-oss-120b", "capabilities": ["text"]}
+  ]
+}

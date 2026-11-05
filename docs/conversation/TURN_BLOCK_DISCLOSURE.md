@@ -95,9 +95,13 @@ Stated crisply (typed path; legacy mirror is parity):
   notes join a group only for known session context reasons with prompt action;
   unknown reasons and stop/continue/tool-policy actions stay first-class.
 - The render body is the **verbatim wire text, escaped, never markdown**:
-  `systemNoteBodyCard` sets `pre.textContent = block.text`
-  (`classic-conversation-renderers.ts:2013`); the view-model carries
-  `text: segment.text` unchanged (`conversation-view-model.ts:728`).
+  context rows build their `pre` from `contextNoteTextRuns(block.text)`
+  (`presentation/context-note-presentation.ts`), whose runs concatenate to
+  the exact text and only wrap whole-line wrapper tags or headings for
+  styling; interventions keep `systemNoteBodyCard`'s `pre.textContent`. The
+  view-model carries `text: segment.text` unchanged. Row titles, glyphs and
+  authority tints come from the registry presentation, never a frontend map
+  (see `docs/RENDER_CONTRACT.md`, "Context rows").
 - Legacy mirror parity: `_groupSegContextNotes` (`tool_rounds.js:1530-1553`),
   `_renderSegSystemNoteHTML` (`:1460-1480`, `<pre>` + `escapeHtml` at `:1478`),
   `_renderSegSystemNoteGroupHTML` (`:1510-1524`), reason map
@@ -136,15 +140,73 @@ narrative: inline they bury the turn under an identical red ladder.
   `compacting` — a durable context boundary), and every succeeded, switched,
   skipped or started row.
 - Display-only: members keep their wire rows, summaries, codes and
-  durations. The group is a read-only collapsed summary (count + distinct
-  model(s) + summed wait) over the unchanged member rows, and it takes the
-  **first member's `blockId`** as its DOM identity so a live-growing storm
-  re-renders in place.
+  durations. The group is a read-only collapsed summary (count + the
+  classified cause(s) + distinct model(s) + summed wait) over the unchanged
+  member rows, and it takes the **first member's `blockId`** as its DOM
+  identity so a live-growing storm re-renders in place.
+- **The cause is the error-envelope taxonomy, never the exception class
+  name.** A gateway 503 is raised as `RateLimitError` only to reuse slot
+  rotation, so reading "rate limit" off the class would send the reader to
+  their keys during an upstream outage. The producer classifies the live
+  exception into `envelopeKind` on the failed `model_request_complete` event
+  (see `contracts/EVENTS.md`); the fold carries it onto failed model rows
+  and drops unknown kinds rather than guessing. The group shows one cause
+  label when every classified member agrees, or each cause's share
+  (`已限频 ×2 · 上游故障 ×1`, most frequent first) in a mixed storm. Retry
+  beats carry no cause and are not counted as one; rows folded before the
+  field existed add no cause instead of a fabricated one.
+- The member row's facts line leads with the same localized cause label
+  ahead of the raw evidence (`上游故障 · provider · HTTP 503`), so an expanded
+  group does not contradict its own summary. The internal routing class
+  (`RateLimitError`) is not a cause and is not repeated in that line: it stays
+  on the cause label's `title` tooltip. Rows with no classified cause keep
+  their raw class as the only failure evidence.
 - A run of exactly **one** failure stays a plain `activity-event` row.
 
 Executable specs: `presentation/view-model/block-coalescing.test.ts`
 (merge, break and idempotence rules) and `ui/activity-event-group.test.ts`
 (closed default, member retention, open-state and focus survival).
+
+## 2c. The recovered-incident rule (failure → automatic model switch)
+
+One provider refusal emits the same fact through several channels: a failed
+provider-attempt row nested in a failed logical-request row, a `retrying`
+phase announcing the fallback, and finally the typed `MODEL_FALLBACK` switch
+row whose reason repeats the refusal text. Rendered verbatim that is five
+rows for one incident, and the group total double-counts the nested attempt.
+
+`foldRecoveredFailureChain` (`presentation/view-model/activity-blocks.ts`)
+collapses that chain in the view model, after visibility/rejection filtering
+and before any block exists. The durable timeline is never mutated, so this
+is presentation-only and old transcripts get the same treatment.
+
+- **Attempt + logical request = one row.** When two adjacent failed `model`
+  rows are linked by `parentSpanId`/`spanId` (either order — the attempt
+  completes first), keep the logical row's identity, model and duration and
+  adopt the attempt's provider, key hint and status code. Distinct attempts
+  of one request stay distinct rows (a 429 storm keeps its per-key rows).
+- **The announcement is the switch.** A `retrying` phase row immediately
+  before its typed switch row (`summaryKey === 'activity.model.switched'`)
+  is dropped; with no switch record it stays.
+- **Failure + its own switch = one recovered row.** The switch row keeps its
+  position, summary and identity, takes the failure's provider/key/timing,
+  and shows the cause once with the `content_filter: `-style taxonomy prefix
+  stripped. The row reads `switched`/warning, not `failed`/error, because the
+  turn recovered.
+- **Fail open everywhere.** Non-adjacent rows, a different producer, a
+  different `fromModel`, or a route-snapshot switch (provider/connection
+  routing, a different decision) keep their own rows.
+- **Facts line is not a second summary** (`ui/renderers/activity-block.ts`):
+  the model is omitted when the summary already names it, a phase row's
+  default `reasonCode === phase` (`retrying`) is dropped, a switch row's
+  typed kind is dropped when its detail already states the cause, and a
+  failed model row's raw exception class moves to the cause label's tooltip
+  once `envelopeKind` names the cause. Provider, key, HTTP status and
+  localized retry reasons remain.
+
+Executable specs: `presentation/view-model/activity-blocks.test.ts` (the
+refusal → fallback → switch-back sequence and every fail-open case) and
+`ui/renderers/activity-block.test.ts` (fact-line dedupe).
 
 ## 3. The core invariant and its three mechanisms
 

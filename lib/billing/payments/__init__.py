@@ -1,15 +1,9 @@
 """lib.billing.payments — Payment provider integrations.
 
-Each provider is a thin module that:
-  1. Validates the incoming webhook (signature / sign / certificate).
-  2. Idempotently records the payment in ``billing_payments``.
-  3. On successful settlement, calls ``billing.deposit(kind='topup',
-     ref_type='payment', ref_id=<provider_id>)`` so the user's
-     wallet reflects the new balance.
-
-The wallet API's idempotency on ``(user_id, kind, ref_type, ref_id)``
-means a webhook re-delivery is a no-op — critical because both Stripe
-and Alipay retry aggressively until they get a 2xx.
+Providers admit authenticated payment facts and hand off to _common's semantic
+storage commands. Alipay registers a local order before exposing its redirect;
+Stripe records the confirmed PaymentIntent. The selected storage authority
+atomically settles payment, wallet and ledger once per provider payment ID.
 
 Provider-specific config lives at ``data/config/payments.json``::
 
@@ -20,6 +14,7 @@ Provider-specific config lives at ``data/config/payments.json``::
       },
       "alipay": {
         "app_id": "...",
+        "seller_id": "2088...",
         "private_key_pem": "-----BEGIN RSA PRIVATE KEY-----...",
         "alipay_public_key_pem": "-----BEGIN PUBLIC KEY-----..."
       },
@@ -28,9 +23,9 @@ Provider-specific config lives at ``data/config/payments.json``::
 
 The ``credit_per_minor_unit`` is the conversion factor from the
 provider's smallest currency unit (cents / 分) to credits. Default 1.0
-means 1 cent → 1 credit (so $1 = 100 credits = 100,000,000 µ at the
-1-credit-per-tenth-cent canonical rate). Operators tune this to match
-their own pricing.
+means 1 cent → 1 credit (so $1 = 100 credits = 100,000,000 µ).
+Operators tune this to match their own pricing; invalid configured rates refuse
+new payments. Alipay app_id, seller_id and both keys are required for checkout.
 """
 
 from __future__ import annotations

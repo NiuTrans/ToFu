@@ -27,6 +27,7 @@ def test_models_tab_excludes_incomplete_xai_drafts(browser, live_server):
         )
     ]
     context = browser.new_context(viewport={'width': 1280, 'height': 950}, service_workers='block')
+    context.add_init_script("localStorage.setItem('tofu_onboarding_v1_done', '1')")
 
     def route_request(route):
         url = urlparse(route.request.url)
@@ -47,8 +48,6 @@ def test_models_tab_excludes_incomplete_xai_drafts(browser, live_server):
     try:
         page.goto(live_server, wait_until='domcontentloaded')
         page.wait_for_function('window.TofuModules && window.TofuModules.version === 3')
-        if page.locator('#obSkip').is_visible():
-            page.locator('#obSkip').click()
         settings_button = page.locator('[data-tofu-action="openSettings()"]')
         settings_button.first.click()
         page.locator('.settings-tab[data-tab="models"]').click()
@@ -75,10 +74,11 @@ def test_model_reasoning_edit_save_and_provider_inheritance(browser, live_server
         'default_effort': 'max'}}
     document = normalize_document(document)
     original = deepcopy(document)
-    state = {'document': document, 'revision': 1, 'writes': []}
+    state = {'document': document, 'revision': 1, 'writes': [], 'reads': 0}
     aa_requests = []
     aa_released = False
     context = browser.new_context(viewport={'width': 1280, 'height': 1000}, service_workers='block')
+    context.add_init_script("localStorage.setItem('tofu_onboarding_v1_done', '1')")
     config = {'model': 'alpha', 'modelRef': {'creator_id': 'creator', 'model_id': 'alpha'},
               'preferredProviderId': '', 'thinkingDepth': 'max'}
     context.add_init_script('localStorage.setItem("claude_client_config", '+json.dumps(json.dumps(config))+');')
@@ -95,6 +95,8 @@ def test_model_reasoning_edit_save_and_provider_inheritance(browser, live_server
                 state['revision'] += 1
                 state['document']['revision'] = state['revision']
                 state['writes'].append(request)
+            else:
+                state['reads'] += 1
             return route.fulfill(json={'ok': True, 'revision': state['revision'],
                 'model_routing': state['document'], 'metadata_inheritance_supported': True,
                 'reasoning_controls': reasoning_controls(state['document'])})
@@ -117,8 +119,12 @@ def test_model_reasoning_edit_save_and_provider_inheritance(browser, live_server
         page.goto(live_server, wait_until='domcontentloaded')
         page.wait_for_function('window.TofuModules && window.TofuModules.version === 3')
         page.wait_for_selector('#presetDropdownList [data-value="alpha"]', state='attached')
-        if page.locator('#obSkip').is_visible():
-            page.locator('#obSkip').click()
+        # A new conversation starts from the server default. Select the
+        # synthetic model through the composer before editing its controls.
+        page.locator('#presetToggle').click()
+        page.locator('#presetDropdownList [data-value="alpha"]').first.click()
+        page.keyboard.press('Escape')
+        assert page.evaluate('JSON.parse(localStorage.getItem("claude_client_config")).model') == 'alpha'
         with page.expect_request(lambda r: urlparse(r.url).path == '/api/v4/model-intelligence/aa'):
             page.locator('[data-tofu-action="openSettings()"]').first.click()
             page.locator('.settings-tab[data-tab="models"]').click()
@@ -140,7 +146,9 @@ def test_model_reasoning_edit_save_and_provider_inheritance(browser, live_server
         expect(editor.locator('[name="defaultEffort"]')).to_be_focused()
         editor.locator('button').first.click()
         assert not state['writes'], 'Edit must stay in the existing Settings draft'
+        expect(page.locator('#thinkingDepthRange')).to_have_attribute('max', '2')
         page.screenshot(path=str(tmp_path/'model-reasoning-staged.png'))
+        reads_before_save = state['reads']
         with page.expect_request(lambda r: r.method == 'PUT' and urlparse(r.url).path == '/api/v4/model-routing'):
             page.locator('#settingsSaveBtn').click()
         expect(page.locator('#settingsModal')).not_to_be_visible(timeout=20000)
@@ -151,9 +159,11 @@ def test_model_reasoning_edit_save_and_provider_inheritance(browser, live_server
         assert state['document']['credentials'] == original['credentials']
         page.locator('#presetToggle').click()
         slider = page.locator('#thinkingDepthRange')
-        # Settings keeps the prior medium intent as an unavailable rung.
-        # Select a supported rung before choosing the newly added maximum.
-        expect(slider).to_have_attribute('max', '4')
+        # Medium stays saved and flagged while the thumb parks on the server's
+        # mapped native rung; it does not add a fifth position to this ladder.
+        expect(slider).to_be_enabled()
+        expect(slider).to_have_attribute('max', '3')
+        assert state['reads'] == reads_before_save, 'The saved response must supply the new controls without another catalog read'
         expect(slider).to_have_attribute('aria-valuetext', re.compile('不可用|Unavailable', re.I))
         slider.focus(); page.keyboard.press('Home')
         expect(slider).to_have_attribute('max', '3')

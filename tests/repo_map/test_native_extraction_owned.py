@@ -343,7 +343,7 @@ def test_canonical_owner_cancel_stops_blocked_tool_without_success_publication(s
         assert cancel_task(task['id'], user_id=OWNER)['signalled']
         worker.join(timeout=5)
         assert not worker.is_alive() and not failures
-        assert len(results) == 1 and results[0][2] and settlements == ['error']
+        assert len(results) == 1 and results[0][2] is False and settlements == ['error']
         events = chat_task_runtime.poll(task['id'])['events']
         assert not [e for e in events if e['type'] == 'tool_result' and e.get('status') == 'done']
     finally:

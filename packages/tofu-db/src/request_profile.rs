@@ -7,8 +7,13 @@
 //! (72 bytes per Sample and operation aggregate); reported active/retained
 //! budgets derive from these structure sizes. Five document/Turn read stages
 //! add 120 bytes per Sample/operation aggregate; no per-key labels are created.
+//! The same span tokens attribute every attributed authority hold on its own
+//! thread (`begin_hold`/`finish_hold`), independently of request sampling:
+//! one reusable per-thread recorder, exclusive time per stage and per fixed
+//! hold phase. Sampled requests also total their holds' phases (112 bytes per
+//! Sample and operation aggregate).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,6 +67,11 @@ static DROPPED: AtomicU64 = AtomicU64::new(0);
 static COLLECTOR: OnceLock<Mutex<Collector>> = OnceLock::new();
 thread_local! {
     static ACTIVE: RefCell<Option<Box<RequestState>>> = const { RefCell::new(None) };
+    // Sequence of the hold this thread is attributing; 0 when none. Checked
+    // before touching the recorder so unattributed spans stay one Cell read.
+    static HOLD_SEQUENCE: Cell<u64> = const { Cell::new(0) };
+    static NEXT_HOLD: Cell<u64> = const { Cell::new(0) };
+    static HOLD: RefCell<HoldState> = RefCell::new(HoldState::idle());
     static REPLY_REUSED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static QUEUE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
@@ -129,32 +139,161 @@ struct Sample {
     sequence: u64, operation: &'static str, outcome: &'static str,
     dispatch_nanos: u64, queue_nanos: Option<u64>, unattributed: u64, invalid_spans: u64,
     stages: [Stage; STAGES], work: [u64; WORK_NAMES.len()],
+    holds: u64, hold_phases: [u64; HOLD_PHASES],
 }
 impl Sample {
     fn new(sequence: u64, operation: &'static str, queue_nanos: Option<u64>) -> Self {
         Self { sequence, operation, outcome: "unwound", dispatch_nanos: 0, queue_nanos,
             unattributed: 0, invalid_spans: 0, stages: [Stage::default(); STAGES],
-            work: [0; WORK_NAMES.len()] }
+            work: [0; WORK_NAMES.len()], holds: 0, hold_phases: [0; HOLD_PHASES] }
     }
 }
 
-/// Thread-bound token prevents moving a timed span onto an unrelated request.
-pub(crate) struct SpanToken { request: u64, span: u64, _thread: PhantomData<Rc<()>> }
+/// Thread-bound token prevents moving a timed span onto an unrelated request
+/// or hold. A zero request/hold sequence means that recorder is not involved.
+pub(crate) struct SpanToken { request: u64, span: u64, hold: u64, hold_span: u64,
+    _thread: PhantomData<Rc<()>> }
 pub(crate) fn enter(stage: usize) -> Option<SpanToken> {
-    ACTIVE.with(|active| {
+    let (request, span) = ACTIVE.with(|active| {
         let mut active = active.borrow_mut();
-        let state = active.as_mut()?;
-        let span = state.enter(stage)?;
-        Some(SpanToken { request: state.sample.sequence, span, _thread: PhantomData })
-    })
+        let Some(state) = active.as_mut() else { return (0, 0); };
+        state.enter(stage).map_or((0, 0), |span| (state.sample.sequence, span))
+    });
+    let (hold, hold_span) = hold_enter(stage);
+    (request != 0 || hold != 0)
+        .then_some(SpanToken { request, span, hold, hold_span, _thread: PhantomData })
 }
 pub(crate) fn exit(token: Option<SpanToken>, nanos: u64) {
     let Some(token) = token else { return; };
+    if token.request != 0 {
+        ACTIVE.with(|active| {
+            if let Some(state) = active.borrow_mut().as_mut() {
+                if state.sample.sequence == token.request { state.exit(token.span, nanos); }
+            }
+        });
+    }
+    if token.hold != 0 { hold_exit(token.hold, token.hold_span, nanos); }
+}
+
+const HOLD_PHASES: usize = crate::authority_watch::HOLD_PHASE_NAMES.len();
+
+#[derive(Clone, Copy)]
+struct HoldFrame { id: u64, stage: usize, phase: usize, children: u64 }
+
+/// Exclusive-time attribution of one authority hold. A stage without its own
+/// phase charges its enclosing span's phase; uncovered hold time is `other`.
+struct HoldState {
+    frames: Vec<HoldFrame>,
+    next_span: u64,
+    covered: u64,
+    invalid_spans: u64,
+    phases: [u64; HOLD_PHASES],
+    stages: [u64; STAGES],
+}
+impl HoldState {
+    fn idle() -> Self {
+        Self { frames: Vec::new(), next_span: 0, covered: 0, invalid_spans: 0,
+            phases: [0; HOLD_PHASES], stages: [0; STAGES] }
+    }
+    fn reset(&mut self) {
+        self.frames.clear();
+        self.frames.reserve(MAX_DEPTH);
+        self.next_span = 0;
+        self.covered = 0;
+        self.invalid_spans = 0;
+        self.phases = [0; HOLD_PHASES];
+        self.stages = [0; STAGES];
+    }
+    fn enter(&mut self, stage: usize) -> Option<u64> {
+        if self.frames.len() == MAX_DEPTH {
+            self.invalid_spans += 1;
+            return None;
+        }
+        let phase = crate::authority_watch::hold_phase_of_stage(stage).map(|phase| phase as usize)
+            .unwrap_or_else(|| self.frames.last().map_or(OTHER_HOLD_PHASE, |frame| frame.phase));
+        self.next_span += 1;
+        self.frames.push(HoldFrame { id: self.next_span, stage, phase, children: 0 });
+        Some(self.next_span)
+    }
+    fn exit(&mut self, id: u64, elapsed: u64) {
+        if self.frames.last().map(|frame| frame.id) != Some(id) {
+            self.invalid_spans += 1;
+            return;
+        }
+        let frame = self.frames.pop().unwrap();
+        let exclusive = elapsed.saturating_sub(frame.children);
+        if frame.children > elapsed { self.invalid_spans += 1; }
+        self.phases[frame.phase] += exclusive;
+        self.stages[frame.stage] += exclusive;
+        if let Some(parent) = self.frames.last_mut() { parent.children += elapsed; }
+        else { self.covered += elapsed; }
+    }
+    fn finish(&mut self, elapsed: u64, detail: bool) -> HoldReport {
+        let mut invalid_spans = self.invalid_spans + self.frames.len() as u64;
+        if self.covered > elapsed { invalid_spans += 1; }
+        let mut phases = self.phases;
+        phases[OTHER_HOLD_PHASE] += elapsed.saturating_sub(self.covered);
+        let mut stages = Vec::new();
+        if detail {
+            let names = crate::fsync_stats::STAGE_NAMES.iter().chain(EXTRA_NAMES.iter());
+            stages.extend(names.zip(self.stages).filter(|(_, nanos)| *nanos != 0)
+                .map(|(name, nanos)| (*name, nanos)));
+            stages.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        }
+        self.frames.clear();
+        HoldReport { phases, stages, invalid_spans }
+    }
+}
+const OTHER_HOLD_PHASE: usize = crate::authority_watch::HoldPhase::Other as usize;
+
+/// Exact split of one completed hold. `phases` sums to the hold's elapsed
+/// time unless `invalid_spans` reports crossing or unclosed spans. With
+/// detail, `stages` lists the exclusive time of every attributed stage.
+pub(crate) struct HoldReport {
+    pub(crate) phases: [u64; HOLD_PHASES],
+    pub(crate) stages: Vec<(&'static str, u64)>,
+    pub(crate) invalid_spans: u64,
+}
+
+/// Thread-bound ownership of the per-thread hold recorder.
+pub(crate) struct HoldToken { sequence: u64, _thread: PhantomData<Rc<()>> }
+
+/// Begin attributing an authority hold on this thread. A hold nested inside an
+/// attributed hold returns None: the outermost hold owns its thread's spans.
+pub(crate) fn begin_hold() -> Option<HoldToken> {
+    if HOLD_SEQUENCE.with(Cell::get) != 0 { return None; }
+    let sequence = NEXT_HOLD.with(|next| { let sequence = next.get() + 1; next.set(sequence); sequence });
+    HOLD.with(|hold| hold.borrow_mut().reset());
+    HOLD_SEQUENCE.with(|active| active.set(sequence));
+    Some(HoldToken { sequence, _thread: PhantomData })
+}
+
+/// Close the hold. `detail` also lists every attributed stage by name. A
+/// sampled request on this thread totals the phases of its holds.
+pub(crate) fn finish_hold(token: HoldToken, elapsed_nanos: u64, detail: bool) -> HoldReport {
+    debug_assert_eq!(HOLD_SEQUENCE.with(Cell::get), token.sequence);
+    HOLD_SEQUENCE.with(|active| active.set(0));
+    let report = HOLD.with(|hold| hold.borrow_mut().finish(elapsed_nanos, detail));
     ACTIVE.with(|active| {
         if let Some(state) = active.borrow_mut().as_mut() {
-            if state.sample.sequence == token.request { state.exit(token.span, nanos); }
+            state.sample.holds += 1;
+            for (total, nanos) in state.sample.hold_phases.iter_mut().zip(report.phases) { *total += nanos; }
         }
     });
+    report
+}
+
+fn hold_enter(stage: usize) -> (u64, u64) {
+    let sequence = HOLD_SEQUENCE.with(Cell::get);
+    if sequence == 0 { return (0, 0); }
+    HOLD.with(|hold| hold.borrow_mut().enter(stage)).map_or((0, 0), |span| (sequence, span))
+}
+
+fn hold_exit(sequence: u64, span: u64, nanos: u64) {
+    // A span that outlived its hold, or opened in an earlier one, is ignored;
+    // the finished hold already counted it as unclosed.
+    if HOLD_SEQUENCE.with(Cell::get) != sequence { return; }
+    HOLD.with(|hold| hold.borrow_mut().exit(span, nanos));
 }
 pub(crate) fn fallback() {
     ACTIVE.with(|active| {
@@ -269,6 +408,8 @@ impl Aggregate {
         self.total.dispatch_nanos += sample.dispatch_nanos;
         self.total.unattributed += sample.unattributed;
         self.total.invalid_spans += sample.invalid_spans;
+        self.total.holds += sample.holds;
+        for (a, b) in self.total.hold_phases.iter_mut().zip(sample.hold_phases) { *a += b; }
         if let Some(queue) = sample.queue_nanos {
             *self.total.queue_nanos.get_or_insert(0) += queue;
             self.queue_samples += 1;
@@ -300,10 +441,12 @@ fn sample_json(sample: &Sample) -> Value {
             "inclusiveNanos": s.inclusive, "exclusiveNanos": s.exclusive})).collect();
     let work: serde_json::Map<String, Value> = WORK_NAMES.iter().zip(sample.work)
         .map(|(name, value)| (name.to_string(), json!(value))).collect();
+    let hold_phases: serde_json::Map<String, Value> = crate::authority_watch::HOLD_PHASE_NAMES.iter()
+        .zip(sample.hold_phases).map(|(name, nanos)| (name.to_string(), json!(nanos))).collect();
     json!({"sample": sample.sequence, "operation": sample.operation, "outcome": sample.outcome,
         "dispatchNanos": sample.dispatch_nanos, "embeddedQueueNanos": sample.queue_nanos,
         "unattributedNanos": sample.unattributed, "invalidSpans": sample.invalid_spans,
-        "stages": stages, "work": work})
+        "stages": stages, "work": work, "holds": sample.holds, "holdPhaseNanos": hold_phases})
 }
 
 fn aggregate_json(a: &Aggregate) -> Value {

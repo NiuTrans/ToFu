@@ -44,8 +44,9 @@ _CONDA_PYTHON_DEPS = [
     # silently downgrade a healthy env below what the app requires.
     'trafilatura>=2.3.1',
     'playwright>=1.40',
-    'pillow>=10.0',
+    'pillow>=13.0.0',
     'python-pptx>=0.6.21',
+    'defusedxml>=0.7.1',
     'fonttools>=4.40',
     'brotli>=1.1',
     'lxml>=5.3',

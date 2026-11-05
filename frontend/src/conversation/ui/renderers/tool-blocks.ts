@@ -36,6 +36,7 @@ import {
 } from './stable-dom';
 import { displayJson, textFor } from './localized-copy';
 import { mountToolDiffReview } from '../tool-diff-review';
+import { decorateToolSummary } from '../tool-summary';
 import { renderToolEffectNotice } from './tool-effect-notice';
 import { toolEffectNotice } from '../../presentation/tool-effect-presentation';
 
@@ -63,8 +64,11 @@ function renderToolBlockContent(
   if (isNativeProgramGateway(block.round ?? { toolName: block.name })) {
     const reference = block.round?._snapshotToolResult;
     const loaded = loadedToolResult(node, reference);
+    // A live turn announces the call (and streams its code) before a round exists.
+    const live = turn.status === 'pending' || turn.status === 'running';
     const round = { ...block.round, toolName: block.name, toolArgs: block.input,
-      status: block.round?.status ?? block.result?.status, result: block.result };
+      status: block.round?.status ?? block.result?.status ?? (live ? 'pending' : undefined),
+      result: block.result };
     if (loaded !== undefined) { delete round._snapshotToolResult; round.toolContent = loaded; }
     node.classList.remove('ptool-parent-child'); delete node.dataset.parentToolCallId;
     toolBodies.get(node)?.detach?.();
@@ -101,7 +105,9 @@ function renderToolBlockContent(
       && block.round.guidanceId && bodyState.choices) {
     disposeLazyToolResult(node); bodyState.detach?.(); bodyState.detach = undefined;
     bodyState.rich ??= node.ownerDocument.createElement('div');
-    if (node.childNodes.length !== 1 || node.firstChild !== bodyState.rich) node.replaceChildren(bodyState.rich);
+    // Shared summary/effect owners may add siblings. Keep the mounted form in
+    // place on compatible updates so those siblings never cause focus loss.
+    if (node.dataset.rendererMode !== 'native-choice' || bodyState.rich.parentNode !== node) node.replaceChildren(bodyState.rich);
     resetManagedHtml(node);
     node.dataset.rendererMode = 'native-choice';
     renderRichResponse(bodyState.rich, { version: 1, title: ports.localizedText?.('rich.question', 'Question') ?? 'Question',
@@ -257,9 +263,16 @@ export function renderToolBlock(
   ports: ClassicConversationRendererPorts,
 ): void {
   renderToolBlockContent(node, block, turn, ports);
+  decorateToolSummary(node, block);
   renderToolEffectNotice(node, block.effectNotice === undefined
     ? toolEffectNotice(block.round?.executionEffect, turn.status, block.round?.status) : block.effectNotice,
-    ports, block.round?.executionEffect);
+    ports, block.round?.executionEffect, headerNamesUnknownEffect(node));
+}
+
+/** Only the block's own header counts; nested child rows have their own. */
+function headerNamesUnknownEffect(node: HTMLElement): boolean {
+  return Boolean(node.querySelector('summary')
+    ?.querySelector('[data-tool-effect-outcome="unknown"]'));
 }
 
 export function renderProgramBlock(
@@ -269,7 +282,8 @@ export function renderProgramBlock(
   ports: ClassicConversationRendererPorts,
 ): void {
   renderProgramBlockContent(node, block, turn, ports);
+  decorateToolSummary(node, block);
   renderToolEffectNotice(node, block.effectNotice === undefined
     ? toolEffectNotice(block.round?.executionEffect, turn.status, block.round?.status) : block.effectNotice,
-    ports, block.round?.executionEffect);
+    ports, block.round?.executionEffect, headerNamesUnknownEffect(node));
 }

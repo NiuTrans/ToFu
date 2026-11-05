@@ -82,3 +82,23 @@ it('preserves one-option questions and safely describes their controls', async (
   expect(explanation.textContent).toContain('<img src=x>'); expect(view.node.querySelector('img')).toBeNull();
   view.dispose();
 });
+
+describe('owner notes for questions answered in chat', () => {
+  it('shows a pending note, keeps a drafted reply answerable and labels a chat reply', async () => {
+    const note = 'Work continues meanwhile; your reply is sent as a normal message.';
+    let outcome: ChoiceInteraction = { ...pending, note: 'Your reply is in the composer' };
+    const { view, ports } = mount({ load: vi.fn(async () => ({ ...pending, note })),
+      submit: vi.fn(async () => outcome) });
+    await flush();
+    expect(view.node.querySelector('[role=status]')?.textContent).toBe(note);
+    select(view.node); send(view.node); await flush();
+    // A drafted reply is information, not an unconfirmed answer: the form stays usable.
+    expect(view.node.querySelector('[role=status]')?.textContent).toBe('Your reply is in the composer');
+    expect(view.node.querySelector('fieldset')?.disabled).toBe(false);
+    outcome = { ...pending, state: 'answered', response: 'Client', note: 'Replied in chat' };
+    send(view.node); await flush();
+    expect(ports.submit).toHaveBeenCalledTimes(2);
+    expect(view.node.querySelector('[role=status]')?.textContent).toBe('Replied in chat: Client');
+    view.dispose();
+  });
+});

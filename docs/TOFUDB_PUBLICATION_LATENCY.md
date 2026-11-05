@@ -20,8 +20,11 @@ the newer logical state. Other physical publishers retain their existing defer
 boundary. Failed/abandoned publications fence the engine; Normal WAL cover,
 lost-sync barriers, old-WAL retention and durable-before-visible acknowledgements
 remain. No extra worker, queue, persistent format or admission limit is added.
-One frozen manifest survives the existing publication window; the WAL ceilings
-continue to bound progress while the underlying volume itself is stalled.
+One frozen manifest survives the publication window. Active-WAL appends now
+continue independently of maintenance backlog size, using the streamed recovery
+and driver ownership defined in
+[rotation progress](TOFUDB_ROTATION_WINDOW.md#foreground-append-independent-of-maintenance).
+Actual append/durability I/O failures still retain their original error boundary.
 
 Alternatives rejected: more retries or a watchdog changes outage handling, not
 lock-induced latency; early success/push without a durable witness weakens
@@ -458,6 +461,44 @@ validated source and artifact identity do not prove live activation or a
 
 ## Full-catalog history promotion and write-delivery anchors
 
+History routing retirement is incremental. Problem: bounding promotion to a
+few source segments still merged every routing run and rewrote all retained
+locations while the same physical publication lane prevented WAL rotation.
+Large retained histories could therefore exhaust the active WAL window and
+return `database_busy` despite responsive health probes.
+
+Decision: after validating and durably promoting each retired SegmentIndex,
+collect its exact `(payload ID, source ID)` locations. `RoutingRoot::remove_locations`
+uses their key ranges to read only candidate pages, removes only matching
+locations, and reuses unaffected immutable pages at their existing levels.
+Candidate pages retain ordinary hash, range and offset validation. A payload
+also present in another source keeps that location; captured old roots remain
+readable. CONTROL/WAL ordering, promotion durability and GC ownership are
+unchanged. Explicit whole-history `Engine::compact_history` retains its
+streaming bulk rewrite, so it never collects all retired locations in memory.
+The automatic path's temporary location set scales with its existing source
+slice. Metadata traversal still scales with routing page references; I/O and
+new page writes depend on candidate/changed pages. Retired hashes spread
+throughout the index can still touch many pages; this is not a constant-time
+claim. No durable table, worker, retry budget or admission limit is added.
+
+Alternatives rejected: enlarging WAL/retry windows postpones the same rewrite;
+dropping stale source checks can lose readable payloads; merging all runs just
+to remove a few locations recreates the publication stall. Verify
+`history_payload::tests::pruning_*`, indexed compaction and publication crash
+fault matrices, and the existing generation/rotation tests.
+
+Measurement: the deterministic zero-cache regression retires one location
+from fixtures with 4, 64 and 512 retained routing pages. Each performs one
+source read and one immutable page write; unaffected pages and old-root reads
+survive, and the resulting root round-trips and accepts a subsequent append.
+The pre-change implementation fails the unaffected-page regression. This
+isolates routing retirement I/O; it does not certify live latency or eliminate
+time spent promoting payloads, publishing CONTROL or waiting on the filesystem.
+The publication fault fixture retires carried payloads from a mixed routing
+page and covers 118 error, short-write and lost-sync cases across 87 operations,
+requiring retired, retained and concurrently acknowledged bytes after recovery.
+
 Problem: history pruning at the payload catalog ceiling fell back to a durable
 loose file per carried block even when existing segments had packing room.
 The unlocked work still reserved the CONTROL publication lane, so the active
@@ -623,7 +664,7 @@ Decision: `wal_publication.rs` captures the current logical length and generatio
 
 Problem: an Engine-level soft trigger appeared to reject a writable successor and could amplify a task's FIFO. The isolated candidate admitted only an empty, unfenced successor after durable handover, keeping the hard path unchanged. Its cold and post-publication power-loss cases and per-I/O fault matrix passed; the native snapshot passed 1,855 tests (eight existing ignores). Earlier unsafe descriptor-only WAL cover was fixed before building either arm.
 
-Decision: reject this runtime candidate. Client-profiled ABBA scheduled-to-push P99 is 3,164/3,207/3,536/3,518 ms: candidate mean regresses 0.93%; settle improvement is only 0.52%, and B1 RSS rises to 2.30 GB against baseline 1.98/1.96 GB. The full-sampling run records zero soft-trigger reuse decisions across sampled operations, so this experiment did not expose the expected mechanism on the default business path. Fewer diagnostic rotation parks alone cannot establish a gain across different coalescing cohorts. Every leg still recovers 1,000 exact contents/replays and 5,000 ordered frames with zero errors; all latency gates fail. `tofudb_soft_rotation_20261014.json` retains the original reports in its companion gzip. Candidate `15ca839ae` and its revert preserve the implementation; no counter or admission behavior is enabled by default. The retained hard-ceiling test now sets the threshold to the actual format ceiling, rather than counting the earlier soft refusal as a hard-cap test. Alternatives excluded: declaring a small or inactive-path change a broad win, ignoring B1 memory, or comparing against the unsafe publication baseline.
+Decision: reject this runtime candidate. Client-profiled ABBA scheduled-to-push P99 is 3,164/3,207/3,536/3,518 ms: candidate mean regresses 0.93%; settle improvement is only 0.52%, and B1 RSS rises to 2.30 GB against baseline 1.98/1.96 GB. The full-sampling run records zero soft-trigger reuse decisions across sampled operations, so this experiment did not expose the expected mechanism on the default business path. Fewer diagnostic rotation parks alone cannot establish a gain across different coalescing cohorts. Every leg still recovers 1,000 exact contents/replays and 5,000 ordered frames with zero errors; all latency gates fail. `tofudb_soft_rotation_20261014.json` retains the original reports in its companion gzip. Candidate `15ca839ae` and its revert preserve the implementation; no counter or admission behavior is enabled by default. The former hard-ceiling admission test has since been replaced by the maintenance-independent append and recovery contract in [rotation ownership](TOFUDB_ROTATION_WINDOW.md#foreground-append-independent-of-maintenance). Alternatives excluded: declaring a small or inactive-path change a broad win, ignoring B1 memory, or comparing against the unsafe publication baseline.
 
 ## Rejected original-snapshot OCC preparation (2026-10-19)
 
@@ -716,5 +757,284 @@ windows exclude other agents' builds, tests and archive/worktree I/O. This
 experiment compares two native versions; the current-schema SQLite controls
 and their retained readiness failures belong to the separate listener cohort,
 not to a claimed OCC-versus-SQLite victory.
+
+## Logical maintenance preparation outside the writer
+
+**Problem.** Limiting retention rows does not limit the wall time of cold page
+reads. Restored-range materialization and tool-result, attempt-event and sync
+retention previously scanned and decoded old data under the foreground authority
+mutex, including rounds that found nothing to remove.
+
+**Decision.** `maintenance_preparation.rs` uses the existing pinned command
+preparation lane. Each existing bounded transaction captures a fresh view in a
+short writer hold, performs source reads and logical preparation outside that
+hold, and publishes through the original writer's OCC validation and WAL commit.
+The commit acquisition uses `try_lock`; a busy writer or changed witness discards
+only the prepared attempt and the existing scheduler retries on a later round.
+Earlier completed transactions retain their progress counters if a later stage
+defers. Metadata-only retirement also counts as completed work. Mounts retain
+their original priority; event pruning still precedes sync pruning and respects
+sync references. Ownership, retention horizons, payload limits, outbox admission,
+WAL acknowledgements and terminal I/O errors retain their original boundaries.
+
+There is at most one preparation snapshot per serial maintenance job. Its pin
+protects source pages through preparation/commit and drops on success, conflict
+or error. No extra worker, durable journal, storage authority, retention policy
+or workload admission ceiling is introduced. Physical tombstone compaction and
+commit validation remain writer work; this change does not promise that every
+maintenance hold is independent of storage latency.
+
+Persistent historical snapshots resolve their owner-scoped pin through the
+replica's captured logical sequence, including its frozen overlay, instead of
+requiring a writer handle. Historical transactions remain read-only and register
+their own older root pin. Removing the live durable pin or dropping the replica
+does not invalidate an already acquired historical reader; a fresh reader sees
+the removal. `entity_optimistic_tests.rs` verifies both physical and overlay pins,
+owner isolation, old bytes after a live update, write refusal and final release.
+
+**Alternatives considered.** Longer deadlines and larger retry budgets leave
+the blocking read under the writer. A second maintenance authority breaks the
+single commit boundary. Publishing deletions from an unchecked snapshot can
+erase a concurrent renewal or range update. Moving these jobs onto the existing
+preparation lane preserves their conflict witnesses without a new state machine.
+
+`maintenance_preparation_tests.rs` pauses an actual cold source read while a
+foreground commit completes, verifies concurrent renewal and range-update
+conflicts, releases discarded pins, and exercises interrupted I/O, short writes
+and lost syncs against a durable crash image captured before clean shutdown.
+Its ignored measurement runs eight controlled 100 ms read pauses with 256 exact
+foreground commits and eight tool-result removals, verifies reopen, and records
+warm idle-round cost separately. It is a profile-off Strict authority component
+measurement on explicitly selected filesystems, not an application P99 or a
+daemon/embedded buffered-WAL qualification.
+
+The 2026-10-27 source-attested ABBA comparison uses debug/system-allocator
+artifacts, baseline `d749e1e62638df522615b5e561e0337dcb1d883ab32d7d8924a243aba8958a5e`
+and candidate `f6cfb7f62ca6381b6711140f379c8d26b7cc17d27cc76c54410229af1c45329a`.
+With those injected pauses, XFS foreground P99 changes from 131.0–136.8 ms
+to 32.6–35.0 ms; FUSE changes from 107.5–107.7 ms to 5.3–5.6 ms. Baseline
+commits make no progress during the pauses; candidate legs complete 92/124
+commits on XFS and 256/256 on FUSE during them. Every leg recovers all 256
+exact records, finishes all eight removals and releases its preparation pins.
+XFS candidate cleanup needs 16/17 follow-up rounds after busy commits; its
+mean completion time including catch-up is 296–305 ms versus 403–429 ms.
+FUSE cleanup is 104.7 ms versus 147.8–150.1 ms. Warm idle cost increases:
+the two-leg mean is 239.0 versus 225.2 microseconds on XFS and 245.0 versus
+227.2 microseconds on FUSE. These are controlled component results, not an
+application SLO. Final production qualification also includes later independent
+database changes: the matching release/mimalloc pair passes 14 daemon/embedded
+application contracts; the debug artifact from the same source passes 29
+boundary tests and the 4,096-Turn recovery fixture.
+Full source identities, excluded exploratory runs, per-leg results and logs
+are retained locally in `.tofu/evidence/storage-maintenance-preparation-20261027/`.
+
+### Application retention commands on the command preparation lane (2026-10-29)
+
+**Problem.** The application's retention owner (`lib/tasks_pkg/event_log.py`)
+still sent `turn.sync.prune`, `event.prune` and `turn.events.prune` through the
+exclusive writer path, so their cold index scans and payload decoding ran under
+the authority mutex. Production `authority_hold` lines (holds of at least 1 s)
+recorded 318/442 `turn.sync.prune`, 560/792 `turn.events.prune` and 148
+`event.prune` holds on 2026-10-27/28, about 3,000 s of exclusive time per day.
+Between 2026-10-28 03:00 and 2026-10-29 06:00, 1,438 of 3,121 slow (at least
+2 s) non-prune storage RPCs, carrying 49% of their time, were waiting when a
+prune completed; shifting the prune times by seven minutes matches only 6.3%.
+
+**Decision.** `compile_parallel_transaction` admits the point-deleting
+`TurnSyncPrune` and `IndexedStreamPrune` steps. They prepare on the shared
+pinned preparation replica and commit through ordinary OCC validation; any
+refused commit re-executes on the writer exactly as before. The replica shares
+the authority's block, page and decoded-chunk caches, so even a refused
+preparation leaves its cold source pages resident for the writer retry.
+`TurnEventsPrune` joined the lane once it became exact point deletes
+([Attempt-event retention as exact point deletes](#attempt-event-retention-as-exact-point-deletes-2026-11-02)).
+
+With `TOFU_DB_TOMBSTONE_RECLAIM` the root directory is part of every range
+witness. The first deferred write after an overlay merge republishes it, so a
+prepared prune that spans a merge falls back. In the production daemon whose
+statistics end on 2026-10-28, 1,281 of about 119,000 prepared commands fell back
+(909 busy, 367 rotation); retention preparations are longer than ordinary
+commands and will fall back more often. No new admission, retry or tuning value
+is introduced.
+
+**Alternatives rejected.** Smaller retention batches or longer pauses tune the
+caller instead of removing the exclusive scan. Relaxing range validation under
+tombstone reclaim weakens the documented ABA protection.
+
+**Verification.** `server::tests::retention_prunes_prepare_outside_writer_beside_live_writes_and_match_serial`
+pins the production overlay and reclaim settings, runs with and without the
+logical outbox, commits prepared sync, Attempt-event and task-event prunes
+beside unrelated live writes, and compares every response and final state with
+a serial control authority.
+`prepared_task_event_prune_refuses_concurrent_append_to_its_task` and
+`prepared_retention_prune_refused_by_root_republication_retries_on_writer`
+verify refusal without publication and exact writer retries. All three fail
+when the two steps are removed from the lane. The production effect is not yet
+measured; it requires the rebuilt engine and the existing `authority_hold`
+and `parallel_commit_*` counters.
+
+### Attempt-event retention as exact point deletes (2026-11-02)
+
+**Problem.** `turn.events.prune` retired each Attempt's event rows with
+`entity_retire_range`. Range retirement is structural: its commit first merges
+the whole write overlay under the writer (every pending chunk materialized,
+staged and committed on the authority volume) and then refuses any moved root,
+so the step could not join the preparation lane above, and its candidate
+selection (retention cursor scan, Attempt and whole Turn document reads, sync
+reference probes) also ran under the writer. Production `authority_hold`
+records on 2026-11-02 show recurring 1.30-1.67 s `turn.events.prune` holds
+with 256-row application batches; an earlier daemon lifetime recorded up to
+20.3 s.
+
+**Decision.** The step and the conversation-retirement sweep that shares its
+transaction delete the exact rows they found with ordinary point deletes. Each
+Attempt's rows are scanned from its retention cursor; a transaction deletes at
+most `max_rows` rows and only as many as its overlay delta can still carry
+beside the cursor or completion writes that follow and the IR's largest inline
+command receipt (`EntityTransaction::overlay_delta_room`, derived from the
+existing 256 KiB family inline bound and its 64 KiB reserve), so the commit is
+always a rebaseable overlay write. `compile_parallel_transaction` admits
+`TurnEventsPrune`: selection and every read run on the pinned preparation
+replica, and the writer only validates the exact witnesses and applies the
+point deletes. Every input of the prunability predicate is a witness: the
+retention cursor range, the Attempt document, the owning Turn, the
+sync-reference prefix (a new reference is a range change), the event head and
+every deleted row (its blind-write version). Any concurrent change refuses the
+prepared commit, which re-executes on the writer against current state. A
+terminal Attempt cannot become live again (`store_attempt_document` refuses
+it), so the only protection a settled stream can gain is a retained sync
+reference, which the retry honors. `deleted_rows` now counts rows actually
+deleted, as the SQL authority does; gaps in an imported stream no longer count.
+
+Each deleted row adds one overlay tombstone (about 70-100 bytes of WAL; an
+application call of 256 rows writes about 25 KB) that background merges and
+tombstone reclaim retire later, and one transaction carries at most about
+2,100 such rows for a 36-character Attempt ID instead of 200,000, so a native
+maintenance round (8,192 rows requested) leaves the rest to its next rounds
+through the existing `has_more` report. Under
+tombstone reclaim a preparation that spans an overlay merge still falls back to
+the writer, like the other retention prunes; that writer execution is now an
+overlay commit, never a full merge.
+
+**Alternatives rejected.** Preparing only candidate selection off the writer
+keeps the structural commit, and its full overlay merge is the hold. A
+range-tombstone overlay record would add a delta format and replay contract for
+one caller. Smaller application batches tune the caller while the merge cost
+does not shrink with the row count.
+
+**Verification.** `turn::event_prune_tests` commits a prepared prune beside an
+unrelated write, refuses a stale prepared commit after each witnessed input
+changes (reference, Attempt, owning Turn, cursor, head, one prepared row), keeps
+a stream that became referenced on the writer retry, pins the terminal-to-live
+refusal, and drains 6,000 rows across envelope-bounded transactions that each
+leave room for the receipt. `server::tests::prepared_attempt_event_prune_refused_by_a_new_reference_keeps_the_stream_on_writer_retry`
+covers the same refusal through the command lane, and the serial-parity test
+above now prepares all three retention commands. The rebase, envelope and
+lane specifications fail with the previous range retirement.
+
+**Measurement.** Source-matched base and new daemons on disposable
+authorities (128 settled Attempts of 42 events, 22 production-shaped calls of
+16 Attempts and 256 rows deleting 5,632 rows, four concurrent `record.put`
+writers, one run each). On this host's DolphinFS mount the mean prune hold fell
+from 10.0 ms (largest sampled 37.7 ms) to 1.67 ms (largest 3.55 ms; `journal`
+0.52, `apply` 0.51, `validate` 0.39, `retention` 0.11, `read` 0.10 ms), and
+selection's 11.4 ms of DolphinFS reads moved onto the replica. Concurrent
+`record.put` completed 841 instead of 51 commits during the calls, mean
+latency 1.8 instead of 29.4 ms (26.3 ms of it queued behind the writer). Two of
+22 preparations fell back to the writer. On `/tmp` the mean hold fell from
+1.99 to 0.70 ms. These fresh authorities have small overlays; the production
+holds were dominated by the full-overlay merge, which the new path never runs.
+
+## Turn event record holds and long-hold evidence (2026-11-02)
+
+**Problem.** Production `authority_hold` records named only elapsed time:
+86 `turn.event.record` holds of at least 1 s (up to 10.6 s) between 03:18 and
+08:45 UTC on 2026-11-02, and up to 921 s in earlier lifetimes, with no evidence
+of what ran inside them. Phase attribution
+([format](RESOURCE_CONTROL.md#demand-driven-root-acceptance-and-workers)) now
+splits each record.
+
+**Measurement.** One live Turn grown to 400 tool rounds (8 KiB results,
+final projection 3,604,036 bytes) through production `record_task_event` on
+disposable daemons, authority on this host's DolphinFS mount (launch probe:
+network volume, Normal durability) or on `/tmp` (Strict, buffered WAL), with
+hold phases from the request profile per 100 records:
+
+| Turn size | DolphinFS hold ms (`journal`) | DolphinFS dispatch ms | `/tmp` hold ms | `/tmp` dispatch ms (fsync wait) |
+|---|---|---|---|---|
+| 50 rounds | 0.49 (0.39) | 2.4 | 0.16 | 50.1 (47.4) |
+| 200 rounds | 0.57 (0.46) | 7.3 | 0.16 | 28.4 (20.7) |
+| 400 rounds | 0.65 (0.53) | 12.9 | 0.58 (two writer fallbacks) | 38.9 (25.7) |
+
+The prepared commit's hold does not grow with the Turn: no projection
+serialization, history scan or fsync runs inside it. On DolphinFS the dominant
+phase is `journal`, the WAL frame's physical write that Normal durability
+performs inside the authority (`vfs_write` 0.49 of the 0.65 ms at 400 rounds):
+69-91% of the mean hold in every 100-record window and all of the slowest holds
+(59.95 and 47.41 ms, of which 59.8 and 47.3 ms in `vfs_write`). Under Strict
+the same frame is queued to the barrier worker (`journal` 0.045 ms) and the
+fsync wait runs outside the hold. The O(projection)
+work (Turn materialization, projection apply, store) runs in preparation,
+outside the hold: about 1 ms per record at 50 rounds and 9.5 ms at 400
+(`turn_event_store` 3.9, `document_materialize` 3.3, `turn_event_projection`
+2.3 ms); the run wrote 17.9 MB of WAL for 803 records and 40 overlay merges,
+so unchanged projection chunks are not restaged. A refused prepared commit
+re-executes on the writer and brings that work inside the hold: up to 16.1 ms
+(`execute` 7.8, `stage` 3.6, `read` 2.2 ms) in this run. There were 2
+(DolphinFS) and 4 (`/tmp`) fallbacks beside 803 prepared commits; the last
+production statistics (2026-10-28) show 1,281 of about 119,000 prepared
+commands.
+
+A multi-second production `turn.event.record` hold is therefore a DolphinFS
+write (`journal`) or fallback read stalling inside the hold, or the host
+stalling the holder, not the record's own work. Production holds of every
+operation stretch together (04:45-04:56 UTC: 108 holds, including
+`swarm.agent.append` 37 s and `raw_archive.put` 25 s), a shared cause.
+
+**Long holds.** The 921 s `turn.event.record` hold (a lifetime before
+2026-10-27, after a 236 s record and a 152.5 s `raw_archive.put`) ended just
+before that daemon's shutdown checkpoint refused with "authority outcome is
+uncertain" (`restart_required`, latched only by a failed physical WAL append or
+sync, CONTROL or catalog publication, or rotation install), while the
+application's own log writes on the same DolphinFS mount failed with `OSError:
+[Errno 70] Communication error on send`. The most likely explanation is a
+DolphinFS client communication failure: the holder was blocked inside the hold
+in an I/O call on the mount that failed after about 15 minutes, like the
+13-minute 2026-09-21 brownout recorded in `authority_watch.rs`. On 2026-11-02 a
+`log_aggregate.flush` (at most 500 point upserts and a bounded sweep) held the
+writer for 1,585 s (07:23:46-07:50:11 UTC); the host load average was 506.6 on
+91 CPUs when it ended, cgroup memory stood at 97-99% of its limit and the
+application's cgroup sampler wrote 2 samples instead of about 50; other writers
+timed out throughout. That holder was also stalled in the kernel, not working.
+Missing evidence: neither record had a phase split (now `phases=`: a DolphinFS
+stall shows as `journal`, `read` or `sync`; a stall between instrumented stages
+as `other`), and no kernel stack (`/proc/<pid>/task/<tid>/stack`) of a holding
+thread was captured during a stall. No liveness probe failed during the second
+hold: published reads, which the application kept serving, counted as authority
+handoff and cleared the wedge signal; that is fixed
+([RESOURCE_CONTROL.md](RESOURCE_CONTROL.md#demand-driven-root-acceptance-and-workers)).
+
+**Decision.** No hold-path change for `turn.event.record` here: its prepared
+hold is already constant in Turn size.
+
+**Proposed, not implemented: Normal-tier WAL writes off the authority.** Queue
+the frame in the existing write buffer under Normal durability as Strict does,
+and respond once the barrier worker's physical write covers it (a written-prefix
+witness waited outside the authority). By the figures above the DolphinFS
+`turn.event.record` hold would fall from about 0.65 ms toward the 0.15 ms Strict
+figure, and a DolphinFS write stall would delay the waiting responses instead
+of every writer, until the buffer fills (overflow writes synchronously). It
+crosses recorded contracts: `walWriteBuffer.durability` acknowledges only after
+physical write and sync,
+[the worker-write decision](#physical-wal-writes-on-the-existing-barrier-worker)
+keeps Normal durability unchanged, and a later commit could publish before an
+earlier frame reaches the kernel. It
+needs an explicit durability decision and the WAL crash and torn-write matrix
+first.
+
+**Alternatives rejected.** Strict durability on network volumes moves the write
+out but adds an fsync wait to every commit (17-58 ms per record on this host).
+Batching several frames per in-hold write adds a window knob. Re-preparing a
+refused commit instead of executing on the writer adds a retry count.
 
 <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

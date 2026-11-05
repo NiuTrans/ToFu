@@ -192,7 +192,7 @@ fn continuation(value: Option<&str>, binding: String, all_bits: u32) -> io::Resu
             ..Default::default()
         });
     };
-    let bad = || invalid_input("invalid conversation search cursor");
+    let bad = || crate::semantic_executor::validation_fence("invalid conversation search cursor");
     if value.len() > CURSOR_BYTES {
         return Err(bad());
     }
@@ -228,7 +228,7 @@ fn page(
         .map_err(|_| invalid_data("search cursor serialization failed"))?;
     let cursor = URL_SAFE.encode(bytes);
     if cursor.len() > CURSOR_BYTES {
-        return Err(exhausted("search cursor exceeds its budget"));
+        return Err(crate::resource_exhaustion::domain_bound("search cursor exceeds its budget"));
     }
     Ok(ConversationSearchPage {
         items,
@@ -553,24 +553,30 @@ impl OpenTurnSearchProjection {
                 !pending.phrase && pending.mask == all_bits
             };
             if matched {
-                let (snippet, role, match_field) = if title_hit || (best.is_none() && !id_hit) {
-                    (String::new(), None, "title".to_owned())
+                let (snippet, role, match_field, turn) = if title_hit || (best.is_none() && !id_hit) {
+                    (String::new(), None, "title".to_owned(), None)
                 } else if id_hit {
-                    (header.conversation_id.clone(), None, "id".to_owned())
+                    (header.conversation_id.clone(), None, "id".to_owned(), None)
                 } else {
                     let (meta, text, phrase) = best.unwrap();
                     let term = if phrase { query.as_str() } else { words[0] };
+                    let turn = (!meta.turn_id.starts_with(ARCHIVED_SOURCE_PREFIX))
+                        .then_some((meta.turn_id, meta.ordinal));
                     (
                         make_snippet(&text, term, request.snippet_radius),
                         Some(meta.role),
                         meta.match_field,
+                        turn,
                     )
                 };
+                let (turn_id, ordinal) = turn.unzip();
                 items.push(ConversationSearchHit {
                     id: header.conversation_id,
                     snippet,
                     role,
                     match_field,
+                    turn_id,
+                    ordinal,
                 });
             }
             if items.len() >= request.limit {
@@ -1137,6 +1143,42 @@ mod tests {
     }
 
     #[test]
+    fn hits_address_the_matching_live_turn_but_never_archived_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projection =
+            OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
+        let mut live = vec![document(0, "intro"), document(0, "the needle reply")];
+        live[0].turn_id = "turn-a".into();
+        live[1].turn_id = "turn-b".into();
+        live[1].ordinal = 7;
+        replace(&mut projection, "live", "g", 300, "", &live);
+        let mut archived = document(0, "an archived needle");
+        archived.turn_id = format!("{ARCHIVED_SOURCE_PREFIX}[\"archive\",3]");
+        replace(&mut projection, "archived", "g", 200, "", &[archived]);
+        replace(&mut projection, "titled", "g", 100, "needle title", &[document(0, "needle")]);
+        let mut request = request("needle");
+        request.limit = 10;
+        let hits = projection.search(&request).unwrap();
+        let turns: Vec<_> = hits
+            .iter()
+            .map(|hit| (hit.id.as_str(), hit.turn_id.as_deref(), hit.ordinal))
+            .collect();
+        assert_eq!(
+            turns,
+            [
+                ("live", Some("turn-b"), Some(7)),
+                ("archived", None, None),
+                ("titled", None, None),
+            ]
+        );
+        assert!(hits[1].snippet.contains("needle"));
+        let encoded = serde_json::to_value(&hits[0]).unwrap();
+        assert_eq!(encoded["turn_id"], "turn-b");
+        assert_eq!(encoded["ordinal"], 7);
+        assert!(serde_json::to_value(&hits[2]).unwrap()["turn_id"].is_null());
+    }
+
+    #[test]
     fn snippet_unicode_expansion_and_source_preference_match_contract() {
         assert_eq!(make_snippet("CAFÉ xxxxxxxxxxxxx", "café", 4), "…CAFÉ xxx…");
         assert_eq!(
@@ -1156,6 +1198,7 @@ mod tests {
         let hit = projection.search(&request("phrase")).unwrap().remove(0);
         assert_eq!(hit.match_field, "originalContent");
         assert_eq!(hit.role.as_deref(), Some("user"));
+        assert_eq!((hit.turn_id.as_deref(), hit.ordinal), (Some("turn"), Some(1)));
         for query in [
             "x\0y".to_owned(),
             "a".repeat(513),

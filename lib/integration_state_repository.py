@@ -198,6 +198,19 @@ def delivery_page(after_id: int = 0, limit: int = 64) -> dict[str, Any]:
     }))
 
 
+def delivery_action_page(
+    after_id: int = 0, limit: int = 64, *, retained: bool = False,
+) -> dict[str, Any]:
+    """Complete rows whose delivery receipt asks the worker to act.
+
+    ``retained`` also returns delivered sources acknowledged as retained.
+    """
+    return dict(_query('integration.workspace.delivery_action_page', {
+        'after_id': max(0, int(after_id)), 'limit': max(1, min(128, int(limit))),
+        'retained': bool(retained),
+    }))
+
+
 def get_integrating(
     row_id: int,
 ) -> dict[str, Any] | None:

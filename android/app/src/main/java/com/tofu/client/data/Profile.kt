@@ -92,8 +92,8 @@ interface ProfileDao {
     suspend fun setCookieHost(id: Long, host: String?): Int
 
     /** Guard late network completions against an edited/deleted profile. */
-    @Query("UPDATE profiles SET cookie_host = :host WHERE id = :id AND base_url = :expectedUrl")
-    suspend fun setCookieHostIfUrlMatches(id: Long, expectedUrl: String, host: String): Int
+    @Query("UPDATE profiles SET cookie_host = :host WHERE id = :id AND base_url = :expectedUrl AND alias = :expectedAlias AND auth_type = :expectedAuthType")
+    suspend fun setCookieHostIfCurrent(id: Long, expectedUrl: String, expectedAlias: String, expectedAuthType: AuthType, host: String): Int
 
     /**
      * Bump ONLY the recency stamp. Same reasoning as [setCookieHost], and the

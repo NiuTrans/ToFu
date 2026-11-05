@@ -8,6 +8,20 @@ policy, high-level page APIs, capture, research, adapters, and diagnostics. Read
 Native operation schemas live in `adapters.py`; `site_tool.py` only projects
 and invokes them. Read targets/receipts live in `content_contract.py`;
 `content.py` is the sole acceptance owner for DOM, snapshot and captured data.
+`read_pipeline.read_json_payload` admits dedicated attributes using
+`content_contract.JsonReadSource`, the same content cleaner, and live
+`BrowserPage.authorize_read_source` policy; no guessed response URLs.
+`content.collect_content_and_network` feeds accepted, cleaned responses
+directly to diagnostic inventory; never re-admit raw responses by receipt URL.
+`data_islands.py` reads embedded page data with one fixed `execute_js` script
+and hands decoded islands to `content.py` as `hydrated_state`; never evaluate
+page script text or render raw island JSON.
+`site_scope.py` owns declared adapter-domain matching; `BrowserPage.site_scope`
+binds it for one invocation, including workflow-owned pages. The live access
+policy and lease lifecycle remain separate authorities.
+`BrowserPage._run` also owns iframe authorization: obtain the target document
+from `page_state`, check its URL, and pin `expectedDocumentId` for execution.
+Never substitute the parent tab URL for a child document's permission or source.
 
 ## Editing rules
 

@@ -4,13 +4,15 @@
  */
 import type { mountEvolution } from './view';
 import type { mountProgramWorkbench } from './programs/page';
+import type { mountStudio } from './studio';
 import { createFeatureModuleCache } from '../../core/feature-module-cache';
 import { createAlert, createButton } from '../../ui';
 import { t } from '../../i18n';
 import { createEvolutionRouteHost, type EvolutionPageKind, type MountedEvolutionPage } from './route-host';
 
 type WorkspacePorts = Parameters<typeof mountEvolution>[1]
-  & Pick<Parameters<typeof mountProgramWorkbench>[1], 'draftOwner' | 'draftScope' | 'draftStorage'>
+  & Pick<Parameters<typeof mountProgramWorkbench>[1], 'draftOwner' | 'draftScope' | 'draftStorage' | 'openConversation'>
+  & Pick<Parameters<typeof mountStudio>[1], 'openWatchdog'>
   & { recoverLoadFailure?: (error: unknown) => boolean };
 const loadPageModule = createFeatureModuleCache();
 const pageLoaders: Record<EvolutionPageKind,

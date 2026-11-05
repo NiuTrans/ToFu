@@ -33,12 +33,6 @@ final class ServerUrlTests: XCTestCase {
         XCTAssertEqual(ServerUrl.defaultAuthType("https://host.example/proxy/15001"), .codeServerPassword)
     }
 
-    func test_needsProxyAuthFix_is_one_way() {
-        XCTAssertTrue(ServerUrl.needsProxyAuthFix(rawUrl: proxy, current: .none))
-        XCTAssertFalse(ServerUrl.needsProxyAuthFix(rawUrl: proxy, current: .codeServerPassword))
-        XCTAssertFalse(ServerUrl.needsProxyAuthFix(rawUrl: "https://host:15000", current: .none))
-    }
-
     func test_displayLabel_compresses_mlp_proxy_url() {
         XCTAssertEqual(ServerUrl.displayLabel(proxy), "5665bc99 · zw05 : 15000")
     }

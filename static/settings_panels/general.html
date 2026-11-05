@@ -18,22 +18,9 @@
               </div>
             </div>
             <div class="settings-field">
-              <div class="settings-section-title" data-i18n="settings.language" style="margin-bottom:8px">界面语言</div>
-              <div class="lang-picker" id="langPicker">
-                <div class="lang-option active" data-lang="zh" data-tofu-action="_onLanguageChange('zh')">
-                  <span class="lang-flag"><svg width="20" height="14" viewBox="0 0 24 16"><rect width="24" height="16" fill="#de2910"/><path d="M5 3l.7 2.1H8l-1.85 1.35.7 2.15L5 7.25 3.15 8.6l.7-2.15L2 5.1h2.3z" fill="#ffde00"/></svg></span>
-                  <span class="lang-label">中文</span>
-                </div>
-                <div class="lang-option" data-lang="en" data-tofu-action="_onLanguageChange('en')">
-                  <span class="lang-flag"><svg width="20" height="14" viewBox="0 0 24 16"><rect width="24" height="16" fill="#fff"/><g fill="#b22234"><rect width="24" height="1.85"/><rect y="3.7" width="24" height="1.85"/><rect y="7.4" width="24" height="1.85"/><rect y="11.1" width="24" height="1.85"/><rect y="14.15" width="24" height="1.85"/></g><rect width="10" height="8.6" fill="#3c3b6e"/></svg></span>
-                  <span class="lang-label">English</span>
-                </div>
-              </div>
-              <!-- hidden select kept for JS compat -->
-              <select id="settingLanguage" style="display:none" data-tofu-action-change="_onLanguageChange(this.value)">
-                <option value="zh">中文</option>
-                <option value="en">English</option>
-              </select>
+              <div class="settings-section-title" id="settingLanguageLabel" data-i18n="settings.language" style="margin-bottom:8px">界面语言</div>
+              <!-- Options are rendered from frontend/src/i18n/languages.json by the i18n owner. -->
+              <select id="settingLanguage" aria-labelledby="settingLanguageLabel" style="max-width:340px" data-tofu-action-change="_onLanguageChange(this.value)"></select>
             </div>
           </div>
 
@@ -45,7 +32,7 @@
           <div class="settings-group">
             <div class="settings-row two-col">
               <div class="settings-field">
-                <label data-i18n="settings.defaultThinkingDepth">默认思维深度 (Thinking Depth)</label>
+                <label data-i18n="settings.defaultThinkingDepth">默认思维深度</label>
                 <select id="settingDefaultThinkingDepth" style="max-width:340px">
                   <option value="off" data-i18n="settings.thinkingOff">Off — 关闭</option>
                   <option value="medium" selected data-i18n="settings.thinkingMedium">Medium — 中等</option>
@@ -56,69 +43,53 @@
                 </select>
               </div>
               <div class="settings-field">
-                <label data-i18n="settings.inputSendMode">输入框发送方式（Shift+Enter 始终插入换行）</label>
+                <label data-i18n="settings.inputSendMode">发送快捷键</label>
                 <select id="settingInputSendMode" style="max-width:340px">
                   <option value="enter" data-i18n="settings.inputSendModeEnter">Enter 发送 · Ctrl+Enter 换行</option>
                   <option value="ctrl_enter" data-i18n="settings.inputSendModeCtrlEnter">Ctrl+Enter 发送 · Enter 换行</option>
                 </select>
               </div>
             </div>
-          </div>
-
-          <div class="settings-divider"></div>
-          <div class="settings-section-title" data-i18n="settings.systemPrompt">系统提示词</div>
-          <!-- Hidden source-of-truth inputs: editor modal reads/writes these,
-               saveSettings() persists them to config.systemPrompt /
-               config.systemPromptBlocks. -->
-          <textarea id="settingSystem" style="display:none"></textarea>
-          <input type="hidden" id="settingSystemDisabledBlocks" value="[]">
-          <!-- Legacy mode flag (block toggles superseded append/replace). Kept
-               hidden so old saved configs still round-trip; the editor no
-               longer exposes it. -->
-          <select id="settingSystemPromptMode" style="display:none">
-            <option value="append">append</option>
-            <option value="replace">replace</option>
-          </select>
-          <div class="sysprompt-control-row">
-            <button type="button" class="stg-btn-balance" data-tofu-action="openSystemPromptEditor()" data-i18n="settings.systemPromptEdit">编辑系统提示词…</button>
-          </div>
-          <div class="settings-toggle-desc" data-i18n="settings.systemPromptBlocksHint">逐块开关内置系统提示词，并可追加自定义指令。CLAUDE.md / 记忆 / 多智能体 / 日期仍会注入。</div>
-          <div class="sysprompt-summary-row">
-            <span id="settingSystemSummary" class="sysprompt-summary" data-i18n="settings.systemPromptEmpty">（使用全部内置提示词，无自定义）</span>
-          </div>
-
-          <div class="settings-divider"></div>
-          <details class="settings-disclosure">
-            <summary><strong data-i18n="settings.featureModules">功能模块</strong></summary>
-            <div class="settings-disclosure-body">
-            <div class="settings-group">
-            <div class="settings-toggle-row">
-              <div>
-                <span class="settings-toggle-label" data-i18n="settings.tradingModule">交易 / 基金模块</span>
-                <div class="settings-toggle-desc" data-i18n="settings.tradingModuleDesc">交易顾问、基金筛选、自动驾驶、资讯爬虫。关闭后立即生效：顶栏入口隐藏、接口停止服务，后台资讯爬虫与自动驾驶也会停止（不再产生模型调用费用）。</div>
+            <div class="settings-toggle-row sysprompt-row">
+              <div class="sysprompt-row-text">
+                <span class="settings-toggle-label" data-i18n="settings.systemPrompt">系统提示词</span>
+                <div id="settingSystemSummary" class="sysprompt-summary" data-i18n="settings.systemPromptEmpty">使用全部内置提示词</div>
               </div>
-              <label class="stg-toggle">
-                <input type="checkbox" id="settingTradingEnabled">
-                <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
-              </label>
-            </div>
-            <div class="settings-toggle-row">
-              <div>
-                <span class="settings-toggle-label" data-i18n="settings.pptxTranslateModule">PPT 翻译模块</span>
-                <div class="settings-toggle-desc" data-i18n="settings.pptxTranslateModuleDesc">上传 PPTX 文件进行全文翻译，保留原始格式</div>
-              </div>
-              <label class="stg-toggle">
-                <input type="checkbox" id="settingPptxTranslateEnabled">
-                <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
-              </label>
+              <button type="button" class="stg-btn-secondary" data-tofu-action="openSystemPromptEditor()" data-i18n="settings.systemPromptEdit">编辑…</button>
+              <!-- Hidden source-of-truth inputs: editor modal reads/writes these,
+                   saveSettings() persists them to config.systemPrompt /
+                   config.systemPromptBlocks. -->
+              <textarea id="settingSystem" style="display:none"></textarea>
+              <input type="hidden" id="settingSystemDisabledBlocks" value="[]">
+              <!-- Legacy mode flag (block toggles superseded append/replace). Kept
+                   hidden so old saved configs still round-trip; the editor no
+                   longer exposes it. -->
+              <select id="settingSystemPromptMode" style="display:none">
+                <option value="append">append</option>
+                <option value="replace">replace</option>
+              </select>
             </div>
           </div>
 
-          <div class="settings-group">
+          <!-- Everyday switches stay visible: folded into a disclosure they
+               left the first screen nearly empty (owner, 2026-11-01). -->
+          <div class="settings-divider"></div>
+          <div class="settings-section-title" data-i18n="settings.featureModules">功能</div>
+          <div class="settings-group settings-list">
+            <div class="settings-toggle-row">
+              <div>
+                <span class="settings-toggle-label" data-i18n="settings.autoGenerateTitle">自动生成对话标题</span>
+                <div class="settings-toggle-desc" data-i18n="settings.autoGenerateTitleDesc">首轮回复后用 AI 为对话命名。</div>
+              </div>
+              <label class="stg-toggle">
+                <input type="checkbox" id="settingAutoGenerateTitle">
+                <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
+              </label>
+            </div>
             <div class="settings-toggle-row">
               <div>
                 <span class="settings-toggle-label" data-i18n="settings.debugMode">调试模式</span>
-                <div class="settings-toggle-desc" data-i18n="settings.debugModeDesc">显示 trace_id、复制会话 ID 按钮等开发调试信息</div>
+                <div class="settings-toggle-desc" data-i18n="settings.debugModeDesc">显示 trace_id、会话 ID 等调试信息。</div>
               </div>
               <label class="stg-toggle">
                 <input type="checkbox" id="settingDebugMode">
@@ -128,35 +99,38 @@
             <div class="settings-toggle-row">
               <div>
                 <span class="settings-toggle-label" data-i18n="settings.optimizerModule">每日优化器</span>
-                <div class="settings-toggle-desc" data-i18n="settings.optimizerModuleDesc">每晚 03:30 分析当日日志并自动提出改进建议（如屏蔽垃圾搜索域名）。关闭后不再运行分析，顶栏 OPTIMIZER 徽章隐藏。已应用的改动会保留直到手动撤销。</div>
+                <div class="settings-toggle-desc" data-i18n="settings.optimizerModuleDesc">每天 03:30 分析日志并提出改进建议。</div>
               </div>
               <label class="stg-toggle">
                 <input type="checkbox" id="settingOptimizerEnabled">
                 <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
               </label>
             </div>
-          </div>
-
-          <div class="settings-group">
             <div class="settings-toggle-row">
               <div>
-                <span class="settings-toggle-label" data-i18n="settings.autoGenerateTitle">自动生成对话标题</span>
-                <div class="settings-toggle-desc" data-i18n="settings.autoGenerateTitleDesc">首轮回复结束后用 AI 自动为对话生成标题。关闭后需要手动重命名对话（默认关闭）。</div>
+                <span class="settings-toggle-label" data-i18n="settings.tradingModule">交易 / 基金模块</span>
+                <div class="settings-toggle-desc" data-i18n="settings.tradingModuleDesc">交易顾问、基金筛选与资讯抓取。</div>
               </div>
               <label class="stg-toggle">
-                <input type="checkbox" id="settingAutoGenerateTitle">
+                <input type="checkbox" id="settingTradingEnabled">
+                <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
+              </label>
+            </div>
+            <div class="settings-toggle-row">
+              <div>
+                <span class="settings-toggle-label" data-i18n="settings.pptxTranslateModule">PPT 翻译模块</span>
+                <div class="settings-toggle-desc" data-i18n="settings.pptxTranslateModuleDesc">上传 PPTX 全文翻译，保留原格式。</div>
+              </div>
+              <label class="stg-toggle">
+                <input type="checkbox" id="settingPptxTranslateEnabled">
                 <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
               </label>
             </div>
           </div>
 
-            </div>
-          </details>
-
-          <details class="settings-disclosure">
-            <summary><strong data-i18n="settings.aboutUpdate">关于与更新</strong></summary>
-            <div class="settings-disclosure-body">
-            <div class="settings-group">
+          <div class="settings-divider"></div>
+          <div class="settings-section-title" data-i18n="settings.aboutUpdate">关于与更新</div>
+          <div class="settings-group">
             <div class="stg-update-row">
               <div class="stg-update-info">
                 <span class="stg-update-icon" aria-hidden="true">
@@ -165,7 +139,7 @@
                 <div class="stg-update-text">
                   <span class="settings-toggle-label" data-i18n="settings.updateTitle">软件更新</span>
                   <div class="settings-toggle-desc">
-                    <span data-i18n="settings.updateDesc">从官方仓库拉取最新版本。更新完成后需要重启服务。</span>
+                    <span data-i18n="settings.updateDesc">从官方仓库更新，完成后需重启服务。</span>
                     <span class="stg-update-version" id="settingsUpdateVersion"></span>
                   </div>
                 </div>
@@ -181,7 +155,7 @@
                  routes/common.py). Android carries a version badge served by
                  the backend (mobile_client_version); the iOS row is an inert
                  "coming soon" until TOFU_IOS_CLIENT_URL is set. -->
-            <div class="settings-group" id="settingsMobileCard" style="display:none">
+            <div id="settingsMobileCard" style="display:none">
             <div class="stg-mobile-card">
               <div class="stg-mobile-head">
                 <span class="stg-update-icon" aria-hidden="true">
@@ -189,7 +163,7 @@
                 </span>
                 <div class="stg-update-text">
                   <span class="settings-toggle-label" data-i18n="settings.mobileClient">手机客户端</span>
-                  <div class="settings-toggle-desc" data-i18n="settings.mobileClientDesc">在手机上使用 Tofu。Android 提供直装 APK；iOS 版本开发中。</div>
+                  <div class="settings-toggle-desc" data-i18n="settings.mobileClientDesc">在手机上使用 Tofu。</div>
                 </div>
               </div>
               <div class="stg-mobile-rows">
@@ -215,14 +189,13 @@
               </div>
             </div>
             </div>
-            </div>
 
             <!-- Full desktop clients (Windows installer / macOS DMG). These
                  are a download, not a control, so they live here next to the
                  mobile client card — the Local Control panel keeps only the
                  lightweight agent (受控端). Config-gated: hidden until
                  /api/v1/desktop/status answers (see core_panel.js). -->
-            <div class="settings-group" id="settingsDesktopCard" style="display:none">
+            <div id="settingsDesktopCard" style="display:none">
             <div class="stg-mobile-card">
               <div class="stg-mobile-head">
                 <span class="stg-update-icon" aria-hidden="true">
@@ -230,13 +203,12 @@
                 </span>
                 <div class="stg-update-text">
                   <span class="settings-toggle-label" data-i18n="settings.desktopClient">完整桌面版</span>
-                  <div class="settings-toggle-desc" data-i18n="settings.desktopClientDesc">把这台电脑变成 Tofu 服务器本体（含受控端）：装好后托盘一键开启，AI 即可操作这台电脑。Windows / macOS 安装包。</div>
+                  <div class="settings-toggle-desc" data-i18n="settings.desktopClientDesc">Windows / macOS 安装包，含受控端，装好后 AI 可操作这台电脑。</div>
                 </div>
               </div>
               <div class="stg-desktop-rows" id="settingsDesktopRows"></div>
             </div>
             </div>
-            </div>
-          </details>
+          </div>
 
         </div>

@@ -38,11 +38,11 @@ def resources(monkeypatch, cpu=63, capacity=8192, available=8192):
 
 
 @pytest.mark.parametrize('cpu,capacity,available,expected', [
-    (63,8192,8192,63), (128,65536,65536,128), (16,8192,256,2),
-    (16,128,8192,1), (1,8192,8192,1), (16,None,8192,1),
-    (16,8192,None,1), (16,8192,0,1), (0,8192,8192,1),
+    (63,8192,8192,63), (128,65536,65536,128), (16,8192,256,16),
+    (16,128,8192,16), (1,8192,8192,1), (16,None,8192,16),
+    (16,8192,None,16), (16,8192,0,16), (0,8192,8192,1), (None,8192,8192,1),
 ])
-def test_capacity_defaults(repo, monkeypatch, cpu, capacity, available, expected):
+def test_every_allowed_core_regardless_of_memory(repo, monkeypatch, cpu, capacity, available, expected):
     root, env = repo
     resources(monkeypatch, cpu, capacity, available)
     assert policy.checkout_worker_config(root, env=env) == ['-c', f'checkout.workers={expected}']

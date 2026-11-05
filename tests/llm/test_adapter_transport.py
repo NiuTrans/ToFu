@@ -155,7 +155,8 @@ def test_v2_adapter_provider_mints_owner_routed_slot(monkeypatch):
         )
         return SimpleNamespace(slot=slot)
 
-    monkeypatch.setattr(dispatch_adapter, 'mint_ephemeral_slot', _mint)
+    monkeypatch.setattr(dispatch_adapter, 'prepare_ephemeral_slot', _mint)
+    monkeypatch.setattr(dispatch_adapter, 'publish_ephemeral_slots', lambda handles: None)
     group = mint_routed_slot_group(
         repository, boundary, selection, owner_tag='owner:17')
 

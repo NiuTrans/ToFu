@@ -15,6 +15,8 @@ Auth: standard ``Authorization: Bearer tofu_…`` (validated by the
 
 from __future__ import annotations
 
+import asyncio
+
 from quart import Blueprint
 
 from lib.agent_core.admission import (
@@ -38,6 +40,7 @@ from lib.compat.openai import (
     translate_openai_request,
 )
 from lib.compat._common import CompatTerminalFailure
+from lib.error_envelope import BadRequest
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
@@ -99,8 +102,10 @@ async def chat_completions():
         return await serve_direct_completion(body, compatibility=True)
     try:
         messages, cfg, options = translate_openai_request(body)
-    except ValueError as e:
-        return api_bad_request(str(e))
+    except BadRequest as e:
+        # Any other translation failure is a server fault for the global
+        # boundary's logged, redacted 500.
+        return api_bad_request(str(e), **({'field': e.field} if e.field else {}))
 
     if not messages:
         return api_bad_request('messages is empty', field='messages')
@@ -114,7 +119,8 @@ async def chat_completions():
     _route_group = None
     _model_in = cfg.get('model') or ''
     try:
-        _model_id, _selection, _route_group = mint_compatible_request_route(
+        _model_id, _selection, _route_group = await asyncio.to_thread(
+            mint_compatible_request_route,
             body,
             model_id=_model_in,
             owner_user_id=auth.owner_user_id,
@@ -139,7 +145,8 @@ async def chat_completions():
     from lib.tasks_pkg.spawn import spawn_task
     conv_id = short_id('compat-openai-', 12)
     task = create_task(
-        conv_id, messages, cfg, user_id=int(request_user_id())
+        conv_id, messages, cfg, user_id=int(request_user_id()),
+        saved_conversation=False,
     )
     task['_inline_messages'] = True
     task['_compat_openai'] = True
@@ -163,23 +170,13 @@ async def chat_completions():
             task, exc, cause='model_route_bind_failed', conv_id=conv_id)
         raise
 
-    # ── Admission control: refuse with 503 when at capacity ───────
+    # ── Execution ownership: an exact lease, never a capacity refusal ──
     try:
-        admission_lease = acquire_and_bind_admission(
-            execution_session, controller)
+        acquire_and_bind_admission(execution_session, controller)
     except Exception as exc:
         reject_unstarted_chat_task(
             task, exc, cause='admission_acquire_failed', conv_id=conv_id)
         raise
-    if admission_lease is None:
-        reject_unstarted_chat_task(
-            task, RuntimeError('Task admission refused'),
-            cause='task_admission_refused', conv_id=conv_id)
-        logger.warning('[compat:openai] admission refused (in_flight=%d/%d) '
-                       'key=%s model=%s', controller.in_flight,
-                       controller.capacity, auth.key_id, cfg.get('model', '?'))
-        return api_error('Server at capacity; retry shortly.', status=503,
-                         error_kind='overloaded', retry_after=5)
     register_waiter(task['id'])
 
     try:
@@ -283,7 +280,6 @@ def embeddings():
         or body.get('tofu_preferred_provider_id') or '').strip()
     try:
         from lib.model_routing.embedding_execution import (
-            EmbeddingCapacityError,
             EmbeddingUnavailableError,
             EmbeddingUpstreamError,
             execute_embeddings,
@@ -297,13 +293,8 @@ def embeddings():
         )
         from quart import jsonify
         return jsonify(payload)
-    except ValueError as exc:
-        return api_bad_request(str(exc), field='input')
-    except EmbeddingCapacityError:
-        return api_error(
-            'Server at capacity; retry shortly.', status=503,
-            error_kind='overloaded', retry_after=5,
-        )
+    except BadRequest as exc:
+        return api_bad_request(str(exc), field=exc.field or 'input')
     except EmbeddingUnavailableError as exc:
         return api_error(str(exc), status=503)
     except EmbeddingUpstreamError as exc:

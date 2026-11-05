@@ -37,7 +37,6 @@ DB-free; skips when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -58,12 +57,6 @@ CORE_JS = os.path.join(JS_DIR, 'paper-reader.js')
 PAPER_JS = REPORT_JS  # the file under test (holds the NC markers)
 REPORT_RUNTIME_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'report-runtime.ts')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -126,7 +119,7 @@ win._renderFinalReport = _renderFinalReport = (c, text) => {
 };
 if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSidebar = () => {}; }
 
-function genBtn(id) { return document.getElementById(id).querySelector('.paper-report-generate-btn'); }
+function genBtn(id) { return document.getElementById(id).querySelector('.paper-document-ready button'); }
 
 (async () => {
   for (let i = 0; i < 10; i++) { await new Promise(r => setTimeout(r, 0)); }
@@ -243,8 +236,6 @@ def _run(
             pass
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_read_position_and_already_generated_shortcut():
     proc = _run(PAPER_JS)
     out = proc.stdout.strip()
@@ -262,8 +253,6 @@ def _run_runtime_neuter(patched_src: str, tag: str) -> str:
     return proc.stdout.strip()
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_neuters_are_load_bearing():
     src = open(PAPER_JS, encoding='utf-8').read()
     runtime_src = open(REPORT_RUNTIME_TS, encoding='utf-8').read()

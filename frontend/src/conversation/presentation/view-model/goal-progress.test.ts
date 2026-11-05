@@ -62,7 +62,7 @@ describe('Goal progress context', () => {
       orchestration: { iteration: 4 }, toolRounds: [round],
     } } as TurnRecord;
     expect(statuses(state)[0]?.value.goalProgress?.workers).toEqual([
-      { text: '<Audit>', phase: 'running', waitReason: '', latestTool: 'read_file · actual.py', toolError: 'permission denied' },
+      { text: '<Audit>', status: 'running', phase: 'running', waitReason: '', latestTool: 'read_file · actual.py', toolError: 'permission denied' },
     ]);
     round._swarmSnapshot = { ...round._swarmSnapshot, settled: true } as typeof round._swarmSnapshot;
     expect(statuses(state)[0]?.value.goalProgress?.workers).toEqual([]);
@@ -76,8 +76,8 @@ describe('Goal progress context', () => {
       ] }],
     } } as TurnRecord;
     expect(statuses(state)[0]?.value.goalProgress?.workers).toEqual([
-      { text: 'thinking', phase: 'thinking', waitReason: '' },
-      { text: 'queued', phase: 'pending', waitReason: 'capacity', latestTool: 'old_read' },
+      { text: 'thinking', status: 'running', phase: 'thinking', waitReason: '' },
+      { text: 'queued', status: 'pending', phase: 'pending', waitReason: 'capacity', latestTool: 'old_read' },
     ]);
   });
   it('gives storage warnings priority and removes all live context on settlement', () => {

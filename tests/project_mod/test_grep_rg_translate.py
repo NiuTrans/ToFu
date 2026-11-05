@@ -110,6 +110,8 @@ class TestArgvTranslation:
                     {'sub': 'dir'}, ['node_modules'])
         assert out is not None and out[0] == tr.rg_executable()
         assert '--no-heading' in out and '--color=never' in out
+        # GNU grep -r searches hidden files; the spliced rg must too.
+        assert '--hidden' in out
         assert '-n' in out
         assert '--regexp' in out and 'beta' in out
         assert '--glob' in out and '!node_modules/' in out

@@ -39,7 +39,6 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -55,12 +54,6 @@ JS_DIR = os.path.join(ROOT, 'static', 'js')
 REPORT_JS = os.path.join(JS_DIR, 'paper', 'report.js')
 REPORT_RUNTIME_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'report-runtime.ts')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -189,8 +182,6 @@ def _run(js_path: str):
     return [ln for ln in output.splitlines() if ln.startswith(('PASS ', 'FAIL '))]
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_stop_button_stays_disabled_across_poll_repaint():
     lines = _run(REPORT_JS)
     fails = [ln for ln in lines if ln.startswith('FAIL')]
@@ -198,8 +189,6 @@ def test_stop_button_stays_disabled_across_poll_repaint():
     assert len(lines) >= 18, 'expected >=18 result lines, got:\n' + '\n'.join(lines)
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_negative_control_revert_reenables_stop_button():
     """Prove the test actually catches the bug: revert the fix in a COPY and the
     decisive still-`running`-repaint checks must FAIL (the button is re-enabled).

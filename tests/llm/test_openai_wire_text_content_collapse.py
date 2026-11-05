@@ -1,6 +1,6 @@
 """OpenAI wire: text-only content part lists collapse to bare strings.
 
-Strict OpenAI-compatible gateways (sankuai AIGC validation stage, probed
+Strict OpenAI-compatible gateways (example-corp AIGC validation stage, probed
 2026-08-31 with MiniMax-M2) hard-reject list-form message content with
 HTTP 400 — even a single ``{'type': 'text', 'text': ...}`` part — and only
 accept bare strings. ``prepare_request`` therefore collapses text-only part
@@ -9,7 +9,11 @@ or non-text keys keep the list form, and the caller's canonical body dict
 (reused on transport retries) must stay untouched.
 """
 
+import pytest
+
 from lib.llm._sse_core import prepare_request
+
+pytestmark = pytest.mark.unit
 
 
 def _plan(messages, api_protocol='openai'):
@@ -65,6 +69,20 @@ class TestTextOnlyCollapse:
         assert body['messages'][0]['content'] == parts, (
             'the caller canonical dict is reused on retries; the collapse '
             'must be wire-only')
+
+    def test_unsupported_cache_markers_collapse_after_marker_stripping(self):
+        from lib.llm.cache import add_cache_breakpoints
+        body, _ = _plan([{'role': 'user', 'content': 'translate faithfully'}])
+        body['_route_inference_profile'] = {
+            'features': {'chat_cache_breakpoints': 'unsupported'},
+        }
+        add_cache_breakpoints(body, api_protocol='openai')
+        assert 'cache_control' not in body['messages'][0]
+        from lib.llm._sse_core import prepare_request
+        plan = prepare_request(
+            body, api_key='unit-test-key',
+            base_url='https://example.invalid/v1', api_protocol='openai')
+        assert plan.body['messages'][0]['content'] == 'translate faithfully'
 
     def test_anthropic_protocol_not_collapsed(self):
         parts = [{'type': 'text', 'text': 'a'}]

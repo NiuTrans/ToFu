@@ -19,12 +19,13 @@ from __future__ import annotations
 from typing import Any
 
 from lib.log import audit_log, get_logger
+from lib.tool_results.tool_round_status import FAILED_TOOL_ROUND_STATUSES
 
 logger = get_logger(__name__)
 
 #: Terminal non-done verdicts that map 1:1 onto an outcome label. 'done'
 #: and 'rejected' are derived from repair/rejection evidence instead.
-_OUTCOME_STATUSES = frozenset({'error', 'aborted', 'unanswerable'})
+_OUTCOME_STATUSES = FAILED_TOOL_ROUND_STATUSES - {'rejected'}
 
 #: Bound on the repair-pattern list attached to one event. Patterns are
 #: short vocabulary labels, but one pathological call must not bloat the

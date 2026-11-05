@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,10 @@ class _Execution:
             else 'managed-model'
         ) or 'managed-model'
         self.status = 'done'
+
+    @property
+    def done(self):
+        return self.status in {'done', 'error', 'aborted'}
 
     @property
     def timeout_s(self):
@@ -227,6 +232,152 @@ def test_managed_model_idempotency_and_async_handle():
         accepted_body = await accepted.get_json()
         assert accepted_body['task_id'] == 'task-2'
         assert accepted.headers['Location'] == '/api/v1/tasks/task-2'
+
+    _run(scenario())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('pressure', ['ttl', 'count'])
+def test_live_idempotent_run_survives_response_retention(monkeypatch, pressure):
+    from tofu_agent import server
+
+    runtime = _Runtime()
+    app = server.create_app(
+        runtime=runtime,
+        config=server.HeadlessServerConfig(
+            bind_host='0.0.0.0', token='runtime-token',
+            idempotency_ttl_s=60, idempotency_max_entries=16),
+    )
+    app.config['TESTING'] = True
+    now = [100.0]
+    monkeypatch.setattr(server, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    headers = {'Authorization': 'Bearer runtime-token',
+               'Idempotency-Key': 'still-running', 'Prefer': 'respond-async'}
+    body = {'messages': [{'role': 'user', 'content': 'finish the long task'}]}
+
+    async def scenario():
+        client = app.test_client()
+        first = await client.post('/api/v1/agent/run', headers=headers, json=body)
+        assert first.status_code == 202
+        original = (await first.get_json())['task_id']
+        runtime.executions[original].status = 'running'
+        if pressure == 'ttl':
+            now[0] += 61
+        else:
+            for index in range(20):
+                now[0] += 1
+                response = await client.post(
+                    '/api/v1/agent/run', json=body,
+                    headers={**headers, 'Idempotency-Key': f'other-{index}'})
+                assert response.status_code == 202
+        before_retry = len(runtime.started)
+        replay = await client.post('/api/v1/agent/run', headers=headers, json=body)
+        assert replay.status_code == 202
+        assert (await replay.get_json())['task_id'] == original
+        assert len(runtime.started) == before_retry
+        conflict = await client.post(
+            '/api/v1/agent/run', headers=headers,
+            json={'messages': [{'role': 'user', 'content': 'different task'}]})
+        assert conflict.status_code == 409
+
+    _run(scenario())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('pressure', ['ttl', 'count'])
+def test_idempotency_reservation_survives_retention_before_publication(
+        monkeypatch, pressure):
+    from tofu_agent import server
+
+    now = [100.0]
+    monkeypatch.setattr(server, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    store = server._IdempotencyStore(ttl_s=60, max_entries=2)
+    reserved, creator, conflict = store.claim('owner:pending', 'body')
+    assert creator and not conflict
+    if pressure == 'ttl':
+        now[0] += 61
+    else:
+        for index in range(4):
+            entry, _, _ = store.claim(f'owner:other-{index}', 'body')
+            store.publish(f'owner:other-{index}', entry, SimpleNamespace(done=True))
+    replay, creator, conflict = store.claim('owner:pending', 'body')
+    assert replay is reserved
+    assert not creator and not conflict
+    execution = SimpleNamespace(done=False)
+    store.publish('owner:pending', reserved, execution)
+    assert replay.ready.is_set() and replay.execution is execution
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('pressure', ['ttl', 'count'])
+def test_idempotency_releases_only_finished_executions(monkeypatch, pressure):
+    from tofu_agent import server
+
+    now = [100.0]
+    monkeypatch.setattr(server, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    store = server._IdempotencyStore(ttl_s=60, max_entries=2)
+    entry, _, _ = store.claim('owner:old', 'body')
+    execution = SimpleNamespace(done=False)
+    store.publish('owner:old', entry, execution)
+    if pressure == 'ttl':
+        now[0] += 61
+    else:
+        for index in range(3):
+            now[0] += 1
+            other, _, _ = store.claim(f'owner:other-{index}', 'body')
+            store.publish(f'owner:other-{index}', other, SimpleNamespace(done=True))
+    assert store.claim('owner:old', 'body')[0] is entry
+    execution.done = True
+    replacement, creator, conflict = store.claim('owner:old', 'body')
+    assert replacement is not entry and creator and not conflict
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('fail_admission', [False, True])
+def test_cancelled_admission_joins_and_resolves_idempotency(fail_admission):
+    from tofu_agent.models import AgentConfigurationError
+    from tofu_agent.server import HeadlessServerConfig, create_app
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingRuntime(_Runtime):
+        def start(self, request):
+            entered.set()
+            assert release.wait(10), 'test did not release admission'
+            if fail_admission and not self.started:
+                self.started.append(request)
+                raise AgentConfigurationError('controlled admission failure')
+            return super().start(request)
+
+    runtime = BlockingRuntime()
+    app = create_app(runtime=runtime, config=HeadlessServerConfig(
+        bind_host='0.0.0.0', token='runtime-token'))
+    app.config['TESTING'] = True
+    headers = {'Authorization': 'Bearer runtime-token',
+               'Idempotency-Key': 'cancelled-observer', 'Prefer': 'respond-async'}
+    body = {'messages': [{'role': 'user', 'content': 'hello'}]}
+
+    async def scenario():
+        async with app.test_request_context(
+                '/api/v1/agent/run', method='POST', headers=headers, json=body):
+            endpoint, _ = app.url_map.bind('localhost').match(
+                '/api/v1/agent/run', method='POST')
+            pending = asyncio.create_task(app.view_functions[endpoint]())
+            try:
+                assert await asyncio.to_thread(entered.wait, 10)
+                pending.cancel()
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                assert not pending.done(), 'admission ownership was abandoned'
+            finally:
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending
+        replay = await app.test_client().post(
+            '/api/v1/agent/run', headers=headers, json=body)
+        assert replay.status_code == 202
+        assert len(runtime.started) == (2 if fail_admission else 1)
 
     _run(scenario())
 

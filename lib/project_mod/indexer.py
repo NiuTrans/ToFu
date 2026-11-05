@@ -1,6 +1,6 @@
 """Context generation for project co-pilot.
 
-The LLM relies entirely on tool-based exploration (grep_search, find_files,
+The LLM relies entirely on tool-based exploration (search_files, find_files,
 read_files, and bounded ``ls`` routing through run_command) to understand
 project structure at runtime.
 

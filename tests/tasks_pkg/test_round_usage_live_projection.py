@@ -19,6 +19,9 @@ Fix chain pinned here:
 """
 from __future__ import annotations
 
+import lib.tasks_pkg.llm_fallback._recovery as _fallback_recovery
+import lib.tasks_pkg.llm_fallback._usage as _fallback_usage
+
 import json
 
 import pytest
@@ -221,7 +224,7 @@ def test_reactive_usage_counts_nested_details_and_discarded_attempt_once(monkeyp
     from lib.tasks_pkg.llm_fallback import _call
     from lib.cost import normalize_usage
     emitted = []
-    monkeypatch.setattr(_call, '_emit_round_usage', lambda *a, **kw: emitted.append(kw))
+    monkeypatch.setattr(_fallback_usage, '_emit_round_usage', lambda *a, **kw: emitted.append(kw))
     usage = {'prompt_tokens': 100, 'completion_tokens': 10,
              'completion_tokens_details': {'reasoning_tokens': 7},
              'prompt_tokens_details': {'cached_tokens': 60},
@@ -231,7 +234,7 @@ def test_reactive_usage_counts_nested_details_and_discarded_attempt_once(monkeyp
                  'prompt_tokens_details': {'cached_tokens': 10}}}]}
     before = deepcopy(usage)
     total, rounds = {}, []
-    _call._record_reactive_usage({}, usage, 'author-model', 0, total, rounds)
+    _fallback_recovery._record_reactive_usage({}, usage, 'author-model', 0, total, rounds)
     assert normalize_usage(total) == {
         'input': 120, 'output': 15, 'cache_write': 0, 'cache_read': 70, 'thinking': 10}
     assert '_extra_billing_rounds' not in total

@@ -46,6 +46,27 @@ def test_operation_buffer_explicit_cancel_can_preserve_terminal_reasoning():
     assert buffer.get(0) == ('stamp',)
 
 
+def test_operation_buffer_hands_out_narration_before_older_reasoning():
+    """A reasoning backlog never delays the narration the reader follows."""
+    from lib.translate._operation_buffer import IncrementalOperationBuffer
+    buffer = IncrementalOperationBuffer()
+    buffer.put_segment('thinking:attempt-a:llm-0', 'older reasoning')
+    buffer.put_segment('thinking:attempt-a:llm-1', 'second reasoning')
+    buffer.put_segment('text:attempt-a:llm-1', 'later narration')
+    buffer.put_segment(2, 'legacy narration round')
+    # Coalescing replaces the pending text but keeps the key's queue position.
+    buffer.put_segment('thinking:attempt-a:llm-0', 'edited older reasoning')
+    assert buffer.put_terminal(('stamp',), replace=True) == 0
+    assert [buffer.get(0) for _ in range(5)] == [
+        ('segment', 'text:attempt-a:llm-1', 'later narration'),
+        ('segment', 2, 'legacy narration round'),
+        ('segment', 'thinking:attempt-a:llm-0', 'edited older reasoning'),
+        ('segment', 'thinking:attempt-a:llm-1', 'second reasoning'),
+        ('stamp',),
+    ]
+    assert not buffer.snapshot()['spoolOpen']
+
+
 def test_incremental_accumulator_registry_accepts_demand_without_count_quota(monkeypatch):
     import lib.translate.incremental as incremental
     class FakeAccumulator:
@@ -84,7 +105,6 @@ def test_incremental_finalize_commits_cached_rounds(monkeypatch):
     pushed = []
     previews_done = threading.Event()
     preview_calls = []
-    monkeypatch.setattr(incremental, '_PREVIEW_MIN_NARRATION_CHARS', 1)
 
     def fake_translate(
             _self, text, progress_cb=None, overall_deadline=None,
@@ -193,7 +213,6 @@ def test_incremental_commits_thinking_segments_keyed_by_block_id(monkeypatch):
     pushed = []
     previews_done = threading.Event()
     preview_calls = []
-    monkeypatch.setattr(incremental, '_PREVIEW_MIN_NARRATION_CHARS', 1)
 
     def fake_translate(
             _self, text, progress_cb=None, overall_deadline=None,
@@ -275,7 +294,6 @@ def test_incremental_previews_have_no_count_gate_and_keep_terminal_deadline(
     }
     accumulator = incremental._Accumulator(task)
     calls = []
-    monkeypatch.setattr(incremental, '_PREVIEW_MIN_NARRATION_CHARS', 1)
 
     def fake_translate(
             _self, text, progress_cb=None, overall_deadline=None,
@@ -302,23 +320,25 @@ def test_incremental_previews_have_no_count_gate_and_keep_terminal_deadline(
     ]
 
 
-def test_short_narration_preview_spends_no_model_call_but_terminal_does(
-        monkeypatch):
-    """Tiny tool-prelude prose is reconstructible UI enrichment, not a reason
-    to spend one provider request. The authoritative terminal deliverable must
-    still translate with the ordinary (non-preview) rate-limit budget."""
+def test_short_narration_is_previewed_once_under_its_block_id(monkeypatch):
+    """Every completed narration segment is translated while the turn runs.
+
+    A 256-character floor used to skip short tool-prelude narration: in one
+    measured turn 19 of 20 narration segments (56-197 characters) got no
+    preview and stayed in the source language until the turn settled.
+    """
     import lib.translate.incremental as incremental
 
-    accumulator = incremental._Accumulator({
+    task = {
         'id': 'incremental-short-preview',
+        '_attemptId': 'short-attempt',
         'convId': 'conversation-1',
         '_turnId': 'turn-1',
         '_userId': 9,
         'config': {'autoTranslate': True, 'uiLang': 'zh'},
-    })
-    calls = []
-    monkeypatch.setattr(
-        incremental, '_PREVIEW_MIN_NARRATION_CHARS', 256)
+    }
+    short = 'I will inspect the failing test first.'
+    calls, frames, started = [], [], []
 
     def fake_translate(
             _self, text, progress_cb=None, overall_deadline=None,
@@ -327,16 +347,34 @@ def test_short_narration_preview_spends_no_model_call_but_terminal_does(
                       defer_on_shared_contention))
         return f'译:{text}', 'translator'
 
-    monkeypatch.setattr(incremental._Accumulator, '_translate', fake_translate)
-    short = 'I will inspect the failing test first.'
-    accumulator._process_preview_segment('text:attempt-a:llm-3', short)
-    assert calls == []
-    assert accumulator._preview_segments_started == 0
+    original_start = incremental._Accumulator.start
 
-    # The terminal deliverable (now on the durable runtime) still spends a
-    # model call on short prose — the preview floor never gated it.
-    assert accumulator._translate(short) == (f'译:{short}', 'translator')
-    assert calls == [(short, None, None, False)]
+    def capture_start(self):
+        started.append(self)
+        original_start(self)
+
+    monkeypatch.setattr(incremental, '_accumulators', {})
+    monkeypatch.setattr(incremental._Accumulator, 'start', capture_start)
+    monkeypatch.setattr(incremental._Accumulator, '_translate', fake_translate)
+    monkeypatch.setattr(
+        'lib.agent_core.push.push_event',
+        lambda channel, _task_id, payload, **_kwargs: frames.append(
+            (channel, payload)))
+    try:
+        assert incremental.submit_round_segment(task, 3, short)
+        [accumulator] = started
+        accumulator._thread.join(5)
+        assert not accumulator._thread.is_alive()
+
+        block_id = 'text:attempt-short-attempt:llm-3'
+        assert calls == [(short, incremental._PREVIEW_DEADLINE_SECONDS,
+                          incremental._PREVIEW_MAX_429_ATTEMPTS, True)]
+        assert [(channel, payload['turnId'], payload['partialByRound'])
+                for channel, payload in frames] == [
+            ('translate', 'turn-1', {block_id: f'译:{short}'})]
+        assert accumulator.translations[block_id] == f'译:{short}'
+    finally:
+        incremental.cancel_incremental(task)
 
 
 def test_preview_and_terminal_reasoning_use_distinct_429_budgets(monkeypatch):
@@ -352,7 +390,6 @@ def test_preview_and_terminal_reasoning_use_distinct_429_budgets(monkeypatch):
         'config': {'autoTranslate': True, 'uiLang': 'zh'},
     })
     calls = []
-    monkeypatch.setattr(incremental, '_PREVIEW_MIN_NARRATION_CHARS', 1)
     monkeypatch.setattr(incremental, '_PREVIEW_MAX_429_ATTEMPTS', 1)
 
     def fake_translate(
@@ -452,7 +489,6 @@ def test_incremental_preview_failure_isolated_from_terminal(monkeypatch):
     }
     accumulator = incremental._Accumulator(task)
     calls = []
-    monkeypatch.setattr(incremental, '_PREVIEW_MIN_NARRATION_CHARS', 1)
     monkeypatch.setattr(incremental, '_PREVIEW_MAX_429_ATTEMPTS', 1)
 
     def fake_translate(
@@ -484,7 +520,7 @@ def test_incremental_preview_failure_isolated_from_terminal(monkeypatch):
 
 
 def test_preview_failure_circuit_survives_accumulator_recreation(monkeypatch):
-    """Idle thread retirement cannot buy another preview 429 for the Turn."""
+    """Idle thread retirement cannot buy a paused Turn another preview 429."""
     import lib.translate.incremental as incremental
 
     task = {
@@ -495,7 +531,6 @@ def test_preview_failure_circuit_survives_accumulator_recreation(monkeypatch):
         'config': {'autoTranslate': True, 'uiLang': 'zh'},
     }
     calls = []
-    monkeypatch.setattr(incremental, '_PREVIEW_MIN_NARRATION_CHARS', 1)
 
     def fake_translate(
             _self, text, progress_cb=None, overall_deadline=None,
@@ -509,11 +544,11 @@ def test_preview_failure_circuit_survives_accumulator_recreation(monkeypatch):
     first = incremental._Accumulator(task)
     for index in range(incremental._PREVIEW_FAILURE_LIMIT):
         first._process_preview_segment('text:first', 'first preview')
-    assert task[incremental._TASK_PREVIEW_STATE][
-        incremental._PREVIEW_STATE_DISABLED] is True
+    assert incremental._preview_paused(
+        task[incremental._TASK_PREVIEW_STATE], 'narration')
 
-    # This is the state after the five-minute idle worker removed itself: the
-    # retired circuit must not buy the Turn another preview attempt.
+    # This is the state after the idle worker removed itself: an open circuit
+    # must not buy the Turn another preview attempt before its pause ends.
     recreated = incremental._Accumulator(task)
     recreated._process_preview_segment('text:later', 'later preview')
     recreated._process_preview_segment(
@@ -530,7 +565,7 @@ def test_preview_failure_circuit_survives_accumulator_recreation(monkeypatch):
         incremental,
         '_Accumulator',
         lambda _task: pytest.fail(
-            'disabled preview recreated an idle worker'),
+            'paused preview recreated an idle worker'),
     )
     monkeypatch.setattr(incremental, '_accumulators', {})
     assert incremental.submit_round_segment(
@@ -551,7 +586,6 @@ def test_preview_count_continues_without_gate_across_accumulator_recreation(monk
         'config': {'autoTranslate': True, 'uiLang': 'zh'},
     }
     calls = []
-    monkeypatch.setattr(incremental, '_PREVIEW_MIN_NARRATION_CHARS', 1)
 
     def fake_translate(
             _self, text, progress_cb=None, overall_deadline=None,
@@ -585,7 +619,8 @@ def test_terminal_handoff_clears_task_preview_admission_state(monkeypatch):
     task = {
         'id': 'incremental-preview-cleanup',
         incremental._TASK_PREVIEW_STATE: {
-            incremental._PREVIEW_STATE_DISABLED: True,
+            incremental._PREVIEW_STATE_CIRCUITS: {
+                'narration': {incremental._PREVIEW_STATE_PAUSED_UNTIL: 1.0}},
             incremental._PREVIEW_STATE_STARTED: 7,
         },
     }
@@ -724,7 +759,7 @@ def test_long_segment_reaches_engine_with_protected_markup_and_complete_output(m
         return output + marker, {'model': 'fixture'}
     monkeypatch.setattr(engine, '_translate_freetext', translate)
     monkeypatch.setattr(skip_policy, 'should_skip_automatic_translation', lambda *args: False)
-    monkeypatch.setattr(accumulator, '_push', lambda payload: None)
+    monkeypatch.setattr(accumulator, '_push', lambda payload, **kwargs: None)
     try:
         accumulator._process_preview_segment('thinking:long', original)
         assert len(calls) == 1

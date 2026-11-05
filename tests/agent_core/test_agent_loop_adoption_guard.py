@@ -85,6 +85,17 @@ _HEURISTIC_EXEMPT = frozenset({
     'lib/llm_dispatch/dispatcher.py',
 })
 
+# Bounded, tool-free retry loops that re-dispatch ONE model request and so
+# match the DELEGATED shape (abort poll + dispatch helper) without being agent
+# loops. Keyed by (file, enclosing function) so the rest of each file stays
+# guarded; test_retry_loop_exemptions_still_match keeps entries live.
+_RETRY_LOOP_EXEMPT = frozenset({
+    # One compaction summary request re-dispatched across requalified
+    # credential routes or the authorized main route, bounded by
+    # MAX_SUMMARY_ATTEMPTS; it never handles tool calls.
+    ('lib/tasks_pkg/compaction/_layer2/_summary.py', '_generate_query_aware_summary'),
+})
+
 # Minimum number of tracked files that must import run_agent_loop. Only
 # grows — a removal means an adopter was reverted to a private loop (or the
 # file was deleted), both of which need a conscious test edit.
@@ -184,8 +195,18 @@ def _while_is_agent_loop(node: ast.While) -> bool:
     return False
 
 
+def _enclosing_function(node: ast.AST, parents: dict) -> str:
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return current.name
+        current = parents.get(current)
+    return '<module>'
+
+
 def _iter_agent_loops():
-    """Yield (relpath, lineno) for every while-loop that looks agentic."""
+    """Yield (relpath, lineno, enclosing function) for every agentic-looking
+    while-loop."""
     for path in _py_files():
         with open(path, encoding='utf-8') as f:
             src = f.read()
@@ -194,9 +215,11 @@ def _iter_agent_loops():
         except SyntaxError:
             continue
         rel = os.path.relpath(path, ROOT)
+        parents = {child: parent for parent in ast.walk(tree)
+                   for child in ast.iter_child_nodes(parent)}
         for node in ast.walk(tree):
             if isinstance(node, ast.While) and _while_is_agent_loop(node):
-                yield rel, node.lineno
+                yield rel, node.lineno, _enclosing_function(node, parents)
 
 
 def _imports_run_agent_loop(src: str) -> bool:
@@ -227,8 +250,8 @@ class TestPrivateAgentLoopRatchet(unittest.TestCase):
 
     def test_no_new_private_agent_loops(self):
         violations = []
-        for rel, lineno in _iter_agent_loops():
-            if rel in _HEURISTIC_EXEMPT:
+        for rel, lineno, function in _iter_agent_loops():
+            if rel in _HEURISTIC_EXEMPT or (rel, function) in _RETRY_LOOP_EXEMPT:
                 continue
             violations.append(
                 f'{rel}:{lineno}: private agent loop (while + LLM '
@@ -236,6 +259,11 @@ class TestPrivateAgentLoopRatchet(unittest.TestCase):
                 'MUST ride lib/agent_loop.run_agent_loop '
                 '(charter 2026-07-27); see docs/AGENT_CAPABILITY_GUIDE.md')
         self.assertEqual(violations, [], '\n'.join(violations))
+
+    def test_retry_loop_exemptions_still_match(self):
+        matched = {(rel, function) for rel, _lineno, function in _iter_agent_loops()}
+        dead = sorted(_RETRY_LOOP_EXEMPT - matched)
+        self.assertEqual(dead, [], f'retry-loop exemptions no longer match a loop: {dead}')
 
     def test_heuristic_recognizes_direct_and_delegated_shapes(self):
         """The detector stays live without preserving a production violation."""

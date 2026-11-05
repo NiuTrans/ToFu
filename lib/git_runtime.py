@@ -1,8 +1,10 @@
-"""Resolve a runnable Git for internal repository operations.
+"""Resolve a runnable Git and the environment of every model- and harness-run Git.
 
-Entry point: git_executable. Probe PATH candidates before any repository command;
-never retry a failed write or change the process environment. Cache successful
-selection by PATH and loader environment; failed probes remain retryable.
+Entry points: git_executable and without_automatic_git_maintenance. Probe PATH
+candidates before any repository command; never retry a failed write or change
+the process environment. Cache successful selection by PATH and loader
+environment; failed probes remain retryable. Explicit repository maintenance is
+scripts/git_maintenance.py (docs/runbooks/GIT_WORKSPACE_GUARD.md).
 """
 from __future__ import annotations
 
@@ -10,6 +12,28 @@ from functools import lru_cache
 import os
 import shutil
 import subprocess
+
+# GIT_CONFIG_PARAMETERS outranks repository configuration and legacy Git
+# binaries read it too; an explicit ``git -c`` in the command still wins.
+AUTOMATIC_GIT_MAINTENANCE_OFF = ("'gc.auto=0' 'maintenance.auto=false' "
+                                 "'gc.autoDetach=false' 'maintenance.autoDetach=false'")
+
+
+def without_automatic_git_maintenance(environment: dict[str, str]) -> dict[str, str]:
+    """Return a copy in which no Git command starts automatic maintenance.
+
+    Commit, merge, rebase, am and fetch otherwise start ``gc --auto``. Detached,
+    it escapes the command's process group with inherited workspace leases; in
+    the foreground it is unbounded hidden work inside the command, rerun by
+    every later writer while Git cannot bring its object counts below the
+    threshold. Explicit opt-ins (``git -c gc.auto=N``) stay in the foreground.
+    """
+    result = dict(environment)
+    parameters = result.get('GIT_CONFIG_PARAMETERS', '').strip()
+    if not parameters.endswith(AUTOMATIC_GIT_MAINTENANCE_OFF):
+        result['GIT_CONFIG_PARAMETERS'] = (
+            parameters + ' ' + AUTOMATIC_GIT_MAINTENANCE_OFF).strip()
+    return result
 
 
 def git_executable() -> str:

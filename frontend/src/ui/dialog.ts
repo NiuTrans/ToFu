@@ -6,11 +6,12 @@
  * boundary cycle prevents Tab from landing on the document body. Adds structure (header/body/footer), a
  * footer action row, and backdrop-click dismissal.
  * Entry points: createDialog.
- * Dependencies: createButton (button.ts); styles from 30-ui-kit.css.
+ * Dependencies: button and shared backdrop factories; styles from 30-ui-kit.css.
  */
 
 import { createButton } from './button';
 import type { ButtonVariant } from './button';
+import { bindDialogBackdrop } from './dialog-backdrop';
 
 export interface DialogAction {
   id: string;
@@ -110,32 +111,7 @@ export function createDialog(options: DialogOptions): DialogHandle {
   el.addEventListener('close', () => {
     settle(el.returnValue === '' ? null : el.returnValue);
   });
-  // Backdrop click: when the pointer lands outside the dialog's box, the
-  // browser reports the click against the backdrop. Retargeting details vary
-  // (the event target may be the dialog itself OR a stretched ancestor), so
-  // decide from coordinates instead of the target node.
-  //
-  // Only dismiss when the gesture STARTED outside as well as ended outside:
-  // a text-selection drag begins inside the dialog, crosses the boundary,
-  // and releases outside — the resulting click must not close the dialog.
-  let pressedOutside = false;
-  const isOutsideDialog = (event: MouseEvent): boolean => {
-    const rect = el.getBoundingClientRect();
-    return (
-      event.clientX < rect.left || event.clientX > rect.right ||
-      event.clientY < rect.top || event.clientY > rect.bottom
-    );
-  };
-  el.addEventListener('mousedown', (event) => {
-    pressedOutside = isOutsideDialog(event);
-  });
-  el.addEventListener('click', (event) => {
-    if (pressedOutside && isOutsideDialog(event)) {
-      settle(null);
-      el.close('');
-    }
-    pressedOutside = false;
-  });
+  bindDialogBackdrop(el, settle);
 
   return {
     el,

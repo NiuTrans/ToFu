@@ -124,3 +124,31 @@ def test_commit_diagnostics_remain_work_and_do_not_double_count_parent():
     assert result["operations"][0]["authority_hold_ms"] == .0001
     stages = result["operations"][0]["largest_exclusive_stages"]
     assert set(names).issubset({stage["stage"] for stage in stages})
+
+
+def test_hold_phases_are_reported_per_operation_and_validated():
+    document = fixture()
+    operation = document["storage_metrics"]["requestProfile"]["operations"][0]
+    assert analyze(document)["operations"][0]["holds"] == 0, "older engines report no holds"
+    operation.update(holds=2, holdPhaseNanos={"journal": 60, "read": 0, "other": 40})
+    row = analyze(document)["operations"][0]
+    assert row["holds"] == 2
+    assert row["hold_phase_ms"] == {"journal": .00006, "other": .00004}
+    for invalid in ({"holds": -1}, {"holdPhaseNanos": {"journal": -5}}, {"holdPhaseNanos": [60]}):
+        broken = fixture()
+        broken["storage_metrics"]["requestProfile"]["operations"][0].update(invalid)
+        with pytest.raises(ValueError, match="hold phase accounting"):
+            analyze(broken)
+
+
+def test_cli_prints_hold_phases_per_hold(tmp_path, monkeypatch, capsys):
+    import json
+    from scripts.tofudb_profile_report import main
+    document = fixture()
+    document["storage_metrics"]["requestProfile"]["operations"][0].update(
+        holds=2, holdPhaseNanos={"journal": 2_000_000, "other": 1_000_000})
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(document))
+    monkeypatch.setattr("sys.argv", ["tofudb_profile_report", str(path)])
+    main()
+    assert "record.get hold phases ms/hold over 2 holds: journal 1.000, other 0.500" in capsys.readouterr().out

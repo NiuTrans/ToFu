@@ -68,6 +68,7 @@ def dispatch_fastest(messages, *, max_tokens=4096, temperature=0,
 
             content, usage = chat(
                 model=slot.model, messages=messages,
+                knowledge_model=getattr(slot, 'logical_model', '') or slot.model,
                 max_tokens=max_tokens, temperature=temperature,
                 thinking_enabled=thinking_enabled,
                 effort=effort or preset,
@@ -101,9 +102,14 @@ def dispatch_fastest(messages, *, max_tokens=4096, temperature=0,
             _note_shared_contention_recovered(dispatcher, slot, tag)
             return (content, usage, slot)
         except Exception as e:
-            from lib.llm.llm_errors import LocalRequestPreparationError, RateLimitError
+            from lib.llm.llm_errors import (
+                LocalRequestPreparationError, ModelRouteUnavailableError,
+                RateLimitError)
             if not settled:
-                if isinstance(e, LocalRequestPreparationError):
+                # Neither local preparation nor a gateway no-channel verdict
+                # is evidence about this key.
+                if isinstance(e, (LocalRequestPreparationError,
+                                  ModelRouteUnavailableError)):
                     slot.release()
                 else:
                     rate_limit = isinstance(e, RateLimitError)
@@ -160,6 +166,8 @@ def dispatch_fastest(messages, *, max_tokens=4096, temperature=0,
                             usage['_dispatch'] = {
                                 'key': winner.key_name,
                                 'model': winner.model,
+                                'logical_model': (getattr(winner, 'logical_model', '')
+                                                  or winner.model),
                                 'key_tail': (winner.api_key or '')[-4:],
                                 'provider_id': winner.provider_id,
                                 'protocol': winner.protocol or 'openai',

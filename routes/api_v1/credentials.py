@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from quart import Blueprint
 
+from lib.error_envelope import BadRequest
 from lib.api_response import api_bad_request, api_error, api_ok
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
@@ -31,9 +32,11 @@ logger = get_logger(__name__)
 api_v1_credentials_bp = Blueprint('api_v1_credentials', __name__)
 
 
-def _managed_source_name(name):
+def _managed_name(name):
+    """Entries owned by a feature's own settings: managed skill sources and channel tokens."""
+    from lib.credentials_vault import is_channel_entry
     from lib.skills.automation.source_records import is_managed_source_credential
-    return is_managed_source_credential(name)
+    return is_managed_source_credential(name) or is_channel_entry(name)
 
 
 def _bootstrap():
@@ -65,7 +68,7 @@ def list_credentials():
     from lib.credentials_vault import list_entries
     _bootstrap()
     return api_ok({'credentials': [row for row in list_entries()
-                                   if not _managed_source_name(row['name'])]})
+                                   if not _managed_name(row['name'])]})
 
 
 @api_v1_credentials_bp.route('/api/v1/credentials', methods=['POST'])
@@ -89,11 +92,11 @@ def upsert_credential():
         return api_bad_request('name is required', field='name')
     if not value:
         return api_bad_request('value is required', field='value')
-    if _managed_source_name(name):
+    if _managed_name(name):
         return api_error('Managed provider credentials require owned source configuration', status=403)
     try:
         meta = set_entry(name, value, note=data.get('note'))
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e), field='name')
     return api_ok({'credential': meta})
 
@@ -113,9 +116,9 @@ def reveal_credential(name):
 
     try:
         n = normalize_name(name)
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e), field='name')
-    if _managed_source_name(n):
+    if _managed_name(n):
         return api_error('Unknown credential', status=404)
     value = get_entry(n)
     if value is None:
@@ -130,7 +133,7 @@ def reveal_credential(name):
 @api_meta(summary='Remove a vault entry', tags=['capabilities'])
 def delete_credential(name):
     from lib.credentials_vault import delete_entry
-    if _managed_source_name(name):
+    if _managed_name(name):
         return api_error('Unknown credential', status=404)
     if not delete_entry(name):
         return api_error(f'Unknown credential: {name}', status=404)

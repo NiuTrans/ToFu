@@ -52,7 +52,6 @@ load-bearing.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -64,10 +63,6 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
-
-
-def _node_available() -> bool:
-    return bool(shutil.which('node'))
 
 
 _HARNESS = r"""
@@ -521,7 +516,6 @@ const flush = () => new Promise((r) => setImmediate(r));
 """
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_update_restart_force_confirm_flow():
     harness = os.path.join(HERE, '_update_restart_force_harness.js')
     with open(harness, 'w') as f:

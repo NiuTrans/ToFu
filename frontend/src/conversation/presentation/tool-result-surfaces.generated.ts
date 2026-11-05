@@ -176,6 +176,9 @@ export const TOOL_RESULT_SURFACES = {
   "errorProjectionText": {
     "bodyField": "summary"
   },
+  "partialProjectionText": {
+    "bodyField": "summary"
+  },
   "textProjection": {
     "sectionFormat": "length_labelled_unicode_text",
     "selection": "smaller_utf8_than_compact_json",

@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import re
 
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -119,12 +120,13 @@ def set_skill_env(skill_id: str, env_name: str, value: str,
                   owner_user_id: int | None = None) -> dict:
     """Create/update one binding in the vault. Returns redacted metadata.
 
-    Raises ValueError on a malformed env name or empty value (both are
+    Raises BadRequest on a malformed env name or empty value (both are
     user-input errors, surfaced by the API as 400).
     """
     name = str(env_name or '').strip()
     if not _ENV_NAME_RE.match(name):
-        raise ValueError(f'{name!r} is not a valid environment variable name')
+        raise BadRequest(f'{name!r} is not a valid environment variable name',
+                         field='name')
     from lib.credentials_vault import set_entry
     return set_entry(entry_name(skill_id, name, owner_user_id), value,
                      note=f'skill {skill_id} env {name.upper()}')
@@ -171,18 +173,18 @@ def get_skill_env(skill_id: str,
     Caller treats the values as secrets. This is the seam subprocess
     execution uses; the Settings UI never calls it.
     """
-    from lib.credentials_vault import get_entry, list_entries
+    from lib.credentials_vault import get_entries_with_prefixes
+    prefixes = _read_prefixes(skill_id, owner_user_id)
+    return _skill_env_from(get_entries_with_prefixes(prefixes), prefixes)
+
+
+def _skill_env_from(values: dict[str, str],
+                    prefixes: tuple[str, ...]) -> dict[str, str]:
     out: dict[str, str] = {}
     # Legacy first, owner-specific last so an explicit owner migration wins.
-    prefixes = tuple(reversed(_read_prefixes(skill_id, owner_user_id)))
-    entries = list_entries()
-    for prefix in prefixes:
-        for meta in entries:
-            entry = meta.get('name') or ''
-            if not entry.startswith(prefix):
-                continue
-            value = get_entry(entry)
-            if value is not None:
+    for prefix in reversed(prefixes):
+        for entry, value in values.items():
+            if entry.startswith(prefix):
                 out[entry[len(prefix):].upper()] = value
     return out
 
@@ -265,18 +267,22 @@ def exec_env_overlay(project_path: str | None = None,
     failure degrades to an empty overlay with a logged warning.
     """
     try:
+        from lib.credentials_vault import get_entries_with_prefixes
         from lib.skills.registry import list_skills
-        overlay: dict[str, str] = {}
-        for skill in list_skills(
+        enabled = [
+            (skill, _read_prefixes(skill['id'], owner_user_id))
+            for skill in list_skills(
                 project_path, extra_paths=extra_paths,
-                owner_user_id=owner_user_id):
-            if not skill.get('enabled', True):
-                continue
+                owner_user_id=owner_user_id)
+            if skill.get('enabled', True)]
+        values = get_entries_with_prefixes(
+            prefix for _, prefixes in enabled for prefix in prefixes)
+        overlay: dict[str, str] = {}
+        for skill, prefixes in enabled:
             for name in declared_env(skill):
                 if name in os.environ:
                     overlay[name] = os.environ[name]
-            overlay.update(get_skill_env(
-                skill['id'], owner_user_id=owner_user_id))
+            overlay.update(_skill_env_from(values, prefixes))
         return overlay
     except Exception as e:
         logger.warning('[Skills.env] exec env overlay failed: %s', e)

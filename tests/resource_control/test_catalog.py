@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from bootstrap_pkg.resource_policy_generated import RESOURCE_FALLBACKS
+from bootstrap_pkg.resource_policy_generated import RESOURCE_FALLBACKS, UNLIMITED_SETTINGS
 from lib.resource_control.contract import catalog_document
 
 pytestmark = pytest.mark.unit
@@ -19,7 +19,10 @@ def test_generated_bootstrap_matches_complete_catalog():
     assert settings
     assert 'TOFU_PRODUCTION_LLM_FANOUT' not in settings
     for mode, defaults in RESOURCE_FALLBACKS.items():
-        assert defaults == {key: spec['defaults'][mode] for key, spec in settings.items()}
+        assert defaults == {key: spec['defaults'][mode] for key, spec in settings.items()
+                            if spec['class'] != 'unlimited'}
+    assert UNLIMITED_SETTINGS == {key for key, spec in settings.items()
+                                  if spec['class'] == 'unlimited'}
     resources = {spec['id']: spec for spec in catalog_document()['resources']}
     def visit(key, path):
         assert key not in path, 'cyclic resource dependency'
@@ -41,14 +44,23 @@ assert 'lib.swarm.execution_gate' not in sys.modules
     subprocess.run([sys.executable, '-c', script], cwd=ROOT, check=True)
 
 
-def test_explicit_operator_capacity_is_preserved():
-    from lib.resource_control.runtime import launch_policy
-    policy = launch_policy({'TOFU_AGENT_WORKERS': '2', 'TOFU_MAX_INFLIGHT_TASKS': '2',
-                            'TOFU_PROCESS_RSS_RECYCLE_MB': '4096',
-                            'TOFU_EPHEMERAL_SLOT_CAPACITY': '128'})
-    assert policy['root_maximum'] == 2
-    assert 'route_capacity' not in policy
-    assert launch_policy({'TOFU_DEPLOYMENT_MODE': 'distributed'})['automatic'] is False
+def test_launch_policy_is_fixed_and_never_consults_hardware(monkeypatch):
+    import runtime_guards
+    from lib.resource_control.runtime import FRAME_MAXIMUM_BYTES, launch_policy
+    monkeypatch.setattr(runtime_guards, 'probe_system_resources',
+                        lambda *_a, **_k: pytest.fail('launch policy consulted the probe'))
+    expected = {'automatic': True,
+                'root_maximum': runtime_guards.MAX_TASK_CONCURRENCY,
+                'child_maximum': runtime_guards.MAX_TASK_CONCURRENCY,
+                'frame_maximum': FRAME_MAXIMUM_BYTES}
+    assert launch_policy({}) == expected
+    # Operator worker hints and retired RSS knobs are not launch ceilings.
+    assert launch_policy({'TOFU_AGENT_WORKERS': '2', 'TOFU_MAX_INFLIGHT_TASKS': '2',
+                          'TOFU_PROCESS_RSS_RECYCLE_MB': '4096',
+                          'TOFU_TASK_RSS_RESERVE_MB': '65536',
+                          'TOFU_EPHEMERAL_SLOT_CAPACITY': '128'}) == expected
+    assert launch_policy({'TOFU_DEPLOYMENT_MODE': 'distributed'}) == {
+        **expected, 'automatic': False}
 
 
 def test_compile_memory_limit_requires_an_explicit_operator_choice():

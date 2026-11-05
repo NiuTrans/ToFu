@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 from tests._runtime_sections import runtime_section, native_module_path
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -40,18 +41,8 @@ INDEX_HTML = ROOT / "index.html"
 
 def _node() -> str:
     exe = shutil.which("node")
-    if not exe:
-        pytest.skip("node not available")
+    require_node_modules('jsdom', 'vite')
     return exe
-
-
-def _has_jsdom() -> bool:
-    try:
-        subprocess.run([_node(), "-e", "require('jsdom')"], cwd=ROOT,
-                       capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
 
 
 def _slice_fn(src: str, signature: str) -> str:
@@ -182,7 +173,6 @@ def _run(populate: str, toggle: str, html: str = DROPDOWN_HTML) -> dict:
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_depth_footer_survives_model_list_rebuild_and_overflow_toggles():
     out = _run(_populate_fn(), _toggle_fn())
     # #1 — model list rebuilt into the inner container, footer intact
@@ -200,7 +190,6 @@ def test_depth_footer_survives_model_list_rebuild_and_overflow_toggles():
     assert out["closedAfter"] is True, "toggleSubmenu should close #submenuTools"
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NC_populate_into_dropdown_root_wipes_footer():
     """Neuter: point _populateModelDropdown at #presetDropdown (the OLD target)
     instead of the inner list → the innerHTML='' wipes the folded-in depth

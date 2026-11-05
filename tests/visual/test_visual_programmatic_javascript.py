@@ -74,11 +74,9 @@ def test_actual_async_program_observation_renders_before_collapsed_code(
     assert card.is_visible()
 
     if handoff_reason == 'aggregate':
-        # Success is quiet by default; errors and judgment handoffs are open.
+        # Success is quiet by default; expanding it shows the outcome first.
         assert card.evaluate('node=>node.open') is False
-        assert card.locator('.ptc-result').evaluate('node=>node.open') is False
         card.locator(':scope > summary').click()
-        card.locator('.ptc-result > summary').click()
     else:
         assert card.evaluate('node=>node.open') is True
     expected_reason = (messages['ptc.reason.noResult'] if handoff_reason == 'missing_program_result'
@@ -127,4 +125,4 @@ def test_actual_async_program_observation_renders_before_collapsed_code(
         assert card.locator('.ptc-observation').count() == 0
     else:
         assert card.locator('.ptc-observation').inner_text() == expected_reason
-    assert card.locator('.ptc-result').evaluate('node=>node.open') is (handoff_reason != 'aggregate')
+    assert card.locator('.ptc-result').evaluate('node=>node.open') is True

@@ -101,8 +101,6 @@
   "x-resource-limits": {
     "command_batch": 256,
     "legacy_execution_ids": 65536,
-    "execution_ids_per_worker": 4096,
-    "memory_mb_per_worker": 1024,
     "result_items_floor": 512,
     "stream_items_floor": 256,
     "result_bytes_floor": 16777216,

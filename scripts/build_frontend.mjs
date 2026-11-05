@@ -4,15 +4,19 @@ import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { build } from 'vite';
 import {
-  copyFile, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, utimes,
-  writeFile,
+  mkdir, mkdtemp, readFile, readdir, rm, stat, utimes,
 } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { composeRuntime } from './compose_frontend_runtime.mjs';
 import { checkLazyRuntimeBindings } from './check_lazy_runtime_bindings.mjs';
 import { checkFiles as checkFrontendTdz, defaultRuntimePaths } from './check_frontend_tdz.mjs';
 import { composeStyles } from './compose_frontend_styles.mjs';
+import { createViteArtifactValidator, safeViteAsset } from './vite_asset_manifest.mjs';
+import { publishViteGeneration } from './vite_asset_publication.mjs';
+import { syncFrontendVendorAssets } from './frontend_vendor_assets.mjs';
 
+import { generateSystemNotePresentation } from './gen_system_note_presentation.mjs';
+import { syncSystemNotePresentationEmbed } from './check_note_presentation_parity.mjs';
 import { composeSettingsPanels } from './compose_settings_panels.mjs';
 import {
   generateI18nContract,
@@ -28,7 +32,6 @@ const root = resolve(import.meta.dirname, '..');
 await import('../frontend/scripts/generate-rich-response.mjs');
 const liveDir = join(root, 'static', 'vite');
 const assetsDir = join(liveDir, 'assets');
-const requiredEntries = ['frontend/src/main.ts', 'frontend/src/admin.ts'];
 const authoringDigestField = 'tofuAuthoringSha256';
 const authoringInputs = JSON.parse(await readFile(
   join(root, 'frontend', 'authoring-inputs.json'), 'utf8',
@@ -37,78 +40,14 @@ if (!Array.isArray(authoringInputs.configPaths)
     || !Array.isArray(authoringInputs.sourceSuffixes)) {
   throw new Error('frontend/authoring-inputs.json has an invalid shape');
 }
+const requiredEntries = Object.values(authoringInputs.entries);
+const artifactValidator = createViteArtifactValidator(requiredEntries);
+const mainEntry = authoringInputs.entries.main;
 const authoringConfigPaths = authoringInputs.configPaths;
 const authoringSuffixes = new Set(authoringInputs.sourceSuffixes);
 
-function safeAsset(value) {
-  if (typeof value !== 'string' || !value.startsWith('assets/') || value.includes('\\')) return '';
-  const resolved = resolve(liveDir, value);
-  const prefix = liveDir.endsWith(sep) ? liveDir : `${liveDir}${sep}`;
-  return resolved.startsWith(prefix) && !value.split('/').includes('..') ? value : '';
-}
-
 async function readJson(path) {
   return JSON.parse(await readFile(path, 'utf8'));
-}
-
-async function validateManifest(manifest, baseDir) {
-  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
-    throw new Error('Vite manifest root must be an object');
-  }
-  const seen = new Set();
-  const assets = new Set();
-  async function visit(key) {
-    if (seen.has(key)) return;
-    const row = manifest[key];
-    if (!row || typeof row !== 'object' || Array.isArray(row)) {
-      throw new Error(`Vite manifest reference is missing: ${key}`);
-    }
-    seen.add(key);
-    for (const value of [row.file, ...(row.css || []), ...(row.assets || [])]) {
-      const asset = safeAsset(value);
-      if (!asset) throw new Error(`Unsafe Vite asset path: ${String(value)}`);
-      const info = await stat(join(baseDir, asset));
-      if (!info.isFile()) throw new Error(`Vite asset is not a file: ${asset}`);
-      assets.add(asset);
-    }
-    for (const field of ['imports', 'dynamicImports']) {
-      const references = row[field] || [];
-      if (!Array.isArray(references) || references.some((value) => typeof value !== 'string')) {
-        throw new Error(`Vite manifest ${field} must be a string array`);
-      }
-      for (const reference of references) await visit(reference);
-    }
-  }
-  for (const entry of requiredEntries) {
-    if (!manifest[entry] || manifest[entry].isEntry !== true) {
-      throw new Error(`Vite manifest has no entry: ${entry}`);
-    }
-    await visit(entry);
-  }
-  // Vite emits URL-imported workers as standalone manifest rows which are not
-  // connected through imports/dynamicImports. They are still part of the
-  // deployable graph and must be published and retained.
-  for (const key of Object.keys(manifest)) await visit(key);
-  return assets;
-}
-
-async function atomicCopy(source, destination) {
-  await mkdir(dirname(destination), { recursive: true });
-  try {
-    await open(destination, 'r').then((handle) => handle.close());
-    return;
-  } catch {
-    // A content-hashed destination that is not present must be published.
-  }
-  const temporary = `${destination}.publish-${process.pid}-${Math.random().toString(16).slice(2)}`;
-  await copyFile(source, temporary);
-  await rename(temporary, destination);
-}
-
-async function publishManifest(path, value) {
-  const temporary = `${path}.publish-${process.pid}`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  await rename(temporary, path);
 }
 
 async function listFiles(directory, prefix = '') {
@@ -171,11 +110,27 @@ async function runBundleBudget(manifest, artifactDir) {
   const { gzipSync } = await import('node:zlib');
   const failures = [];
   for (const entry of requiredEntries) {
-    const file = manifest[entry] && manifest[entry].file;
-    const asset = file && safeAsset(file);
-    if (!asset) continue;
-    const bytes = await readFile(join(artifactDir, asset));
-    const kib = gzipSync(bytes, { level: 9 }).length / 1024;
+    const pending = [entry];
+    if (authoringInputs.startupDynamicImports?.includes(entry)) {
+      pending.push(...(manifest[entry]?.dynamicImports || []));
+    }
+    const seen = new Set();
+    const assets = new Set();
+    while (pending.length) {
+      const key = pending.pop();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const row = manifest[key];
+      const asset = row && safeViteAsset(artifactDir, row.file);
+      if (!asset) throw new Error(`frontend bundle budget: missing startup owner ${key}`);
+      assets.add(asset);
+      pending.push(...(row.imports || []));
+    }
+    let bytes = 0;
+    for (const asset of assets) {
+      bytes += gzipSync(await readFile(join(artifactDir, asset)), { level: 9 }).length;
+    }
+    const kib = bytes / 1024;
     process.stdout.write(`bundle budget: ${entry} = ${kib.toFixed(1)} KiB gzip `
       + `(ceiling ${BUILD_MAIN_MAX_KIB} KiB)\n`);
     if (kib > BUILD_MAIN_MAX_KIB) {
@@ -232,8 +187,12 @@ async function runBundleCanary(artifactDir) {
 }
 
 async function main() {
-
+  await syncFrontendVendorAssets();
   await composeSettingsPanels();
+  // Generate both render surfaces before runtime composition and digest capture.
+  // Backend registry edits must never ship with a stale presentation map.
+  await generateSystemNotePresentation();
+  await syncSystemNotePresentationEmbed({ check: false });
   // The retained runtime is a delivery artifact. Compose it before Vite so a
   // clean checkout and every direct build entry point consume the section
   // manifest rather than depending on an accidentally fresh generated file.
@@ -246,15 +205,8 @@ async function main() {
   await mkdir(dirname(liveDir), { recursive: true });
   // Snapshot the live graph before invoking Vite. This also protects against
   // build-tool configuration drift that might otherwise touch the live outDir.
-  let previousManifest = null;
-  let previousAssets = new Set();
-  try {
-    previousManifest = await readJson(join(liveDir, 'manifest.json'));
-    previousAssets = await validateManifest(previousManifest, liveDir);
-  } catch {
-    previousManifest = null;
-    previousAssets = new Set();
-  }
+  const { manifest: previousManifest, assets: previousAssets } =
+    await artifactValidator.readPrevious(liveDir);
 
   const temporaryDir = await mkdtemp(join(dirname(liveDir), '.vite-build-'));
   try {
@@ -273,29 +225,13 @@ async function main() {
     // server validates this digest before serving any Vite entry, so editing a
     // locale without rebuilding fails closed instead of silently serving the
     // previous language chunks.
-    nextManifest[requiredEntries[0]].tofuI18nCatalogSha256 = i18nCatalog.digest;
-    nextManifest[requiredEntries[0]][authoringDigestField] = authoringDigest;
-    const nextAssets = await validateManifest(nextManifest, temporaryDir);
-
-    // Execute the exact minified graph before copying a single asset into the
-    // live publication. Syntax/type checks cannot observe module-evaluation
-    // TDZs or browser-only startup failures; the canary must reach app-ready
-    // and issue both catalog requests in real Chromium.
-    await runBundleCanary(temporaryDir);
-
-    await mkdir(assetsDir, { recursive: true });
-    for (const asset of nextAssets) {
-      await atomicCopy(join(temporaryDir, asset), join(liveDir, asset));
-    }
-
-    if (previousManifest) {
-      await publishManifest(join(liveDir, 'previous-manifest.json'), previousManifest);
-    } else {
-      await rm(join(liveDir, 'previous-manifest.json'), { force: true });
-    }
-
-    // The manifest is the commit point: every path it names is present first.
-    await publishManifest(join(liveDir, 'manifest.json'), nextManifest);
+    nextManifest[mainEntry].tofuI18nCatalogSha256 = i18nCatalog.digest;
+    nextManifest[mainEntry][authoringDigestField] = authoringDigest;
+    const nextAssets = await publishViteGeneration({
+      manifest: nextManifest, artifactDir: temporaryDir, liveDir,
+      previousManifest, validator: artifactValidator,
+      checkBudget: runBundleBudget, checkBoot: runBundleCanary,
+    });
 
     // Re-stamp the live graph: atomicCopy short-circuits existing names, so
     // without the touch a dropped file would keep its first-publication
@@ -334,8 +270,7 @@ async function main() {
     for (const name of deletions) {
       await rm(join(assetsDir, ...name.split('/')), { force: true });
     }
-    await validateManifest(await readJson(join(liveDir, 'manifest.json')), liveDir);
-    await runBundleBudget(nextManifest, temporaryDir);
+    await artifactValidator.validateCandidate(await readJson(join(liveDir, 'manifest.json')), liveDir);
     process.stdout.write(
       `Published ${nextAssets.size} Vite assets; retained ${previousAssets.size} from the previous graph; `
       + `kept ${retentionCandidates.length - deletions.length} older-generation files, pruned ${deletions.length}.\n`,

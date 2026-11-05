@@ -27,11 +27,16 @@ from lib.log import audit_log, get_logger
 from lib.model_routing import (
     build_discovered_provider_bundle,
     discovered_provider_id,
+    listed_model_count,
     ModelRoutingError,
     ModelRoutingRepository,
     OwnerBoundary,
     execute_migration,
     plan_legacy_migration,
+)
+from lib.model_routing.managed_provider import (
+    remove_provider_resources_in_place,
+    unreferenced_secret_references,
 )
 from lib.openapi import api_meta
 from lib.provider.provider_headers import sanitise_extra_headers as sanitise_extra_headers
@@ -49,6 +54,7 @@ from lib.catpaw_local_import import (
     secret_envelope as catpaw_secret_envelope,
 )
 from lib.request_parser import parse_body
+from lib.storage import StorageError
 from lib.generated_api_v1_model_routing import (
     ContractViolation,
     decode_request,
@@ -171,6 +177,8 @@ def _error(exc: Exception):
                                **{key: value for key, value in extras.items() if key != "kind"})
     if "conflict" in kind.lower():
         return api_conflict(str(exc), **extras)
+    if kind == "model_routing_storage_unavailable":
+        return api_service_unavailable(str(exc), **extras)
     return api_bad_request(str(exc), **extras)
 
 
@@ -192,55 +200,23 @@ def _contract_rejection(operation_id: str, body: Any):
 from lib.model_routing.probe_plan import provider_bundle as _provider_bundle
 
 
-def _remove_provider(document: dict[str, Any], provider_id: str) -> list[str]:
-    access_ids = {
-        row["provider_access_id"] for row in document["provider_accesses"]
-        if row["provider_id"] == provider_id
-    }
-    connection_ids = {
-        row["connection_id"] for row in document["connections"]
-        if row["provider_access_id"] in access_ids
-    }
-    offering_ids = {
-        row["offering_id"] for row in document["offerings"]
-        if row["provider_access_id"] in access_ids
-    }
-    secret_references = [
-        row["secret_reference"] for row in document["credentials"]
-        if row["provider_access_id"] in access_ids and row["secret_reference"]
-    ]
-    document["providers"] = [
-        row for row in document["providers"] if row["provider_id"] != provider_id]
-    document["provider_accesses"] = [
-        row for row in document["provider_accesses"]
-        if row["provider_id"] != provider_id]
-    document["connections"] = [
-        row for row in document["connections"]
-        if row["connection_id"] not in connection_ids]
-    document["credentials"] = [
-        row for row in document["credentials"]
-        if row["provider_access_id"] not in access_ids]
-    document["offerings"] = [
-        row for row in document["offerings"]
-        if row["offering_id"] not in offering_ids]
-    document["deployments"] = [
-        row for row in document["deployments"]
-        if row["offering_id"] not in offering_ids
-        and row["connection_id"] not in connection_ids]
-    return secret_references
-
-
 def _reclaim_secret_references(
     repository: ModelRoutingRepository,
     boundary: OwnerBoundary,
     references: list[str],
+    *,
+    committed_document: Mapping[str, Any] | None,
 ) -> None:
     """Best-effort cleanup after a failed write or superseded credential.
 
     Aggregate CAS is authoritative. Once it commits, cleanup failure must not
     tell a caller the mutation failed and invite a duplicate retry; the
-    repository janitor can reclaim the bounded orphan later.
+    repository janitor can reclaim the bounded orphan later. A successful CAS
+    supplies its committed document; None is only for newly created secrets
+    whose candidate never committed.
     """
+    if committed_document is not None:
+        references = unreferenced_secret_references(committed_document, references)
     for reference in references:
         if not reference:
             continue
@@ -403,7 +379,8 @@ def put_model_routing():
     except ModelRoutingError as exc:
         return _error(exc)
     except Exception as exc:
-        if "conflict" in str(getattr(exc, "code", "")).lower():
+        # The commit's typed CAS refusal; nothing else is a client 409.
+        if isinstance(exc, StorageError) and exc.code == "database_conflict":
             return _error(exc)
         return api_internal_error(exc, context="api_v1.model_routing.put")
 
@@ -511,6 +488,7 @@ def probe_provider_route():
             provider_bundle=bundle,
             credential_id=bundle["credentials"][0]["credential_id"],
             model_count=len(bundle["offerings"]),
+            listed_model_count=listed_model_count(result.get("models") or []),
         )
     except ModelRoutingError as exc:
         return _error(exc)
@@ -603,7 +581,8 @@ def probe_provider_cells_start(provider_id: str):
     clamped 1..5) re-probes a transiently-failing cell to filter false 429s.
     ``only`` restricts the run to rows/columns/cells and MERGES the fresh
     verdicts into the persisted snapshot. Manual diagnostics include disabled
-    Offerings/Connections and ungranted cells without changing routing state.
+    Connections and ungranted cells on enabled Offerings without changing
+    routing state; disabled Offerings are never probed.
 
     One bounded exception, and it is a WRITE: the card is first converged with
     its provider template (``sync_template_supply(backfill_only=True)`` scoped
@@ -994,7 +973,7 @@ def catpaw_local_import_apply():
         return api_internal_error(exc, context="api_v1.providers.catpaw_import")
     finally:
         _reclaim_secret_references(
-            repository, boundary, uncommitted_secret_references)
+            repository, boundary, uncommitted_secret_references, committed_document=None)
 
 @api_v1_providers_bp.route("/api/v1/providers", methods=["POST"])
 @require_scope("providers")
@@ -1046,7 +1025,7 @@ def create_provider_route():
         return api_internal_error(exc, context="api_v1.providers.create_v2")
     finally:
         _reclaim_secret_references(
-            repository, boundary, uncommitted_secret_references)
+            repository, boundary, uncommitted_secret_references, committed_document=None)
 
 
 @api_v1_providers_bp.route("/api/v1/providers/<provider_id>", methods=["GET"])
@@ -1085,7 +1064,7 @@ def update_provider_route(provider_id: str):
         document = copy.deepcopy(authority.document)
         if _provider_bundle(document, provider_id) is None:
             return api_not_found("Provider not found")
-        old_secrets = _remove_provider(document, provider_id)
+        old_secrets = remove_provider_resources_in_place(document, provider_id)
         replacement_id = _apply_bundle(
             repository,
             boundary,
@@ -1100,15 +1079,8 @@ def update_provider_route(provider_id: str):
         committed = repository.compare_and_swap(
             boundary, document, expected_revision=expected)
         uncommitted_secret_references.clear()
-        active_refs = {
-            credential["secret_reference"]
-            for credential in committed.document["credentials"]
-        }
         _reclaim_secret_references(
-            repository,
-            boundary,
-            [reference for reference in old_secrets
-             if reference and reference not in active_refs],
+            repository, boundary, old_secrets, committed_document=committed.document,
         )
         _hot_reload_dispatcher_slots()
         return api_ok(
@@ -1121,7 +1093,7 @@ def update_provider_route(provider_id: str):
         return api_internal_error(exc, context="api_v1.providers.update_v2")
     finally:
         _reclaim_secret_references(
-            repository, boundary, uncommitted_secret_references)
+            repository, boundary, uncommitted_secret_references, committed_document=None)
 
 
 @api_v1_providers_bp.route("/api/v1/providers/<provider_id>", methods=["DELETE"])
@@ -1145,13 +1117,13 @@ def delete_provider_route(provider_id: str):
         document = copy.deepcopy(authority.document)
         if _provider_bundle(document, provider_id) is None:
             return api_not_found("Provider not found")
-        secrets_to_delete = _remove_provider(document, provider_id)
+        secrets_to_delete = remove_provider_resources_in_place(document, provider_id)
         from lib.model_routing.registration import prepare_registration_document
         document = prepare_registration_document(document, previous=authority.document)
         committed = repository.compare_and_swap(
             boundary, document, expected_revision=expected)
         _reclaim_secret_references(
-            repository, boundary, secrets_to_delete)
+            repository, boundary, secrets_to_delete, committed_document=committed.document)
         audit_log(
             "model_routing_provider_access_deleted",
             owner_user_id=boundary.owner_user_id,
@@ -1164,6 +1136,32 @@ def delete_provider_route(provider_id: str):
         return _error(exc)
     except Exception as exc:
         return api_internal_error(exc, context="api_v1.providers.delete_v2")
+
+
+@api_v1_providers_bp.route(
+    "/api/v1/providers/<provider_id>/listed-models/import", methods=["POST"])
+@require_scope("providers")
+@api_meta(summary="Add every model the provider's authenticated /models lists",
+          tags=["providers"], scope="providers")
+def import_listed_provider_models_route(provider_id: str):
+    """Load the rest of a listing that provider creation imported in part."""
+
+    boundary = _boundary()
+    if boundary is None:
+        return api_not_found("Provider not found")
+    repository = _repository()
+    try:
+        if _provider_bundle(repository.get(boundary).document, provider_id) is None:
+            return api_not_found("Provider not found")
+        from lib.llm_dispatch.provider_catalog_sync import import_listed_models
+        result = import_listed_models(boundary, repository, provider_id)
+        if result["added_model_count"]:
+            _hot_reload_dispatcher_slots()
+        return api_ok(provider_id=provider_id, **result)
+    except ModelRoutingError as exc:
+        return _error(exc)
+    except Exception as exc:
+        return api_internal_error(exc, context="api_v1.providers.import_listed_models")
 
 
 @api_v1_providers_bp.route(
@@ -1209,7 +1207,7 @@ def replace_credential_secret(credential_id: str):
         uncommitted_secret_references.clear()
         if prior_reference and prior_reference != stored["secret_reference"]:
             _reclaim_secret_references(
-                repository, boundary, [prior_reference])
+                repository, boundary, [prior_reference], committed_document=committed.document)
         _hot_reload_dispatcher_slots()
         return api_ok(
             credential_id=credential_id,
@@ -1222,7 +1220,7 @@ def replace_credential_secret(credential_id: str):
         return api_internal_error(exc, context="api_v1.model_routing.secret")
     finally:
         _reclaim_secret_references(
-            repository, boundary, uncommitted_secret_references)
+            repository, boundary, uncommitted_secret_references, committed_document=None)
 
 
 @api_v1_providers_bp.route(

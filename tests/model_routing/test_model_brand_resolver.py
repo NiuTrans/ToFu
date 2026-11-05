@@ -23,6 +23,7 @@ from tests._runtime_sections import (
     native_module_path,
     runtime_section,
 )
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -40,7 +41,6 @@ def _run_node(harness_path, *args):
     return result.stdout
 
 
-@pytest.mark.skipif(not NODE, reason='node not installed')
 def test_brand_resolver_prioritizes_creator_over_name_pattern(tmp_path):
     module = native_module_path(
         '.native/model-brand-detection.js',
@@ -96,8 +96,8 @@ console.log(JSON.stringify({
     assert values['tableKeysNormalized'] is True
 
 
-@pytest.mark.skipif(not NODE, reason='node not installed')
 def test_vendor_icon_follows_creator_identity(tmp_path):
+    require_node_modules('vite')
     entry = tmp_path / 'entry.ts'
     output = tmp_path / 'vendor.cjs'
     module = ROOT / 'frontend/src/features/model-catalog/vendor.ts'
@@ -131,7 +131,6 @@ console.log(JSON.stringify({{
     assert values['kimi']['icon'] == 'kimi'
 
 
-@pytest.mark.skipif(not NODE, reason='node not installed')
 def test_access_matrix_row_icon_resolves_via_model_brand(tmp_path):
     module = native_module_path(
         '.native/model-brand-detection.js',
@@ -195,7 +194,6 @@ console.log(JSON.stringify({html: html, brandCalls: brandCalls}));
     assert output['html'].count('data-brand="meta"') == 2  # Model header and request-name row
 
 
-@pytest.mark.skipif(not NODE, reason='node not installed')
 def test_access_matrix_header_shows_masked_key_hint(tmp_path):
     # The credential column header must identify the key by its masked
     # recognition hint (sk-…•••…wxyz); the bare kind string is the fallback

@@ -1,32 +1,23 @@
 """Real owner-scoped binding HTTP/record CAS journey; no LLM is dispatched."""
 import uuid
+from unittest.mock import Mock
 import pytest
 
 pytest_plugins = ('tests._chat_sidecar',)
 pytestmark = [pytest.mark.api, pytest.mark.auth_mode('open')]
 
 
-def test_budget_defaults_cas_owner_and_binding_never_start_work(flask_client, chat_sidecar):
+def test_request_usage_is_passive_and_has_no_settings_endpoint(flask_client, chat_sidecar):
     from lib.conversations.project_coordination import ProjectCoordinationRepository
     from lib.project_dispatch.repository import ProjectDispatchRepository
-    path = '/test/budget-' + uuid.uuid4().hex
+    path = '/test/usage-' + uuid.uuid4().hex
     binding = ProjectCoordinationRepository(1).create(path, folder_id='test', expected_revision=0, command_id='create')
     endpoint = '/api/v4/project/coordination/budget'
     initial = flask_client.get(endpoint, query_string={'path': path})
     assert initial.status_code == 200, initial.get_json()
-    state = initial.get_json()
-    assert state['revision'] == 0 and state['request'] is None
-    request = {'path': path, 'conversationId': binding['conversationId'], 'bindingRevision': binding['revision'],
-        'expectedRevision': 0, 'settings': {**state['settings'], 'maxTokens': 9000, 'maxModelRequests': 12}}
-    updated = flask_client.post(endpoint, json=request)
-    assert updated.status_code == 200, updated.get_json()
-    assert updated.get_json()['revision'] == 1 and updated.get_json()['settings']['maxTokens'] == 9000
-    assert flask_client.post(endpoint, json=request).get_json() == updated.get_json()
-    assert flask_client.post(endpoint, json={**request, 'settings': {**request['settings'], 'maxTokens': 8000}}).status_code == 400
-    assert flask_client.post(endpoint, json={**request, 'bindingRevision': 999}).status_code == 403
-    assert flask_client.post(endpoint, json={**request, 'path': '/foreign'}).status_code == 403
-    assert flask_client.post(endpoint, json={**request, 'owner': 2}).status_code == 400
-    assert flask_client.post(endpoint, json={**request, 'settings': {**request['settings'], 'maxTokens': -1}}).status_code == 400
+    body = initial.get_json()
+    assert body['projectPath'] == path and body['request'] is None and 'settings' not in body
+    assert flask_client.post(endpoint, json={'path': path}).status_code in (404, 405)
     assert ProjectCoordinationRepository(1).read(path) == binding
     value, _ = ProjectDispatchRepository(1, path)._load()
     assert not value['assignments'] and not value.get('requestBudgets')
@@ -122,7 +113,7 @@ def test_scoped_message_receipts_are_readonly_and_match_contract(flask_client, c
     seed_conversation(recipient, settings={'projectPath': path})
     mailbox = ProjectMailbox(1, path, recipient)
     mailbox.submit('sender', {'content': 'x' * 1000, 'idempotency_key': 'one'}, 'sender-task')
-    before = mailbox.load()
+    before = mailbox.head()
     endpoint = '/api/v4/project/coordination/messages'
     response = flask_client.get(endpoint, query_string={'path': path, 'conversation_id': recipient})
     assert response.status_code == 200, response.get_json()
@@ -134,7 +125,7 @@ def test_scoped_message_receipts_are_readonly_and_match_contract(flask_client, c
     assert result['ok'] is True
     payload = {key: value for key, value in result.items() if key != 'ok'}
     Draft202012Validator({**contract, '$ref': '#/$defs/pageView'}).validate(payload)
-    assert mailbox.load() == before
+    assert mailbox.head() == before
     assert flask_client.get(endpoint, query_string={'path': '/different', 'conversation_id': recipient}).status_code == 400
 
 
@@ -206,21 +197,39 @@ def test_create_empty_coordinator_replay_and_scope(flask_client, chat_sidecar, m
     assert replay.get_json()['conversationId'] == fresh['conversationId']
 
 
-def test_project_conversation_inventory_is_passive_owned_and_includes_empty_shells(flask_client, chat_sidecar):
+def test_project_conversation_inventory_is_passive_owned_and_includes_empty_shells(flask_client, chat_sidecar, monkeypatch):
     from tests._seed import seed_conversation
     from lib.project_dispatch.repository import ProjectDispatchRepository
     path = '/test/inventory-' + uuid.uuid4().hex
     worker, foreign = 'worker-' + uuid.uuid4().hex, 'foreign-' + uuid.uuid4().hex
     seed_conversation(worker, title=worker, settings={'projectPath': path, '_coordinatorSource': 'coordinator-source'})
     seed_conversation(foreign, user_id=2, settings={'projectPath': path})
+    history = Mock(side_effect=RuntimeError('Unused assignment history unavailable'))
+    monkeypatch.setattr('lib.conversations.coordinator_conversations.project_catalog_origins', history)
     endpoint = '/api/v4/project/coordination/conversations'
     response = flask_client.get(endpoint, query_string={'path': path})
     assert response.status_code == 200, response.get_json()
     body = response.get_json()
     assert body['conversations'] == [{'conversationId': worker, 'title': worker,
-        'turnCount': 0, 'coordinatorId': 'coordinator-source'}]
+        'turnCount': 0, 'coordinatorId': 'coordinator-source',
+        'createdAt': body['conversations'][0]['createdAt'], 'updatedAt': body['conversations'][0]['updatedAt']}]
+    assert body['conversations'][0]['updatedAt'] >= body['conversations'][0]['createdAt'] > 0
     assert body['nextCursor'] is None and body['coverage'] == 'complete'
     assert flask_client.get(endpoint, query_string={'path': path, 'cursor': '%'}).status_code == 400
     assert flask_client.get(endpoint, query_string={'path': path + '-other'}).get_json()['conversations'] == []
+    history.assert_not_called()
     value, _ = ProjectDispatchRepository(1, path)._load()
     assert not value['assignments'] and not value.get('requestBudgets')
+
+
+def test_assignment_history_read_runs_through_the_live_async_view(flask_app, flask_client, chat_sidecar):
+    """The assembled app serves the disconnect-aware history read as a coroutine view."""
+    import asyncio
+    views = [flask_app.view_functions[rule.endpoint] for rule in flask_app.url_map.iter_rules()
+             if rule.rule == '/api/v4/project/coordination/assignments' and 'GET' in rule.methods]
+    assert len(views) == 1 and asyncio.iscoroutinefunction(views[0])
+    path = '/test/assignments-' + uuid.uuid4().hex
+    response = flask_client.get('/api/v4/project/coordination/assignments', query_string={'path': path})
+    assert response.status_code == 200, response.get_json()
+    page = response.get_json()
+    assert (page['assignments'], page['olderCursor'], page['newerCursor']) == ([], None, None)

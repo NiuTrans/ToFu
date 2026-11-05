@@ -45,9 +45,9 @@ def test_diff_revision_quote_and_send_rollback(browser, live_server, tmp_path, t
         item = page.locator(f'.conv-item[data-conv-id="{cid}"]')
         expect(item).to_have_count(1, timeout=20000)
         expect(page.locator('#chatInner')).to_contain_text('Retry behavior updated.', timeout=20000)
-        process = page.locator('#chatInner .conversation-history-process')
-        if process.count() and not process.evaluate('node => node.open'):
-            process.locator(':scope > summary').click()
+        panel = page.locator('#chatInner .conversation-tool-panel__toggle[aria-expanded="false"]')
+        if panel.count():
+            panel.first.click()
         card = page.locator('#chatInner .ptool-batch-done-block')
         expect(card).to_have_count(1, timeout=20000)
         card.locator(':scope > summary').click()

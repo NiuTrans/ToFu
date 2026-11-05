@@ -27,11 +27,17 @@ import os
 import re
 from typing import Any
 
+from lib.error_envelope import BadRequest
 from lib.http_transport.client import async_http_get
 from lib.log import get_logger
 from lib.ttl_cache import TTLCache
 
 logger = get_logger(__name__)
+
+
+class MCPServerNotFound(LookupError):
+    """The named server is absent from the owner's MCP configuration."""
+
 
 # ── Upstream registries ─────────────────────────────────────────────
 
@@ -382,8 +388,8 @@ def build_updated_args(cfg: dict, ref: PackageRef, latest: str) -> list[str]:
 async def apply_update(name: str, *, user_id) -> dict[str, Any]:
     """Pin the stored config to the latest upstream release + reconnect.
 
-    Returns a result dict; raises ``KeyError`` for an unknown server and
-    ``ValueError`` for a non-updatable one. A reconnect failure propagates
+    Returns a result dict; raises ``MCPServerNotFound`` for an unknown server
+    and ``BadRequest`` for a non-updatable one. A reconnect failure propagates
     as ``MCPConnectError`` AFTER the config was already updated — the route
     surfaces that split state exactly like the install flow does.
     """
@@ -393,10 +399,10 @@ async def apply_update(name: str, *, user_id) -> dict[str, Any]:
     config = load_mcp_config(user_id=user_id)
     cfg = config.get(name)
     if not isinstance(cfg, dict):
-        raise KeyError(name)
+        raise MCPServerNotFound(name)
     ref, reason = parse_package_ref(cfg)
     if ref is None:
-        raise ValueError(reason)
+        raise BadRequest(reason, field='id')
 
     latest = await fetch_latest_version(ref['source'], ref['package'],
                                         refresh=True)
@@ -414,7 +420,7 @@ async def apply_update(name: str, *, user_id) -> dict[str, Any]:
 
     new_args = build_updated_args(cfg, ref, latest)
     if patch_server(name, {'args': new_args}, user_id=user_id) is None:
-        raise KeyError(name)
+        raise MCPServerNotFound(name)
     logger.info('[MCP:Updates] %s: %s %s → %s (args rewritten, env preserved)',
                 name, ref['package'], current or '(floating)', latest)
 
@@ -445,7 +451,7 @@ async def apply_update(name: str, *, user_id) -> dict[str, Any]:
 
 
 __all__ = [
-    'PackageRef', 'parse_package_ref', 'compare_versions',
+    'MCPServerNotFound', 'PackageRef', 'parse_package_ref', 'compare_versions',
     'fetch_latest_version', 'check_server_update', 'check_all_updates',
     'build_updated_args', 'apply_update',
 ]

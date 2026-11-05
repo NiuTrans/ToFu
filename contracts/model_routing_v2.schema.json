@@ -404,7 +404,10 @@
         "credential_id": {"$ref": "#/$defs/identifier"},
         "provider_access_id": {"$ref": "#/$defs/identifier"},
         "kind": {"enum": ["api_key", "oauth", "local_identity", "subscription"]},
-        "secret_reference": {"type": "string", "maxLength": 256},
+        "secret_reference": {
+          "type": "string", "maxLength": 256,
+          "description": "Owner/tenant-scoped encrypted secret reference. Delete and prune must retain references in the current aggregate, including disabled credentials, within the cleanup transaction. Caller prune references are additional retention pins."
+        },
         "key_hint": {"type": "string", "maxLength": 64},
         "enabled": {"type": "boolean"},
         "authorization": {"$ref": "#/$defs/credentialAuthorization"},
@@ -526,7 +529,8 @@
       "properties": {
         "source": {"type": "string", "maxLength": 128},
         "migrated_at": {"type": "number", "minimum": 0},
-        "receipt_id": {"$ref": "#/$defs/identifier"}
+        "receipt_id": {"$ref": "#/$defs/identifier"},
+        "context_repair_receipt_id": {"$ref": "#/$defs/identifier"}
       }
     }
   }

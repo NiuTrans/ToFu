@@ -5,8 +5,7 @@
 .ri-state-panel-kind:empty{display:none}
 .ri-state-panel-kind.ri-kind-fallback{color:var(--text-secondary);background:color-mix(in srgb, var(--text-secondary) 10%, transparent);border-color:var(--border-light)}
 .ri-state-panel-title{font-family:var(--font-mono);font-size:var(--font-size-sm);font-weight:var(--weight-semibold);color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ri-state-panel-close{margin-left:auto;display:inline-flex;align-items:center;padding:calc(var(--space-1) * 0.5);border-radius:3px;color:var(--text-secondary);cursor:pointer}
-.ri-state-panel-close:hover{color:var(--accent);background:color-mix(in srgb, var(--text-secondary) 12%, transparent)}
+.ri-state-panel-close{margin-left:auto}
 .ri-state-body{max-height:420px;overflow-y:auto;padding:calc(var(--space-1) * 1.75) calc(var(--space-1) * 2.25)}
 .ri-state-body .debug-msg-block{margin-bottom:calc(var(--space-1) * 1.25)}
 .ri-state-body .debug-msg-header{font-size:var(--font-size-sm);padding:calc(var(--space-1) * 1.25) calc(var(--space-1) * 2.25)}

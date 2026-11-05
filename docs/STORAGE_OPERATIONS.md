@@ -1,6 +1,301 @@
 # Storage operations and verification
 
+## Payment quote retention
+
+Stripe prepares one durable payment quote before provider IO and later binds its
+PaymentIntent identity. Synthetic SQLite measurement on 2026-10-28: 16 checkouts
+and 96 success notifications retained 16 payments and 16 ledger entries, versus
+32 payments and 16 ledger entries before this change. The former 16 pending
+Session rows disappear from new lifecycles. Compact UTF-8 payment JSON after
+notifications measured 7,905 bytes versus 11,713; pending quotes measured 4,033
+versus 4,721 bytes. These are logical document sizes, not physical storage or
+throughput. A failed provider request or abandoned checkout retains its prepared
+quote; financial evidence has no automatic TTL. Historical duplicate records are
+not removed. Future retention work must preserve reconciliation. See the
+[payment lifecycle](modules/auth_providers_billing.md#stripe-checkout-quote-and-provider-binding)
+for ownership, legacy migration and verification.
+
+## Model-routing secret reclamation
+
+The [credential lifecycle](modules/auth_providers_billing.md#secret-storage)
+protects current owner/tenant aggregate references inside cleanup transactions.
+Disabled credentials retain their secrets. Caller prune references add retention
+pins; expiry remains strictly `updated_at < updated_before`, with at most 256
+deletions per command. This introduces no table, index, background worker, cache,
+or new persistent record. Unreferenced old secrets remain reclaimable, including
+those beyond a large active prefix. A malformed reference collection refuses
+reclamation rather than treating it as empty.
+
+Speech service activation uses the existing ProviderAccess enabled flag. Its
+saved credentials remain durable owner data while disabled; only explicit
+Provider/credential removal makes their unused references reclaimable. No
+per-toggle secret, preference record or retention timer is created. A real
+SQLite/API fixture with two speech Providers measured two encrypted secret
+records before and after three activation changes (disable, re-enable, then
+disable both); both original references remained resolvable, with zero new
+secret records. Disabled accesses disappeared from runnable speech routes,
+while enabled sibling services remained available. This is a logical record
+count, not a physical database-size or throughput measurement.
+
+Cleanup decodes the current aggregate once per command; that correctness check
+adds work proportional to aggregate size. SQL uses the existing owner and
+per-secret fences, then conditional DELETE row counts, avoiding a separate read
+per candidate. An equivalent-work SQLite in-memory measurement used 2,048 active
+credentials plus 384 orphans and reclaimed the same first 256 orphans in every
+sample. Eight ABBA repetitions measured median 9.47 ms with separate timestamp
+reads versus 8.63 ms with conditional deletion; SELECT statements fell from 266
+to 10. A separate paired comparison with the former snapshot-only implementation
+measured 5.62 ms versus 8.64 ms: decoding current authority is an explicit
+correctness cost, not a throughput improvement. These SQL-handler measurements
+exclude encryption, RPC and disk durability, and do not establish production
+latency. PostgreSQL transaction tests separately verify in-flight aggregate and
+secret refresh fences, independent-key progress and rollback; native process
+tests verify retained references, integrity refusal and delete receipt replay.
+
+## Request Inspector list projection
+
+Problem: listing request rounds needs counts, call names and usage, but fetching
+complete delta tails also transfers message bodies, tool dictionaries and context
+manifests into the Web process. Decision: `event.list` accepts the optional
+`payload_projection: "request-inspector/v1"` view declared in
+[`request_inspector_projection_v1.json`](../contracts/request_inspector_projection_v1.json).
+Omitted selectors and `"full"` retain complete replay. Both SQL authorities and
+native TofuDB preserve owner filtering, sequence, timestamp, ordering, page
+boundaries and payload-integrity checks. `payload_types` still selects payload
+presence first. Invalid selectors fail with the existing protocol error.
+
+Only delta snapshots with integer message/tool counts use the reduced view.
+Their metadata and OpenAI/Anthropic tool-name declarations reproduce the same
+list fold without message content. Legacy full snapshots retain their original
+positional-prefix evidence; malformed shapes retain the original failure path.
+The existing inspector byte budget and invalidation/TTL own both views. Projected
+delta rows cannot supply full details; an already-full cache can supply lists.
+This adds no durable index, schema migration, worker or background retention.
+Alternatives rejected: reducing the durable event destroys inspection evidence;
+filtering only after the RPC still makes the Web process decode the full body;
+substituting metadata into the replay cache silently corrupts detail reads.
+
+`benchmarks/request_inspector_projection.py` uses disposable existing comparison
+authorities, valid producer delta snapshots, an independent authored-fold oracle,
+and ABBA ordering (five complete reads/folds per leg). A 32-round, 65,536-character
+per-round fixture returns 3,019,488 JSON bytes in full versus 9,572 projected
+bytes (99.68% less). SQLite medians were 54.49/57.44 ms full versus 31.139/31.132 ms
+projected. A native **debug build**, through the production application client,
+measured 262.042/257.002 ms versus 57.617/57.349 ms. These are component results,
+not production browser RTT or cross-engine rankings. Every leg preserves the
+exact list and subsequent full replay. Regenerate/check shared constants with
+`python3 scripts/gen_request_inspector_projection.py --check`; verify
+`tests/diagnostics/test_request_inspector_projection.py`,
+`tests/storage/test_request_inspector_projection.py`, and native
+`request_inspector_projection`/`indexed_stream` tests.
+
+## Resident native lifecycle
+
+[Native storage lifecycle](NATIVE_STORAGE_LIFECYCLE.md) retains one host process
+and the existing native runtime across Web-worker restarts. Engine caches and
+their eviction budgets keep their existing owners; durable database history is
+neither copied nor removed. The service adds two replaced mode-0600 JSON files
+and one zero-byte OS lease file per project, with no per-restart append history.
+An isolated full-application observation measured 857 bytes for the service
+record (path lengths affect its size). Publication validates a 64 KiB
+connection-document bound; records
+have the same read bound. Full stop removes the owned active connection and
+service record only after shutdown. The lease inode remains for safe reuse.
+Host diagnostics use the existing `server_console` copy/truncate retention
+family; there is no new unbounded log. Offline maintenance must stop the full
+managed service and obtain the ordinary storage authority lease.
+
 Coordinator reports keep one attention pointer per owner/project and transient publication intents; [record sizing, recovery and retention](PROJECT_COORDINATION.md#proactive-reports-and-durable-attention) belong to the shared report contract.
+
+## Admitted engines, start refusals and liveness
+
+These decisions close the failure chain of 2026-10-27, when a supported staged
+preparation replaced the certified engine while the resident engine served, a
+ten-second stall detached the application, every re-attachment was refused
+and the restart breaker fenced a live, healthy engine for 5 h 23 min.
+
+**Admitted engine bytes.** Problem: every relaunch reopened the mutable
+certified path, so any staged deployment turned the next crash or recycle into
+a deterministic refusal (0e261df19 fixed re-attachment only; the host's own
+relaunch still refused). A descriptor held since admission is no substitute:
+on the BeeGFS FUSE volume holding the checkout, reading a renamed-over file
+through its open descriptor fails with ENOENT (measured 2026-10-27; the local
+xfs `/tmp` keeps it readable). Decision: `lib/storage/admitted_engine.py`.
+A supervisor that may launch stages the selected artifact once into
+`$TMPDIR/tofu-admitted-engines-<uid>/<sha256>/tofu-db` (directory 0700, file
+0500, ownership checked), checks the pin against exactly those staged bytes,
+and holds a shared `flock` lease plus a descriptor for its lifetime. Every
+launch, including the planned [fastpath](TOFUDB_FASTPATH.md) exit
+(`fastpath-export`, `inspect`) that precedes it, re-verifies and runs that
+copy; a copy removed by a temporary-file
+cleaner is republished from the descriptor; bytes that no longer match raise a
+typed refusal. Attachments admit by digest only and copy nothing. The next
+application restart admits the deployed engine. Alternatives rejected: a
+hardlink shares the inode, so an in-place write still changes the admitted
+bytes, and it cannot cross filesystems; keeping the bytes in memory costs the
+engine size in RSS per supervisor; content-addressed release directories would
+change the `TOFUDB_BIN` deployment contract; refusing staged preparation while
+an engine runs would block the supported update flow.
+
+**Deterministic start refusals.** Problem: an identical refusal was retried
+after 0.1-1.6 s and fed the restart breaker as crash pressure. Decision:
+`StorageStartRefused` (`reason`, `detail`, `remedy`) marks a lost admission
+and every attachment identity refusal. `StorageRuntime` reports
+`state: refused` with a `refusal` object in `status()` (the `/api/ready`
+`storage` payload), logs CRITICAL once per distinct refusal, rechecks every
+30 s and never counts it toward the breaker; any other failure supersedes it.
+Callers never wait a refusal out: `client()`, including a caller already
+parked on the restart when it was refused, fails at once with a non-retryable
+`database_unavailable` naming the reason and remedy, with the 30 s recheck as
+its retry hint; the detail, which can name host paths, stays in the logs and
+`status()`. Alternatives rejected: exponential backoff alone still feeds the
+breaker; a terminal refusal strands a condition the operator or host can
+clear; parking callers on the fence-wait cap (the recheck sleep kept the
+restart worker alive, so every request and loop stalled 30 s and then got a
+retryable error for a refusal no retry could clear).
+
+**Liveness policy.** Problem: the external monitor declared a live engine dead
+after three probes (about 3 s) without starvation attribution, and the managed
+monitor's suppression count never reset on a served probe (it reached 27
+across two healthy hours on 2026-10-26/27, so a starved engine would have been
+force-recycled at 60). Decision: both monitors share `_LivenessStreak`. A
+process exit fences at once (managed child exit, or the attachment's published
+PID/start identity gone). A live engine is recycled (managed) or detached
+(an attachment whose published identity proves it alive; a SQL co-container
+publishes none and keeps the plain threshold) only after at least the failure
+threshold spanning
+`TOFU_STORAGE_LIVENESS_UNRESPONSIVE_SECONDS` (default 120 s, bounds
+10..3600; on 2026-10-26 23:42 an engine failed 25 probes within 61 s and
+recovered by itself). An overloaded host resets the streak in both monitors;
+a served probe resets suppression. Only the managed monitor forces a bounded
+recycle after the suppression bound; an attachment's owner recycles a wedged
+engine and its exit then detaches the attachment. Alternatives rejected:
+keeping the three-probe kill for managed engines, which with an accurate
+memory signal would kill starved engines within seconds; PSI, which this
+kernel does not provide (`/proc/pressure/*` returns EOPNOTSUPP).
+
+**Memory overload signal.** Problem: cgroup v1 `memory.usage_in_bytes` and v2
+`memory.current` count page cache (an hour after the outage: 213 of 220 GiB
+used, 139 GiB inactive file, 45 GiB RSS), so the host always read as
+overloaded. Decision: working set = usage minus inactive file
+(`total_inactive_file` on v1, `inactive_file` on v2), the kubelet
+definition. The verdict only withholds liveness recycles; it never sizes,
+refuses or stops work.
+
+**Degraded recovery.** Problem: the terminal `degraded` latch stranded a live,
+reachable engine for 5 h 23 min. Decision: the breaker bounds spawn churn, so
+it applies only to a runtime that launches its engine
+(`StorageSupervisor.owns_engine_process`). An attachment to the resident host
+or a co-container is never latched: it keeps re-attaching with the capped
+backoff (60 s) and returns automatically once the engine answers. Managed
+runtimes keep the terminal latch, because re-spawning into a crash storm is
+the churn it prevents and an explicit restart re-runs the boot gates.
+Alternatives rejected: a one-click owner action adds an authenticated
+mutation surface and still needs a watching human (nobody was for five
+hours); half-open automatic spawns for managed runtimes are deferred, since no
+healthy engine exists to strand there and they need their own cooldown policy.
+
+Persistence and retention: one private copy per admitted digest (26,913,136
+bytes for the engine certified on 2026-10-27), shared by every supervisor of
+the user that admits it. Admission collects copies no live process leases; an
+abandoned staging file or lease-less directory is removed after one hour.
+Measured after the storage and resident-host ladders: one 26 MB copy left by
+exited test hosts, collected at the next admission. A host or application
+restart is what activates the changed lifecycle code: the manager replaces the
+resident host because its configuration identity covers the storage
+lifecycle modules. Verification: `tests/storage/test_storage_admitted_engine.py`,
+`test_storage_start_refusal.py`, `test_storage_supervisor_liveness.py`,
+`test_storage_monitor_alignment.py`,
+`test_storage_supervisor_restart_identity.py` (real engine: rename deployment,
+then SIGKILL) and `tests/server/test_native_storage_service.py` (resident
+host and attached application: deployment, engine SIGKILL, admitted-engine
+relaunch and re-attachment).
+
+## Accepted-attempt dispatch catalogue
+
+Problem: pre-claim interruption, restart settlement and conversation deletion
+could leave tenant-global dispatch entries pointing at non-dispatchable work.
+The strict reader then repeatedly failed the accepted-attempt backstop.
+Decision: `turn/dispatchable_index.rs` updates this derived catalogue in the
+same transaction as each Attempt state transition or conversation deletion.
+Deletion also retires the live Attempt's restart-recovery index, so a later
+restart cannot encounter a locator whose executable state was already detached.
+Queue activation publishes an entry; claim, binding and terminal settlement
+retire it through the same predicate the reader uses.
+
+Restart recovery also repairs older entries below its existing creation cutoff,
+only for the explicitly requested owner. It requires an exact settled Attempt,
+or an exact Attempt identity in the deleted conversation's retained Turn
+directory. A missing target, malformed identity, unknown status or unrelated
+owner is never evidence for deletion. The same retained-directory witness
+repairs recovery indexes stranded by older conversation deletion. Unexplained
+rows remain visible to the existing integrity fence. The tenant catalogue is read in bounded pages without
+a prefix-only scan ceiling that could permanently starve later owners.
+Alternatives rejected: ignoring reader mismatches hides corruption; treating
+absence as proof can erase a fabricated locator; a separate cleanup worker adds
+another lifecycle owner for the existing restart recovery transaction.
+
+The repair adds no durable record, cursor or worker and removes only derived
+index rows. A two-owner fixture starts with three stranded entries plus one
+live entry and ends with exactly that live entry. User records and foreign-owner
+entries survive an individual owner's repair. Native regressions cover queue
+activation, terminal-before-claim, deletion, exact trash evidence, corrupt
+locators, owner isolation, and I/O faults followed by crash/reopen/retry.
+
+## Synchronous overlay drain
+
+Problem: a full overlay drain reused the foreground latency-adaptive slice.
+On a slow filesystem it could shrink to one key and repeat a durability barrier
+for every key, although the caller already holds exclusive authority until the
+entire drain finishes. A 4,096-Turn deletion regression spent over 40 minutes
+in this path; a sampled stack showed one-key WAL publications inside the drain.
+Decision: full drains use the existing 2,048-position/key batch ceiling with
+the existing carried-byte and block-reference checks. Each batch retains its
+ordinary WAL durability and replay boundary. Foreground/background slices keep
+their adaptive policy, and bulk drain timing never increases the next online
+slice. Alternatives rejected: relaxing fsync weakens acknowledged durability;
+raising the online minimum worsens foreground latency; one unbounded batch
+can exceed the transaction's carried-byte boundary.
+
+The regression sets the online slice to one, drains 2,049 small keys in two
+publications, keeps the online slice at one, and verifies every value after a
+crash/reopen. Existing overlay I/O error, short-write and lost-sync campaigns
+cover each batch's publication mechanism. No new persistent state, retention
+policy, executor or admission limit is introduced.
+
+## Native compiler directory aliases
+
+Problem: service and shell entry points can reach the same compiler installation
+through different directory symlinks. Using their literal paths split one Cargo
+dependency cache into two and repeated a cold dependency build during restart.
+Decision: existing compiler paths use canonical parent directories in cache
+identity, preserving the executable basename and original invocation. Cargo's
+`cargo` and `rustc` proxy names must not collapse to the `rustup` executable.
+Distinct wrappers, ABI and linker flags remain distinct inputs; source freshness
+and artifact validation are unchanged. The real Cargo regression produces one
+target directory and reports fresh artifacts after changing only the directory
+alias, then recompiles after a source edit. Previously two alias spellings made
+two targets. Existing reconstructible-cache retention remains authoritative;
+there is no new cache, worker or deletion of older cache directories.
+Alternatives rejected: ignoring toolchain identity risks incompatible reuse;
+resolving the proxy filename itself changes command dispatch.
+
+## Native manifest preparation diagnostics
+
+Problem: a generic manifest-read error hid whether preparation lost its parser
+to a timeout, a failed child or malformed output. Decision: report the failure
+category and timeout/exit code while retaining the isolated, joined child
+and refusing unverified source identity. Parser output is not echoed into
+control responses. Treat the named file as context, not proof of corrupt source.
+Alternative rejected: retrying or weakening source admission to hide the error.
+
+The parser has a fixed 30-second allowance including interpreter startup,
+clamped to the preparation's remaining deadline; an expired preparation starts
+no new parser. The former independent ten-second limit repeatedly interrupted
+valid source reads during live preflight, while direct reads succeeded. This
+change preserves the total preparation budget and child cancellation; raising
+that outer budget or trusting a stale source identity was rejected. Preparation
+still completes before the serving application is stopped.
 
 ## Knowledge publication candidates
 
@@ -15,6 +310,46 @@ CRC/content hash and wrapper read-fault boundaries still apply. The bounded
 read owns only its existing call-local buffer; no worker, resident cache or
 persistent growth is added. Paired FUSE warm-read component measurement and
 limits: [length reuse](STORAGE_PERFORMANCE_CHARTER.md#loose-block-length-reuse).
+
+## Loose-block growth and online compaction
+
+Every live loose block is one file, one inode and one metadata operation per
+online-GC scan until loose compaction packs it into a payload segment. A
+completed scan packs every live loose block it finds, one format-bounded
+segment at a time, while the catalog stays below its 75% pressure floor
+([rate and rules](TOFUDB_ONLINE_GC.md#loose-compaction-rate-and-planning-probes-2026-10-31)).
+Within one epoch of a backlog appearing, the loose files left are an epoch's
+trailing segment below the 128-block floor plus garbage awaiting two-mark
+confirmation; previously one segment (at most 65,536 blocks) packed per epoch.
+Temporary disk stays one built-but-unpublished segment, and each segment's
+loose copies go once both CONTROL slots name its catalog. A loose copy of a
+block the catalog already holds (left by a crash, stop or error between a
+catalog publication and its loose cleanup, or written again by a later
+writer) goes in the next completed scan, one hold per file, also while
+compaction has no catalog slot; before, such copies stayed for good
+([rules and read-path proof](TOFUDB_ONLINE_GC.md#redundant-loose-copies-of-catalogued-blocks-2026-10-31)).
+Measure growth with `total_compaction_segments`, `total_compacted_blocks` and
+`total_redundant_copies_removed` in
+`system.metrics.onlineGarbageCollector` / `searchGarbageCollector` per epoch,
+`df -i` on the volume and `ls -f | wc -l` of a few `blocks/<xx>` shards; never
+walk a live store recursively.
+
+Live baseline, 2026-10-31 (read-only sampling of the running engine, which
+still packs one segment per epoch): the search projection on the container
+overlay held 16,761,814 of 16,777,216 root inodes. Shards 00-18 were already
+compacted (about 2,700 files each) and sampled shards 28-ff held 69,582-71,808
+loose files each at 2,426 B average: about 2.7M blocks packed in 51 h of
+uptime (about 52,500 blocks/hour), with about 15.2M left. Projection, not a
+measurement of the new code on the live store: before, about 290 h (12 days)
+at that rate, or about 6 days if scan time shrank with the backlog; after, the
+first completed epoch packs them into about 232 count-bound segments of
+65,536 blocks (its temporary budget is 1 GiB, so the byte limit is 256 MiB),
+about 37 GB in total, leaving the catalog near 650 of 4,096 entries. The main
+authority (74,861 and 75,292 loose files in two sampled shards, about 19.2M)
+is bound by catalog capacity instead: its catalog was at the 4,096 ceiling,
+and compaction waits until pressure consolidation brings it below the 75%
+floor, where it previously took any slot below the ceiling, one segment per
+epoch.
 
 ## Native hot-cache residency
 
@@ -102,9 +437,12 @@ Restart recovery now uses [deferred search opening](STORAGE_TOFUDB.md) and
 Search opening retains only one candidate on the existing maintenance worker,
 plus a shared atomic stop token; cold I/O holds neither request nor source mutex.
 Project summaries cost 40 logical value bytes per project, plus entity keys/index
-framing; their one owner cursor is at most 42 value bytes. Retirement removes the
-project summary; legacy backfill ends with one complete marker. It hydrates at most
-one historical document per round and retains no document cache. A deterministic
+framing; their one owner cursor (`backfill:documents`) is at most 34 value bytes,
+and completing its pass deletes the superseded 42-byte `backfill` cursor. Retirement
+removes the project summary; the document backfill ends with one complete marker.
+It hydrates at most one historical document per round and retains no document
+cache. Restart and backfill walks read one document row per project, so retained
+legacy update-index rows add no recovery work. A deterministic
 reopened 24-project / 14,942,208-byte history fixture measured 119,345 microseconds
 and 54 VFS reads through legacy fallback versus 749 microseconds and 3 reads with
 summaries. This isolates hydration work, not cold production mount latency.
@@ -126,7 +464,35 @@ without feedback. Linux records measure 40 bytes each (2,560 bytes at 64 scopes,
 excluding Vec allocation), a scheduling bound rather than production latency:
 search retry feedback.
 
-Host-keyed build outputs participate in the same reuse checks. Restart builds keep release opt-level 3, use Thin LTO and incremental code generation, and derive LLVM codegen units from the launch CPU/memory worker budget; explicit Cargo profile overrides win. Problem: full LTO plus one codegen unit serialized the large engine despite many available CPUs. Alternative rejected: debug optimization would tax storage operations.
+Host-keyed build outputs participate in the same reuse checks. Source restart
+builds keep release opt-level 3 and incremental code generation, and use Cargo
+`lto=false` with a fixed 64 LLVM codegen partitions, independent of host capacity.
+This preserves local Thin LTO across those partitions, without cross-crate LTO.
+Explicit Cargo profile overrides win; packaged release profiles are unchanged.
+Problem: cross-crate LTO repeated optimization/linking after small source edits.
+Decision: reuse optimized incremental objects with local optimization, without
+that whole-program pass.
+Alternatives rejected: debug optimization would tax storage operations, and
+hardware-derived compiler profiles repeatedly invalidate otherwise usable caches.
+A frozen-source local comparison, after populating each profile's dependency
+cache, changed an exported Rust function's returned value from 1 to 2 and
+invoked both rebuilt libraries to prove the new result. Compilation took
+85.070 s with cross-crate Thin LTO / 16 partitions and 23.031 s with local Thin
+LTO / 64 partitions. Adding that function initially took 78.786 s and 43.415 s
+respectively. A fully disabled LTO candidate took 28.098 s for the body edit;
+local Thin LTO preserves more optimization and was faster in this measurement.
+These are small code-change measurements, excluding artifact certification and
+application restart, not latency guarantees. First builds and profile switches
+depend on which dependency artifacts already exist and are not a cold-build
+speedup claim. The executable grew from 26,913,136 to 30,471,776 bytes and its
+shared library from 26,369,024 to 26,823,368 bytes.
+Disposable embedded read checks (500 point reads and a 400-Turn history)
+measured point-read means of 29.4–31.7 microseconds for the new profile versus
+27.4–38.3 for the previous profile, and history-window means of 50.8–53.1 versus
+51.6–52.7 microseconds. The ranges overlap under shared-host noise; these
+limited checks do not establish performance parity across storage workloads.
+Existing disposable-cache placement and retention still own
+the build outputs; no new cache lifetime, worker or durable state is added.
 
 Preparation reports actual stages through the existing admin approval GET's bounded `preparation` projection (`contracts/restart_preparation_v1.json`). The browser observes at 2s intervals with one request in flight, stops when the restart attempt settles or is replaced, and shows stage plus elapsed time without invented compilation percentages. Compiler logs remain local. Fifty retained approval records bound progress storage; preparation never changes approval authority.
 
@@ -136,8 +502,9 @@ Continued source churn refuses before shutdown and asks users to finish the upda
 
 Measured on the same 63-CPU host: a cold optimized build took 90.9s versus 528.5s for the preceding full-LTO build (different concurrent load, not a fixed SLA); unchanged build 0.785s; disposable engine/library validation 2.974s. Incremental intermediates live in the existing host Cargo cache, retain reconstructible state only and follow Cargo session reclamation.
 
-Automation execution uses launch-probed `TOFU_AGENT_WORKERS` capacity with lazy
-growth and one idle claim per 250 ms; empty claims retain no command receipt.
+Automation execution starts every claimed job on demand; the fixed
+`TOFU_AGENT_WORKERS` hint only sizes idle reuse, with lazy growth and one idle
+claim per 250 ms; empty claims retain no command receipt.
 On native source `5412f267…`, a synthetic capacity-97 service added two idle
 Python threads (1→3), four active actions grew to eleven including heartbeats,
 and shutdown returned to one. Two warm idle seconds made eight claims with zero
@@ -302,13 +669,32 @@ Problem: whole-file source hashing retained large tokenizer or contract buffers 
 
 Native engine updates are prepared before lifecycle shutdown. The preparation process has one 1,200-second total deadline (1,230-second caller ceiling), a 600-second maximum lock wait, 8 MiB subprocess logs, and bounded HTTPS downloads. Work uses the remaining total time after lock acquisition; compilation retains 30 seconds for identity, semantic probes and publication. A shorter caller deadline always wins. Problem: independent 600-second work/compiler caps discarded unused queue time and timed out healthy compilation. Decision: share the fixed total clock, not extend it. Alternatives rejected: increasing the total timeout blindly or renewing a full work budget after a contested lock would weaken bounds. Source compilation uses an owned input snapshot and the smaller of launch-probed effective CPUs and available GiB of memory as its worker count (minimum one; explicit Cargo worker overrides remain). One reconstructible `target/update-build` cache is reused; staging sources/downloads and logs are released on every outcome. The existing deployment owner retains rollback binaries and updates content pins. Candidate semantic probes use disposable authorities with live connection locators cleared. In a local debug validation, hashing the source took 37 ms and the three semantic probes completed in 3.5 s; these are preparation measurements, not production latency claims. Compiler/process groups are terminated and reaped on deadline or cancellation. A failed preparation does not stop a live worker or change backend selection. Source attestation uses SHA-256 over `tofu-db-source-v2\0` followed by sorted logical UTF-8 path keys, NUL, an unsigned 64-bit little-endian byte length, and exact file bytes. The root key prefix is always `tofu-db/`; dependency prefixes are the normalized Cargo-relative snapshot locations. Inputs include each transitive path crate's manifest, existing lockfile/build script, `src/**/*.rs` and `.cargo` files, including optional, target, build and dev dependencies. Existing explicit package include selection is retained (for publishable crates): literal included files plus Cargo manifests/lockfiles replace the default source selection; `.cargo` configuration remains included. This selection is not a complete Cargo glob implementation. Project-root `include_str!`/`include_bytes!` inputs are declared once in the engine manifest's `package.metadata.tofu.external-inputs` list. Both fingerprint owners hash their exact bytes under `@external/` keys. Preparation mirrors them at the same relative depth, preserving unchanged mtimes; its private ledger prunes only previously copied inputs. Missing files, traversal, symlinks and unowned target collisions fail preparation. New external compile references must join this list. Problem: crate-only snapshots omitted runtime schema and version inputs. Decision: declare the shared external closure in Cargo metadata; keep Cargo's crate selection unchanged. Alternatives: copying all contracts needlessly invalidates builds; parsing Rust macros cannot reliably cover generated paths. Verification: the identity/update/preparation neighbors passed 84 checks; the final identity suite passed 10 checks including maintained literal coverage, real Rust relocation/edit builds and unowned-target preservation. A fresh owned snapshot compiled the complete binary and embedded-mimalloc library offline in 46.56 seconds; compiled identity matched the maintained source fingerprint. No running application or storage backend was changed. Malformed manifests and logical path collisions fail preparation. Rust `packages/tofu-db/build.rs` and Python `serverctl_pkg/native_engine.py` share this contract; `tests/server/test_native_engine_identity.py` compiles the real build script and checks relocation, configuration and transitive edits.
 
+Deployment pin synchronization uses the canonical `tofu_dotenv` reader and
+atomic updater, including whitespace, quoted values, a leading BOM and repeated
+assignments. Problem: a second parser recognized only bare `NAME=` lines and
+could report a successful deployment while leaving an effective stale pin for
+the next startup. Decision: replace all recognized pin assignments through the
+shared owner and verify the value startup will read. Alternative rejected:
+adding ad hoc syntax matches would leave deployment and startup liable to drift
+again. Unrelated dotenv content is retained; the shared updater writes private
+file permissions.
+
+Deployment also attests a present sibling embedded library through the native
+preparation owner's isolated identity port before changing installed files.
+Problem: a binary-only Cargo build can leave an older sibling library, and
+recording that library's hash alone falsely blesses the pair. Decision: require
+the library's compiled source identity to match the daemon and require the
+selected allocator. Invalid or mismatched libraries refuse publication while
+preserving the installed pair. Alternative rejected: trusting file presence or
+deployment receipts cannot prove both artifacts came from the same source.
+
 ### Isolated native test preparation
 
 Problem: lifecycle preparation publishes managed artifacts and synchronizes `.env`; tests must not mutate a running deployment. Decision: `python3 -m serverctl_pkg.native_engine --project "$PWD" --prepare-only /tmp/tofu-native-test-artifacts` uses existing source/build/candidate-validation owners without reading or synchronizing dotenv, selecting a backend or restarting services. The output directory must not exist and must be outside the source checkout. Append `--candidate /absolute/path/to/tofu-db` to certify those exact bytes without any rebuild fallback. Otherwise compilation is explicit and potentially expensive; toolchain/profile settings come only from the command environment.
 
 Private snapshots/compiler targets are removed on success or failure; certified binary/library, content pins and provenance remain in the new output directory. Failed runs may leave their new output directory; retry with a fresh path. Source identity, library compatibility, disposable semantic probes and post-probe source rechecking remain mandatory; publication reuses the deployment owner with `no_env_sync=True`. Normal lifecycle preparation is unchanged. Alternatives rejected: bypassing freshness or borrowing a live deployment to avoid compilation.
 
-Run `TOFU_TEST_TOFUDB_BIN=/tmp/tofu-native-test-artifacts/tofu-db python3 -m pytest tests/server/test_native_engine_isolated.py -q` to select an explicit source-certified test artifact. Pytest never builds implicitly: it validates source identity before project imports and replaces inherited binary/content-pin values only in its process; embedded transport also requires the paired library. Existing per-worker disposable storage roots remain authoritative. Unit regressions mock compilation and semantic probes, not source identity or publication.
+Run `TOFU_TEST_TOFUDB_BIN=/tmp/tofu-native-test-artifacts/tofu-db python3 -m pytest tests/server/test_native_engine_isolated.py -q` to select an explicit source-certified test artifact. Pytest never builds implicitly: it validates source identity before project imports and replaces inherited binary/content-pin values only in its process; embedded transport also requires the paired library. The same artifact is the default `TOFUDB_DIFFERENTIAL_BIN`, so differential daemon fixtures (for example the swarm `native-*` lanes) execute it instead of cargo-building the checkout in-tree, which on a network filesystem outlasts the pytest timeout; an explicit `TOFUDB_DIFFERENTIAL_BIN` stays authoritative. Alternative rejected: a second opt-in for differential fixtures, which let one session silently compile a different engine than the certified one it selected. Source identity covers every crate input, including `packages/tofu-db/.cargo/`, so prepare a new artifact after any engine-source commit or edit. Existing per-worker disposable storage roots remain authoritative. Unit regressions mock compilation and semantic probes, not source identity or publication. Without that selection the shared app fixtures inherit the deployment's backend and engine; when that engine was not built from the checkout under test they skip with this remedy or the SQLite lane instead of erroring at setup (`docs/TESTING_STRATEGY.md`, "Live-app fixture prerequisites").
 
 Problem: root-only compiled identity omitted runtime/vendor edits, while
 physical-path closure hashing changed when `tofu-db` became `update-source`.
@@ -332,6 +718,10 @@ row is added only after all known commands finish and publish; startup and the
 existing maintenance tick rebuild missed wakes without a new worker or timer.
 
 The complete JSON-safe request freezes before the first enqueue: owner, conversation, command identity, message, timestamp and configuration. The bounded command registry retains it for maintenance retries; explicit POSIX background commands fsync `delivery.json` in their existing record directory before enqueue, then delete it only after acknowledgement. Restart recovery loads the identical envelope. Foreground handoffs retain their process-local recovery limit. Freezing only the command ID fails when a lost ACK is retried with changed configuration or time; reusing just the result is insufficient. Completion configuration retains execution preferences/policy and excludes the previous attempt's `checkpoint*`, prefill, content prefix, exclusion and private buffers. Problem: legacy frozen envelopes copied multi-MiB checkpoints into a 1 MiB native queue core. Decision: replay the original first; only a permanent size/protocol refusal permits a deterministic config projection under the same queue/command identity. The original `delivery.json`, result, owner and timestamp are never overwritten; authority fingerprint conflicts fail closed. Transient failures/lost ACKs continue replaying identical original bytes. Alternatives rejected: minting a new identity duplicates completion; discarding the original or truncating results destroys evidence. Maintenance retries claim one publisher per result, back off from 2 seconds to 5 minutes and start no further publication after a one-second tick budget; an already-started storage call retains its ordinary deadline. Failed controls/records remain available for later recovery. Once the queue ACK arrives, frozen retry bytes are released from completed-history memory; the ordinary delivered/headless result retention policy remains.
+
+Launch configuration survives restart. Problem: `delivery.json` exists only after a first publication attempt, so a result that the restart sweep recovers (finished while the server was down, or reattached and finished later) has no frozen configuration. Published empty, its collective wake runs on the server default model without the launching turn's project: the project tools leave the wire while the transcript still uses them, and every command that turn launches inherits the empty configuration. Decision: `record.json` stores the JSON-safe completion configuration at launch and restart delivery publishes with it; an existing `delivery.json` still wins. Records written before this change carry none and still publish an empty configuration. Alternatives rejected: re-resolving the conversation's saved settings at wake loses per-turn overrides and adds a settings dependency to the registry; freezing the whole envelope at launch is impossible because the result does not exist yet. Spec: `tests/background/test_background_recovery_envelope.py::test_restart_recovered_completion_wakes_with_the_launch_config`.
+
+Permanent versus retryable publication failure. Problem: both backends refuse `queue.enqueue` with `database_not_found` unless the owner's active conversation exists. A completion addressed to a headless request label (`/api/v1/chat/completions` mints `api-…` for inline-message tasks), a never-persisted session label or a deleted conversation was retried forever: an ERROR with traceback every five minutes, a record that every restart resurrected, and a batch fence that never cleared. Decision: the registry (`lib/tasks_pkg/background_commands.py` `deliver_completion`) classifies every publication. A refusal is owner-absent only when the owner-scoped `conversation.get` also returns null (`lib/background_command_delivery.py` `owner_absence`); an unanswered read, a present owner, storage unavailability, timeouts and lost ACKs stay `failed` and keep the backoff above. Owner absence becomes final only when no live flow can still create the conversation: the launching task is no longer live and `OWNER_CREATION_GRACE_S` (600 s, a fixed deadline) has passed since that was first observed, because a launcher may persist its conversation after its task returns (Feishu runs `run_task_sync` first, then `create_turn_pair(allowCreate)`). A record recovered after restart is final at once, since its launcher and creation flows ended with the old process; overlapping recovery sweeps skip, so one sweep owns a record. Settlement happens once per result: `delivery_status=undeliverable`, one WARNING with the reason, frozen bytes released and the record directory removed exactly like a delivered or headless result, so neither maintenance nor restart retries it and the conversation batch fence treats it as settled. Headless request tasks no longer reach this path: they are created without a saved conversation and start no deferred work ([Headless API](contracts/HEADLESS_API.md)). The result itself stays pollable under the ordinary completed-history retention. Trash counts as absent: delete already discards queued receipts and restore never revives runtime work (`contracts/conversation_lifecycle_v1.yaml`). Alternatives rejected: treating every `database_not_found` as final drops completions whose owner is created just after the refusal or after the launching task returns; parking until the conversation appears needs a creation hook across owners and keeps never-created labels forever; a durable undeliverable tombstone or retained record has no reader or retention owner; a retry-count or age limit alone would also discard deliveries during long storage outages. Specs: `tests/background/test_background_undeliverable_completion.py`.
 
 
 `queue.list` retains legacy array modes. Background application reads use
@@ -409,6 +799,7 @@ Embedded response encoding adds 512 bytes of fixed diagnostic stage atomics and 
 Embedded FIFO job delivery retains resource-derived workers/queue/byte caps, bounds idle registration by workers, and adds 256 fixed diagnostic-counter bytes; measured thread counts, allocator retention and lifecycle: [worker delivery](TOFUDB_WORKER_DELIVERY.md).
 Encoded semantic validation removes temporary decoded objects, retains parser scratch/recursion bounds, and adds 256 fixed counter bytes plus two bounded sampled-profile stage slots; no worker, cache or persistent-file growth: [JSON ownership](TOFUDB_JSON_MATERIALIZATION.md#encoded-semantic-response-validation).
 Canonical document projection borrows strictly recognized body bytes and builds one encoded envelope; four opt-in stages add 512 fixed counter bytes and 96 bytes per active/retained profile sample and operation aggregate (measured retained profile growth 3,264 bytes), without format/cache/worker growth: [projection ownership](TOFUDB_JSON_MATERIALIZATION.md#canonical-versioned-document-projections).
+Header-bound Turn metadata summaries add at most one `turn_metadata_summaries` row per blob-carried Turn document (40 bytes plus its raw metadata members; 365 bytes measured, never above the 8 KiB entity value bound). The row is written in the Turn's own transaction and removed with the Turn or its conversation's trash/purge ranges; no worker, cache or retention policy is added: [Turn metadata summaries](STORAGE_TOFUDB.md#header-bound-turn-metadata-summaries).
 
 Borrowed-string canonical recognition adds two opt-in work dimensions (16 bytes per active/retained sample and operation aggregate), aggregates once per recognition attempt, and introduces no cache, workers or persistent state: [recognition proof](TOFUDB_JSON_MATERIALIZATION.md#borrowed-string-canonical-recognition).
 
@@ -449,7 +840,19 @@ daemon's online backup driver: `system.backup` returns
 `<data>/backups/tofudb`), the snapshot manifest path, copied/manifest byte
 counts, sha256 and retention fields; the artifact is a directory of
 immutable content-addressed blocks plus `snapshots/*.manifest`, retained at
-two verified generations, restorable with `tofu-db restore`. Offline
+two verified generations, restorable with `tofu-db restore`.
+
+`scripts/tofudb_perf_compare.py` creates disposable synthetic authorities under
+separate owned parents; native default backups remain inside each parent in
+daemon and embedded modes. Shutdown removes these test artifacts only. Verify
+an acknowledged `system.backup`, distinct live authorities, a sibling that
+survives another engine's close, and preservation of an unrelated backup.
+After close, each owned backup has zero retained files, logical bytes and
+allocated bytes; startup failures use the same directory owner. This cleanup
+measurement does not expand the benchmark's declared authority/projection
+footprint inventory or alter durable deployment backup retention.
+
+Offline
 integrity operators: run `tofu-db verify --data-dir <authority>` for a
 read-only full-structure verdict (`tofu-db.verify.v1`: ok/degraded/fatal,
 naming corrupt blocks, failed segments and torn WAL tail bytes), and
@@ -538,6 +941,23 @@ bytes. In a read-only active-authority audit, 6,887 of 13,878 boot-window
 frames had empty patches and carried 3,923,713,036 bytes of conservative
 projection evidence; 6,111 known full-fold frames accounted for
 3,893,916,098 bytes. Actual WAL reduction must be measured after deployment.
+
+`turn.event.record_batch` (receipt-free) runs K ordinary `turn.event.record`
+steps in one transaction and answers one ordinary result per entry; any refused
+entry rolls back every entry. Its eligibility and bounds are `structuralBatch`
+in `contracts/task_event_delivery_v1.json`: one task attempt, carried rows in
+strictly ascending order, at most the existing storage-event RPC bound of 500
+rows and 60 MiB of row payload. The SQL authority loops the single-event
+operation in one session and publishes each entry's sync change in order; a
+failure discards that attempt's reconstructible projection-cache baseline.
+Native TofuDB additionally refuses (`database_resource_exhausted`, nothing
+written) a multi-entry batch once its entity delta leaves the overlay envelope
+or its new blobs and rows exceed the WAL-carried ceiling minus the composition
+headroom (`AuthorityDatabase::commits_as_one_ordinary_delta`). Such a commit
+would otherwise drain the authority-wide overlay and synchronize every new
+loose block under the authority. The producer splits the refused batch; a
+single entry is never refused for its size. Rationale and measurements:
+[`TOFUDB_EXECUTION_FRAMES.md`](TOFUDB_EXECUTION_FRAMES.md#batched-structural-events-2026-11-01).
 
 Full-fold application commands use that same versioned projection-patch
 primitive instead of transporting the cumulative Turn twice (once as the
@@ -774,6 +1194,17 @@ ship lag/age. It should also alert on growing logical publication age and durabl
 bytes. Capacity hints do not backpressure business commits or delete history;
 real write/allocation failures and failed publication remain visible.
 
+SQLite acquisition timeout warnings distinguish a deadline already expired on
+writer submission, one exhausted before the acquisition wait, and one exhausted
+while waiting. They report signed entry budget, wait budget, measured wait and
+submission elapsed time in milliseconds, alongside the observed queue and current
+writer phase. Problem: a zero-budget request may time out with an idle writer.
+Decision: preserve these observations without attributing every timeout to writer
+contention; `held_by` is a snapshot at diagnosis, not proof of the cause throughout
+the wait. Alternatives rejected: inferring occupancy from the timeout or extending
+request deadlines hides upstream budget exhaustion. The existing five-second
+warning throttle, caller deadlines and cancellation/commit semantics remain intact.
+
 The native TofuDB backend exports its own observation surface through the
 authenticated `system.health`/`system.metrics` control operations (contract
 owner: `contracts/storage_v2.json` `controlOperations`; behavior:
@@ -857,6 +1288,23 @@ budget-excluded segments remain explicit fallback candidates. Catalog changes
 retire old routes, cache-budget changes rebuild within the new bound, and
 lookup retains its fresh-catalog retry. Alternative: scanning every segment's
 membership filter avoids I/O but still performs linear directory work.
+
+Problem (2026-10-30): with 4,091 full-range segments and a route share that
+fits a few dozen of them, every catalog install (checkpoint materialization
+steps, pack adoption, GC publications) reopened and CRC32C/BLAKE3-verified the
+index of every other segment, about 5.4 GB per install, only to recompute a
+route that still could not fit; the live maintenance thread read about 6 GB
+every 40 s, and `Engine::publish_payload_manifest` installs while it owns the
+engine. Decision: routing keeps the distinct-prefix count of each verified
+fallback segment (at most one entry per catalogued segment; segments are
+immutable) and reads an index again only when that count fits the remaining
+route budget, so published routes are unchanged. Alternatives: a larger route
+share still loses once the catalog outgrows it; never reading unknown segments
+would stop routing newly published ones; retaining fallback prefix sets costs
+about 100 MB at the catalog ceiling for routes that cannot be published.
+`block::tests::catalog_install_reads_only_segments_whose_route_is_unknown`
+reinstalls a 48-segment catalog (two routed) with 0 index reads (138 before)
+and reads only the three framing reads of one newly published segment.
 
 
 The retained mixed-load measurement (`audit_mixed_load_measurement`, Linux
@@ -1077,6 +1525,25 @@ bytes are unchanged. Browser scanning and Markdown remain bounded by
 `docs/RENDER_CONTRACT.md`; durable user reports are not deleted to meet display
 limits. Test: `tests/tasks_pkg/test_swarm_inbox_reports.py`.
 
+### Swarm run result retention
+
+Each settled sub-agent outcome is one generic record in namespace
+`swarm.run_results.v1` (`lib/swarm/persistence.py`), retained as durable user
+state after TTL eviction and new-wave replacement reclaim the
+conversation-keyed `swarm_sessions`/`swarm_agents` resumable rows (decision:
+[AGENT_LIFECYCLE.md](AGENT_LIFECYCLE.md#swarm-results-outlive-their-session)).
+Measured per record: a 131-byte key and 517 compact JSON value bytes of
+identity, status and usage, plus the agent's objective and final answer; the
+transcript is never copied. Re-recording an agent replaces its record, so
+growth is one record per settled agent of a run. Records are owner-prefixed
+on the SQL authority and physically owner-scoped on native TofuDB; both use
+the ordinary `record.put/get` operations, so no table, worker, index or
+background lifecycle is added. A record that cannot be written (storage
+unavailable, or an answer above the generic document bound) keeps the
+resumable rows instead of deleting them. Conversation purge does not yet
+cascade to swarm rows or these records. Test:
+`tests/swarm/test_swarm_run_results.py`.
+
 ### Original result retention for text report views
 
 A producer JSON report reformatted for the model is captured canonically before
@@ -1246,25 +1713,101 @@ No background pool workers, persistent data or second resource probe are added.
 Problem: `io::OutOfMemory` becomes the same `database_resource_exhausted` wire
 error for domain quotas, reservation failure and OS errors. It is not evidence
 of host OOM. Decision: authenticated `system.metrics.resourceExhaustionReasons`
-exports eight process-local fixed counters under the storage.v2 contract; the
-existing opt-in exit stats print the same fixed snapshot. No request log I/O,
-worker, cache or durable state is added. Unknown error text is never exported.
-Exact library constants classify archive owner/conversation/restore limits,
-known domain bounds and request accounting overflow. Typed `TryReserveError`
-means reservation failure, which can include capacity overflow; OS ENOMEM is
-separate and still does not prove kernel OOM or an OOM kill. All other causes
-remain `other`, including unlisted quotas. Direct semantic resource errors that
-do not pass through the I/O mapper are outside these counters. Wire errors,
-retry flags, ownership, source checks, rollback and ACK stay unchanged.
+exports nine process-local fixed counters under the storage.v2 contract
+(`tofudb.resource-exhaustion-reasons/v2`); the existing opt-in exit stats print
+the same fixed snapshot. No request log I/O, worker, cache or durable state is
+added. Error text is never exported. The class is the one the construction site
+declares (see "Resource refusals declare their class where they are
+constructed" below); typed `TryReserveError` means reservation failure, which
+can include capacity overflow; OS ENOMEM is separate and still does not prove
+kernel OOM or an OOM kill. Only an untyped `OutOfMemory` from outside the
+engine's constructors counts as `other`. Bounds the semantic surface enforces
+itself count as `domain_resource_bound` too. Ownership, source checks,
+rollback and ACK stay unchanged.
 
-The eight u64 atomics cost 64 fixed resident bytes. Classification formats at
-most 256 bytes on the stack, with no added heap copy of an unknown message;
+The same classification also carries the wire retry policy
+(`nonRetryableReasons` in the contract). Problem: a deterministic per-request
+bound (a whole-transcript read over `MAX_TURN_RESPONSE_BYTES`, a conversation
+list over its byte budget) was emitted retryable, so the v2 client replayed it
+three times and re-read ~64 MiB per attempt. Decision: the generated per-reason
+bitmap marks `domain_resource_bound` non-retryable; `map_storage_error` turns
+it into `SemanticExecutionError::ResourceBound` — the same
+`database_resource_exhausted` code with `retryable=false`, which the client
+keeps as its own non-transient storage code rather than folding it into
+retryable `database_unavailable`. Transient shedding (every other reason) stays
+retryable. Alternatives rejected: routing bound refusals through the existing
+`storage_payload_too_large` prefix channel (conflates a domain quota with a
+caller-correctable page boundary and skips the reason counters), and a
+per-literal retryability list beside the reason table (a second source of
+truth that can drift from the classification itself).
+
+The nine u64 atomics cost 72 fixed resident bytes. Classification reads the
+declared class from the error's typed payload and formats nothing;
 metric/exit output contains only generated labels and counts. Independent
 atomic snapshot loads are not one transaction. Counters saturate and reset on
 process restart; SIGKILL before a metrics read loses the volatile diagnosis.
 Alternatives rejected: printing raw error strings can expose user content;
 per-request stderr may block the writer; fake timing stages confuse durations
 with counts; labelling every quota as allocator failure invents a root cause.
+
+## Resource refusals declare their class where they are constructed
+
+Problem: the reason, and with it the wire retry flag, came from an exact-text
+table in `resource_exhaustion.rs`. About a hundred fixed bounds (`turn list
+exceeds 10000 rows`, `conversation sync page exceeds 8 MiB`, the 8 MiB
+billing/archive/credential/tenant/task-result responses, `Turn event patch
+exceeds its bound`, ...) were missing from it, as was every new bound, and
+several semantic checks (billing and tenant list scan rows, TofuSQL ceilings,
+related-Turn and sync list sizes) built a retryable
+`SemanticExecutionError::ResourceExhausted` directly. All of them reached the
+client as retryable load shedding. The v2 client replayed such a refusal with
+backoff under the managed-recovery budget, as it did for the swarm bounds
+before they were listed (2026-10-27 04:28:58–04:29:56,
+`swarm.resumable.list (attempt 9/256) ... database_resource_exhausted`). The
+caller then swallowed a `database_unavailable` that never named the bound.
+Decision: every `OutOfMemory` refusal is built by one typed constructor in
+`packages/tofu-db/src/resource_exhaustion.rs`, which carries the class inside
+the `io::Error` to `semantic_executor::map_storage_error`:
+
+| Constructor | Reason | Wire | Used for |
+|---|---|---|---|
+| `domain_bound` | `domain_resource_bound` | non-retryable, literal as `errorMessage` | a fixed bound on one request, response, page, scan, batch, document or entity (bytes, rows, entries, lanes, history length) |
+| `capacity_quota` | `capacity_quota` | retryable | a fixed quota on retained rows or bytes that retirement, reaping, deletion or completion frees: swarm session/agent capacity, paper/research/orchestration owner capacity, billing ledger/payment/redeem quotas, compaction archive collection, per-owner search budgets |
+| `raw_archive_*` | the three raw-archive reasons | retryable | unchanged archive ceilings; capture pauses on them (docs/LOGGING.md) |
+| `accounting_overflow` | `request_accounting_overflow` | retryable | a checked size, count or identifier computation that cannot be represented |
+| `reservation_failure` / `reservation_error` | `allocation_reservation_failure` | retryable | a refused `try_reserve` |
+
+A bound enforced by the semantic surface uses `semantic_bound(literal)`, the
+same class and counter. `SemanticExecutionError::ResourceExhausted` holds a
+token only `resource_exhaustion` can mint, so no other module can emit a
+retryable refusal without a declared class (a compile error), and
+`resource_exhaustion_tests.rs::every_resource_refusal_declares_its_class`
+fails when production code outside the owner names `OutOfMemory` at all
+(construction or comparison; tests and `#[cfg(test)]` items are exempt, and the
+scanner is pinned by its own negative controls). Message text is never
+evidence: a raw `OutOfMemory` with a bound's exact wording classifies as
+`other`. The bound's literal is a `&'static str`, so the wire message cannot
+echo request bytes; retryable refusals keep echoing the code, which
+`lib/raw_archive.py` relies on to pause capture. No limit value changed. The
+Python client already keeps non-retryable `database_resource_exhausted` out of
+its replay loop; `lib/evolution/records.py` now also shrinks a record page on
+that code, like `is_resource_bound_refusal` does for conversation reads. The
+SQL authority already raises its one bound (`Run retirement exceeds its
+bound`) as non-retryable `database_resource_exhausted`. Specs:
+`resource_exhaustion::` (classes, wire flags, counters, the gate, a billing
+list offset past its scan bound) and
+`tests/tofudb/test_tofudb_resource_refusal_retry.py` (the production client
+against a real daemon: one dispatch and the bound's literal for the bound,
+replay for the swarm session quota; against the pre-change engine the same
+bound was dispatched three times and surfaced as `database_unavailable`).
+Alternatives rejected: completing the text table (a new bound still defaults to
+retryable and the table drifts from the sites); defaulting every untyped
+`OutOfMemory` to non-retryable (allocator and OS failures and quotas would
+stop being retried, and the class would still be implicit); a per-site
+retryability registry beside the code (two sources of truth); and making
+capacity quotas non-retryable in the same change (the swarm capacity quotas
+are deliberately retryable, docs/AGENT_LIFECYCLE.md; whether count quotas over
+rows that are never reclaimed should replay is a separate policy decision).
 
 ### Compaction archive body admission
 

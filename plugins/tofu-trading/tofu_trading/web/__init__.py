@@ -5,13 +5,14 @@ The Tofu host calls :func:`register` (the ``tofu.blueprints`` entry point) from
 ``tofu.startup`` entry point) right after, once blueprints are mounted.
 
 ``register()`` returns:
-  1. the 7 ``api_v1_trading_*_bp`` v1 Blueprints (REST surface) — importing the
+  1. the 8 ``api_v1_trading_*_bp`` native Quart Blueprints (REST surface) — importing the
      handler modules attaches their route decorators to those blueprints;
   2. a ``trading_pages_bp`` that serves the ``/trading.html`` SPA page and the
      trading-owned static assets (``/trading-static/...`` → trading.css +
-     static/js/trading/*). The page itself reuses the host's canonical shared
-     assets (``/static/js/api.js`` and ``/static/vendor/*``) over the same
-     origin — those stay in core and are NOT vendored here.
+     static/js/trading/*). The host projects REST handlers to its active API
+     major, retaining plugin gates. Its public ``tofu_plugin_assets()`` Jinja
+     helper supplies the Vite entry; ``entry.js::mount(host)`` receives shared
+     API/Markdown ports without importing host implementation modules.
 
 ``start_workers(app)`` launches the intel + autopilot background threads and
 restores brain cycle-count (formerly core's ``server.py`` block + the
@@ -30,7 +31,7 @@ from __future__ import annotations
 
 import os
 
-from flask import Blueprint, abort, send_from_directory
+from quart import Blueprint, abort, render_template, send_from_directory
 
 from lib.api_response import api_error
 from lib.log import get_logger
@@ -46,29 +47,26 @@ _TEMPLATES_DIR = os.path.join(_PKG_DIR, 'templates')
 _STATIC_DIR = os.path.join(_PKG_DIR, 'static')
 
 # Page + static blueprint for the trading SPA and its owned assets.
-trading_pages_bp = Blueprint('trading_pages', __name__)
+trading_pages_bp = Blueprint('trading_pages', __name__, template_folder=_TEMPLATES_DIR)
 
 
 @trading_pages_bp.route('/trading.html')
-def trading_page():
-    """Serve the trading SPA page (reuses core's api.js + vendor/* assets)."""
+async def trading_page():
+    """Render the plugin page with the host's manifest-owned browser entry."""
     if not trading_enabled():
         # 404 rather than 403: while the feature is off the page genuinely does
         # not exist for this deployment, and a 403 would imply a permission
         # problem the user could fix by logging in as someone else.
         abort(404)
-    return send_from_directory(_TEMPLATES_DIR, 'trading.html')
+    return await render_template('trading.html')
 
 
 @trading_pages_bp.route('/trading-static/<path:filename>')
-def trading_static(filename):
+async def trading_static(filename):
     """Serve trading-owned static assets (trading.css, static/js/trading/*)."""
     if not trading_enabled():
         abort(404)
-    full = os.path.join(_STATIC_DIR, filename)
-    if not os.path.isfile(full):
-        abort(404)
-    return send_from_directory(_STATIC_DIR, filename)
+    return await send_from_directory(_STATIC_DIR, filename)
 
 
 def _reject_when_disabled():
@@ -118,7 +116,7 @@ def register() -> list:
     #
     # Idempotent by necessity: the blueprints are module-level singletons, so a
     # second register() (a test that calls it twice, a host that re-discovers
-    # plugins) would re-attach the hook — and Flask REFUSES a setup method on an
+    # plugins) would re-attach the hook — and Quart REFUSES a setup method on an
     # already-registered blueprint ("can no longer be called ... registered at
     # least once"). Marking the blueprint keeps the guard attached exactly once
     # for the life of the process.

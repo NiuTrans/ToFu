@@ -64,7 +64,6 @@ class _Browser(tofu_search.BrowserProvider):
 
 @pytest.fixture
 def rig(monkeypatch):
-    xhs._GUARD.reset()
     tofu_search.clear_site_drift_listeners()
     tofu_search.configure(xhs_min_interval_s=0, xhs_cache_ttl_s=0,
                           xhs_backoff_cooldown_s=0)
@@ -72,7 +71,6 @@ def rig(monkeypatch):
     tofu_search.register_browser_provider(None)
     tofu_search.register_auth_source_provider(None)
     tofu_search.clear_site_drift_listeners()
-    xhs._GUARD.reset()
 
 
 def _pool_spy(monkeypatch, result):

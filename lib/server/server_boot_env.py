@@ -1,11 +1,12 @@
 """Executable-environment preparation (extracted from server.py).
 
 Owns the pre-import environment contract for the real server executable:
-BLAS/OpenMP native-pool bounding, conda/uv re-exec into the marked
-environment, child-process native search paths, and the canonical ``.env``
-load. Everything here runs before routes, NumPy, pools, or storage are
-imported; keep it dependency-free (stdlib + runtime_guards/tofu_dotenv
-only) and free of application imports. The server.py wrapper supplies the
+an explicit operator BLAS/OpenMP thread ceiling, conda/uv re-exec into the marked
+environment (or a verified local replica of it), child-process native search
+paths, and the canonical ``.env`` load. Everything here runs before routes,
+NumPy, pools, or storage are imported; keep it dependency-free (stdlib +
+runtime_guards/tofu_dotenv/serverctl_pkg only) and free of application
+imports. The server.py wrapper supplies the
 executable-only guard; this imported module never infers the caller from
 its own __name__. Manager handoff and early resource configuration live in
 bootstrap_pkg.server_entry.
@@ -26,25 +27,22 @@ _PROJ_DIR = os.path.normpath(
 
 
 def _install_numeric_thread_defaults() -> int:
-    """Bound implicit BLAS/OpenMP pools before NumPy or ML imports.
+    """Apply an explicit operator BLAS/OpenMP thread ceiling before imports.
 
-    High-core personal hosts otherwise make OpenBLAS eagerly retain one native
-    worker per visible CPU (64 in the measured deployment) even while Tofu is
-    idle.  Tofu already owns request, DB, agent, and tool executors; an
-    additional host-sized pool per numeric runtime causes oversubscription and
-    needless thread stacks under memory pressure. ``TOFU_NUMERIC_THREADS`` is
-    the process-wide ceiling; a smaller library-specific value remains valid,
-    while a larger inherited host setting is clamped before imports.
+    ``TOFU_NUMERIC_THREADS`` is unlimited by default: numeric libraries keep
+    their own defaults and any inherited ``*_NUM_THREADS`` values untouched.
+    Only an explicit positive operator value is exported as the process-wide
+    ceiling; a smaller library-specific value remains valid. Returns the
+    ceiling, or ``runtime_guards.UNLIMITED`` when none applies.
     """
-    from runtime_guards import deployment_resource_default
-    default = deployment_resource_default(
-        'TOFU_NUMERIC_THREADS', os.environ)
-    raw = os.environ.get('TOFU_NUMERIC_THREADS', str(default))
+    from runtime_guards import UNLIMITED
     try:
-        workers = int(raw or default)
-    except (TypeError, ValueError):
-        workers = default
-    workers = max(1, min(32, workers))
+        workers = int(os.environ.get('TOFU_NUMERIC_THREADS', '') or 0)
+    except (TypeError, ValueError, OverflowError):
+        workers = 0
+    # The launch manifest may materialize the unlimited sentinel itself.
+    if workers <= 0 or workers >= UNLIMITED:
+        return UNLIMITED
     for name in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS',
                  'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
         try:
@@ -90,8 +88,18 @@ def _tofu_export_env_native_paths(env_prefix, backend):
         os.environ.setdefault('CONDA_PREFIX', env_prefix)
 
 
+def _hold_runtime_replica_leases():
+    """Keep the runtime replica this worker runs from out of collection."""
+    try:
+        from serverctl_pkg.runtime_replica import hold_process_leases
+        hold_process_leases()
+    except Exception as _e:  # a lease is protection, never a boot requirement
+        sys.stderr.write(f'[server.py] runtime replica lease skipped: {_e}\n')
+
+
 def _tofu_maybe_reexec_into_env():
     """Re-exec into Tofu's conda env if not already there."""
+    _hold_runtime_replica_leases()
     marker = os.path.join(_PROJ_DIR, '.tofu_env.json')
     if not os.path.isfile(marker):
         # No marker (fresh clone, exported bundle, Docker, pip layout) — there
@@ -119,17 +127,11 @@ def _tofu_maybe_reexec_into_env():
     # even though we are NOT running with the venv's site-packages active —
     # comparing sys.prefix to env_prefix catches that. Fall back to the
     # interpreter-path compare when env_prefix is absent.
-    already_in_env = False
-    if env_prefix:
-        try:
-            already_in_env = (os.path.realpath(sys.prefix) == os.path.realpath(env_prefix))
-        except OSError:
-            already_in_env = (sys.prefix == env_prefix)
-    else:
-        try:
-            already_in_env = os.path.realpath(target_py) == os.path.realpath(sys.executable)
-        except OSError:
-            already_in_env = (target_py == sys.executable)
+    # A manager-selected local replica of the marked environment is the same
+    # environment; re-executing would put the worker back on the slow volume
+    # the replica exists to avoid.
+    from serverctl_pkg.runtime_replica import runs_marked_environment
+    already_in_env = runs_marked_environment(target_py, env_prefix)
     # Export the env's native-library search path BEFORE the already_in_env
     # early return. Chromium is a CHILD process and resolves libatk /
     # libatk-bridge / libnss out of $env_prefix/lib, which is not on the

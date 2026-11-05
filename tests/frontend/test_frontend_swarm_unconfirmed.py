@@ -28,7 +28,6 @@ installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
 
@@ -41,12 +40,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 _NODE_HARNESS_TIMEOUT_S = 180
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -95,9 +88,11 @@ const errRound = {
   _swarmAgents: [{ id: 'e1', role: 'coder', objective: 'x', status: 'unknown', phase: 'unknown' }],
 };
 const errHtml = _buildSwarmPanelHTML(errRound, [errRound]);
-check('error_pill_failed', errHtml.includes('Failed'));
+// The stub translator returns a key's last segment: the verdict chip of a
+// failed run reads "failed", an unresolved one "unconfirmed".
+check('error_pill_failed', errHtml.includes('sw-pill-error') && errHtml.includes('> failed</span>'));
 check('error_pill_reason', errHtml.includes('driver boom'));
-check('error_pill_not_unconfirmed', !errHtml.includes('Unconfirmed'));
+check('error_pill_not_unconfirmed', !errHtml.includes('> unconfirmed</span>'));
 
 // ── 2. Probe-key precedence: _swarmKey → conv.id → spawning task id ──
 check('probekey_prefers_swarmkey',
@@ -276,7 +271,7 @@ const roundA = convA._testProjections[0].toolRounds[0];
   const roundF = convF._testProjections[0].toolRounds[0];
   const timeoutsBefore = scheduledTimeouts;
   const htmlF = _buildSwarmPanelHTML(roundF, [roundF]);
-  check('unconfirmed_pill_rendered', htmlF.includes('Unconfirmed'));
+  check('unconfirmed_pill_rendered', htmlF.includes('sw-pill-stale') && htmlF.includes('> unconfirmed</span>'));
   check('unconfirmed_fast_probe_scheduled', scheduledTimeouts === timeoutsBefore + 1);
   check('unconfirmed_render_is_pure', roundF._swFastProbeAt === undefined);
 
@@ -319,8 +314,6 @@ const roundA = convA._testProjections[0].toolRounds[0];
 """
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_swarm_unconfirmed_reconcile_three_state():
     with tempfile.TemporaryDirectory(prefix='tofu-swarm-unconfirmed-') as temp_dir:
         harness = os.path.join(temp_dir, 'swarm_unconfirmed_harness.js')
@@ -341,8 +334,6 @@ def test_swarm_unconfirmed_reconcile_three_state():
     assert output.count('PASS') >= 33, f'expected >=33 PASS lines, got:\n{output}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_ambiguous_answer_settle_guard_is_load_bearing():
     """NEUTER: restore two-state probing (any non-active answer settles) and
     prove the ambiguous-answer case then FALSE-settles on the first probe —

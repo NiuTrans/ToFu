@@ -812,6 +812,39 @@ pub(crate) fn claim_next(
     encoded_json_bytes(&job.response()).map(Some)
 }
 
+/// Read-only answer to: when can `claim_next` claim one of these kinds?
+/// `claimableInMs` is 0 now, the delay to the earliest queued/suspended
+/// availability or current-epoch lease expiry by the same clocks, or null.
+/// It reads the same bounded lease ranges and per-kind summary as a claim,
+/// so the query lane answers an idle worker without the writer.
+pub(crate) fn claim_horizon(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    task_kinds: &[String],
+) -> io::Result<Vec<u8>> {
+    let clock = database.worker_clock_snapshot()?;
+    let mut horizon: Option<u64> = None;
+    let mut observe =
+        |delay: u64| horizon = Some(horizon.map_or(delay, |current| current.min(delay)));
+    for task_kind in task_kinds {
+        for entry in lease_candidates(database, transaction, task_kind)? {
+            observe(if epoch_matches(database, &entry.lease_authority_epoch) {
+                entry.lease_deadline_ms.saturating_sub(clock.lease_now_ms)
+            } else {
+                0
+            });
+        }
+        if let Some(available_at_ms) = read_summary(database, transaction, task_kind)?
+            .into_iter()
+            .filter(|available_at_ms| *available_at_ms != u64::MAX)
+            .min()
+        {
+            observe(available_at_ms.saturating_sub(clock.utc_now_ms));
+        }
+    }
+    encoded_json_bytes(&json!({ "claimableInMs": horizon }))
+}
+
 fn live_claim_matches(
     database: &AuthorityDatabase,
     job: &Job,
@@ -1285,6 +1318,62 @@ mod tests {
             first["fencingToken"].as_u64().unwrap() + 1
         );
         assert_eq!(next["leaseDeadlineMs"], 100_000);
+    }
+
+    fn horizon(database: &AuthorityDatabase) -> Value {
+        let mut tx = database.begin_with_identity_claim_scopes(7, 41).unwrap();
+        let bytes = claim_horizon(database, &mut tx, &["lease-kind".into()]).unwrap();
+        assert!(!tx.has_business_mutation(), "a horizon probe must not write");
+        serde_json::from_slice::<Value>(&bytes).unwrap()["claimableInMs"].clone()
+    }
+
+    #[test]
+    fn claim_horizon_predicts_every_claim_by_the_same_clocks() {
+        let (_, mut db) = prepared();
+        db.set_worker_queue_test_time(1_000);
+        assert_eq!(horizon(&db), Value::Null);
+        seed(&mut db, "due");
+        assert_eq!(horizon(&db), json!(0));
+        assert_eq!(take(&mut db, "holder", 1).unwrap()["taskId"], "due");
+        // The live lease (100_000 + 10_000) is the only future claim.
+        assert_eq!(horizon(&db), json!(10_000));
+        assert!(take(&mut db, "rival", 1).is_none());
+
+        let mut tx = db.begin_with_identity_claim_scopes(7, 41).unwrap();
+        enqueue(&db, &mut tx, EnqueueRequest {
+            task_id: "delayed".to_owned(), user_id: 41, tenant_id: "tenant-a".to_owned(),
+            task_kind: "lease-kind".to_owned(), payload: json!({}),
+            idempotency_key: "delayed".to_owned(), request_digest: "b".repeat(64),
+            priority: 900, available_at_ms: 4_000, now_ms: 1_000,
+        }).unwrap();
+        db.commit(tx).unwrap();
+        assert_eq!(horizon(&db), json!(3_000));
+        assert!(take(&mut db, "rival", 1).is_none());
+        db.set_worker_queue_test_time(4_000);
+        assert_eq!(horizon(&db), json!(0));
+        assert_eq!(take(&mut db, "rival", 1).unwrap()["taskId"], "delayed");
+
+        assert_eq!(horizon(&db), json!(10_000));
+        db.set_worker_lease_test_time(110_000);
+        assert_eq!(horizon(&db), json!(0));
+        let recovered = take(&mut db, "successor", 1).unwrap();
+        assert_eq!(recovered["taskId"], "due");
+        assert_eq!(recovered["fencingToken"], 2);
+        assert_eq!(take(&mut db, "successor", 1).unwrap()["taskId"], "delayed");
+        assert_eq!(horizon(&db), json!(10_000));
+
+        // A lease from another authority lifecycle is claimable immediately.
+        let mut tx = db.begin_with_identity_claim_scopes(7, 41).unwrap();
+        let mut job = read_job(&db, &mut tx, "due").unwrap().unwrap();
+        let live_lease = lease_key(&tx, &job).unwrap();
+        db.entity_delete(&mut tx, live_lease).unwrap();
+        job.lease_authority_epoch = "0".repeat(32);
+        job.lease_deadline_ms = 900_000;
+        put_job(&db, &mut tx, &job).unwrap();
+        put_lease_index(&db, &mut tx, &job).unwrap();
+        db.commit(tx).unwrap();
+        assert_eq!(horizon(&db), json!(0));
+        assert_eq!(take(&mut db, "successor", 1).unwrap()["fencingToken"], 3);
     }
 
     #[test]

@@ -78,6 +78,26 @@ def test_request_budget_binding_precedes_spawn_and_uses_existing_rollback(monkey
     assert discarded == [('task-ownership', 'conv-ownership')]
 
 
+def test_deferred_translation_attempt_binds_its_request_account_at_worker_entry(
+        monkeypatch, task_start_fixture):
+    """Its verdict rewrites the input Turn after registration; the worker binds after it."""
+    from concurrent.futures import Future
+    runtime, config, task, discarded = task_start_fixture
+    config['_deferredInputTranslation'] = True
+    pending = Future()
+    monkeypatch.setattr('lib.chat.turn_builder.start_deferred_input_translation',
+                        lambda *args, **kwargs: pending)
+    monkeypatch.setattr(runtime, '_prepare_unbound_task_dispatch', lambda *a: (config, None, False))
+    monkeypatch.setattr('lib.project_dispatch.request_budget.bind_source_account',
+                        lambda *a, **kw: pytest.fail('bound before the input verdict settled'))
+    spawned = []
+    monkeypatch.setattr('lib.tasks_pkg.spawn.spawn_task', lambda task, **kw: spawned.append(task))
+    assert runtime.start_conversation_attempt_executor(
+        'conv-ownership', config, on_task_registered=lambda task_id: None) == ('task-ownership', None)
+    assert spawned == [task] and task['_deferredInputTranslation'] is pending
+    assert discarded == []
+
+
 def test_prebind_preparation_exception_discards_registry_carrier(
     monkeypatch,
     task_start_fixture,
@@ -366,8 +386,38 @@ def test_failure_after_worker_entry_remains_worker_owned(
     task = {'id': 'task-worker-owned', 'status': 'running'}
 
     async def run_worker():
-        loop = asyncio.get_running_loop()
-        await spawn._executor_runner(loop, fail_inside_worker, task)()
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+        spawn.spawn_task(task, runner=fail_inside_worker)
+        await asyncio.gather(*chat_task_runtime._bg_tasks)
 
     asyncio.run(run_worker())
     assert rejected == []
+
+
+def test_turn_start_cleanup_sweep_never_runs_on_the_starting_thread(monkeypatch):
+    """Best-effort housekeeping must not delay an accepted attempt's start."""
+    import threading
+    import time
+
+    import lib.conversation_sync.task_start as task_start
+
+    release = threading.Event()
+    swept = []
+
+    def stalled_sweep():
+        swept.append(threading.current_thread().name)
+        release.wait(5)
+
+    monkeypatch.setattr(task_start, 'cleanup_old_tasks', stalled_sweep)
+    monkeypatch.setattr(task_start, '_last_cleanup_ts', 0.0)
+    started = time.monotonic()
+    task_start._throttled_cleanup_old_tasks()
+    task_start._throttled_cleanup_old_tasks()
+    elapsed = time.monotonic() - started
+    release.set()
+
+    assert elapsed < 1.0
+    deadline = time.monotonic() + 5
+    while not swept and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert swept == ['turn-start-task-cleanup']

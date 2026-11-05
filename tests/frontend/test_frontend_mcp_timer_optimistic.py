@@ -91,8 +91,13 @@ function _el() {
            textContent: '', style: {}, classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
            querySelectorAll() { return []; }, isConnected: true, offsetParent: {} };
 }
+const _nodes = new Map();
 global.document = {
-  getElementById(id) { return id === 'mcpCatalogGrid' ? _grid : _el(); },
+  getElementById(id) {
+    if (id === 'mcpCatalogGrid') return _grid;
+    if (!_nodes.has(id)) _nodes.set(id, _el());
+    return _nodes.get(id);
+  },
   querySelectorAll() { return []; },
   createElement() { return _el(); },
   addEventListener() {},

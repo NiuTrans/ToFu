@@ -50,6 +50,7 @@ const DYNAMIC_PREFIXES = [
   // features/settings/tools-inventory.ts — localized(prefix, registry ID)
   'toolsInv.tool.',
   'toolsInv.family.',
+  'toolsInv.group.',
   // background-activity-presentation.ts, agent-sidebar-dock.ts,
   // agent-sidebar-dock-projection.ts, conversation/ui/renderers/text-blocks.ts
   'swarm.phase.',
@@ -79,6 +80,9 @@ const DYNAMIC_PREFIXES = [
   'projectBrain.integration.',
   // runtime/sections/settings/other_tabs.js
   'settings.costExperimentBlocker.',
+  // features/orchestration/event-format.ts — localizedCode(prefix, value) for
+  // goal_run_transition / flow_complete status and outcome-category labels
+  'orch.ev.status.', 'orch.ev.outcome.',
 ];
 
 async function* walkScriptFiles(directory) {

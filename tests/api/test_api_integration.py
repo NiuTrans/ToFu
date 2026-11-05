@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import re
 import time
+from pathlib import Path
 
 import pytest
+
+from tests._jsdom import require_shipped_graph
 
 
 @pytest.fixture(autouse=True)
@@ -187,6 +190,24 @@ class TestConversations:
         assert len(clone["messages"]) == 8
         assert clone["messages"][0]["_turnId"] != refreshed["messages"][0]["_turnId"]
 
+        exported = flask_client.get(
+            f"/api/v4/conversations/{conv_id}/export?format=markdown"
+        )
+        assert exported.status_code == 200
+        assert exported.headers["Content-Type"].startswith("text/markdown")
+        assert "attachment; filename=" in exported.headers["Content-Disposition"]
+        transcript = exported.get_data(as_text=True)
+        for index in range(4):
+            assert f"question {index}" in transcript
+            assert f"answer {index}" in transcript
+        # The default stays the bounded prose reference for @-mention prompts.
+        prose = flask_client.get(f"/api/v4/conversations/{conv_id}/export")
+        assert prose.status_code == 200
+        assert "Referenced Conversation" in prose.get_json()["text"]
+        assert flask_client.get(
+            f"/api/v4/conversations/{conv_id}/export?format=pdf"
+        ).status_code == 400
+
         assert flask_client.put(
             f"/api/v4/conversations/{conv_id}", json={"messages": []}
         ).status_code == 405
@@ -262,6 +283,7 @@ class TestRetainedAPIs:
 
 @pytest.mark.api
 def test_static_shell_uses_built_frontend(flask_client):
+    require_shipped_graph()
     index = flask_client.get("/")
     assert index.status_code == 200
     html = index.data.decode("utf-8")
@@ -271,4 +293,8 @@ def test_static_shell_uses_built_frontend(flask_client):
     assert match
     asset = flask_client.get("/" + match.group(1))
     assert asset.status_code == 200
-    assert len(asset.data) > 10_000
+    # The entry may be a small loader for split chunks. Serving the exact
+    # published JavaScript is the contract; a byte-size floor is not.
+    assert "javascript" in asset.headers.get("Content-Type", "")
+    published_asset = Path(__file__).resolve().parents[2] / match.group(1)
+    assert asset.data == published_asset.read_bytes()

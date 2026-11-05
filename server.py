@@ -291,6 +291,7 @@ except OSError:
 # This must happen before any third-party imports.
 _PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _PROJ_DIR)
+_APPLICATION_IMPORT_ROOTS = [_PROJ_DIR]
 
 # ── Dev fallback: prefer the monorepo's canonical tofu-search source when it
 # is not pip-installed (production installs it via requirements.txt). An
@@ -300,9 +301,17 @@ if not _TOFU_SEARCH_PATH:
     _TOFU_SEARCH_PATH = os.path.join(_PROJ_DIR, 'packages', 'tofu-search')
 if _TOFU_SEARCH_PATH and os.path.isdir(_TOFU_SEARCH_PATH):
     sys.path.insert(0, _TOFU_SEARCH_PATH)
+    _APPLICATION_IMPORT_ROOTS.append(_TOFU_SEARCH_PATH)
 
 
 _tofu_maybe_reexec_into_env()
+
+# The serving process outlives many merges into this checkout, and most
+# imports are function-local: modules first imported days from now must come
+# from the revision this process booted with (docs/DEFENSIVE_PATTERNS.md).
+if __name__ == '__main__':
+    from lib.runtime.pinned_import_source import PinnedImportSource
+    PinnedImportSource(_APPLICATION_IMPORT_ROOTS).install()
 
 # ── .env loading ──
 try:
@@ -1114,7 +1123,6 @@ def register_server_production_lifecycle(
         logger=_server_log,
         boot=_boot,
         announce_ready=announce_ready,
-        request_graceful_shutdown=_request_graceful_shutdown,
         process_role=DEPLOYMENT_CONFIGURATION.process_role,
     )
 
@@ -1271,7 +1279,7 @@ if __name__ == '__main__':
     # ── Write-freshness snapshot on clean exit ──
     # Signal-path restarts (SIGTERM/SIGINT/SIGHUP drain → normal exit) run
     # atexit; the re-exec path does NOT (execv) and saves explicitly in
-    # routes/api_v1/update.py::_perform_server_reexec instead.
+    # lib/server/server_reexec.py::perform_server_reexec instead.
     try:
         import atexit as _atexit2
         from lib import write_freshness as _wf_mod

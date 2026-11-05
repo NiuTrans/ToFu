@@ -68,6 +68,7 @@ from typing import Optional
 
 from lib.config_dir import config_path
 from lib.json_store import read_json, update_json_atomic
+from lib.error_envelope import BadRequest
 from lib.log import audit_log, get_logger
 
 logger = get_logger(__name__)
@@ -206,7 +207,7 @@ def set_mode(new_mode: str, *, set_by: str = '') -> AuthModeState:
     """
     canon = _normalise(new_mode)
     if canon is None:
-        raise ValueError(f'Unknown auth mode: {new_mode!r}')
+        raise BadRequest(f'Unknown auth mode: {new_mode!r}', field='mode')
     if env_overrides_file():
         raise RuntimeError('TOFU_AUTH_MODE is set; remove the env var '
                            'before changing the mode at runtime.')

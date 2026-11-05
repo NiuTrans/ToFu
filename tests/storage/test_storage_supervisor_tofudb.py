@@ -53,6 +53,20 @@ def _tofudb_binary() -> str:
         pytest.skip(str(exc))
 
 
+def _stage_fake_engine(monkeypatch: pytest.MonkeyPatch, path: Path,
+                       body: bytes = b'#!/bin/sh\nexit 0\n') -> Path:
+    """Stage an executable engine stand-in outside the inherited content pin.
+
+    tests/conftest.py pins TOFUDB_EXPECTED_SHA256 to an explicit
+    TOFU_TEST_TOFUDB_BIN for the whole process, and no stand-in can match that
+    digest. A test that exercises a content pin sets its own after staging.
+    """
+    monkeypatch.delenv('TOFUDB_EXPECTED_SHA256', raising=False)
+    path.write_bytes(body)
+    path.chmod(0o755)
+    return path
+
+
 @pytest.fixture()
 def project_root(tmp_path: Path) -> Path:
     root = tmp_path / 'proj'
@@ -92,9 +106,7 @@ def test_override_is_authoritative(
     must never silently degrade to a bundled/PATH binary, or a pinned-engine
     test could pass against the wrong binary.
     """
-    fake = tmp_path / _tofudb_binary_name()
-    fake.write_text('#!/bin/sh\nexit 0\n')
-    fake.chmod(0o755)
+    fake = _stage_fake_engine(monkeypatch, tmp_path / _tofudb_binary_name())
     monkeypatch.setenv('TOFUDB_BIN', str(fake))
     assert _resolve_tofudb_binary() == str(fake.resolve())
     # A non-executable override is rejected, not skipped.
@@ -116,9 +128,7 @@ def test_bundled_binary_precedes_source_build(
     """
     bundle_dir = tmp_path / '_internal'
     bundle_dir.mkdir()
-    engine = bundle_dir / _tofudb_binary_name()
-    engine.write_text('#!/bin/sh\nexit 0\n')
-    engine.chmod(0o755)
+    engine = _stage_fake_engine(monkeypatch, bundle_dir / _tofudb_binary_name())
     monkeypatch.delenv('TOFUDB_BIN', raising=False)
     monkeypatch.setattr('sys._MEIPASS', str(bundle_dir), raising=False)
     try:
@@ -320,9 +330,7 @@ def test_nonempty_native_authority_init_fails_closed(project_root):
 
 @pytest.mark.parametrize('expected', ['not-a-digest', 'a' * 63, 'g' * 64])
 def test_binary_content_pin_rejects_invalid_configuration(tmp_path, monkeypatch, expected):
-    engine = tmp_path / 'tofu-db'
-    engine.write_bytes(b'candidate-engine')
-    engine.chmod(0o755)
+    engine = _stage_fake_engine(monkeypatch, tmp_path / 'tofu-db', b'candidate-engine')
     monkeypatch.setenv('TOFUDB_BIN', str(engine))
     monkeypatch.setenv('TOFUDB_EXPECTED_SHA256', expected)
     with pytest.raises(RuntimeError, match='TOFUDB_EXPECTED_SHA256'):
@@ -331,9 +339,7 @@ def test_binary_content_pin_rejects_invalid_configuration(tmp_path, monkeypatch,
 
 def test_binary_content_pin_detects_replacement_without_fallback(tmp_path, monkeypatch):
     import hashlib
-    engine = tmp_path / 'tofu-db'
-    engine.write_bytes(b'verified-candidate')
-    engine.chmod(0o755)
+    engine = _stage_fake_engine(monkeypatch, tmp_path / 'tofu-db', b'verified-candidate')
     monkeypatch.setenv('TOFUDB_BIN', str(engine))
     monkeypatch.setenv('TOFUDB_EXPECTED_SHA256', hashlib.sha256(engine.read_bytes()).hexdigest())
     assert _resolve_tofudb_binary() == str(engine.resolve())
@@ -349,9 +355,7 @@ def test_binary_content_pin_detects_replacement_without_fallback(tmp_path, monke
 
 def test_binary_content_pin_applies_to_bundled_resolution(tmp_path, monkeypatch):
     import hashlib
-    engine = tmp_path / 'tofu-db'
-    engine.write_bytes(b'bundled-engine')
-    engine.chmod(0o755)
+    engine = _stage_fake_engine(monkeypatch, tmp_path / 'tofu-db', b'bundled-engine')
     monkeypatch.delenv('TOFUDB_BIN', raising=False)
     monkeypatch.setattr('lib.storage.supervisor._bundled_tofudb_candidates', lambda: [engine])
     monkeypatch.setenv('TOFUDB_EXPECTED_SHA256', hashlib.sha256(engine.read_bytes()).hexdigest().upper())
@@ -374,9 +378,7 @@ def test_binary_content_pin_bounds_sparse_file_work(tmp_path, monkeypatch):
 
 def test_binary_content_pin_detects_replacement_during_hashing(tmp_path, monkeypatch):
     import hashlib
-    engine = tmp_path / 'tofu-db'
-    engine.write_bytes(b'verified-candidate')
-    engine.chmod(0o755)
+    engine = _stage_fake_engine(monkeypatch, tmp_path / 'tofu-db', b'verified-candidate')
     replacement = tmp_path / 'replacement'
     replacement.write_bytes(b'changed-candidate')
     replacement.chmod(0o755)
@@ -398,9 +400,7 @@ def test_binary_content_pin_detects_replacement_during_hashing(tmp_path, monkeyp
 
 
 def test_binary_pin_mismatch_rejects_before_child_spawn(project_root, tmp_path, monkeypatch):
-    engine = tmp_path / 'tofu-db'
-    engine.write_bytes(b'wrong-engine')
-    engine.chmod(0o755)
+    engine = _stage_fake_engine(monkeypatch, tmp_path / 'tofu-db', b'wrong-engine')
     monkeypatch.setenv('TOFUDB_BIN', str(engine))
     monkeypatch.setenv('TOFUDB_EXPECTED_SHA256', '0' * 64)
     monkeypatch.setattr('lib.storage.supervisor.subprocess.Popen',
@@ -412,31 +412,27 @@ def test_binary_pin_mismatch_rejects_before_child_spawn(project_root, tmp_path, 
     assert not (project_root / 'data/tofudb-authority').exists()
 
 
-def _sidecar_engine(tmp_path: Path, body: bytes = b'sidecar-candidate') -> Path:
-    engine = tmp_path / 'tofu-db'
-    engine.write_bytes(body)
-    engine.chmod(0o755)
-    return engine
+def _sidecar_engine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                    body: bytes = b'sidecar-candidate') -> Path:
+    return _stage_fake_engine(monkeypatch, tmp_path / 'tofu-db', body)
 
 
 def test_binary_sidecar_pin_verifies_deployed_artifact(tmp_path, monkeypatch):
     import hashlib
-    engine = _sidecar_engine(tmp_path)
+    engine = _sidecar_engine(monkeypatch, tmp_path)
     digest = hashlib.sha256(engine.read_bytes()).hexdigest()
     (tmp_path / 'tofu-db.sha256').write_text(f'{digest}  tofu-db\n', encoding='ascii')
     monkeypatch.setenv('TOFUDB_BIN', str(engine))
-    monkeypatch.delenv('TOFUDB_EXPECTED_SHA256', raising=False)
     assert _resolve_tofudb_binary() == str(engine.resolve())
 
 
 def test_binary_sidecar_pin_mismatch_names_source_remedy_and_provenance(tmp_path, monkeypatch):
-    engine = _sidecar_engine(tmp_path)
+    engine = _sidecar_engine(monkeypatch, tmp_path)
     (tmp_path / 'tofu-db.sha256').write_text('0' * 64 + '  tofu-db\n', encoding='ascii')
     (tmp_path / 'build.json').write_text(
         '{"source_head": "abc123", "deployment_utc": "2026-09-17T08:05:29Z"}',
         encoding='utf-8')
     monkeypatch.setenv('TOFUDB_BIN', str(engine))
-    monkeypatch.delenv('TOFUDB_EXPECTED_SHA256', raising=False)
     with pytest.raises(RuntimeError, match='SHA-256 mismatch') as failure:
         _resolve_tofudb_binary()
     message = str(failure.value)
@@ -445,9 +441,70 @@ def test_binary_sidecar_pin_mismatch_names_source_remedy_and_provenance(tmp_path
     assert 'abc123' in message                   # surfaces recorded provenance
 
 
+def test_verified_artifact_watch_detects_out_of_band_replacement(tmp_path, monkeypatch):
+    """An out-of-band artifact swap must be caught while the authority runs.
+
+    The launch path verifies the artifact against its pin; this watch notices
+    a hand copy of another build before the next crash needs that pin. In
+    production the drift was invisible until the sidecar crashed and every
+    restart was refused (2026-10-22: a 9.5 h fenced outage).
+    """
+    import hashlib
+    from lib.storage.supervisor import _artifact_sample_digest
+    engine = _sidecar_engine(monkeypatch, tmp_path)
+    digest = hashlib.sha256(engine.read_bytes()).hexdigest()
+    (tmp_path / 'tofu-db.sha256').write_text(f'{digest}  tofu-db\n', encoding='ascii')
+    monkeypatch.setenv('TOFUDB_BIN', str(engine))
+    resolved = str(engine.resolve())
+    supervisor = StorageSupervisor(backend='tofudb')
+    # The launch path records the identity it verified against the pin.
+    supervisor._verified_artifact_path = resolved
+    supervisor._verified_artifact_sample = _artifact_sample_digest(resolved)
+    assert supervisor.check_verified_artifact()['consistent'] is True
+
+    # A hand copy of a different build desynchronizes artifact and pin.
+    engine.write_bytes(b'a-different-build')
+    engine.chmod(0o755)
+    drift = supervisor.check_verified_artifact()
+    assert drift['checked'] is True
+    assert drift['consistent'] is False
+    assert 'SHA-256 mismatch' in drift['detail']
+    assert 'deploy_tofudb_engine.py' in drift['detail']
+
+
+def test_verified_artifact_watch_accepts_a_re_pinned_deploy(tmp_path, monkeypatch):
+    """A sanctioned deploy re-pins the new bytes; the watch must not alarm."""
+    import hashlib
+    from lib.storage.supervisor import _artifact_sample_digest
+    engine = _sidecar_engine(monkeypatch, tmp_path)
+    digest = hashlib.sha256(engine.read_bytes()).hexdigest()
+    (tmp_path / 'tofu-db.sha256').write_text(f'{digest}  tofu-db\n', encoding='ascii')
+    monkeypatch.setenv('TOFUDB_BIN', str(engine))
+    resolved = str(engine.resolve())
+    supervisor = StorageSupervisor(backend='tofudb')
+    supervisor._verified_artifact_path = resolved
+    supervisor._verified_artifact_sample = _artifact_sample_digest(resolved)
+
+    engine.write_bytes(b'next-verified-build')
+    engine.chmod(0o755)
+    new_digest = hashlib.sha256(engine.read_bytes()).hexdigest()
+    (tmp_path / 'tofu-db.sha256').write_text(
+        f'{new_digest}  tofu-db\n', encoding='ascii')
+    result = supervisor.check_verified_artifact()
+    assert result['consistent'] is True
+    # The recorded identity is refreshed, so the next pass is a plain stat.
+    assert supervisor._verified_artifact_sample == _artifact_sample_digest(resolved)
+
+
+def test_verified_artifact_watch_is_inert_without_a_verified_artifact(tmp_path, monkeypatch):
+    supervisor = StorageSupervisor(backend='tofudb')
+    result = supervisor.check_verified_artifact()
+    assert result == {'checked': False, 'consistent': True, 'detail': ''}
+
+
 def test_binary_env_pin_outranks_sidecar(tmp_path, monkeypatch):
     import hashlib
-    engine = _sidecar_engine(tmp_path)
+    engine = _sidecar_engine(monkeypatch, tmp_path)
     digest = hashlib.sha256(engine.read_bytes()).hexdigest()
     # A stale sidecar cannot veto an explicit operator pin...
     (tmp_path / 'tofu-db.sha256').write_text('0' * 64 + '  tofu-db\n', encoding='ascii')
@@ -468,18 +525,16 @@ def test_binary_env_pin_outranks_sidecar(tmp_path, monkeypatch):
     b'\xff\xfe' + b'0' * 64,
 ])
 def test_binary_sidecar_pin_fails_closed_when_malformed(tmp_path, monkeypatch, body):
-    engine = _sidecar_engine(tmp_path)
+    engine = _sidecar_engine(monkeypatch, tmp_path)
     (tmp_path / 'tofu-db.sha256').write_bytes(body)
     monkeypatch.setenv('TOFUDB_BIN', str(engine))
-    monkeypatch.delenv('TOFUDB_EXPECTED_SHA256', raising=False)
     with pytest.raises(RuntimeError, match='pin sidecar'):
         _resolve_tofudb_binary()
 
 
 def test_binary_without_any_pin_keeps_development_resolution(tmp_path, monkeypatch):
-    engine = _sidecar_engine(tmp_path)
+    engine = _sidecar_engine(monkeypatch, tmp_path)
     monkeypatch.setenv('TOFUDB_BIN', str(engine))
-    monkeypatch.delenv('TOFUDB_EXPECTED_SHA256', raising=False)
     assert _resolve_tofudb_binary() == str(engine.resolve())
 
 
@@ -509,12 +564,11 @@ def engine_checkout(tmp_path: Path) -> Path:
     return root
 
 
-def _deployed_engine(tmp_path: Path, source_head: str | None) -> Path:
+def _deployed_engine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                     source_head: str | None) -> Path:
     engine_dir = tmp_path / 'deployed'
     engine_dir.mkdir(exist_ok=True)
-    engine = engine_dir / 'tofu-db'
-    engine.write_text('#!/bin/sh\nexit 0\n')
-    engine.chmod(0o755)
+    engine = _stage_fake_engine(monkeypatch, engine_dir / 'tofu-db')
     if source_head is not None:
         (engine_dir / 'build.json').write_text(
             json.dumps({'source_head': source_head}), encoding='utf-8')
@@ -523,7 +577,6 @@ def _deployed_engine(tmp_path: Path, source_head: str | None) -> Path:
 
 def _resolve_deployed(monkeypatch: pytest.MonkeyPatch, engine: Path, checkout: Path) -> str:
     monkeypatch.setenv('TOFUDB_BIN', str(engine))
-    monkeypatch.delenv('TOFUDB_EXPECTED_SHA256', raising=False)
     monkeypatch.setattr(
         'lib.storage.supervisor._tofudb_checkout_root', lambda: checkout)
     return _resolve_tofudb_binary()
@@ -538,7 +591,7 @@ def _engine_commit(root: Path, name: str = 'engine v2') -> None:
 def test_engine_staleness_silent_when_provenance_matches_head(
         engine_checkout, tmp_path, monkeypatch, caplog):
     head = _git(engine_checkout, 'rev-parse', 'HEAD')
-    engine = _deployed_engine(tmp_path, head)
+    engine = _deployed_engine(monkeypatch, tmp_path, head)
     with caplog.at_level(logging.WARNING, logger='tofu.storage.supervisor'):
         assert _resolve_deployed(monkeypatch, engine, engine_checkout) == str(engine.resolve())
     assert not caplog.records
@@ -547,7 +600,7 @@ def test_engine_staleness_silent_when_provenance_matches_head(
 def test_engine_staleness_warns_on_engine_commits_since_provenance(
         engine_checkout, tmp_path, monkeypatch, caplog):
     base = _git(engine_checkout, 'rev-parse', 'HEAD')
-    engine = _deployed_engine(tmp_path, base)
+    engine = _deployed_engine(monkeypatch, tmp_path, base)
     _engine_commit(engine_checkout)
     with caplog.at_level(logging.WARNING, logger='tofu.storage.supervisor'):
         assert _resolve_deployed(monkeypatch, engine, engine_checkout) == str(engine.resolve())
@@ -559,7 +612,7 @@ def test_engine_staleness_warns_on_engine_commits_since_provenance(
 def test_engine_staleness_ignores_commits_outside_the_engine(
         engine_checkout, tmp_path, monkeypatch, caplog):
     base = _git(engine_checkout, 'rev-parse', 'HEAD')
-    engine = _deployed_engine(tmp_path, base)
+    engine = _deployed_engine(monkeypatch, tmp_path, base)
     (engine_checkout / 'README.md').write_text('docs only\n')
     _git(engine_checkout, 'add', '.')
     _git(engine_checkout, 'commit', '-qm', 'docs only')
@@ -571,7 +624,7 @@ def test_engine_staleness_ignores_commits_outside_the_engine(
 def test_engine_staleness_notes_dirty_provenance(
         engine_checkout, tmp_path, monkeypatch, caplog):
     base = _git(engine_checkout, 'rev-parse', 'HEAD')
-    engine = _deployed_engine(tmp_path, base + '-dirty')
+    engine = _deployed_engine(monkeypatch, tmp_path, base + '-dirty')
     _engine_commit(engine_checkout)
     with caplog.at_level(logging.WARNING, logger='tofu.storage.supervisor'):
         assert _resolve_deployed(monkeypatch, engine, engine_checkout) == str(engine.resolve())
@@ -581,7 +634,7 @@ def test_engine_staleness_notes_dirty_provenance(
 
 def test_engine_staleness_warns_when_provenance_is_not_an_ancestor(
         engine_checkout, tmp_path, monkeypatch, caplog):
-    engine = _deployed_engine(tmp_path, '0' * 40)
+    engine = _deployed_engine(monkeypatch, tmp_path, '0' * 40)
     with caplog.at_level(logging.WARNING, logger='tofu.storage.supervisor'):
         assert _resolve_deployed(monkeypatch, engine, engine_checkout) == str(engine.resolve())
     (warning,) = [r.getMessage() for r in caplog.records]
@@ -591,7 +644,7 @@ def test_engine_staleness_warns_when_provenance_is_not_an_ancestor(
 def test_engine_staleness_fail_closed_when_fresh_engine_required(
         engine_checkout, tmp_path, monkeypatch):
     base = _git(engine_checkout, 'rev-parse', 'HEAD')
-    engine = _deployed_engine(tmp_path, base)
+    engine = _deployed_engine(monkeypatch, tmp_path, base)
     _engine_commit(engine_checkout)
     monkeypatch.setenv('TOFUDB_REQUIRE_FRESH_ENGINE', '1')
     with pytest.raises(RuntimeError, match='deploy_tofudb_engine.py'):
@@ -600,7 +653,7 @@ def test_engine_staleness_fail_closed_when_fresh_engine_required(
 
 def test_engine_staleness_silent_without_provenance(
         engine_checkout, tmp_path, monkeypatch, caplog):
-    engine = _deployed_engine(tmp_path, None)
+    engine = _deployed_engine(monkeypatch, tmp_path, None)
     _engine_commit(engine_checkout)
     with caplog.at_level(logging.WARNING, logger='tofu.storage.supervisor'):
         assert _resolve_deployed(monkeypatch, engine, engine_checkout) == str(engine.resolve())

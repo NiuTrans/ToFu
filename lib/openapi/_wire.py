@@ -1,13 +1,41 @@
 """Project domain schemas through declared HTTP response boundaries.
 
 Entry points: project_v4_responses, native_contract_components,
-native_contract_operation, schema_definition, rebase_inline_schema_refs. Dependencies: generated release/Conversation Sync
+native_contract_operation, schema_definition, inline_schema_definition,
+rebase_inline_schema_refs. Dependencies: generated release/Conversation Sync
 contracts, loaded only during spec construction. No routes, storage or workers.
 """
 from __future__ import annotations
 
 from copy import deepcopy
 import re
+
+
+def inline_schema_definition(authority: dict, name: str) -> dict:
+    """A canonical definition with its local references replaced by their targets.
+
+    Parameter schemas sit in a list, where a rebased reference cannot point, so
+    they must be self-contained. A reference that is not local, or that recurses,
+    cannot be inlined and is refused rather than published unresolvable.
+    """
+    def inline(value, active):
+        if isinstance(value, dict):
+            if '$ref' in value:
+                reference = value['$ref']
+                if not isinstance(reference, str) or not reference.startswith('#/$defs/'):
+                    raise ValueError(f'Schema reference must stay local: {reference!r}')
+                if reference in active:
+                    raise ValueError(f'Recursive schema reference cannot be inlined: {reference}')
+                target = authority
+                for key in reference[2:].split('/'):
+                    target = target[key.replace('~1', '/').replace('~0', '~')]
+                return inline(target, active | {reference})
+            return {key: inline(child, active) for key, child in value.items()}
+        if isinstance(value, list):
+            return [inline(child, active) for child in value]
+        return value
+
+    return inline(deepcopy(authority['$defs'][name]), frozenset())
 
 
 def schema_definition(authority: dict, name: str) -> dict:

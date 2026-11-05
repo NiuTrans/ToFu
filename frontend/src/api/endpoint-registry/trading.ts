@@ -5,25 +5,15 @@ export function createTradingEndpoints(ports: EndpointPorts) {
   const _TRADING_BASE = '/api/v4/trading';
   const trading = {
     base: () => _resolve(_TRADING_BASE),
-    call: async (path: string, opts?: EndpointOptions) => {
-      opts = opts || {};
-      const resp = await request<Response>(_TRADING_BASE + path, Object.assign({
+    call: (path: string, opts: EndpointOptions = {}) => {
+      return request<JsonObject>(_TRADING_BASE + path, {
         method: opts.method || 'GET',
         headers: Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {}),
         body: opts.body,
         timeout: opts.timeout,
         signal: opts.signal,
-        parse: 'response' as const,
-      }, {}));
-      if (!resp.ok) {
-        let err: JsonObject = {};
-        try { err = await resp.json(); } catch (e) {
-          console.warn('[Api][trading] non-JSON error body for %s (HTTP %s): %s',
-                       _TRADING_BASE + path, resp.status, e instanceof Error ? e.message : String(e));
-        }
-        throw new Error(String((err && err.error) || ('HTTP ' + resp.status)));
-      }
-      return await resp.json();
+        parse: 'json',
+      });
     },
     // Raw Response for streaming / progress-poll endpoints. Caller pipes
     // resp.body.getReader() (SSE) or reads resp.json() and branches on

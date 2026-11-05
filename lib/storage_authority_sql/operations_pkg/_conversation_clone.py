@@ -263,11 +263,13 @@ def conversation_clone(
             destination_id,
             user_id,
             title[:500],
-            _dump([]),
+            # A frozen pre-Turn transcript lives only in messages_json; pass
+            # the stored bytes through so the copy keeps its private codec.
+            source["messages_json"] or _dump([]),
             now,
             now,
             _dump(settings),
-            main_count,
+            main_count or int(source["msg_count"] or 0),
             "",
         ),
     )

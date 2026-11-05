@@ -388,48 +388,6 @@ def _state_key(conv_id: str, *, user_id: int) -> tuple[int, str, str | int]:
     return scope.key if scope else (user_id, conv_id, threading.get_ident())
 
 
-def get_warm_cache_read(conv_id: str, *, user_id: int) -> int:
-    """Largest recent cache-read prefix observed for this conversation.
-
-    The proactive L2 gate runs before the next provider call and may execute on
-    a different worker thread from the turn that warmed the cache.  Inspect all
-    live per-thread states and the durable previous-turn baseline, then return
-    the larger value.  The current task's existing three-round verified-cold
-    guard is stronger, newer evidence than either fallback and returns zero.
-    One or two cold rounds still preserve the warm baseline.  Zero means there
-    is no evidence of a warm prefix, so an automatic rewrite has no known cache
-    entry to destroy.
-    """
-    if not conv_id:
-        return 0
-    with _cache_lock:
-        current = _cache_states.get(_state_key(conv_id, user_id=user_id))
-        if (current is not None and current.call_count > 0
-                and current.cold_streak >= COLD_STREAK_GUARD_OPEN):
-            return 0
-        live = max(
-            (int(st.last_cache_read_tokens) for (uid, cid, _tid), st
-             in _cache_states.items()
-             if uid == user_id and cid == conv_id and st.call_count > 0
-             and (_current_invocation(conv_id, user_id) is None
-                  or (uid, cid, _tid) == _state_key(conv_id, user_id=user_id))),
-            default=0,
-        )
-    scope = _current_invocation(conv_id, user_id)
-    if scope is not None:
-        return max(live, scope.predecessor_read)
-    try:
-        from lib.tasks_pkg.cache_tracking._persist import (
-            read_last_turn_cache_read)
-        durable = int(read_last_turn_cache_read(
-            conv_id, user_id=user_id) or 0)
-    except Exception as e:
-        logger.debug('[CacheTrack] durable warm-cache read unavailable '
-                     'conv=%s: %s', conv_id[:8], e)
-        durable = 0
-    return max(live, durable)
-
-
 def get_prev_turn_cache_read(conv_id: str, *, user_id: int) -> int:
     """Return the invocation's frozen completed, same-lane predecessor read.
 

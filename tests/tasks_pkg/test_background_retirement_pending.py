@@ -30,7 +30,7 @@ def test_failed_retirement_retains_watcher_and_pending_receipt(tmp_path, monkeyp
     monkeypatch.setattr(background, '_record_pid_alive', lambda _record: True)
     monkeypatch.setattr(background, '_read_exit_code', lambda _paths: None)
     monkeypatch.setattr(background, '_result_from_record', lambda *a, **k: 'settled after observed quiescence')
-    monkeypatch.setattr(background, '_deliver_record', lambda *a: True)
+    monkeypatch.setattr(background, '_deliver_record', lambda *a: 'not_applicable')
     monkeypatch.setattr(background, '_remove_record_dir', lambda *a: None)
     monkeypatch.setattr(background, 'REATTACH_POLL_S', 0.01)
     monkeypatch.setattr('lib.project_mod.process_group.group_has_live_members', lambda _pgid: not release.is_set())

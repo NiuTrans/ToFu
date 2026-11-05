@@ -395,7 +395,8 @@ def test_unstarted_copy_failure_preserves_sibling_files(tmp_path, monkeypatch):
         nonlocal starts
         if thread.name.startswith('tofu-cp') and '_FILES' in thread.name:
             starts += 1
-            if starts == 2:
+            # The second file's start and its one startup recovery both fail.
+            if starts in (2, 3):
                 raise RuntimeError('injected unstarted copy')
         return original_start(thread)
 
@@ -427,6 +428,32 @@ def test_unstarted_copy_failure_preserves_sibling_files(tmp_path, monkeypatch):
     for path in copied:
         assert path.read_text() == (source / path.name).read_text()
     assert not any(t.name.startswith('tofu-cp') for t in threading.enumerate())
+
+
+@pytest.mark.parametrize('boundary', ['start', 'worker'])
+def test_copy_failure_without_message_keeps_its_cause(tmp_path, monkeypatch, boundary):
+    import threading
+
+    (tmp_path / 'source').write_text('data')
+    if boundary == 'start':
+        original_start = threading.Thread.start
+
+        def start(thread):
+            if thread.name.startswith('tofu-cp'):
+                raise RuntimeError()
+            return original_start(thread)
+
+        monkeypatch.setattr(threading.Thread, 'start', start)
+    else:
+        def copy(self, task):
+            raise threading.BrokenBarrierError()
+
+        monkeypatch.setattr(copy_engine._Engine, '_copy_one_file', copy)
+    plan = copy_engine.parse_cp_argv(['source', 'dest'])
+    result = copy_engine.run_copy_plan(plan, str(tmp_path), workers=1)
+    expected = ('cp: cannot start copy task: RuntimeError' if boundary == 'start'
+                else 'cp: copy worker failed: BrokenBarrierError')
+    assert result.exit_code == 1 and result.errors == [expected]
 
 
 def test_standalone_kernel_import_never_boots_application(tmp_path):

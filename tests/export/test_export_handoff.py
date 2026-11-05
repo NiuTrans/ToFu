@@ -51,9 +51,11 @@ def _make_fake_project(root: Path):
     (root / 'data' / 'skills' / 'users' / '1' / 'skill-a' / 'SKILL.md').write_text(
         '# skill-a\n', encoding='utf-8')
     (root / 'data' / 'memories' / 'global').mkdir(parents=True)
-    (root / 'data' / 'memories' / 'global' / 'mem.md').write_text('memo\n', encoding='utf-8')
+    (root / 'data' / 'memories' / 'global' / 'mem.md').write_text(
+        '---\ntags: [yourprovider]\n---\nmemo\n', encoding='utf-8')
     (root / '.tofu' / 'memories').mkdir(parents=True)
-    (root / '.tofu' / 'memories' / 'proj.md').write_text('proj memo\n', encoding='utf-8')
+    (root / '.tofu' / 'memories' / 'proj.md').write_text(
+        '---\ntags: [mcp]\n---\nproj memo\n', encoding='utf-8')
     (root / '.tofu' / 'error_resolutions.json').write_text('{}', encoding='utf-8')
     (root / 'data' / 'config').mkdir(parents=True)
     (root / 'data' / 'config' / 'server_config.json').write_text(json.dumps({
@@ -65,8 +67,17 @@ def _make_fake_project(root: Path):
         'proxy_bypass_domains': ['corp.local'],
         'feishu': {'app_id': 'personal-feishu'},
     }), encoding='utf-8')
-    (root / 'data' / 'config' / 'mcp_servers.json').write_text(
-        '{"personal": true}', encoding='utf-8')
+    (root / 'data' / 'config' / 'mcp_servers.json').write_text(json.dumps({
+        'hope': {'command': 'hope-mcp', 'args': [], 'enabled': True,
+                 'env': {'HOPE_USERNAME': 'operator-mis'}},
+        'xuecheng': {'command': 'xuecheng-mcp', 'args': [], 'enabled': True,
+                     'env': {'XUECHENG_MIS': 'operator-mis', 'XUECHENG_TOOLSET': 'all'}},
+        'github': {'command': '/mnt/personal/env/bin/python',
+                   'args': ['-c', 'import sys; sys.path.insert(0, "/mnt/personal/tofu")'],
+                   'enabled': True, 'env': {}},
+        'overleaf': {'command': 'tofu-overleaf-mcp', 'args': [], 'enabled': True,
+                     'env': {'OVERLEAF_SESSION': 'shared-session-token'}},
+    }), encoding='utf-8')
 
 
 @pytest.fixture()
@@ -114,17 +125,44 @@ class TestHandoffArtifacts:
 
         members = _tar_members(out / 'tofu_state.tar.gz')
         assert 'data/skills/users/1/skill-a/SKILL.md' in members
+        # The handoff shares the tree export's skill filters: a vendored
+        # engine survives, live session tickets and identity bindings do not.
+        package = fake_project / 'data' / 'skills' / 'users' / '1' / 'skill-a'
+        (package / '.cache').mkdir()
+        (package / '.cache' / 'tickets.json').write_text('{"live": true}',
+                                                        encoding='utf-8')
+        (package / 'vendor' / 'node_modules' / 'engine').mkdir(parents=True)
+        (package / 'vendor' / 'node_modules' / 'engine' / 'main.js').write_text(
+            'export {};\n', encoding='utf-8')
+        out2 = tmp_path / 'handoff-filtered'
+        handoff.run_handoff('internal', out2, _GIT_URL, push=False)
+        filtered = _tar_members(out2 / 'tofu_state.tar.gz')
+        assert 'data/skills/users/1/skill-a/vendor/node_modules/engine/main.js' in filtered
+        assert not any(n.endswith('.cache/tickets.json') for n in filtered), \
+            'a raw tar of the skill store ships live session tickets'
         assert 'data/memories/global/mem.md' in members
         assert '.tofu/memories/proj.md' in members
-        assert '.tofu/error_resolutions.json' in members
+        # The retired error-resolutions store is not carried any more.
+        assert '.tofu/error_resolutions.json' not in members
 
-        # Internal mode: config seeded like the full export — whitelisted
-        # keys only, providers filtered to the internal set, no personal
-        # config files.
+        # Internal mode: shared keys only, but EVERY provider travels —
+        # colleagues must not have to re-add API keys (owner decision
+        # 2026-11-01). Only the single-holder Feishu binding stays behind.
         cfg = _tar_json(out / 'tofu_state.tar.gz', 'data/config/server_config.json')
         assert 'feishu' not in cfg
-        assert [p['id'] for p in cfg['providers']] == ['example-corp']
-        assert 'data/config/mcp_servers.json' not in members
+        assert {p['id'] for p in cfg['providers']} == {'example-corp', 'openai'}
+
+        # Every MCP registration travels, made host-portable: no personal
+        # login ids, and the absolute interpreter wrapper becomes a bare
+        # command plus a credential-vault reference.
+        mcp = _tar_json(out / 'tofu_state.tar.gz', 'data/config/mcp_servers.json')
+        assert set(mcp) == {'hope', 'xuecheng', 'github', 'overleaf'}
+        assert 'HOPE_USERNAME' not in mcp['hope']['env']
+        assert 'XUECHENG_MIS' not in mcp['xuecheng']['env']
+        assert mcp['xuecheng']['env']['XUECHENG_TOOLSET'] == 'all'
+        assert mcp['github']['command'] == 'npx'
+        assert mcp['github']['env']['GITHUB_PERSONAL_ACCESS_TOKEN'] == 'vault:github_token'
+        assert mcp['overleaf']['env']['OVERLEAF_SESSION'] == 'shared-session-token'
 
     def test_internal_bakes_corp_proxy_default_when_source_has_none(self, fake_project, tmp_path):
         # Exporter's shell often carries the proxy in env, not in

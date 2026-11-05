@@ -151,26 +151,73 @@ def test_dispatch_screenshot_gate_needs_gui():
 
 
 # ══════════════════════════════════════════════════════════
-#  3. cmd_run_local — shell-metachar branch selection & safety
+#  3. cmd_run_local — POSIX simple-command / shell branch selection
 # ══════════════════════════════════════════════════════════
 
-def test_shell_meta_regex_detects_pipe_and_redirect():
-    from lib.desktop_agent._exec import _SHELL_META_RE
-    assert _SHELL_META_RE.search('cat a | grep b')
-    assert _SHELL_META_RE.search('echo x > f')
-    assert _SHELL_META_RE.search('a && b')
+_posix_only = pytest.mark.skipif(os.name == 'nt', reason='POSIX shell grammar')
 
 
+@_posix_only
 def test_simple_command_uses_argv_not_shell():
     from lib.desktop_agent import _exec
     assert _exec._build_args('whoami') == ['whoami']
 
 
+@_posix_only
 def test_metachar_command_routed_through_explicit_shell():
     from lib.desktop_agent import _exec
     args = _exec._build_args('cat f | wc -l')
     assert args[-1] == 'cat f | wc -l'
     assert '-c' in args
+
+
+@_posix_only
+@pytest.mark.parametrize('command,argv', [
+    ("python3 -u -c 'import os,signal;print(1)'", ['python3', '-u', '-c', 'import os,signal;print(1)']),
+    ('git commit -m "fix: a; b & c | d > e"', ['git', 'commit', '-m', 'fix: a; b & c | d > e']),
+    ("grep -e 'a|b' -e \"(c)\" 'file name.txt'", ['grep', '-e', 'a|b', '-e', '(c)', 'file name.txt']),
+    ('ls a\\ b \\$HOME \\* \\~ \\#', ['ls', 'a b', '$HOME', '*', '~', '#']),
+    ('tool "a\\"b" "c\\\\d" "\\$x" "\\`y" "e\\f"', ['tool', 'a"b', 'c\\d', '$x', '`y', 'e\\f']),
+    ("tool 'it'\"'\"'s' '' \"\"", ['tool', "it's", '', '']),
+    ("tool 'multi\nline' \"tab\there\"", ['tool', 'multi\nline', 'tab\there']),
+    ('make CC=gcc --jobs=4 a]b ^x %y @z +w', ['make', 'CC=gcc', '--jobs=4', 'a]b', '^x', '%y', '@z', '+w']),
+    ('  /usr/bin/env\t -i  ', ['/usr/bin/env', '-i']),
+    ('tool 文件 naïve', ['tool', '文件', 'naïve']),
+])
+def test_quoted_metacharacters_are_literal_argv_data(command, argv):
+    from lib.desktop_agent import _exec
+    assert _exec._build_args(command) == argv
+
+
+@_posix_only
+@pytest.mark.parametrize('command', [
+    'cat a | grep b', 'a && b', 'a || b', 'a; b', 'sleep 1 &', 'echo x > f', 'cat < f',
+    'ls 2>&1', 'ls >>log', '(cd sub)', 'ls)',
+    'ls $HOME', 'ls "$HOME"', 'ls ${HOME}', 'ls $(pwd)', 'ls `id`', 'ls "`id`"', "ls $'a\\tb'",
+    'ls *.py', 'ls ?', 'ls [ab]', 'ls ~', 'git show HEAD~1', 'ls a{b,c}', 'ls # note',
+    '! ls', 'find . ! -name x', 'FOO=1 env', 'A=b',
+    'cat <<EOF\nx\nEOF', 'if true; then ls; fi', 'for i in 1 2; do ls; done',
+    'while false; do ls; done', 'case x in x) ls;; esac', '{ ls; }', 'ls\nls',
+    'cd /tmp', "'cd' /tmp", 'export A', 'exit 3', 'set -e', 'echo hi', 'printf x',
+    'exec ls', 'time ls', '. ./env', 'source env', 'ulimit -n', 'umask', 'type ls',
+    'command -v ls', 'kill %1', 'test -f x', 'true', 'pwd',
+    "ls 'unterminated", 'ls "unterminated', 'ls a\\', 'ls a\\\nb', 'ls "a\\\nb"',
+    '"" arg', 'ls\r', 'ls\x0bx',
+])
+def test_shell_syntax_and_builtins_use_explicit_shell(command):
+    from lib.compat import get_shell_args
+    from lib.desktop_agent import _exec
+    assert _exec._build_args(command) == get_shell_args(command)
+
+
+@pytest.mark.parametrize('command', ['whoami', 'dir', 'npm', 'git commit -m "a b"', "python -c 'x'"])
+def test_windows_commands_always_use_cmd_without_posix_tokenization(monkeypatch, command):
+    import lib.compat
+    from lib.compat import _platform
+    from lib.desktop_agent import _exec
+    monkeypatch.setattr(lib.compat, 'IS_WINDOWS', True)
+    monkeypatch.setattr(_platform, 'IS_WINDOWS', True)
+    assert _exec._build_args(command) == ['cmd.exe', '/c', command]
 
 
 def test_run_local_rejects_empty_command():

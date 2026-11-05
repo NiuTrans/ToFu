@@ -11,13 +11,10 @@
 import { escapeHtmlText } from '../../html-safety';
 import { TOOL_RESULT_SURFACES } from './tool-result-surfaces.generated';
 import type { I18nArgs, I18nKey, Translator } from '../../i18n';
-
-type UnknownRecord = Readonly<Record<string, unknown>>;
-
-type BoundedText = Readonly<{
-  value: string;
-  truncated: boolean;
-}>;
+import {
+  record, field, scalarText as safeText, nonNegativeInteger as safeCount,
+  type UnknownRecord, type BoundedText,
+} from './tool-payload-values';
 
 type ParsedSwarmUpdate = Readonly<{
   agentId: BoundedText;
@@ -77,7 +74,6 @@ export type ToolInjectionPresentationDependencies = Readonly<{
   resolveConversationTitle: (conversationId: string) => unknown;
 }>;
 
-const EMPTY_RECORD: UnknownRecord = Object.freeze({});
 const EMPTY_ARRAY: readonly unknown[] = Object.freeze([]);
 
 const INBOX_ICON_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>';
@@ -86,20 +82,6 @@ const PEER_JUMP_ICON_HTML = '<svg class="sw-peer-jump" viewBox="0 0 24 24" fill=
 const STEER_ICON_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
 const BGCMD_ICON_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
 const STALL_ICON_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M3 2v6h6"/><path d="M3 8a9 9 0 1 0 3-5.7L3 8"/></svg>';
-
-function record(value: unknown): UnknownRecord {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as UnknownRecord
-    : EMPTY_RECORD;
-}
-
-function field(value: unknown, name: string): unknown {
-  try {
-    return record(value)[name];
-  } catch {
-    return undefined;
-  }
-}
 
 function arrayField(value: unknown, name: string): readonly unknown[] {
   const candidate = field(value, name);
@@ -112,14 +94,21 @@ function arrayField(value: unknown, name: string): readonly unknown[] {
   }
 }
 
-function safeText(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (
-    typeof value === 'number'
-    || typeof value === 'boolean'
-    || typeof value === 'bigint'
-  ) return String(value);
-  return '';
+/** Full display coverage, not merely a matching stored preview. Structured
+ * inbox reports render selected fields, so cannot replace a verbatim witness.
+ * Keep this beside the renderer's own item/text bounds to prevent drift.
+ */
+export function injectionReceiptDisplaysFullPayload(value: unknown, lane: 'inbox' | 'peer'): boolean {
+  const previews = arrayField(value, 'previews');
+  const count = field(value, 'count');
+  if (!previews.length || previews.length > PREVIEW_ITEMS
+      || (count !== undefined && count !== previews.length)) return false;
+  return previews.every(preview => {
+    const text = field(preview, 'text');
+    if (field(preview, 'textTruncated') || typeof text !== 'string' || !text) return false;
+    if (lane === 'inbox') return text.length <= RAW_TEXT_UNITS && !parseSwarmUpdateXml(text);
+    return text === text.trim() && text.length <= MARKDOWN_UNITS;
+  });
 }
 
 function boundedText(value: unknown, limit: number): BoundedText {
@@ -129,14 +118,6 @@ function boundedText(value: unknown, limit: number): BoundedText {
     value: truncated ? `${text.slice(0, limit)}…` : text,
     truncated,
   };
-}
-
-function safeCount(value: unknown, fallback: number): number {
-  return typeof value === 'number'
-    && Number.isSafeInteger(value)
-    && value >= 0
-    ? value
-    : fallback;
 }
 
 /* Only display-resolvable image sources are rendered. Mirrors the classic

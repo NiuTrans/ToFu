@@ -93,7 +93,7 @@ def test_background_readonly_reference_refuses_after_guard_time_lru_eviction(
     env = execution_workspace
     scheduled = {}
 
-    def capture_background(*, task, config, command, execute):
+    def capture_background(*, task, config, command, execute, credentials=None):
         # Capture the real handler callback without durable scheduling/storage.
         scheduled.update(task=BackgroundCommandTask(task), execute=execute)
         assert all(cell.cell_contents is not task

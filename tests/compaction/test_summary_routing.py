@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from lib.llm_dispatch.slot import Slot
 from lib.model_profiles import configured_model_profiles
 from lib.tasks_pkg.compaction._summary_routing import select_summary_route
 
@@ -48,7 +49,7 @@ def _slot(model, **changes):
         'max_output_tokens': 16_384, 'oauth': '',
     }
     fields.update(changes)
-    return SimpleNamespace(**fields)
+    return Slot(key_name='slot-' + model, api_key='', **fields)
 
 
 @pytest.fixture
@@ -77,7 +78,8 @@ def routes(monkeypatch):
     monkeypatch.setattr('lib.llm_dispatch.get_dispatcher', lambda: dispatcher)
     monkeypatch.setattr('lib.llm_dispatch.provider_pin.get_pinned_provider', lambda: None)
     monkeypatch.setattr('lib.context_limits.resolve_learned_context_limit', lambda p, m, w: w)
-    return SimpleNamespace(task=task, profiles=profiles, slots=slots, seen=seen)
+    # Specs edit the live pool, which keeps its selection index exact.
+    return SimpleNamespace(task=task, profiles=profiles, slots=dispatcher.slots, seen=seen)
 
 
 def _select(routes, **tokens):
@@ -612,12 +614,15 @@ def test_optional_compaction_prices_separate_input_and_capacity_before_payback(
         # A near-cutoff .05 budget admits the old cheap quote, not the
         # capacity-qualified main route. Neither route may be purchased.
         return {'dropped_tokens': tokens_before - candidate_tokens,
-                'cache_read_tokens': 0, 'cache_rewrite_tokens': candidate_tokens,
+                'cache_read_tokens': 0, 'warm_prefix_tokens': 0,
+                'cache_rewrite_tokens': candidate_tokens,
                 'rewrite_cost_tokens': candidate_tokens,
                 'payback_rounds': 1 if cost < .05 else 100,
                 'payback_limit_rounds': 2}
 
     monkeypatch.setattr(compact, '_proactive_cache_economics', payback)
+    # The stubbed economics prices the main route; keep the pricing probe consistent.
+    monkeypatch.setattr(compact, '_main_route_pricing_verified', lambda *a, **k: True)
     def no_dispatch(*args, **kwargs):
         pytest.fail('An unprofitable summary must not be dispatched')
     monkeypatch.setattr(compact, '_generate_query_aware_summary', no_dispatch)
@@ -631,6 +636,73 @@ def test_optional_compaction_prices_separate_input_and_capacity_before_payback(
     assert meta['reason'] == 'cache_negative'
     assert messages == original
 
+
+def test_optional_compaction_quote_prices_the_request_dispatch_sends(routes, monkeypatch):
+    """An unchanged route revalidates: the quote and dispatch price one request.
+
+    Production shape: after a cold rebuild the prior receipt exists only in the
+    archive, and the default ledger-off input spends its whole character budget
+    on dense elided history. A preflight that priced a different prompt
+    under-quoted it, so revalidation refused the cheap route it had selected.
+    """
+    import hashlib
+    import lib.llm_dispatch as dispatch
+    from lib.llm.stream_result import ProviderStreamResult
+    import lib.tasks_pkg.compaction._summary_routing as summary_routing
+    import lib.tasks_pkg.compaction._layer2._compact as compact
+    from lib.tasks_pkg.compaction._layer2 import _summary as summary
+
+    for slot in routes.slots:
+        slot.max_output_tokens = 128_000
+    routes.task.update(id='exact-quote', convId='exact-quote')
+    monkeypatch.setattr(summary, '_codex_subscription_provider', lambda task: '')
+    monkeypatch.setattr(summary, '_archived_prior_receipt', lambda task: (
+        '### Objective\nShip the parser fix.\n'
+        '### Completed & Verified\n' + 'Verified archived step.\n' * 120))
+    messages = [{'role': 'system', 'content': 'rules'},
+                {'role': 'user', 'content': 'preserve the original objective'}]
+    for index in range(60):
+        dense = ''.join(hashlib.sha256(f'{index}:{part}'.encode()).hexdigest()
+                        for part in range(40))
+        messages += [{'role': 'assistant', 'content': dense},
+                     {'role': 'user', 'content': f'continue step {index}'}]
+    messages += [{'role': 'user', 'content': 'continue the current task'},
+                 {'role': 'assistant', 'content': 'recent evidence'}]
+    quoted = []
+    select = summary_routing.select_summary_route
+
+    def recording_select(task, input_tokens, output_tokens, **kwargs):
+        quoted.append(input_tokens)
+        return select(task, input_tokens, output_tokens, **kwargs)
+
+    monkeypatch.setattr(summary_routing, 'select_summary_route', recording_select)
+    monkeypatch.setattr(compact, '_main_route_pricing_verified', lambda *a, **k: True)
+    monkeypatch.setattr(compact, '_proactive_cache_economics', lambda task, *, tokens_before, candidate_tokens, **kwargs: {
+        'dropped_tokens': tokens_before - candidate_tokens, 'cache_read_tokens': 0,
+        'warm_prefix_tokens': 0, 'cache_rewrite_tokens': candidate_tokens,
+        'rewrite_cost_tokens': candidate_tokens, 'payback_rounds': 1,
+        'payback_limit_rounds': 2})
+    calls = []
+
+    def generate(body_messages, **kwargs):
+        calls.append(kwargs)
+        return '### Objective\nShip the parser fix.', {
+            'prompt_tokens': 10, 'completion_tokens': 10, 'finish_reason': 'stop'}
+
+    def stream(body, **kwargs):
+        content, usage = generate(body['messages'], **kwargs)
+        return ProviderStreamResult.from_legacy(
+            {'role': 'assistant', 'content': content}, 'stop', usage)
+
+    monkeypatch.setattr(dispatch, 'dispatch_chat', generate)
+    monkeypatch.setattr(dispatch, 'dispatch_stream', stream)
+    compact.execute_compact_tool(
+        messages, task=routes.task, _proactive_economic=True,
+        preserve_budget_tokens=1, _result_meta={}, _compaction_skip_archive=True)
+    assert len(quoted) == 2
+    assert quoted[0] == quoted[1]
+    assert len(calls) == 1
+    assert calls[0]['prefer_model'] == 'cheap'
 
 @pytest.mark.parametrize('evidence', [
     None, {}, {'intelligence': 99}, _aa(None), _aa(True), _aa('99'),

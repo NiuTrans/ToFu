@@ -19,7 +19,7 @@ def test_original_survives_storage_restart_and_model_resize(
         isolated_knowledge, knowledge_storage, monkeypatch, dimensions):
     # Real PNG validation and original writing/indexing/owner checks. Replace
     # only optional OCR extraction to avoid external model/parser dependencies.
-    def parser(raw, name):
+    def parser(raw, name, **_options):
         with Image.open(io.BytesIO(raw)) as image:
             image.verify()
         return {'text': 'Synthetic recovery image evidence', 'kind': '.png',
@@ -98,24 +98,24 @@ def test_original_survives_storage_restart_and_model_resize(
     from lib.llm.body import _validate_image_blocks, _downscale_oversized_images
     source = [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': ref}}]}]
     projected = copy.deepcopy(source)
-    _validate_image_blocks(projected, user_id=1)
+    projected = _validate_image_blocks(projected, user_id=1)
     hydrated = projected[0]['content'][0]['image_url']['url']
     assert base64.b64decode(hydrated.split(',', 1)[1]) == raw
-    _downscale_oversized_images(projected, 'claude-sonnet-4-5', user_id=1)
+    projected = _downscale_oversized_images(projected, 'claude-sonnet-4-5', user_id=1)
     view = projected[0]['content'][0]['image_url']['url']
     assert (view != hydrated) == (dimensions[0] > 2000)
     assert source[0]['content'][0]['image_url']['url'] == ref
     assert result.media_refs[0] == receipt and result._modelReplaySources == [ref]
     assert path.read_bytes() == raw
     denied = copy.deepcopy(source)
-    _validate_image_blocks(denied, user_id=2)
+    denied = _validate_image_blocks(denied, user_id=2)
     assert denied[0]['content'][0]['type'] == 'text'
     assert 'unavailable' in denied[0]['content'][0]['text'].lower()
     # Loss of the disposable source yields a read-only unavailable projection,
     # not a request to re-execute the original (possibly mutating) tool.
     path.unlink()
     missing = copy.deepcopy(source)
-    _validate_image_blocks(missing, user_id=1)
+    missing = _validate_image_blocks(missing, user_id=1)
     assert missing[0]['content'][0]['type'] == 'text'
     assert 'unavailable' in missing[0]['content'][0]['text'].lower()
     assert result._modelReplaySources == [ref] and result.media_refs[0] == receipt

@@ -12,7 +12,19 @@ import threading
 
 import pytest
 
+from lib.storage.deadline_policy import (
+    observe_storage_service,
+    reset_storage_service_observations,
+)
+
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _clean_service_observations():
+    reset_storage_service_observations()
+    yield
+    reset_storage_service_observations()
 
 
 class _FakeBatcher:
@@ -91,9 +103,11 @@ def test_construction_failure_is_explicit(fresh, monkeypatch):
         el._ensure_sidecar_batcher()
 
 
+@pytest.mark.parametrize('observed_seconds', [None, 2.5])
 def test_batcher_rejection_uses_one_natural_key_direct_fallback(
     fresh,
     monkeypatch,
+    observed_seconds,
 ):
     from lib.storage import StorageError
 
@@ -115,6 +129,11 @@ def test_batcher_rejection_uses_one_natural_key_direct_fallback(
     monkeypatch.setattr(el, '_ensure_sidecar_batcher', RejectingBatcher)
     monkeypatch.setattr('lib.storage.get_storage_client', lambda **_kwargs: DirectClient())
     monkeypatch.setattr(el, '_invalidate_event_read_caches', lambda _task_id: None)
+    if observed_seconds is not None:
+        for _ in range(16):
+            observe_storage_service('command', 'event.append', observed_seconds)
+    # Cold: the writer's own budget. Observed: four times the service tail.
+    expected_deadline = el._PERSIST_TIMEOUT_S if observed_seconds is None else 10.0
 
     result = el.append_persistent_event(
         'task-fallback', 7, {'type': 'delta', 'content': 'durable'})
@@ -129,5 +148,118 @@ def test_batcher_rejection_uses_one_natural_key_direct_fallback(
             'event': {'type': 'delta', 'content': 'durable'},
         },
         None,
-        {'priority': 'event', 'deadline': el._PERSIST_TIMEOUT_S},
+        {'priority': 'event', 'deadline': expected_deadline},
     )]
+
+
+def test_batch_confirmation_and_flush_waits_follow_the_observed_service_time(
+    fresh,
+    monkeypatch,
+):
+    el, _created = fresh
+    waits = []
+
+    class RecordingBatcher:
+        def append(self, **kwargs):
+            waits.append(('append', kwargs['timeout']))
+            return {'inserted': True}
+
+        def flush(self, timeout):
+            waits.append(('flush', timeout))
+            return True
+
+    batcher = RecordingBatcher()
+    monkeypatch.setattr(el, '_ensure_sidecar_batcher', lambda: batcher)
+    monkeypatch.setattr(el, '_SIDECAR_BATCHER', batcher)
+    monkeypatch.setattr(el, '_invalidate_event_read_caches', lambda _task_id: None)
+    for _ in range(16):
+        observe_storage_service('command', 'event.append_batch', 3.0)
+
+    el.append_persistent_event('task-waits', 1, {'type': 'delta', 'content': 'x'})
+    assert el.flush_pending('task-waits') is True
+
+    # Both wait for the batch path, so both get four times its observed tail.
+    assert waits == [('append', 12.0), ('flush', 12.0)]
+
+
+@pytest.mark.parametrize('batch_fails', [False, True])
+def test_slow_batch_is_awaited_and_never_raced_by_a_direct_append(
+    monkeypatch,
+    batch_fails,
+):
+    from lib.storage import StorageError, StorageEventBatcher
+    from lib.tasks_pkg import event_log as el
+
+    batch_entered = threading.Event()
+    release = threading.Event()
+    in_flight = threading.Event()
+    direct_called = threading.Event()
+    direct_calls = []
+    failure = StorageError('database_timeout', 'deadline_elapsed')
+
+    class Authority:
+        def command(self, operation, payload, command_id, **kwargs):
+            if operation == 'event.append_batch':
+                in_flight.set()
+                batch_entered.set()
+                try:
+                    assert release.wait(10)
+                finally:
+                    in_flight.clear()
+                if batch_fails:
+                    raise failure
+                return {'results': [
+                    {'inserted': True, 'task_id': row['task_id'], 'sequence': row['sequence']}
+                    for row in payload['events']], 'inserted': len(payload['events'])}
+            direct_calls.append((operation, payload['sequence'], in_flight.is_set()))
+            direct_called.set()
+            return {'inserted': False, 'task_id': payload['task_id'],
+                    'sequence': payload['sequence']}
+
+    authority = Authority()
+    # With no observations the budget is this floor: the confirmation wait
+    # expires almost at once, while the batch is held.
+    monkeypatch.setattr(el, '_PERSIST_TIMEOUT_S', 0.05)
+    monkeypatch.setattr('lib.storage.get_storage_client', lambda **_kwargs: authority)
+    monkeypatch.setattr(el, '_invalidate_event_read_caches', lambda _task_id: None)
+    batcher = StorageEventBatcher(client_provider=lambda **_kwargs: authority,
+                                  coalesce_ms=0)
+    cancel_queued = batcher._cancel_queued
+
+    def cancel_after_dispatch(pending):
+        # Expiry is judged once the row is claimed, whatever the scheduling.
+        assert batch_entered.wait(10)
+        return cancel_queued(pending)
+
+    monkeypatch.setattr(batcher, '_cancel_queued', cancel_after_dispatch)
+    monkeypatch.setattr(el, '_ensure_sidecar_batcher', lambda: batcher)
+    outcome = {}
+
+    def produce():
+        try:
+            outcome['result'] = el.append_persistent_event(
+                'task-slow', 3, {'type': 'delta', 'content': 'durable'})
+        except Exception as error:  # surfaced through the assertion below
+            outcome['error'] = error
+
+    producer = threading.Thread(target=produce, daemon=True)
+    producer.start()
+    try:
+        assert batch_entered.wait(10)
+        assert not direct_called.wait(0.5), 'the row was re-sent while its batch was in flight'
+        release.set()
+        producer.join(10)
+        assert not producer.is_alive()
+        assert 'error' not in outcome
+        if batch_fails:
+            # One natural-key fallback, only after the batch settled.
+            assert direct_calls == [('event.append', 3, False)]
+            assert outcome['result'] == {'inserted': False, 'task_id': 'task-slow',
+                                         'sequence': 3}
+        else:
+            assert direct_calls == []
+            assert outcome['result']['inserted'] is True
+    finally:
+        release.set()
+        producer.join(10)
+        assert batcher.close(timeout=10)

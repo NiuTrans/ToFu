@@ -27,6 +27,10 @@ pub const MAX_INLINE_BYTES: usize = 256 * 1024;
 /// fsyncs the loose blocks instead, preserving the 4 MiB history segment
 /// ceiling and bounded WAL replay memory.
 pub const MAX_CARRIED_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
+/// Share of that ceiling reserved for transaction-level framing and
+/// state-dependent representation work when a caller composes several
+/// independent writes into one commit (`resourceBudget.eventBatchComposition`).
+pub const CARRIED_TRANSACTION_HEADROOM_BYTES: usize = MAX_CARRIED_PAYLOAD_BYTES / 4;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]

@@ -7,7 +7,7 @@ import Foundation
 ///
 /// Ordering invariants that matter for correctness:
 ///  - ADD: store the secret BEFORE login (login reads it via the vault).
-///  - EDIT with a URL host change: delegate to
+///  - EDIT with a URL origin change: delegate to
 ///    ``SessionManager/updateUrlAndReauth`` so the dead host's Domain-pinned
 ///    jar is purged before re-login.
 ///  - DELETE: remove the secret AND the row (never orphan a credential).
@@ -50,16 +50,15 @@ public final class SessionController: Sendable {
         self.clock = clock
     }
 
-    /// Find a password already stored for ANOTHER profile on the SAME host as
-    /// [baseUrl]. code-server auth is per-HOST (its session cookie is
-    /// `Domain`-pinned to the host), so different `/proxy/PORT/` URLs on one
-    /// host share one password. Returns the reusable secret, or nil if no
-    /// same-host profile has one. [excludeAlias] skips the profile itself.
+    /// Reuse a password only within the same HTTP origin and code-server
+    /// prefix. Sibling proxy ports may share a gateway; separate deployments
+    /// on another scheme, network port or prefix do not share credentials.
     public func findSharedSecret(_ baseUrl: String, excludeAlias: String? = nil) async -> String? {
-        guard let host = ServerUrl.parse(baseUrl)?.host else { return nil }
+        guard let server = ServerUrl.parse(baseUrl) else { return nil }
         for profile in await store.getAllOnce() {
             if profile.alias == excludeAlias { continue }
-            if ServerUrl.parse(profile.baseUrl)?.host != host { continue }
+            guard let candidate = ServerUrl.parse(profile.baseUrl), candidate.origin == server.origin,
+                  candidate.codeServerRootPath == server.codeServerRootPath, profile.authType == .codeServerPassword else { continue }
             if let secret = secrets.secretFor(profile.alias), !secret.isEmpty { return secret }
         }
         return nil
@@ -99,7 +98,7 @@ public final class SessionController: Sendable {
     /// Edit an existing profile. Handles four cases in one entry point:
     ///  - rename (alias change) → move the secret key,
     ///  - new secret provided → overwrite it,
-    ///  - URL host change → purge + re-login (via updateUrlAndReauth),
+    ///  - URL origin change → purge + re-login (via updateUrlAndReauth),
     ///  - plain field change → persist + re-login.
     ///
     /// Returns BOTH the login outcome and the row as actually PERSISTED. The
@@ -134,15 +133,15 @@ public final class SessionController: Sendable {
             secrets.putSecret(shared, for: a)
         }
 
-        let oldHost = ServerUrl.parse(current.baseUrl)?.host
-        let newHost = ServerUrl.parse(newUrl)?.host
+        let oldOrigin = ServerUrl.parse(current.baseUrl)?.origin
+        let newOrigin = ServerUrl.parse(newUrl)?.origin
         var base = current
         base.alias = a
         base.authType = newAuthType
         base.projectPath = pp
 
-        if let oldHost, let newHost, oldHost != newHost {
-            // URL host changed → the purge-and-relogin path owns persistence,
+        if let oldOrigin, let newOrigin, oldOrigin != newOrigin {
+            // URL origin changed → the purge-and-relogin path owns persistence,
             // so it also owns what the persisted row looks like.
             let reauth = await session.updateUrlAndReauth(base, newUrl: newUrl)
             return ProfileResult(login: reauth.login, persisted: reauth.persisted)
@@ -170,25 +169,6 @@ public final class SessionController: Sendable {
         await store.touchLastUsed(profile.id, clock())
         let current = await store.getById(profile.id) ?? profile
         return ProfileResult(login: await session.login(current), persisted: current)
-    }
-
-    /// One-time upgrade migration (idempotent, safe to run every launch): fix
-    /// any persisted profile whose URL is a code-server proxy form but whose
-    /// stored authType is the stale NONE default (see
-    /// ``ServerUrl/needsProxyAuthFix``) — flip it so it can headless-login
-    /// instead of being stranded on the code-server login page. Returns the
-    /// count of rows fixed. Targeted writes only; bare-host NONE and any
-    /// non-NONE auth are left as-is.
-    @discardableResult
-    public func migrateProxyAuthDefaults() async -> Int {
-        var fixed = 0
-        let all = await store.getAllOnce()
-        for profile in all
-        where ServerUrl.needsProxyAuthFix(rawUrl: profile.baseUrl, current: profile.authType) {
-            await store.setAuthType(profile.id, .codeServerPassword)
-            fixed += 1
-        }
-        return fixed
     }
 
     /// Delete a profile and its stored secret (never orphan a credential).

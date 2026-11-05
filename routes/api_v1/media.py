@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import mimetypes
-import os
 
 from quart import Blueprint, current_app, request
 
@@ -38,106 +37,63 @@ def upload_media_attachment_v1():
     upload = files.get('file')
     if upload is None or not getattr(upload, 'filename', ''):
         return api_bad_request('No file provided', field='file')
+    from lib.knowledge.html_application import application_html_projector
+    from lib.knowledge.ingest import KnowledgeIngestError
+    from lib.media_attachments import ingest_document
+
+    # The parser owns its full byte input; HTTP reception already spills
+    # into the request-owned file rather than a second receive buffer.
+    raw = upload.stream.read()
+    owner_user_id = int(request_user_id())
     try:
-        from lib.media_attachments import ingest_document
-        from lib.knowledge.html_application import application_html_projector
-
-        # The parser owns its full byte input; HTTP reception already spills
-        # into the request-owned file rather than a second receive buffer.
-        raw = upload.stream.read()
         attachment = ingest_document(
-            raw, str(upload.filename), user_id=int(request_user_id()),
+            raw, str(upload.filename), user_id=owner_user_id,
             html_projector=application_html_projector(current_app))
-    except Exception as exc:
-        from lib.knowledge.ingest import KnowledgeIngestError
-
-        if isinstance(exc, KnowledgeIngestError):
-            return api_bad_request(str(exc), field='file')
-        logger.error('[Media.v1] document ingest failed: %s', exc, exc_info=True)
-        return api_internal_error('Attachment indexing failed')
+    except KnowledgeIngestError as exc:
+        return api_bad_request(str(exc), field='file')
     return api_ok({'attachment': attachment})
 
 
-_ARCHIVE_ERROR_KIND = {
-    'archive_limit': 'archive-too-large',
-    'archive_invalid': 'archive-invalid',
-    'archive_empty': 'archive-empty',
-    'archive_path': 'archive-invalid',
-}
-
-
-@api_v1_media_bp.route('/api/v1/media/attachments/expand-archive', methods=['POST'])
+@api_v1_media_bp.route('/api/v1/media/attachments/archive', methods=['POST'])
 @require_auth
 @api_meta(
-    summary='Extract a dropped chat archive into a managed workspace',
+    summary='Store a dropped chat archive verbatim in a managed workspace',
     description=(
-        "multipart/form-data: ``file`` (a .zip/.tar/.tar.gz archive). Spooled "
-        "to an owned temp file and extracted atomically into "
-        "``uploads/workspaces/<stem>/`` (fresh auto-suffixed directory; "
-        "existing files never overwritten) via lib.paper.archive — zip-slip/link "
-        "defense and complete regular-file reception; "
-        "Unlike the project-browser archive drop, this needs no "
-        "already-attached root, so a ChatGPT-style 'drop a zip on the input "
-        "box' works with no project set. Returns the extraction receipt, the "
-        "extracted path (for the client to mount as a project root via "
-        "/api/v1/project/paths), and TeX main-document candidates so a paper "
-        "preview can be offered immediately."),
+        "multipart/form-data: ``file`` (a .zip/.tar/.tar.gz/.tgz/.tar.bz2/"
+        ".tar.xz archive). The archive is NOT extracted: its bytes are copied "
+        "into a fresh ``uploads/workspaces/<stem>/`` directory (auto-suffixed; "
+        "existing files never overwritten) and the response names that "
+        "directory for the client to mount as a project root via "
+        "/api/v1/project/paths. The model unpacks it with its own workspace "
+        "tools when a task needs the contents. Unlike the project-browser "
+        "archive drop, this needs no already-attached root."),
     tags=['media'])
-def expand_archive_attachment_v1():
-    from lib.chat_workspace import chat_workspaces_root
-    from lib.paper.archive import (
-        extract_archive,
-        stream_to_temp,
-    )
-    from lib.paper.builds.errors import BuildError
+def store_archive_attachment_v1():
+    from lib.chat_workspace import ArchiveRejected, store_archive
 
     files = request_files()
     upload = files.get('file')
     if upload is None or not getattr(upload, 'filename', ''):
         return api_bad_request('No file provided', field='file')
-    archive_name = os.path.basename(
-        (upload.filename or 'archive').replace('\\', '/'))
-
-    spooled = None
     try:
-        spooled = stream_to_temp(upload.stream)
-        receipt = extract_archive(
-            spooled, chat_workspaces_root(), name_hint=archive_name)
-    except BuildError as exc:
-        kind = _ARCHIVE_ERROR_KIND.get(exc.code, 'archive-invalid')
+        stored = store_archive(upload.stream, str(upload.filename))
+    except ArchiveRejected as exc:
         return api_payload(
-            {'ok': False, 'errorKind': kind, 'error': str(exc)}, 400)
+            {'ok': False, 'errorKind': exc.kind, 'error': str(exc)}, 400)
     except OSError as exc:
-        logger.warning('[Media.v1] archive extraction failed: %s', exc,
-                       exc_info=True)
-        return api_internal_error('Cannot store the extracted archive')
-    finally:
-        if spooled is not None:
-            spooled.unlink(missing_ok=True)
-
-    tex_candidates = []
-    try:
-        for candidate in sorted(receipt.directory.rglob('*.tex'))[:64]:
-            try:
-                head = candidate.read_text(errors='replace')[:8192]
-            except OSError:
-                continue
-            if '\\documentclass' in head:
-                tex_candidates.append(
-                    candidate.relative_to(receipt.directory).as_posix())
-    except OSError:
-        pass
-    logger.info(
-        '[Media.v1] chat archive extracted %s (%d files, %d bytes, %d tex)',
-        receipt.directory, receipt.files, receipt.bytes_written,
-        len(tex_candidates))
-    result = receipt.as_dict(receipt.directory.parent)
-    result.update(
-        ok=True,
-        action='expand_archive',
-        texMainCandidates=tex_candidates[:16],
-    )
-    return api_ok(result)
+        logger.warning('[Media.v1] archive store failed: %s', exc, exc_info=True)
+        return api_internal_error('Cannot store the archive')
+    logger.info('[Media.v1] chat archive stored %s (%d bytes)',
+                stored.archive, stored.bytes_written)
+    return api_ok({
+        'ok': True,
+        'action': 'store_archive',
+        'directory': stored.directory.name,
+        'path': str(stored.directory),
+        'archiveName': stored.archive.name,
+        'archivePath': str(stored.archive),
+        'bytes': stored.bytes_written,
+    })
 
 
 @api_v1_media_bp.route(

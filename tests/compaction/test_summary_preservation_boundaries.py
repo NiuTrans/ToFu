@@ -7,7 +7,7 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.parametrize('transient', [False, True])
-@pytest.mark.parametrize('failure', ['empty', 'incomplete', 'cancel', 'memory'])
+@pytest.mark.parametrize('failure', ['empty', 'incomplete', 'cancel'])
 def test_reactive_failure_preserves_complete_source(monkeypatch, transient, failure):
     from lib.tasks_pkg.compaction import _reactive as reactive
     from lib.tasks_pkg.compaction._layer2 import _compact as compact
@@ -40,10 +40,9 @@ def test_reactive_failure_preserves_complete_source(monkeypatch, transient, fail
     monkeypatch.setattr(reactive, '_get_context_limit', lambda *a: 1_000_000)
     monkeypatch.setattr(reactive, '_head_truncate', lambda *a, **k: pytest.fail('head deletion'))
     assert reactive.reactive_compact(
-        messages, task, error_text='context overflow',
-        byte_target=1024 if failure == 'memory' else None) is False
+        messages, task, error_text='context overflow') is False
     assert messages == original
-    assert len(calls) == (0 if failure == 'memory' else 1)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize('carrier', ['typed', 'typed_no_heading', 'manual', 'legacy'])

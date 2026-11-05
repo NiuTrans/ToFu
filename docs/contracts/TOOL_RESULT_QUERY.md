@@ -120,9 +120,15 @@ its producer. Expired/missing continuation evidence stays distinct from malforme
 input, and a failed batch item does not discard following successful items.
 
 Unclassified storage protocol failures remain storage failures; their text cannot
-establish a cursor diagnosis. Known storage errors retain their retryability,
-while unexpected exceptions receive no speculative retry promise. Diagnostics
-remain in host logs; model feedback uses declared, bounded recovery advice.
+establish a cursor diagnosis. Generic `artifact_store_unavailable` feedback uses
+the canonical `TRANSIENT_STORAGE_CODES` from the backend-neutral storage contract:
+temporary pressure permits another retained-evidence read even when the RPC's
+`retryable` flag is false; a terminal code remains nonretryable even with a true
+flag. A normalized `retry_after_ms` becomes a millisecond wait hint. Unexpected
+exceptions receive no speculative retry promise. Diagnostics remain in host logs;
+model feedback uses declared, bounded recovery advice. Whole-tool recovery authority
+is defined in [TOOL_EFFECT_RECOVERY.md](TOOL_EFFECT_RECOVERY.md); a read retry never
+reexecutes the evidence producer or switches storage authorities.
 An older engine without the new codes gets this generic storage-failure handling.
 There is no new retry loop, record, key, pool or background work; successful
 query payloads and existing scan/owner/expiry fences are unchanged.
@@ -179,6 +185,41 @@ space; locally trimming signed pages loses evidence; collecting maximum raw
 pages before any fitting needlessly increases temporary memory. Verify
 `test_artifact_batch_demand_budget` and `test_artifact_batch_demand_backends`
 for fitting batches, oversubscription, concurrent fitting failures and restart.
+
+Problem: halving a source limit after each oversized page repeated expensive
+queries over already available evidence. Decision: a private planning helper
+uses that page and the shared model projection counter to estimate a useful
+byte/match limit. It copies whole codepoints/hits and matching provenance only
+for sizing; these sketches never become returned pages or cursors. Each fit
+permits two planning attempts, each with at most four additional token counts,
+reusing the observed full-page count. A small margin allows changed cursor and
+number encodings. Every proposed limit strictly decreases, and the source still
+re-queries the original owner, reference, selector/query and cursor. The exact
+returned page is measured again before delivery.
+
+Unsupported provenance, poor estimates and exhausted planning attempts use the
+existing observed-extent halving path. Unknown fields remain charged; a source
+failure stops fitting with its original classification. No local sketch can
+grant source or continuation authority. Alternatives rejected: exhaustive
+binary search saved source IO but increased tokenizer CPU; proportional body
+bytes alone ignore metadata and token density; emitting a clipped signed page
+strands evidence. Verify `test_artifact_refit_planning` and
+`test_artifact_refit_planning_backends` for query counts, nonuniform token density,
+unknown metadata, alias/selector scope and exact continuation after restart.
+
+Problem: owner Stop could leave an Artifact handler querying progressively
+smaller source pages while the execution layer waited for it to exit. Decision:
+the handler borrows the existing task/tool cancellation context. Initial batch
+workers, each source query and any budget-refitting wave check that same signal.
+Started storage calls finish and join; cancellation prevents subsequent queries
+and unwinds through the common executor's typed cancellation settlement. A source
+control exception without owner Stop remains a nonretryable source failure,
+and does not cancel its healthy siblings. No cursor, retained source or backend
+selection changes. Alternatives rejected: abandoning a running query leaves a
+live producer; marking skipped slots as a retryable store outage invites false
+recovery; publishing a handler-specific terminal state duplicates the executor.
+Verify Artifact query cancellation, native gateway cancellation and paired
+backend cancellation suites, plus common tool cancellation outcomes.
 
 Problem: the query handler counted full canonical JSON before the common model
 projection removed replay-only metadata. Sixteen 8-byte reads could issue 64

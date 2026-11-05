@@ -183,7 +183,6 @@ def _run(scenario):
 
 # ── 1. Start with NO paper open ───────────────────────────────────
 
-@requires_node
 def test_a_direction_starts_a_job_with_no_paper_open():
     """★ Acceptance #1: type a direction on the landing screen, get a job.
 
@@ -234,7 +233,6 @@ def test_start_goes_through_the_evolution_run_seam_not_a_bespoke_route():
 
 # ── 2. Progress survives a re-render, on the SERVER clock ─────────
 
-@requires_node
 def test_elapsed_comes_from_the_server_clock_not_a_local_stopwatch():
     """★ Acceptance #2: a refresh / tab switch must not reset the timer.
 
@@ -250,7 +248,6 @@ def test_elapsed_comes_from_the_server_clock_not_a_local_stopwatch():
         'render and washes a long-running job into looking fresh')
 
 
-@requires_node
 def test_running_job_is_polled_and_subscribed_for_live_progress():
     out = _run('running')
     assert out['calls']['events'], 'the job was never polled for event replay'
@@ -261,7 +258,6 @@ def test_running_job_is_polled_and_subscribed_for_live_progress():
 
 # ── 3. A degraded job must LOOK degraded ──────────────────────────
 
-@requires_node
 def test_degraded_job_is_surfaced_as_degraded_not_as_success():
     """★ Acceptance #3: the interlock with the artifact_quality axis.
 
@@ -281,7 +277,6 @@ def test_degraded_job_is_surfaced_as_degraded_not_as_success():
         'nothing in the rendered output marks this job as degraded')
 
 
-@requires_node
 def test_clean_job_is_not_flagged_degraded():
     """Discrimination: the degraded marker must track the real verdict."""
     out = _run('clean')
@@ -290,7 +285,6 @@ def test_clean_job_is_not_flagged_degraded():
         'a healthy job was flagged degraded — the marker is unconditional')
 
 
-@requires_node
 def test_finished_job_links_back_to_the_library_folder():
     """Products land on the shelf: harvest wrote them to folder_id=research_<id>.
 

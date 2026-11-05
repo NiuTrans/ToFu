@@ -2,6 +2,11 @@
  * Responsibility: bounded, endpoint-backed compaction-history state.
  * Entry point: createCompactionHistoryState. Dependencies: injected list,
  * clock, and refresh-notification ports; no DOM or application globals.
+ *
+ * The archive listing is the count authority. Loaded Turns reference archives
+ * through compaction receipts; `observe` lists again when they reference one
+ * no settled listing has covered, so an automatic compaction in an open
+ * conversation reaches the count without polling.
  */
 
 export const COMPACTION_HISTORY_LIMITS = Object.freeze({
@@ -43,7 +48,8 @@ export interface CompactionListPayload {
 }
 
 export interface CompactionHistoryState {
-  readonly count: (conversationId: unknown) => number;
+  /** Listed archive count; null until a listing for the conversation settles. */
+  readonly count: (conversationId: unknown) => number | null;
   readonly get: (conversationId: unknown) => readonly CompactionHistoryRow[];
   readonly list: (
     conversationId: unknown,
@@ -52,6 +58,16 @@ export interface CompactionHistoryState {
   readonly refresh: (
     conversationId: unknown,
   ) => Promise<readonly CompactionHistoryRow[]>;
+  /**
+   * Reconcile with the archive IDs the conversation's loaded Turns reference.
+   * A listing covers the IDs observed when it starts, so an ID the endpoint
+   * never lists (child scope, pruned, failed-attempt placeholder) costs at
+   * most one listing; only a newly referenced ID lists again.
+   */
+  readonly observe: (
+    conversationId: unknown,
+    archiveIds: readonly string[],
+  ) => void;
   readonly limits: typeof COMPACTION_HISTORY_LIMITS;
 }
 
@@ -65,6 +81,15 @@ interface HistoryRecord {
   readonly loadedAt: number;
   readonly history: readonly CompactionHistoryRow[];
   readonly totalCount: number;
+  readonly archiveIds: ReadonlySet<string>;
+}
+
+interface ConversationHistory {
+  record: HistoryRecord | null;
+  /** Archive IDs the loaded Turns referenced at the latest observation. */
+  observed: readonly string[] | null;
+  /** Observed IDs when the latest listing started; null before any listing. */
+  covered: ReadonlySet<string> | null;
 }
 
 const EMPTY_HISTORY: readonly CompactionHistoryRow[] = Object.freeze([]);
@@ -137,45 +162,66 @@ export function createCompactionHistoryState(
   ports: CompactionHistoryStatePorts,
 ): CompactionHistoryState {
   const now = ports.now ?? Date.now;
-  const records = new Map<string, HistoryRecord>();
+  const conversations = new Map<string, ConversationHistory>();
   const inflight = new Map<string, Promise<CompactionListPayload>>();
 
-  const touch = (conversationId: string, record: HistoryRecord): void => {
-    records.delete(conversationId);
-    records.set(conversationId, record);
+  /** Touch an existing conversation without admitting a new one. */
+  const existing = (conversationId: string): ConversationHistory | undefined => {
+    const conversation = conversations.get(conversationId);
+    if (conversation) {
+      conversations.delete(conversationId);
+      conversations.set(conversationId, conversation);
+    }
+    return conversation;
+  };
+
+  const admit = (conversationId: string): ConversationHistory => {
+    const conversation = existing(conversationId)
+      ?? { record: null, observed: null, covered: null };
+    conversations.set(conversationId, conversation);
+    while (conversations.size > COMPACTION_HISTORY_LIMITS.conversations) {
+      const oldest = conversations.keys().next().value;
+      if (oldest === undefined) break;
+      conversations.delete(oldest);
+    }
+    return conversation;
   };
 
   const store = (
     conversationId: string,
     payload: CompactionListPayload,
   ): void => {
-    const record = Object.freeze({
+    admit(conversationId).record = Object.freeze({
       loadedAt: now(),
       history: projectHistory(conversationId, payload),
       totalCount: payload.compactions.length,
+      archiveIds: new Set(payload.compactions.flatMap((value) => {
+        const id = objectValue(value).id;
+        return typeof id === 'string' && id ? [id] : [];
+      })),
     });
-    touch(conversationId, record);
-    while (records.size > COMPACTION_HISTORY_LIMITS.conversations) {
-      const oldest = records.keys().next().value;
-      if (oldest === undefined) break;
-      records.delete(oldest);
-    }
   };
 
   const get = (conversationId: unknown): readonly CompactionHistoryRow[] => {
     const key = String(conversationId || '');
-    const record = key ? records.get(key) : undefined;
-    if (!record) return EMPTY_HISTORY;
-    touch(key, record);
-    return record.history;
+    return (key && existing(key)?.record?.history) || EMPTY_HISTORY;
   };
 
-  const count = (conversationId: unknown): number => {
+  const count = (conversationId: unknown): number | null => {
     const key = String(conversationId || '');
-    const record = key ? records.get(key) : undefined;
-    if (!record) return 0;
-    touch(key, record);
-    return record.totalCount;
+    const record = key ? existing(key)?.record : null;
+    return record ? record.totalCount : null;
+  };
+
+  const reconcile = (key: string): void => {
+    const conversation = conversations.get(key);
+    const observed = conversation?.observed;
+    if (!conversation || !observed || inflight.has(key)) return;
+    const { covered, record } = conversation;
+    if (covered && observed.every((id) => (
+      covered.has(id) || record?.archiveIds.has(id)
+    ))) return;
+    list(key, { force: true }).then(() => ports.onRefresh?.(), () => undefined);
   };
 
   const list = async (
@@ -187,13 +233,14 @@ export function createCompactionHistoryState(
     const pending = inflight.get(key);
     if (pending) return pending;
 
-    const record = records.get(key);
+    const record = existing(key)?.record;
     if (!options?.force && record
         && now() - record.loadedAt < COMPACTION_HISTORY_LIMITS.freshMs) {
-      touch(key, record);
       return Object.freeze({ compactions: record.history });
     }
 
+    const conversation = admit(key);
+    conversation.covered = new Set(conversation.observed ?? []);
     const request = Promise.resolve()
       .then(() => ports.list(key))
       .then(normalizePayload)
@@ -207,6 +254,7 @@ export function createCompactionHistoryState(
       return await request;
     } finally {
       if (tracked && inflight.get(key) === request) inflight.delete(key);
+      reconcile(key);
     }
   };
 
@@ -220,11 +268,24 @@ export function createCompactionHistoryState(
     return get(key);
   };
 
+  const observe = (
+    conversationId: unknown,
+    archiveIds: readonly string[],
+  ): void => {
+    const key = String(conversationId || '');
+    if (!key) return;
+    admit(key).observed = archiveIds.filter(
+      (id) => typeof id === 'string' && id.length > 0,
+    );
+    reconcile(key);
+  };
+
   return Object.freeze({
     count,
     get,
     list,
     refresh,
+    observe,
     limits: COMPACTION_HISTORY_LIMITS,
   });
 }

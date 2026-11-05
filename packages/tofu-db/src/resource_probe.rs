@@ -109,14 +109,24 @@ impl DaemonResourceBudget {
         snapshot: LaunchResourceSnapshot,
         volume_class: Option<VolumeClass>,
     ) -> Self {
+        Self::derive(snapshot, volume_class, &ResourceOverrides::from_launch_environment())
+    }
+
+    /// The snapshot, volume class and explicit overrides fully determine the
+    /// budget; only the launch entry above reads the process environment.
+    fn derive(
+        snapshot: LaunchResourceSnapshot,
+        volume_class: Option<VolumeClass>,
+        overrides: &ResourceOverrides,
+    ) -> Self {
         let Some(logical_cpus) = snapshot.logical_cpus.filter(|value| *value > 0) else {
-            return Self::lean(snapshot);
+            return Self::lean(snapshot, overrides);
         };
         if snapshot.memory_capacity_bytes.is_none() || snapshot.volume_free_bytes.is_none() {
-            return Self::lean(snapshot);
+            return Self::lean(snapshot, overrides);
         }
         let Some(memory_headroom_bytes) = snapshot.memory_headroom_bytes else {
-            return Self::lean(snapshot);
+            return Self::lean(snapshot, overrides);
         };
         let memory_connections = usize::try_from(memory_headroom_bytes / BYTES_PER_CONNECTION)
             .unwrap_or(usize::MAX)
@@ -145,21 +155,30 @@ impl DaemonResourceBudget {
                 memory_headroom_bytes / 16,
                 MIN_BLOCK_CACHE_BYTES,
                 memory_headroom_bytes,
-                "TOFU_DB_BLOCK_CACHE_MIB",
+                overrides.block_cache_mib.as_deref(),
             ),
             entity_page_cache_bytes: cache_capacity_bytes(
                 memory_headroom_bytes / 32,
                 MIN_PAGE_CACHE_BYTES,
                 memory_headroom_bytes,
-                "TOFU_DB_PAGE_CACHE_MIB",
+                overrides.page_cache_mib.as_deref(),
             ),
-            overlay_budget_bytes: overlay_budget_bytes(memory_headroom_bytes),
-            overlay_wal_watermark_bytes: overlay_wal_watermark_bytes(),
+            overlay_budget_bytes: overlay_budget_bytes(
+                memory_headroom_bytes,
+                overrides.overlay_budget_bytes.as_deref(),
+            ),
+            overlay_wal_watermark_bytes: overlay_wal_watermark_bytes(
+                overrides.overlay_wal_watermark_bytes.as_deref(),
+            ),
             checkpoint_materialize_batch_bytes: checkpoint_materialize_batch_bytes(
                 memory_headroom_bytes,
                 volume_class,
+                overrides.checkpoint_materialize_batch_bytes.as_deref(),
             ),
-            payload_segment_cache_bytes: payload_segment_cache_bytes(memory_headroom_bytes),
+            payload_segment_cache_bytes: payload_segment_cache_bytes(
+                memory_headroom_bytes,
+                overrides.payload_segment_cache_bytes.as_deref(),
+            ),
             snapshot,
             used_lean_fallback: false,
         }
@@ -171,7 +190,7 @@ impl DaemonResourceBudget {
             .is_some_and(|bytes| bytes < MIN_WRITABLE_VOLUME_FREE_BYTES)
     }
 
-    fn lean(snapshot: LaunchResourceSnapshot) -> Self {
+    fn lean(snapshot: LaunchResourceSnapshot, overrides: &ResourceOverrides) -> Self {
         Self {
             maximum_connections: LEAN_CONNECTIONS,
             maximum_frame_bytes: 16 * MIB as usize,
@@ -181,7 +200,9 @@ impl DaemonResourceBudget {
             block_cache_bytes: MIN_BLOCK_CACHE_BYTES,
             entity_page_cache_bytes: MIN_PAGE_CACHE_BYTES,
             overlay_budget_bytes: MIN_OVERLAY_BUDGET_PROBED_BYTES,
-            overlay_wal_watermark_bytes: overlay_wal_watermark_bytes(),
+            overlay_wal_watermark_bytes: overlay_wal_watermark_bytes(
+                overrides.overlay_wal_watermark_bytes.as_deref(),
+            ),
             checkpoint_materialize_batch_bytes: MAX_CHECKPOINT_MATERIALIZE_BATCH_BYTES,
             payload_segment_cache_bytes: PAYLOAD_SEGMENT_CACHE_BYTES,
             snapshot,
@@ -190,14 +211,40 @@ impl DaemonResourceBudget {
     }
 }
 
+/// Explicit operator escape hatches, read from the launch environment once per
+/// derivation. Each keeps its consumer's historical parse and clamp below.
+#[derive(Default)]
+struct ResourceOverrides {
+    block_cache_mib: Option<String>,
+    page_cache_mib: Option<String>,
+    overlay_budget_bytes: Option<String>,
+    overlay_wal_watermark_bytes: Option<String>,
+    checkpoint_materialize_batch_bytes: Option<String>,
+    payload_segment_cache_bytes: Option<String>,
+}
+
+impl ResourceOverrides {
+    fn from_launch_environment() -> Self {
+        let read = |name: &str| std::env::var(name).ok();
+        Self {
+            block_cache_mib: read("TOFU_DB_BLOCK_CACHE_MIB"),
+            page_cache_mib: read("TOFU_DB_PAGE_CACHE_MIB"),
+            overlay_budget_bytes: read("TOFU_DB_OVERLAY_BUDGET_BYTES"),
+            overlay_wal_watermark_bytes: read("TOFU_DB_OVERLAY_WAL_WATERMARK_BYTES"),
+            checkpoint_materialize_batch_bytes: read("TOFU_DB_CHECKPOINT_MATERIALIZE_BATCH_BYTES"),
+            payload_segment_cache_bytes: read("TOFU_DB_PAYLOAD_SEGMENT_CACHE_BYTES"),
+        }
+    }
+}
+
 /// Resolve one hot-data cache budget: the probed share clamped between the
-/// legacy floor and a headroom-derived ceiling, with an explicit MiB env override
+/// legacy floor and a headroom-derived ceiling, with an explicit MiB override
 /// winning over the probe (matching the timer-cap override convention).
 fn cache_capacity_bytes(
     probed_share: u64,
     floor: usize,
     memory_headroom_bytes: u64,
-    env_name: &str,
+    override_mib: Option<&str>,
 ) -> usize {
     let ceiling = usize::try_from(memory_headroom_bytes / HOT_CACHE_OVERRIDE_HEADROOM_DIVISOR)
         .unwrap_or(usize::MAX)
@@ -205,8 +252,7 @@ fn cache_capacity_bytes(
     let probed = usize::try_from(probed_share)
         .unwrap_or(usize::MAX)
         .clamp(floor, ceiling);
-    std::env::var(env_name)
-        .ok()
+    override_mib
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .map(|mib| mib.saturating_mul(MIB as usize).min(ceiling))
@@ -217,15 +263,14 @@ fn cache_capacity_bytes(
 /// Overlay merge byte budget: headroom/128 between the measured 8 MiB floor
 /// and the consumer's 256 MiB structural clamp; the explicit byte-unit
 /// override keeps the consumer's historical 1..256 MiB clamp.
-fn overlay_budget_bytes(memory_headroom_bytes: u64) -> usize {
+fn overlay_budget_bytes(memory_headroom_bytes: u64, override_bytes: Option<&str>) -> usize {
     let probed = usize::try_from(memory_headroom_bytes / 128)
         .unwrap_or(usize::MAX)
         .clamp(
             MIN_OVERLAY_BUDGET_PROBED_BYTES,
             crate::entity::OVERLAY_BUDGET_BYTES_MAX,
         );
-    std::env::var("TOFU_DB_OVERLAY_BUDGET_BYTES")
-        .ok()
+    override_bytes
         .and_then(|value| value.parse::<usize>().ok())
         .map(|value| {
             value.clamp(
@@ -240,10 +285,9 @@ fn overlay_budget_bytes(memory_headroom_bytes: u64) -> usize {
 /// historical 48 MiB default), so the backstop derives from the WAL geometry
 /// by construction. The explicit override keeps the consumer's clamp, which
 /// preserves ≥4 MiB of headroom under the 64 MiB active-WAL hard ceiling.
-fn overlay_wal_watermark_bytes() -> u64 {
+fn overlay_wal_watermark_bytes(override_bytes: Option<&str>) -> u64 {
     let probed = crate::ACTIVE_LOG_ROTATE_BYTES * 4 / 5;
-    std::env::var("TOFU_DB_OVERLAY_WAL_WATERMARK_BYTES")
-        .ok()
+    override_bytes
         .and_then(|value| value.parse::<u64>().ok())
         .map(|value| {
             value.clamp(
@@ -262,6 +306,7 @@ fn overlay_wal_watermark_bytes() -> u64 {
 fn checkpoint_materialize_batch_bytes(
     memory_headroom_bytes: u64,
     volume_class: Option<VolumeClass>,
+    override_bytes: Option<&str>,
 ) -> u64 {
     let probed = match volume_class {
         Some(VolumeClass::Network) => MAX_CHECKPOINT_MATERIALIZE_BATCH_BYTES,
@@ -271,8 +316,7 @@ fn checkpoint_materialize_batch_bytes(
         ),
     };
     const CEILING: u64 = crate::payload_segment::MAX_SEGMENT_PAYLOAD_BYTES / 2;
-    std::env::var("TOFU_DB_CHECKPOINT_MATERIALIZE_BATCH_BYTES")
-        .ok()
+    override_bytes
         .and_then(|raw| raw.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .map(|value| value.min(CEILING))
@@ -282,19 +326,14 @@ fn checkpoint_materialize_batch_bytes(
 /// Verified open-segment index cache: headroom/64 between the legacy 64 MiB
 /// floor and the consumer's 16 GiB clamp; the explicit override keeps the
 /// consumer's exact semantics (including 0 = disabled).
-fn payload_segment_cache_bytes(memory_headroom_bytes: u64) -> usize {
+fn payload_segment_cache_bytes(memory_headroom_bytes: u64, override_bytes: Option<&str>) -> usize {
     let probed = usize::try_from(memory_headroom_bytes / 64)
         .unwrap_or(usize::MAX)
         .clamp(
             PAYLOAD_SEGMENT_CACHE_BYTES,
             crate::payload_segment::MAX_SEGMENT_CACHE_BUDGET_BYTES,
         );
-    crate::payload_segment::segment_cache_budget_override(
-        std::env::var("TOFU_DB_PAYLOAD_SEGMENT_CACHE_BYTES")
-            .ok()
-            .as_deref(),
-    )
-    .unwrap_or(probed)
+    crate::payload_segment::segment_cache_budget_override(override_bytes).unwrap_or(probed)
 }
 
 fn timer_live_capacity(_logical_cpus: usize) -> usize {
@@ -855,47 +894,53 @@ nas/share /data/nested nfs4 rw,relatime 0 0
         assert!(disk_pressure.has_volume_pressure());
     }
 
+    /// Probe specifications pin the explicit-override input empty, so an
+    /// operator's launch environment cannot change their expectations.
+    fn probed(snapshot: LaunchResourceSnapshot, volume_class: Option<VolumeClass>) -> DaemonResourceBudget {
+        DaemonResourceBudget::derive(snapshot, volume_class, &ResourceOverrides::default())
+    }
+
     #[test]
     fn hot_data_cache_budgets_scale_with_headroom_and_floor_at_lean() {
         // Probe failure keeps the legacy laptop-sized defaults.
-        let lean = DaemonResourceBudget::from_snapshot(LaunchResourceSnapshot::default());
+        let lean = probed(LaunchResourceSnapshot::default(), None);
         assert!(lean.used_lean_fallback);
         assert_eq!(lean.block_cache_bytes, 32 * MIB as usize);
         assert_eq!(lean.entity_page_cache_bytes, 16 * MIB as usize);
 
         // A pressured host still floors at the legacy defaults, never below.
-        let pressured = DaemonResourceBudget::from_snapshot(LaunchResourceSnapshot {
+        let pressured = probed(LaunchResourceSnapshot {
             logical_cpus: Some(8),
             memory_capacity_bytes: Some(1024 * MIB),
             memory_headroom_bytes: Some(1),
             volume_free_bytes: Some(MIN_WRITABLE_VOLUME_FREE_BYTES),
-        });
+        }, None);
         assert_eq!(pressured.block_cache_bytes, 32 * MIB as usize);
         assert_eq!(pressured.entity_page_cache_bytes, 16 * MIB as usize);
 
         // 8 GiB headroom: /16 = 512 MiB payloads, /32 = 256 MiB pages.
-        let moderate = DaemonResourceBudget::from_snapshot(LaunchResourceSnapshot {
+        let moderate = probed(LaunchResourceSnapshot {
             logical_cpus: Some(16),
             memory_capacity_bytes: Some(64 * 1024 * MIB),
             memory_headroom_bytes: Some(8 * 1024 * MIB),
             volume_free_bytes: Some(1024 * 1024 * MIB),
-        });
+        }, None);
         assert_eq!(moderate.block_cache_bytes, 512 * MIB as usize);
         assert_eq!(moderate.entity_page_cache_bytes, 256 * MIB as usize);
 
         // Larger hosts keep scaling instead of plateauing at 2/1 GiB.
-        let roomy = DaemonResourceBudget::from_snapshot(LaunchResourceSnapshot {
+        let roomy = probed(LaunchResourceSnapshot {
             logical_cpus: Some(64),
             memory_capacity_bytes: Some(256 * 1024 * MIB),
             memory_headroom_bytes: Some(64 * 1024 * MIB),
             volume_free_bytes: Some(1024 * 1024 * MIB),
-        });
+        }, None);
         assert_eq!(roomy.block_cache_bytes, 4096 * MIB as usize);
         assert_eq!(roomy.entity_page_cache_bytes, 2048 * MIB as usize);
-        let larger = DaemonResourceBudget::from_snapshot(LaunchResourceSnapshot {
+        let larger = probed(LaunchResourceSnapshot {
             memory_headroom_bytes: Some(128 * 1024 * MIB),
             ..roomy.snapshot.clone()
-        });
+        }, None);
         assert_eq!(larger.block_cache_bytes, roomy.block_cache_bytes * 2);
         assert_eq!(larger.entity_page_cache_bytes, roomy.entity_page_cache_bytes * 2);
     }
@@ -912,7 +957,7 @@ nas/share /data/nested nfs4 rw,relatime 0 0
         }
 
         // Probe failure keeps the measured personal defaults.
-        let lean = DaemonResourceBudget::from_snapshot(LaunchResourceSnapshot::default());
+        let lean = probed(LaunchResourceSnapshot::default(), None);
         assert!(lean.used_lean_fallback);
         assert_eq!(lean.overlay_budget_bytes, 8 * MIB as usize);
         assert_eq!(lean.overlay_wal_watermark_bytes, 48 * MIB);
@@ -920,7 +965,7 @@ nas/share /data/nested nfs4 rw,relatime 0 0
         assert_eq!(lean.payload_segment_cache_bytes, 64 * MIB as usize);
 
         // A pressured host still floors, never below the defaults.
-        let pressured = DaemonResourceBudget::from_snapshot(snapshot(1));
+        let pressured = probed(snapshot(1), None);
         assert_eq!(pressured.overlay_budget_bytes, 8 * MIB as usize);
         assert_eq!(pressured.checkpoint_materialize_batch_bytes, 8 * MIB);
         assert_eq!(pressured.payload_segment_cache_bytes, 64 * MIB as usize);
@@ -928,10 +973,7 @@ nas/share /data/nested nfs4 rw,relatime 0 0
         // 8 GiB headroom on a local volume: /128 = 64 MiB overlay, /256 =
         // 32 MiB materialize batch (the packer's steady-state target),
         // /64 = 128 MiB segment index cache.
-        let local = DaemonResourceBudget::from_snapshot_with_volume_class(
-            snapshot(8 * 1024 * MIB),
-            Some(VolumeClass::Local),
-        );
+        let local = probed(snapshot(8 * 1024 * MIB), Some(VolumeClass::Local));
         assert_eq!(local.overlay_budget_bytes, 64 * MIB as usize);
         assert_eq!(local.checkpoint_materialize_batch_bytes, 32 * MIB);
         assert_eq!(local.payload_segment_cache_bytes, 128 * MIB as usize);
@@ -939,22 +981,16 @@ nas/share /data/nested nfs4 rw,relatime 0 0
 
         // Same headroom on a network volume keeps the 8 MiB materialize
         // floor: one fenced step already costs ~300 ms there.
-        let network = DaemonResourceBudget::from_snapshot_with_volume_class(
-            snapshot(8 * 1024 * MIB),
-            Some(VolumeClass::Network),
-        );
+        let network = probed(snapshot(8 * 1024 * MIB), Some(VolumeClass::Network));
         assert_eq!(network.checkpoint_materialize_batch_bytes, 8 * MIB);
         assert_eq!(network.overlay_budget_bytes, 64 * MIB as usize);
 
         // An unobserved volume class derives like a local one.
-        let unobserved = DaemonResourceBudget::from_snapshot(snapshot(8 * 1024 * MIB));
+        let unobserved = probed(snapshot(8 * 1024 * MIB), None);
         assert_eq!(unobserved.checkpoint_materialize_batch_bytes, 32 * MIB);
 
         // 64 GiB headroom hits the bounded ceilings, never above.
-        let roomy = DaemonResourceBudget::from_snapshot_with_volume_class(
-            snapshot(64 * 1024 * MIB),
-            Some(VolumeClass::Local),
-        );
+        let roomy = probed(snapshot(64 * 1024 * MIB), Some(VolumeClass::Local));
         assert_eq!(
             roomy.overlay_budget_bytes,
             crate::entity::OVERLAY_BUDGET_BYTES_MAX
@@ -971,7 +1007,40 @@ nas/share /data/nested nfs4 rw,relatime 0 0
         );
         assert!(
             crate::entity::OVERLAY_WAL_WATERMARK_BYTES_MAX
-                <= crate::ACTIVE_LOG_MAX_BYTES - 4 * MIB
+                <= crate::ACTIVE_LOG_CHECKPOINT_BYTES - 4 * MIB
+        );
+    }
+
+    #[test]
+    fn explicit_overrides_win_with_their_historical_clamps() {
+        let overrides = ResourceOverrides {
+            block_cache_mib: Some("64".to_owned()),
+            page_cache_mib: Some("32".to_owned()),
+            overlay_budget_bytes: Some("1".to_owned()),
+            overlay_wal_watermark_bytes: Some("1".to_owned()),
+            checkpoint_materialize_batch_bytes: Some((32 * MIB).to_string()),
+            payload_segment_cache_bytes: Some("0".to_owned()),
+        };
+        let snapshot = LaunchResourceSnapshot {
+            logical_cpus: Some(16),
+            memory_capacity_bytes: Some(64 * 1024 * MIB),
+            memory_headroom_bytes: Some(8 * 1024 * MIB),
+            volume_free_bytes: Some(1024 * 1024 * MIB),
+        };
+        let network = DaemonResourceBudget::derive(snapshot, Some(VolumeClass::Network), &overrides);
+        assert_eq!(network.block_cache_bytes, 64 * MIB as usize);
+        assert_eq!(network.entity_page_cache_bytes, 32 * MIB as usize);
+        assert_eq!(network.overlay_budget_bytes, crate::entity::OVERLAY_BUDGET_BYTES_MIN);
+        assert_eq!(
+            network.overlay_wal_watermark_bytes,
+            crate::entity::OVERLAY_WAL_WATERMARK_BYTES_MIN
+        );
+        assert_eq!(network.checkpoint_materialize_batch_bytes, 32 * MIB);
+        assert_eq!(network.payload_segment_cache_bytes, 0);
+        let lean = DaemonResourceBudget::derive(LaunchResourceSnapshot::default(), None, &overrides);
+        assert_eq!(
+            lean.overlay_wal_watermark_bytes,
+            crate::entity::OVERLAY_WAL_WATERMARK_BYTES_MIN
         );
     }
 

@@ -146,11 +146,25 @@ def test_dispatch_threads_authenticated_owner_to_single_and_batch(
     )
     kwargs = {'task': {'_userId': 42}}
 
-    assert tools._exec_grep_search(
+    assert tools._exec_search_files(
         {'pattern': 'x'}, str(tmp_path), 'conv', 'task', kwargs) == 'single'
     assert single[0]['owner_user_id'] == 42
 
-    assert tools._exec_grep_search(
+    assert tools._exec_search_files(
         {'searches': [{'pattern': 'x'}]},
         str(tmp_path), 'conv', 'task', kwargs) == 'batch'
     assert batch[0]['owner_user_id'] == 42
+
+
+def test_retired_grep_search_name_dispatches_like_search_files(tmp_path, monkeypatch):
+    """Frozen catalogs may still declare ``grep_search``; it runs the same search."""
+    from lib.project_mod import tools
+
+    monkeypatch.setenv('TOFU_TREE_INDEX_DISABLE', '1')
+    (tmp_path / 'a.py').write_text('needle-retired\n')
+    current = tools.execute_tool(
+        'search_files', {'pattern': 'needle-retired'}, str(tmp_path))
+    retired = tools.execute_tool(
+        'grep_search', {'pattern': 'needle-retired'}, str(tmp_path))
+    assert 'a.py' in current
+    assert retired == current

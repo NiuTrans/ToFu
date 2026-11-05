@@ -443,3 +443,38 @@ for (const action of ['analyze', 'compile']) {
     } finally {controller.destroyResearchWorkspace();dom.window.close();}
   });
 }
+
+test('programme handoff keeps visible protocol edits and original candidate source without starting work', async () => {
+  const dom = new JSDOM('<section id="researchWorkspace"></section>', {url:'http://localhost/tofu/'});
+  global.window=dom.window;global.document=dom.window.document;global.Element=dom.window.Element;global.location=dom.window.location;
+  const binding={capability:'experiment.execute',provider:'lab',tool:'mcp__lab__run',schema_hash:'pinned',enabled:true,argument_defaults:{seeds:[3,7]},notes:''};
+  const workspace={revision:1,direction:'handoff',lang:'en',stage:'protocol',selected_idea_id:'idea',selected_idea_source_task_id:'original-source',
+    hypothesis:'Saved hypothesis',protocol:{falsifier:'Saved falsifier',random_seeds:[3,7],stop_conditions:['Null effect']},capability_bindings:[binding],
+    runs:[],claims:[],manuscript:{},source_files:[],figures:[],tables:[],compilation:{status:'not_run'},publication:{}};
+  const routes=[];
+  const registry={_researchStream:{direction:'handoff',lang:'en',status:'done',taskId:'later-task',acceptedIdeas:[{id:'idea',title:'Candidate'}]},
+    Api:{research:{workspace:async()=>({workspace}),capabilities:async()=>({catalog:{capabilities:[],tools:[]}})}}};
+  const ports={'../../../../feature-registry':{featureRegistry:registry,readLiveRuntimeBinding:()=>7},
+    '../../../../application-shell/page-host':{goToWorkspace:route=>routes.push(route)},
+    './manuscript':{ResearchManuscript:class {show(){} hide(){} destroy(){}}}};
+  const controller=load('controllers/workspace.ts',ports);
+  try {
+    await controller.loadResearchWorkspace('handoff');
+    document.querySelector('[data-rsw-field="hypothesis"]').value='Visible edited hypothesis';
+    document.querySelector('[data-rsw-field="protocol.falsifier"]').value='Visible edited falsifier';
+    document.querySelector('[data-research-programme]').click();
+    const drafts=load('../programs/drafts.ts');
+    const store=drafts.createProgramDraftStore({owner:()=>7,scope:'/tofu/',storage:()=>window.localStorage});
+    const identity=drafts.programmeCreationDraftIdentity(routes[0]);
+    const saved=store.read(identity);
+    assert.deepEqual(saved.researchSource,{task_id:'original-source',idea_id:'idea'});
+    assert.equal(saved.researchContext.hypothesis,'Visible edited hypothesis');
+    assert.equal(saved.researchContext.protocol.falsifier,'Visible edited falsifier');
+    assert.deepEqual(saved.researchContext.protocol.random_seeds,[3,7]);
+    assert.deepEqual(saved.researchContext.capability_bindings,[binding]);
+    document.querySelector('[data-rsw-field="hypothesis"]').value='Later workspace edit';
+    document.querySelector('[data-research-programme]').click();
+    assert.deepEqual(store.read(identity),saved,'reopening must preserve the existing intake draft');
+    assert.deepEqual(routes,[routes[0],routes[0]]);
+  } finally {controller.destroyResearchWorkspace();dom.window.close();delete global.location;}
+});

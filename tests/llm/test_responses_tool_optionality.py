@@ -10,7 +10,9 @@ from lib.swarm.message_contract import CONTRACT
 pytestmark = pytest.mark.unit
 
 
-@pytest.mark.parametrize('profile', ['compatible', 'codex'])
+# The generic wire dialect is "default"; "compatible" names the separate
+# route feature profile and must not rely on unknown-dialect fallback.
+@pytest.mark.parametrize('profile', ['default', 'codex'])
 @pytest.mark.parametrize('strict', ['omitted', False, True])
 def test_conversion_preserves_tool_optionality_without_implicit_strict_normalization(profile, strict):
     tools = deepcopy(CONTRACT['tools'])

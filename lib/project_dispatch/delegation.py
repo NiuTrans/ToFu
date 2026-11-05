@@ -2,28 +2,86 @@
 
 The ordinary Coordinator tool assembly issues a worker capability ceiling. A
 tool call may narrow it, never manufacture it from arguments. Durable source
-Turn/Attempt checks and the repository CAS own authorization and aggregate
-allowances. Worker execution remains the ordinary command/Turn/task pipeline.
+Turn/Attempt checks and the repository CAS own authorization and frozen policy.
+Requests have no spend or concurrency ceiling. Worker execution remains the
+ordinary command/Turn/task pipeline. Workers run on the Coordinator
+conversation's ``workerModel`` setting, else the owner's default model, never
+implicitly on the Coordinator's own model (docs/ROUTER.md R5): resolve_worker_model
+and admit_worker_model are that resolver and its route admission.
 """
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from lib.identity import PrincipalContext
 from .repository import CONTRACT, ProjectDispatchError, _validate_schema
 
 
-class DelegationAllowanceExhausted(ProjectDispatchError):
-    """Finite cohort reservation is occupied or spent; no authority failure."""
-
-
 @dataclass(frozen=True)
 class CoordinatorWorkerPolicy:
+    """Issued Worker ceiling. ``model`` is the Workers' model, None until the first
+    delegation of a request resolves it (resolve_worker_model reads storage, so
+    per-round tool assembly never does); continuations of the Coordinator
+    itself keep ``coordinator_model``."""
     tools: tuple[str, ...]
-    model: str
+    model: str | None
     config: dict
-    coordinator_tools: tuple[str, ...] = ()
+    coordinator_tools: tuple[str, ...]
+    coordinator_model: str
+
+
+def owner_default_model(owner: int) -> str:
+    """The model an owner's new conversations default to."""
+    from lib.identity import require_user_id
+    require_user_id(owner, context='owner default model')
+    # TODO(enterprise): the default model is server configuration
+    # (model_defaults.default_model); a per-owner default belongs in that
+    # owner's model-routing settings.
+    import lib
+    return str(getattr(lib, 'LLM_MODEL', '') or '')
+
+
+def admit_worker_model(owner: int, model: str, *, tenant_id: str | None = None) -> str:
+    """Admit an owner's Worker model choice through the ordinary route resolver."""
+    if not isinstance(model, str) or not model.strip() or len(model) > 256:
+        raise ValueError('workerModel must contain 1–256 characters')
+    from lib.conv_config import canonicalise_model_id
+    from lib.model_routing import ModelRoutingError, ModelRoutingRepository, OwnerBoundary, \
+        resolve_compatible_model
+    model = canonicalise_model_id(model.strip())
+    document = ModelRoutingRepository().get(OwnerBoundary.create(owner, tenant_id)).document
+    try:
+        resolve_compatible_model(document, model)
+    except ModelRoutingError as error:
+        raise ValueError(f'workerModel {model!r} is not routable for this owner: {error}') from error
+    return model
+
+
+def resolve_worker_model(task) -> str:
+    """The Workers' model for this Coordinator request, pinned on the task.
+
+    The bound Coordinator conversation's ``workerModel`` wins; otherwise the
+    owner's default model. Models never choose it: only the owner's setting
+    (written through ProjectCoordinationRepository.set_worker_model) does.
+    """
+    pinned = task.get('_coordinatorWorkerModel')
+    if isinstance(pinned, str) and pinned:
+        return pinned
+    from lib.tasks_pkg.coordinator_policy import coordinator_scope
+    from lib.tasks_pkg.manager import task_user_id
+    scope = coordinator_scope(task)
+    owner = scope['user_id'] if scope else task_user_id(task)
+    model = ''
+    if scope:
+        from lib.conversations.project_coordination import ProjectCoordinationRepository
+        model = ProjectCoordinationRepository(owner).worker_model(scope['project_path'])
+    model = model or owner_default_model(owner)
+    if not model:
+        raise PermissionError('No Worker model: configure a default model or this Coordinator’s '
+                              'Worker model, then delegate again')
+    task['_coordinatorWorkerModel'] = model
+    return model
 
 
 def request_delegation(repository, task):
@@ -42,11 +100,15 @@ def issued_worker_policy(repository, task):
     """Resumed human attempts retain the first worker capability/model ceiling."""
     _, prior = request_delegation(repository, task)
     if prior is None:
-        return task['_coordinatorWorkerPolicy']
+        issued = task['_coordinatorWorkerPolicy']
+        return issued if issued.model else replace(issued, model=resolve_worker_model(task))
     request = prior['request']; policy = request['delegation']['policy']
     controls = policy.get('continuation') or {}
+    # The first Worker's request records the Workers' model; continuation
+    # controls record the Coordinator's own model.
     return CoordinatorWorkerPolicy(tuple(controls.get('workerTools', request['profile']['tools'])),
-        controls.get('model', request['model']), deepcopy(policy['config']), tuple(controls.get('tools', ())))
+        request['model'], deepcopy(policy['config']), tuple(controls.get('tools', ())),
+        controls.get('model', request['model']))
 
 
 def worker_control(repository, task, row):
@@ -66,15 +128,21 @@ def worker_control(repository, task, row):
     return origin
 
 
-def capture_worker_policy(task, config, catalog, model):
-    """Called before the Coordinator's own planning-only tool projection."""
+def capture_worker_policy(task, config, catalog, model, *, worker_model=None):
+    """Called before the Coordinator's own planning-only tool projection.
+
+    ``model`` is the Coordinator's own model. ``worker_model`` pins the Workers'
+    model; omitted, the first delegation resolves it with resolve_worker_model.
+    """
     from .continuation import current_continuation
     continuation = current_continuation(task)
     if continuation is not None:
         policy = continuation['request']['delegation']['policy']
         controls = policy['continuation']
+        # Grants issued before separate Worker models recorded one shared model.
         task['_coordinatorWorkerPolicy'] = CoordinatorWorkerPolicy(
-            tuple(controls['workerTools']), controls['model'], deepcopy(policy['config']), tuple(controls['tools']))
+            tuple(controls['workerTools']), controls.get('workerModel', controls['model']),
+            deepcopy(policy['config']), tuple(controls['tools']), controls['model'])
         return
     denied = set(CONTRACT['workerDeniedTools'])
     names = tuple(sorted({'search_tools', 'execute_tools'} | {
@@ -83,12 +151,14 @@ def capture_worker_policy(task, config, catalog, model):
     selected = {key: deepcopy(config[key]) for key in keys if config.get(key) is not None}
     # Arbitrary program execution obscures independent worker ownership. The
     # regular batch transport remains available and every member is admitted.
-    from lib.context_experiment_flags import normalize_context_experiment_flags
-    selected['tools'] = {**normalize_context_experiment_flags(config)['tools'], 'programmaticCalling': 'off'}
+    from lib.tasks_pkg.coordinator_policy import coordinator_tool_settings
+    selected['tools'] = coordinator_tool_settings(config)
     selected.update(schedulerEnabled=False, humanGuidanceEnabled=False)
     visible = {item['function']['name'] for item in catalog} | {'search_tools', 'execute_tools'}
     controls = tuple(name for name in CONTRACT['continuationTools'] if name in visible)
-    task['_coordinatorWorkerPolicy'] = CoordinatorWorkerPolicy(names, model, selected, controls)
+    if worker_model is not None:
+        task['_coordinatorWorkerModel'] = worker_model
+    task['_coordinatorWorkerPolicy'] = CoordinatorWorkerPolicy(names, worker_model, selected, controls, model)
 
 
 def source_for_task(repository, task, *, for_budget=False):
@@ -140,53 +210,32 @@ def policy_for_task(repository, task, attempt):
     if continuation is not None:
         return deepcopy(continuation['request']['delegation']['policy'])
     policy = task.get('_coordinatorWorkerPolicy')
-    if not isinstance(policy, CoordinatorWorkerPolicy) or not policy.tools or not policy.model:
+    if not isinstance(policy, CoordinatorWorkerPolicy) or not policy.tools or not policy.coordinator_model:
         raise PermissionError('Coordinator worker capabilities have not been issued by tool assembly')
     _, prior = request_delegation(repository, task)
     if prior is not None:
-        if prior['request']['delegation']['policy']['deadline'] <= repository.clock():
-            raise PermissionError('Original Coordinator request execution deadline expired')
         return deepcopy(prior['request']['delegation']['policy'])
-    from runtime_guards import task_concurrency_hard_ceiling
-    defaults = CONTRACT['delegationDefaults']
-    limits = (task.get('config') or {}).get('executionLimits') or {}
     from .request_budget import source_policy
     shared = source_policy(repository, task)
-    # Legacy tasks without the typed source receipt cannot share an explicit
-    # ceiling. Bound tasks reserve their own spend and Worker grants in one CAS.
-    if shared is None and any(limits.get(key) is not None for key in ('max_tokens', 'max_tool_calls')):
-        raise PermissionError('Automatic delegation cannot share this request\'s explicit execution budget yet; report the budget constraint instead of starting workers')
-    # The launch probe owns capacity. One slot is retained for the Coordinator;
-    # normal task admission remains the final physical-concurrency authority.
-    concurrent = max(1, task_concurrency_hard_ceiling() - 1)
-    start = attempt.get('createdAt', 0) / 1000
-    if start <= 0:
-        raise PermissionError('Delegation source has no durable start time')
-    deadline = start + defaults['durationSeconds']
-    if limits.get('deadline') is not None:
-        deadline = min(deadline, limits['deadline'])
+    result = {'config': deepcopy(policy.config)}
     if shared is not None:
-        deadline = shared['policy']['deadline']
-    if deadline <= repository.clock():
-        raise PermissionError('Original Coordinator request execution deadline expired')
-    result = {'config': deepcopy(policy.config), 'maxTotalTokens': defaults['maxTotalTokens'],
-              'maxTotalModelRequests': defaults['maxTotalModelRequests'],
-              'deadline': deadline, 'maxConcurrent': concurrent}
-    if shared is not None:
-        result.update(requestBudgetId=shared['id'], maxTotalTokens=shared['policy']['maxTokens'],
-            maxTotalModelRequests=shared['policy']['maxModelRequests'], maxTotalToolCalls=shared['policy']['maxToolCalls'],
-            deadline=shared['policy']['deadline'])
+        result['requestBudgetId'] = shared['id']
     if {'delegate_project_work', 'get_project_workers', 'finish_project_request', 'report_to_user'} <= set(policy.coordinator_tools):
-        result['continuation'] = {'version': 1, 'model': policy.model, 'workerTools': list(policy.tools),
-            'tools': list(policy.coordinator_tools), 'maxTokens': defaults['coordinatorTokens'],
-            'maxModelRequests': defaults['coordinatorModelRequests'], 'maxToolCalls': defaults['coordinatorToolCalls'],
-            'maxStalledTurns': defaults['maxStalledTurns']}
+        result['continuation'] = {'version': 1, 'model': policy.coordinator_model,
+            'workerModel': policy.model or resolve_worker_model(task), 'workerTools': list(policy.tools),
+            'tools': list(policy.coordinator_tools),
+            'maxStalledTurns': CONTRACT['delegationDefaults']['maxStalledTurns']}
     _validate_schema(result, 'workerPolicy')
     return result
 
 
-def validate_source(repository, request, *, check_deadline=True):
-    """Live policy/birth validation shared by admission, tools and model sends."""
+def validate_source(repository, request, *, value=None):
+    """Live policy/birth validation shared by admission, tools and model sends.
+
+    ``value`` is the caller's loaded dispatch snapshot. When it holds the request
+    budget row, that row decides: its authority fields are immutable and its
+    accounts append-only, so rereading it within the same check cannot differ.
+    """
     delegation = request.get('delegation')
     if request.get('profile', {}).get('mode') not in ('project', 'coordinator'):
         if delegation is not None:
@@ -198,10 +247,7 @@ def validate_source(repository, request, *, check_deadline=True):
         _validate_schema(request.get('coordinatorWake'), 'coordinatorWake')
         controls = delegation['policy']['continuation']
         if (request['coordinatorId'] != request['recipientId'] or request['model'] != controls['model']
-                or request['profile']['tools'] != controls['tools']
-                or request['profile']['maxToolCalls'] > controls['maxToolCalls']
-                or request['budget']['maxTokens'] > controls['maxTokens']
-                or request['budget']['maxModelRequests'] > controls['maxModelRequests']):
+                or request['profile']['tools'] != controls['tools']):
             raise PermissionError('Coordinator continuation differs from its original issued policy')
     elif 'coordinatorWake' in request:
         raise PermissionError('Worker cannot carry a Coordinator continuation')
@@ -218,16 +264,14 @@ def validate_source(repository, request, *, check_deadline=True):
     policy = delegation['policy']
     if policy.get('requestBudgetId'):
         from .request_budget import validate_policy
-        validate_policy(repository, repository._load(repository._selection(
-            budgets=[policy['requestBudgetId']], cohort=False))[0], request)
+        budget = policy['requestBudgetId']
+        if value is None or not any(row['id'] == budget for row in value.get('requestBudgets', [])):
+            value = repository._load(repository._selection(budgets=[budget], cohort=False))[0]
+        validate_policy(repository, value, request)
     from .repository import stopped_after
     if stopped_after(repository.owner, request['coordinatorId'], attempt.get('createdAt', 0) / 1000,
                      client=repository.client):
         raise PermissionError('Original Coordinator request was stopped')
-    budget = request['budget']
-    if (budget['maxTokens'] > policy['maxTotalTokens'] or budget['maxModelRequests'] > policy['maxTotalModelRequests']
-            or budget['deadline'] > policy['deadline'] or check_deadline and policy['deadline'] <= repository.clock()):
-        raise PermissionError('Worker allowance exceeds its original delegation policy')
 
 
 def worker_input(repository, request):
@@ -256,7 +300,7 @@ def review_worker(repository, task, arguments):
         raise ValueError('Only accepted work may request checkpoint publication')
     def record(value):
         row = repository._find(value, arguments['assignment_id'])
-        origin = worker_control(repository, task, row)
+        worker_control(repository, task, row)
         repository.validate_own(repository._admission(row), value=value)
         execution = row['execution'] or {}
         attempt = repository.get_attempt(execution.get('attemptId'))
@@ -271,9 +315,17 @@ def review_worker(repository, task, arguments):
             raise ValueError('Review requires the exact current completed worker result')
         review = {'actor': 'coordinator', 'decision': arguments['decision'],
                   'note': arguments['note'], 'resultRevision': arguments['result_revision']}
-        if row['review'] is not None and row['review'] != review:
-            raise ValueError('Worker review is immutable; delegate a new repair assignment')
         checkpoint = arguments.get('checkpoint_sha')
+        old = row.get('publication')
+        # The same execution can gain later projection revisions after review
+        # (late background-command output). Re-affirming the identical accepted
+        # checkpoint at the newer current revision is the only allowed change.
+        reaffirm = (row['review'] is not None and row['review'] != review and old is not None
+                    and row['review'].get('decision') == 'accept' and review['decision'] == 'accept'
+                    and checkpoint == old['checkpointSha']
+                    and review['resultRevision'] > row['review']['resultRevision'])
+        if row['review'] is not None and row['review'] != review and not reaffirm:
+            raise ValueError('Worker review is immutable; delegate a new repair assignment')
         if checkpoint:
             workspace = repository.get_workspace(repository.project, attempt.get('taskId'), user_id=repository.owner)
             if (not workspace or workspace.get('checkpoint_sha') != checkpoint
@@ -282,51 +334,35 @@ def review_worker(repository, task, arguments):
                     or workspace.get('project_root') != repository.project
                     or (workspace.get('origin') or {}).get('_projectDispatchAdmission') != repository._admission(row)):
                 raise ValueError('Publication requires the exact registered worker checkpoint')
+            origin = row['request']['delegation']
             publication = {'resultRevision': arguments['result_revision'], 'grantRevision': row['grant']['revision'],
                 'checkpointSha': checkpoint, 'subject': 'coordinator:' + origin['taskId'], 'requestedAt': repository.clock()}
-            old = row.get('publication')
+            if reaffirm:
+                old = None
             if old is not None and any(old[key] != publication[key]
                                       for key in ('resultRevision', 'grantRevision', 'checkpointSha')):
                 raise ValueError('Worker publication is immutable')
-            row['publication'] = old or publication
+            # Human steering may review earlier work. Keep publication anchored
+            # to that Worker's original grant, including when an authorized
+            # repeat review repairs an older receipt attributed to the reviewer.
+            row['publication'] = {**(old or publication), 'subject': publication['subject']}
         row['review'] = review
         return row
     return repository._change(record, selected=repository._assignment_selection(arguments['assignment_id']))
 
 
-def check_allowance(repository, value, request):
-    """Reserve a child grant atomically with existing grants, not in a new account.
+def validate_delegation_policy(repository, value, request):
+    """Fence request identity and issued capabilities inside the grant CAS.
 
-    Confirmed terminal usage releases unused allowance; unknown model effects
-    retain their entire reservation. This only distributes finite grant limits;
-    ExecutionBudget still admits and settles every physical model/tool request.
+    Legacy maxConcurrent values remain immutable receipt data, never admission
+    limits. Neither active Worker count nor local memory can refuse a grant.
     """
-    delegation = request['delegation']; policy = delegation['policy']
-    if policy.get('requestBudgetId'):
-        from .request_budget import require_grant_capacity
-        require_grant_capacity(repository, value, request)
-        return
-    tokens, requests, active = request['budget']['maxTokens'], request['budget']['maxModelRequests'], 0
+    delegation = request['delegation']
+    from .request_budget import validate_policy
+    validate_policy(repository, value, request)
     for row in value['assignments']:
         prior = row['request'].get('delegation')
         if not prior or prior['attemptId'] != delegation['attemptId']:
             continue
         if prior != delegation:
             raise ProjectDispatchError('Delegation source policy changed within one request')
-        budget = row['request']['budget']; attempts = row['modelAttempts']
-        execution = row['execution']
-        current = repository.get_attempt(execution['attemptId']) if execution else None
-        terminal = (isinstance(current, dict) and execution is not None
-                    and current.get('attemptId') == execution['attemptId']
-                    and current.get('turnId') == execution['turnId']
-                    and current.get('conversationId') == row['request']['recipientId']
-                    and current.get('status') in ('completed', 'failed', 'interrupted', 'truncated'))
-        confirmed = terminal and all(item['phase'] in ('settled', 'voided') and item['usage_complete'] for item in attempts)
-        tokens += sum(item['reported_tokens'] for item in attempts) if confirmed else budget['maxTokens']
-        requests += len(attempts) if confirmed else budget['maxModelRequests']
-        if not terminal and not row['grant']['revoked'] and row['request'].get('profile', {}).get('mode') != 'coordinator':
-            active += 1
-    if tokens > policy['maxTotalTokens'] or requests > policy['maxTotalModelRequests']:
-        raise DelegationAllowanceExhausted('Worker allowance is reserved or exhausted; await current results before delegating more')
-    if request['profile']['mode'] != 'coordinator' and active >= policy['maxConcurrent']:
-        raise ProjectDispatchError('Worker capacity is occupied; await current results before delegating more')

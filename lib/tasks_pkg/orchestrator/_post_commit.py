@@ -21,6 +21,10 @@ def finish_committed_task(task,*,messages,cfg,project_enabled,project_path,
         consolidate_profile=_spawn_async_profile_consolidation
     from lib.tasks_pkg.event_invariants import maybe_check_task_log
     maybe_check_task_log(task)
+    # Settlement stored this Turn's checkpoint; the compaction owner retires an
+    # owner-scheduled working-view request only if that view carries it.
+    from lib.tasks_pkg.compaction.api import settle_scheduled_compaction
+    settle_scheduled_compaction(task)
     # Terminal busy-state broadcast (): the CLEAR half of the busy
     # channel must be event-driven like the SET half is, not ride the next
     # incidental write. The status is terminal and the finalize latch is gone.

@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from lib.tools.program_results import describe_program_input, retain_program_result
+from lib.tools.program_results import describe_program_input, replayed_program_input, retain_program_result
 from lib.tools.result_envelope import ToolResultEnvelopeV2, ToolResultProgramInputV2, split_tool_result_delivery, with_program_input
 from lib.tools.result_value import capture_result
 
@@ -37,6 +37,35 @@ def test_partial_view_gets_metadata_without_replacing_source_or_recovery(retaine
     assert delivery.evidence['visibleBytes']==len(delivery.model_text.encode())
     assert json.loads(updated)['visibleBytes']==delivery.evidence['visibleBytes']
     assert entry.canonical.text()==json.dumps([{'amount':i} for i in range(96)])
+
+
+def test_identical_recapture_keeps_the_advertised_reference(retained):
+    task,entry=retained;names={'read_rows'}
+    same=retain_program_result(task,'read_rows',{},'prefetched',
+        capture_result(json.dumps([{'amount':i} for i in range(96)])),user_id=7)
+    assert same is entry
+    assert describe_program_input(task,entry,user_id=7,catalog_names=names) is not None
+    changed=retain_program_result(task,'read_rows',{},'changed',
+        capture_result(json.dumps([{'amount':i} for i in range(97)])),user_id=7)
+    assert changed is not None and changed.input_ref!=entry.input_ref
+    # A replaced binding is never re-advertised under its old reference.
+    assert describe_program_input(task,entry,user_id=7,catalog_names=names) is None
+
+
+def test_cached_envelope_replay_reuses_only_the_capture_it_names(retained):
+    task,entry=retained
+    metadata=describe_program_input(task,entry,user_id=7,catalog_names={'read_rows'})
+    envelope=with_program_input(ToolResultEnvelopeV2(status='partial',summary='96 rows; showing 64',
+        items=tuple(range(64)),truncated=True,raw_bytes=entry['bytes'],artifact_ref='tool-result:display',
+        cursor='64').to_envelope_text(),metadata)
+    assert replayed_program_input(task,'read_rows',{},envelope) is entry
+    assert replayed_program_input(task,'read_rows',{'page':2},envelope) is None
+    assert replayed_program_input(task,'read_rows',{},'plain legacy text') is None
+    forged=envelope.replace(entry.input_ref,'input_'+'f'*32)
+    assert replayed_program_input(task,'read_rows',{},forged) is None
+    retain_program_result(task,'read_rows',{},'changed',
+        capture_result(json.dumps([{'amount':i} for i in range(97)])),user_id=7)
+    assert replayed_program_input(task,'read_rows',{},envelope) is None
 
 
 def test_complete_and_legacy_results_keep_identical_model_bytes(retained):

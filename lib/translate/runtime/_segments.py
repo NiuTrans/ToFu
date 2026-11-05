@@ -21,7 +21,8 @@ from lib import translate_cache
 from lib.log import get_logger
 from lib.text_lang import is_predominantly_chinese
 
-from ..engine import _translate_freetext
+from ..engine import _translate_freetext, translation_first_byte_timeout_seconds
+from ..errors import TranslationDeadlineExhausted
 from ..policy import translation_max_429_attempts
 from ..notranslate import (
     _extract_notranslate_blocks,
@@ -65,6 +66,44 @@ def _segment_enrichment_deadline_seconds(total_chars):
             + max(0, int(total_chars)) / _SEGMENT_ENRICHMENT_CHARS_PER_SECOND,
         ),
     )
+
+
+class _SegmentPassBudget:
+    """Wall budget one enrichment pass spends on its sequential provider calls.
+
+    The first provider call always runs, because the budget floor may sit below
+    the engine's response-header bound. Every later call starts only while the
+    remaining budget still funds that bound. A smaller remnant cannot even wait
+    for the provider to answer, so the leftover clock, not the provider, would
+    decide the call. Unfunded work is counted and reported once as skipped,
+    never as a failed dispatch.
+    """
+
+    def __init__(self, seconds):
+        self.deadline_at = (
+            None if seconds is None
+            else time.monotonic() + max(0.0, float(seconds)))
+        self.calls_started = 0
+        self.not_dispatched = 0
+        self.cut_by_deadline = 0
+
+    def remaining(self):
+        if self.deadline_at is None:
+            return None
+        return max(0.0, self.deadline_at - time.monotonic())
+
+    def admits_call(self, chars):
+        remaining = self.remaining()
+        if remaining is None:
+            return True
+        if not self.calls_started:
+            return remaining > 0.0
+        return remaining >= translation_first_byte_timeout_seconds(chars)
+
+    def start_call(self):
+        """Count one provider call and return its share of the deadline."""
+        self.calls_started += 1
+        return self.remaining()
 
 
 class _SegmentBatchValidationError(ValueError):
@@ -237,36 +276,30 @@ def _translate_segment_batch(
 
 
 def _translate_pending_batch(
-        entries, system_prompt, source, target, log_tag, *, abort_check=None,
-        remaining_deadline_seconds=None, max_429_attempts=None,
+        entries, system_prompt, source, target, log_tag, *, budget,
+        abort_check=None, max_429_attempts=None,
         defer_on_shared_contention=False):
     """Translate one planned batch, falling back without weakening output."""
-    def call_deadline():
-        if remaining_deadline_seconds is None:
-            return None
-        remaining = remaining_deadline_seconds()
-        if remaining is None:
-            return None
-        return max(0.0, float(remaining))
-
-    def deadline_expired():
-        remaining = call_deadline()
-        return remaining is not None and remaining <= 0.0
+    if not budget.admits_call(sum(len(entry.body) for entry in entries)):
+        budget.not_dispatched += len(entries)
+        return {}
 
     if len(entries) == 1:
-        if deadline_expired():
-            return {}
         entry = entries[0]
-        translated, _usage = _translate_freetext(
-            entry.body,
-            system_prompt,
-            source=source,
-            target=target,
-            abort_check=abort_check,
-            overall_deadline=call_deadline(),
-            max_429_attempts=max_429_attempts,
-            defer_on_shared_contention=defer_on_shared_contention,
-        )
+        try:
+            translated, _usage = _translate_freetext(
+                entry.body,
+                system_prompt,
+                source=source,
+                target=target,
+                abort_check=abort_check,
+                overall_deadline=budget.start_call(),
+                max_429_attempts=max_429_attempts,
+                defer_on_shared_contention=defer_on_shared_contention,
+            )
+        except TranslationDeadlineExhausted:
+            budget.cut_by_deadline += 1
+            return {}
         restored = _reattach_notranslate_blocks(
             str(translated or '').strip(),
             list(entry.protected_blocks),
@@ -280,7 +313,7 @@ def _translate_pending_batch(
             source,
             target,
             abort_check=abort_check,
-            overall_deadline=call_deadline(),
+            overall_deadline=budget.start_call(),
             max_429_attempts=max_429_attempts,
             defer_on_shared_contention=defer_on_shared_contention,
         )
@@ -292,6 +325,9 @@ def _translate_pending_batch(
             len(entries),
             exc,
         )
+    except TranslationDeadlineExhausted:
+        budget.cut_by_deadline += len(entries)
+        return {}
     except Exception as exc:
         from lib.llm import AbortedError
 
@@ -307,14 +343,10 @@ def _translate_pending_batch(
         return {}
 
     results = {}
-    for entry in entries:
+    for index, entry in enumerate(entries):
         _raise_if_aborted(abort_check)
-        if deadline_expired():
-            logger.info(
-                '[Translate] segment enrichment deadline reached for %s; '
-                'skipping remaining isolated calls',
-                log_tag,
-            )
+        if not budget.admits_call(len(entry.body)):
+            budget.not_dispatched += len(entries) - index
             break
         try:
             translated, _usage = _translate_freetext(
@@ -323,7 +355,7 @@ def _translate_pending_batch(
                 source=source,
                 target=target,
                 abort_check=abort_check,
-                overall_deadline=call_deadline(),
+                overall_deadline=budget.start_call(),
                 max_429_attempts=max_429_attempts,
                 defer_on_shared_contention=defer_on_shared_contention,
             )
@@ -333,6 +365,8 @@ def _translate_pending_batch(
             ).strip()
             if restored:
                 results[entry.key] = restored
+        except TranslationDeadlineExhausted:
+            budget.cut_by_deadline += 1
         except Exception as exc:
             from lib.llm import AbortedError
 
@@ -461,15 +495,7 @@ def _translate_segments_to_map(segs, system_prompt, source, target, *,
     """
     seg_map = {}
     pending = []
-    deadline_at = (
-        time.monotonic() + max(0.0, float(overall_deadline))
-        if overall_deadline is not None else None
-    )
-
-    def remaining_deadline_seconds():
-        if deadline_at is None:
-            return None
-        return max(0.0, deadline_at - time.monotonic())
+    budget = _SegmentPassBudget(overall_deadline)
 
     def flush_pending():
         if not pending:
@@ -482,8 +508,8 @@ def _translate_segments_to_map(segs, system_prompt, source, target, *,
                 source,
                 target,
                 log_tag,
+                budget=budget,
                 abort_check=abort_check,
-                remaining_deadline_seconds=remaining_deadline_seconds,
                 max_429_attempts=max_429_attempts,
                 defer_on_shared_contention=defer_on_shared_contention,
             )
@@ -573,6 +599,13 @@ def _translate_segments_to_map(segs, system_prompt, source, target, *,
             logger.warning('[Translate] segment key=%s translate failed for '
                            '%s: %s', key, log_tag, e)
     flush_pending()
+    skipped = budget.not_dispatched + budget.cut_by_deadline
+    if skipped:
+        logger.info(
+            '[Translate] segment enrichment budget spent for %s: %d segments '
+            'skipped, not failed (%d not dispatched, %d cut at the deadline); '
+            'a later pass may translate them',
+            log_tag, skipped, budget.not_dispatched, budget.cut_by_deadline)
     if seg_map:
         logger.info('[Translate] built segment translation map for %s: '
                     '%d/%d segments', log_tag, len(seg_map), len(segs))

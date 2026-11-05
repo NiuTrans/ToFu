@@ -43,7 +43,7 @@ def test_evaluation_has_stable_exact_ground_truth_metrics():
         search_text_by_name=SEARCH_TEXT_BY_NAME)
     assert report['episodes'] == 3
     assert 0 <= report['recall_at_1'] <= report['recall_at_5'] <= 1
-    assert report['rows'][0]['target'] == 'grep_search'
+    assert report['rows'][0]['target'] == 'search_files'
 
 
 def test_selection_scoring_uses_oracle_not_model_verdict():

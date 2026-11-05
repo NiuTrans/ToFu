@@ -25,6 +25,9 @@ class EvolutionRecordStore:
                                retryable=True, retry_after_ms=0)
         if operation == 'record.delete':
             key=(payload['namespace'],payload['key'])
+            if (key in self.rows and 'expected_version' in payload
+                    and payload['expected_version'] != self.versions[key]):
+                raise StorageError('database_conflict', 'Storage record version conflict')
             deleted=self.rows.pop(key,None) is not None
             self.versions.pop(key,None)
             return {'deleted':deleted}
@@ -41,7 +44,8 @@ class EvolutionRecordStore:
             value = self.rows.get((payload['namespace'], payload['key']))
             return {'value': deepcopy(value), 'version': self.versions.get((payload['namespace'], payload['key']), 1)} if value else None
         assert operation == 'record.list'
-        return [{'key': key, 'value': deepcopy(value)} for (namespace, key), value in
+        return [{'key': key, 'value': deepcopy(value), 'version': self.versions.get((namespace, key), 1)}
+                for (namespace, key), value in
                 sorted(self.rows.items(), reverse=bool(payload.get('before_key'))) if namespace == payload['namespace']
                 and key.startswith(payload['prefix'])
                 and (not payload.get('after_key') or key > payload['after_key'])

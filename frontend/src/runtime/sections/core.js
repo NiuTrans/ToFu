@@ -143,7 +143,7 @@ let _igSelectedResolution = '1K';
 let _igSelectedCount = 1;
 let fetchEnabled = true,
   codeExecEnabled = false,
-  browserEnabled = false,
+  browserEnabled = true,   // always on — no toggle; a connected extension gates the tools
   desktopEnabled = false,
   memoryEnabled = true,
   schedulerEnabled = false,
@@ -166,6 +166,9 @@ let fetchEnabled = true,
    * case. Backend authority: lib/tasks_pkg/plan_mode.py (assembly wire
    * filter + dispatch rejection lane + prompt contract). */
   planMode = false,
+  /* Delegate Mode — the root agent only orchestrates; spawn_agents workers do
+   * all tool work. Backend authority: lib/tasks_pkg/delegate_mode.py. */
+  delegateMode = false,
   debugVisible = false,
   sidebarSearchQuery = "";
 Object.defineProperty(runtimeScope, 'memoryEnabled', {
@@ -388,6 +391,9 @@ function _rehydrateInjectRows(msg, base) {
       inboxCount: s.count || 0,
       inboxAgentIds: Array.isArray(s.agentIds) ? s.agentIds.filter(Boolean) : [],
       inboxPreviews: Array.isArray(s.previews) ? s.previews : [],
+
+      taskId: s.taskId ?? s._taskId,
+      attemptId: s.attemptId ?? s._attemptId,
     }, rnd - 1);
   }
   for (const p of peer) {
@@ -401,6 +407,9 @@ function _rehydrateInjectRows(msg, base) {
       peerRound: rnd,
       peerCount: p.count || 0,
       peerPreviews: Array.isArray(p.previews) ? p.previews : [],
+
+      taskId: p.taskId ?? p._taskId,
+      attemptId: p.attemptId ?? p._attemptId,
     }, rnd - 1);
   }
   for (const s of steer) {

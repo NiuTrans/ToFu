@@ -26,8 +26,23 @@ This package defines execution contracts shared by the full application and
 - `task_runtime.py` owns the optional terminal_persist durability port;
   `docs/DEFENSIVE_PATTERNS.md` and `test_research_action_terminal.py` own its
   settlement-before-visibility and pending-repair verification path.
+- `finish(commit_result=...)` owns capability completion effects under the
+  same terminal claim. `ExecutionSession.settle(on_completed=...)` runs that
+  commit only after successful resource release; failures preserve their cause
+  and freeze failed execution. Verify `test_task_completion_commit.py` alongside
+  terminal-candidate retry and execution cleanup contracts.
 - Keep interfaces usable by transient and durable compositions without making
   the transient runtime depend on repositories.
+
+TaskRuntime also observes entered workers independently of primary settlement.
+Its shared retention predicate protects active callbacks; verify
+`test_task_worker_observation.py` and the contract in `DEFENSIVE_PATTERNS.md`.
+Generic and chat workers share its context/observation envelope and background
+transport. Domain-owned submission supplies only its admission callable,
+error sink and optional queue observer; the explicit-executor entry returns
+the original Future. `finish(expected_task=...)` fences automatic crash
+settlement against same-ID replacements. Verify `test_chat_worker_submission.py`
+and the worker boundary in `docs/modules/task_engine.md`.
 
 `progress_ledger.py` owns bounded progress checkpoint serialization; the
 shared `lib/agent_loop/agent_loop.py` completed-round restoration ports are documented in
@@ -99,6 +114,8 @@ callback quiescence, cancellation-safe spawn and joined process close.
 Optional RoundPolicy gates every native HTTP round and acknowledges raw evidence;
 verify joined cancellation, exactly-once settlement attempts, ACK bounds and
 NativeRoundError cause preservation. Durable accounting policy remains external.
+Under concurrent_tool_dispatch a returned settlement carries a NativeToolOrder
+the policy must bind once; the ACK forwards it as tool_order (no authority).
 Explicit pending-tool checkpoint callbacks restore paid fees before domain
 queries and reuse progress/completion before new reservations. Verify exact
 observation order, sticky refusal, joined cancellation and priced installed
@@ -122,12 +139,15 @@ port. Verify candidate equality, callback/ACK joining, failure attribution and
 explicit retries; never infer persistence from process exit or rerun models.
 
 `worker_executor.py` injects app observations into the standard-library-only
-`tofu_workers.executor` lifecycle. Shared ownership rules are verified by worker
-executor and server-loop tests; standalone consumers must not import app state.
+`tofu_workers.executor` lifecycle and attaches each executor to an
+`ExecutorObservation` read at scrape time; jobs never publish gauges. Shared
+ownership rules are verified by worker executor and server-loop tests;
+standalone consumers must not import app state.
 
 `push_frames.py` binds Push launch hints to the shared immutable JSON file
 owner in `tofu_workers/json_frames.py`, including joined worker close. `push.py` owns authenticated routing,
-FIFO references and priority control lanes. Verify `test_push_frame_spool.py`
+FIFO references, per-socket latest-value positions and priority control lanes.
+Verify `test_push_frame_spool.py`, `test_push_latest_value.py`
 and the server Push lifecycle/socket tests; no temporary range becomes durable
 replay authority or a count/byte admission quota.
 

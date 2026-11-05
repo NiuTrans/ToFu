@@ -5,6 +5,7 @@ import pytest
 from lib.model_routing import ModelRef, NativeModelSelection, OwnerBoundary
 from lib.model_routing.domain import ModelRoutingError
 from lib.model_routing import dispatch_adapter as adapter
+from lib.model_routing.routing import compile_candidates
 from tests.model_routing.test_model_routing_contract import _full_document
 
 pytestmark = pytest.mark.unit
@@ -23,12 +24,14 @@ def _prepare(monkeypatch, secrets):
         return value
     repository = SimpleNamespace(
         get=lambda owner: SimpleNamespace(document=document, revision=3), resolve_secret=resolve)
-    def mint(**kwargs):
+    def prepare(**kwargs):
         handle = SimpleNamespace(slot=SimpleNamespace(), api_key=kwargs['api_key'])
         minted.append(handle)
         return handle
-    monkeypatch.setattr(adapter, 'mint_ephemeral_slot', mint)
-    monkeypatch.setattr(adapter, 'dispose_ephemeral_slot', lambda handle: disposed.append(handle))
+    monkeypatch.setattr(adapter, 'prepare_ephemeral_slot', prepare)
+    monkeypatch.setattr(adapter, 'publish_ephemeral_slots', lambda handles: None)
+    monkeypatch.setattr(adapter, 'dispose_ephemeral_slots',
+                        lambda handles: [disposed.append(handle) or True for handle in handles])
     return repository, minted, disposed
 
 
@@ -74,9 +77,9 @@ def test_infrastructure_or_authority_failure_stops_and_cleans_existing_handles(m
 def test_shared_credential_is_resolved_once_per_group_not_across_requests(monkeypatch):
     repository, minted, _ = _prepare(monkeypatch, ['working-key', 'other-key'])
     selection = NativeModelSelection(ModelRef('creator', 'alpha'), None, 'provider-a')
-    candidate = adapter.compile_candidates(repository.get(None).document, selection)[0]
-    monkeypatch.setattr(adapter, 'compile_candidates', lambda *a, **k: [candidate] * 12)
-    monkeypatch.setattr(adapter, 'compile_model_fallback_candidates', lambda *a, **k: [])
+    candidate = compile_candidates(repository.get(None).document, selection)[0]
+    monkeypatch.setattr(adapter.RouteCandidateCompiler, 'compile', lambda *a, **k: [candidate] * 12)
+    monkeypatch.setattr(adapter.RouteCandidateCompiler, 'compile_fallbacks', lambda *a, **k: [])
     calls = []
 
     def resolve(owner, reference):
@@ -100,11 +103,11 @@ def test_shared_missing_credential_is_not_reloaded_for_each_deployment(monkeypat
     failure = ModelRoutingError('credential unavailable', kind='credential_secret_missing')
     repository, minted, _ = _prepare(monkeypatch, [failure, 'working-key'])
     selection = NativeModelSelection(ModelRef('creator', 'alpha'), None, 'provider-a')
-    candidates = adapter.compile_candidates(repository.get(None).document, selection)
+    candidates = compile_candidates(repository.get(None).document, selection)
     assert len(candidates) == 2
-    monkeypatch.setattr(adapter, 'compile_candidates',
+    monkeypatch.setattr(adapter.RouteCandidateCompiler, 'compile',
                         lambda *a, **k: [candidates[0]] * 12 + [candidates[1]])
-    monkeypatch.setattr(adapter, 'compile_model_fallback_candidates', lambda *a, **k: [])
+    monkeypatch.setattr(adapter.RouteCandidateCompiler, 'compile_fallbacks', lambda *a, **k: [])
     original = repository.resolve_secret
     calls = []
 

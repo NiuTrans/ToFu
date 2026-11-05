@@ -68,7 +68,9 @@ from ._poll import (  # noqa: E402,F401
 # ── Continuation dispatch + background loop + resume ────────────────────────
 from ._loop import (  # noqa: E402,F401
     _execute_continuation,
+    check_timer_now,
     get_active_timer_count,
+    record_requeued_continuation,
     resume_active_timers,
     start_timer_loop,
 )
@@ -79,7 +81,8 @@ from ._runtime import shutdown_timer_watchers  # noqa: E402,F401
 
 # ── Public API ─────────────────────────────────────────────────────────────
 __all__ = [
-    'create_timer', 'cancel_timer', 'force_trigger_timer',
+    'create_timer', 'cancel_timer', 'force_trigger_timer', 'check_timer_now',
+    'record_requeued_continuation',
     'get_timer', 'list_active_timers', 'has_timer_history',
     'get_timer_poll_log',
     'poll_timer', 'start_timer_loop', 'resume_active_timers',

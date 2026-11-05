@@ -25,6 +25,7 @@ from lib.storage.errors import StorageError
 from lib.log import get_logger
 from lib.openapi import media_responses, api_meta
 from lib.request_parser import BadRequest, async_parse_body, parse_body
+from lib.turn_lifecycle import LifecycleNotFound
 
 from .auth import request_user_id, require_auth
 
@@ -137,8 +138,8 @@ def research_workspace_get():
         from lib.research.workspace import load_workspace_response
         result = load_workspace_response(direction, lang, user_id=int(request_user_id()),
                                          history_cursor=history_cursor)
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
     except Exception as exc:
         logger.error('[api_v1.research] workspace lookup failed: %s',
                      exc, exc_info=True)
@@ -176,8 +177,10 @@ async def research_workspace_put():
             expected_revision=expected_revision,
             user_id=int(request_user_id()),
         )
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
+    except LifecycleNotFound as exc:
+        return api_not_found(str(exc))
     except StorageError as exc:
         if exc.code == 'database_conflict':
             return api_conflict('research_workspace_stale')
@@ -228,8 +231,10 @@ def research_workspace_draft_protocol():
             user_id=int(request_user_id()),
             model=str(body.get('model') or ''),
             source_task_id=body.get('source_task_id'))
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
+    except LifecycleNotFound as exc:
+        return api_not_found(str(exc))
     except Exception as exc:
         logger.error('[api_v1.research] protocol draft failed: %s',
                      exc, exc_info=True)
@@ -291,8 +296,10 @@ async def research_manuscript_scaffold():
             expected_revision=expected_revision,
             user_id=int(request_user_id()),
         )
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
+    except LifecycleNotFound as exc:
+        return api_not_found(str(exc))
     except StorageError as exc:
         if exc.code == 'database_conflict':
             return api_conflict('research_workspace_stale')
@@ -373,10 +380,14 @@ def research_action_observations(task_id):
     from lib.research.action_observations import load_action_observation_page
     try:
         limit = int(request.args.get('limit', '8'))
+    except (TypeError, ValueError, OverflowError):
+        return api_bad_request('limit must be an integer', field='limit')
+    user_id = int(request_user_id())
+    try:
         return api_ok(load_action_observation_page(task_id,
-            user_id=int(request_user_id()), limit=limit, cursor=request.args.get('cursor', '')))
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+            user_id=user_id, limit=limit, cursor=request.args.get('cursor', '')))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
 
 
 @api_v1_research_bp.route('/api/v1/research/actions/<task_id>/effects', methods=['GET'])
@@ -389,10 +400,15 @@ def research_action_observations(task_id):
 def research_action_effects(task_id):
     from lib.research.action_observations import load_action_effect_page
     try:
-        return api_ok(load_action_effect_page(task_id, user_id=int(request_user_id()),
-            limit=int(request.args.get('limit', '8')), cursor=request.args.get('cursor', '')))
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+        limit = int(request.args.get('limit', '8'))
+    except (TypeError, ValueError, OverflowError):
+        return api_bad_request('limit must be an integer', field='limit')
+    user_id = int(request_user_id())
+    try:
+        return api_ok(load_action_effect_page(task_id, user_id=user_id,
+            limit=limit, cursor=request.args.get('cursor', '')))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
 
 
 @api_v1_research_bp.route('/api/v1/research/actions/<task_id>/model-calls', methods=['GET'])
@@ -405,10 +421,15 @@ def research_action_effects(task_id):
 def research_model_calls(task_id):
     from lib.research.model_accounting import load_model_calls_page
     try:
-        return api_ok(load_model_calls_page(task_id, user_id=int(request_user_id()),
-            limit=int(request.args.get('limit', '8')), cursor=request.args.get('cursor', '')))
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+        limit = int(request.args.get('limit', '8'))
+    except (TypeError, ValueError, OverflowError):
+        return api_bad_request('limit must be an integer', field='limit')
+    user_id = int(request_user_id())
+    try:
+        return api_ok(load_model_calls_page(task_id, user_id=user_id,
+            limit=limit, cursor=request.args.get('cursor', '')))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
 
 
 @api_v1_research_bp.route('/api/v1/research/actions/<task_id>/terminal', methods=['GET'])
@@ -419,8 +440,8 @@ def research_action_terminal(task_id):
     from lib.research.action_terminal import load_action_terminal
     try:
         return api_ok(load_action_terminal(task_id, user_id=int(request_user_id())))
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
 
 
 class _VerifiedObservationBody(ResponseBody):
@@ -476,8 +497,8 @@ def research_action_observation_original(task_id, ordinal):
     from lib.research.action_observations import prepare_action_observation_export
     try:
         prepared = prepare_action_observation_export(task_id, ordinal, user_id=int(request_user_id()))
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
     if prepared is None:
         return api_not_found('research_observation_not_found')
     manifest, spool, byte_count = prepared
@@ -500,8 +521,8 @@ def research_record_resume(task_id):
     from lib.research.records import resume_record
     try:
         return api_ok(resume_record(task_id, user_id=int(request_user_id())))
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
 
 
 @api_v1_research_bp.route('/api/v1/research/actions/<task_id>/resume', methods=['POST'])
@@ -520,10 +541,10 @@ def research_action_resume(task_id):
     from lib.research.action_continuation import resume_action
     try:
         return api_ok(resume_action(task_id, user_id=int(request_user_id())))
-    except LookupError:
-        return api_not_found('Research action not found')
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except LifecycleNotFound as exc:
+        return api_not_found(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
     except StorageError as exc:
         if exc.code == 'database_conflict':
             return api_conflict(str(exc), error_code='research_resume_conflict')
@@ -541,8 +562,8 @@ def research_unfinished_actions():
     try:
         return api_ok(discover_unfinished_actions(request.args.get('direction'),
             lang=request.args.get('lang','en'),user_id=int(request_user_id())))
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
 
 
 __all__ = ['api_v1_research_bp']

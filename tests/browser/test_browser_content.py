@@ -1,5 +1,7 @@
 """Target-aware browser content contracts; fixtures contain no live site data."""
 import json
+from urllib.parse import quote
+
 import pytest
 from lib.browser.content import collect_content, render_content
 
@@ -93,6 +95,40 @@ def test_dom_match_cannot_override_query():
                'network': {'responses': [capture({'items': [{'title': '网页提取'}, {'title': '深度检索'}]}, 'https://site.test/api/skills')]}}
     receipt = collect_content(payload, owner_user_id='41', target={'kind': 'list', 'query': '网页'})
     assert [r['title'] for r in receipt['records']] == ['网页提取']
+
+
+def test_dom_corroboration_requires_a_whole_rendered_unit():
+    """An untargeted API/state record is corroborated only when its title or
+    snippet equals a whole rendered text line, never by a page substring."""
+    telemetry = capture({'data': {'settings': [{'name': 'action'}, {'name': 'default', 'value': 1}]}},
+                        'https://mon.site.test/monitor_web/settings/browser-settings?bid=1')
+    feed = capture({'items': [{'title': 'Lakeside Cabin'},
+                              {'title': 'Lake', 'desc': 'Quiet rooms by the water'},
+                              {'title': 'Cabin rules', 'desc': 'rooms'}]}, 'https://site.test/api/feed')
+    payload = {'url': 'https://site.test/video/7',
+               'text': 'Interaction guide\nTake action today\nLakeside Cabin\nQuiet rooms by the water\nDefaults',
+               'network': {'responses': [telemetry, feed]},
+               'initialStatePayloads': [{'value': {'config': [{'name': 'action'},
+                                                               {'title': 'Lakeside Cabin', 'id': 'h1'}]}}]}
+    receipt = collect_content(payload, owner_user_id='41', representation='data')
+    assert [r['title'] for r in receipt['records']] == ['Lakeside Cabin', 'Lake']
+    assert not any('monitor_web' in e['url'] for e in receipt['evidence'])
+
+
+def test_requested_fields_reach_nested_objects_but_not_nested_records():
+    body = {'items': [{'title': 'coffee grinder', 'id': 'g1',
+                       'offers': {'price': '89.00', 'seller': {'name': 'Shop', 'rating': 2}},
+                       'author': {'name': 'Ann', 'id': 'author-id', 'currency': 'EUR'},
+                       'stats': [{'rating': 4.5}]}]}
+    receipt = collect_content({'url': 'https://site.test/search?q=coffee',
+                               'network': {'responses': [capture(body, 'https://site.test/api/feed')]}},
+                              owner_user_id='41',
+                              target={'kind': 'list', 'query': 'coffee', 'fields': ['price', 'rating', 'currency']})
+    [record] = receipt['records']
+    # Nearest nested object first; another titled object (author, seller)
+    # is a different record and never lends it fields.
+    assert record['fields'] == {'price': '89.00', 'rating': 4.5, 'id': 'g1'}
+    assert receipt['coverage']['missing_fields'] == ['currency', 'url']
 
 
 def test_blocked_long_article_and_navigation_are_not_content():
@@ -194,3 +230,85 @@ def test_within_budget_receipt_has_identical_evidence():
     full = json.loads(receipt.evidence_json)
     assert full['content'] == receipt['content']
     assert full['records'] == receipt['records']
+
+
+@pytest.mark.parametrize(('title', 'first_line', 'status'), [
+    ('403 Forbidden', '403 Forbidden', 'blocked'),
+    ('401 Unauthorized', '401 Unauthorized', 'blocked'),
+    ('407 Proxy Authentication Required', '407 Proxy Authentication Required', 'blocked'),
+    ('404 NOT FOUND', '404 Not Found', 'unavailable'),
+    ('502 Bad Gateway', '502 bad gateway', 'unavailable'),
+    ('504 Gateway Time-out', '504 Gateway Time-out', 'unavailable'),
+])
+def test_http_error_document_is_not_content(title, first_line, status):
+    """A default proxy/WAF error document names its status line in the title and renders it first."""
+    payload = {'url': 'https://www.example.test/hotels/list', 'title': title,
+               'text': first_line + '\nopenresty',
+               'network': {'responses': [capture({'items': [{'title': 'Lakeside room'}]}, 'https://www.example.test/api/hotels/list')]}}
+    receipt = collect_content(payload, owner_user_id='41')
+    assert receipt['status'] == status
+    assert receipt['content'] == '' and receipt['records'] == [] and receipt['evidence'] == []
+    assert receipt['coverage']['stop_reason'] == 'http_error_' + title[:3]
+
+
+@pytest.mark.parametrize(('title', 'text'), [
+    ('500 Miles', '500 Miles\nA walking song about the long road home, verse by verse.'),
+    ('404 Not Found: a history of errors', '404 Not Found: a history of errors\nHow the web learned to report missing pages.'),
+    ('404 Not Found', 'A field guide to broken links\nWhy archived pages disappear.'),
+    ('200 OK', '200 OK\nA short essay about successful responses.'),
+])
+def test_status_like_titles_of_real_pages_stay_content(title, text):
+    receipt = collect_content({'url': 'https://www.example.test/articles/1', 'title': title, 'text': text}, owner_user_id='41')
+    assert receipt['status'] == 'ok' and receipt['content'] == text
+
+
+@pytest.mark.parametrize('url', [
+    'https://passport.example.test/user/login?backurl=' + quote('https://hotels.example.test/hotels/list?city=2&checkin=2026-11-08', safe=''),
+    'https://www.example.test/signin?continue=' + quote('https://www.example.test/orders', safe=''),
+    'https://auth.example.test/oauth2/authorize?client_id=web&redirect_uri=' + quote('https://app.example.test/callback', safe=''),
+    'https://www.example.test/member/login.jhtml?redirectURL=' + quote('https://www.example.test/cart', safe=''),
+])
+def test_login_gate_redirect_is_blocked_not_content(url):
+    payload = {'url': url, 'title': 'Member account', 'contentSnapshot': {
+        'text': 'Account login\nPhone number\nPassword\nForgot password?',
+        'records': [{'title': 'About us', 'url': '/about'}, {'title': 'Help center', 'url': '/help'}]}}
+    receipt = collect_content(payload, owner_user_id='41')
+    assert receipt['status'] == 'blocked'
+    assert receipt['content'] == '' and receipt['records'] == []
+    assert receipt['coverage']['stop_reason'] == 'authentication_required'
+
+
+@pytest.mark.parametrize('url', [
+    'https://www.example.test/articles/coffee?redirect=' + quote('https://example.com/', safe=''),
+    'https://www.example.test/docs/oauth',
+    'https://author.example.test/posts/1?ref=' + quote('https://example.com/', safe=''),
+])
+def test_return_urls_and_auth_words_alone_are_not_login_gates(url):
+    text = 'Getting started guide\nInstall the client and configure the callback address.'
+    receipt = collect_content({'url': url, 'title': 'Guide', 'text': text}, owner_user_id='41')
+    assert receipt['status'] == 'ok' and receipt['content'] == text
+
+
+@pytest.mark.parametrize('query', [
+    'X-Amz-Expires=60&X-Amz-Signature=abc',
+    'X-Goog-Expires=60&X-Goog-Signature=abc',
+    'x-expires=1&x-signature=abc',
+    'q-sign-algorithm=sha1&q-signature=abc',
+    'deadline=1&upsig=abc',
+    't=1&sign=abc',
+    'Expires=1&Signature=abc&Key-Pair-Id=K',
+    'sv=1&sig=abc',
+])
+def test_vendor_prefixed_signature_keys_withhold_observed_urls(query):
+    from lib.browser.content import observed_url
+
+    page = 'https://site.test/gallery'
+    assert observed_url(f'https://cdn.site.test/a.jpg?{query}', page, '41') == ''
+
+
+@pytest.mark.parametrize('query', ['design=modern', 'assign=1', 'w=200&format=webp'])
+def test_words_merely_ending_in_sign_keep_observed_urls(query):
+    from lib.browser.content import observed_url
+
+    url = f'https://cdn.site.test/a.jpg?{query}'
+    assert observed_url(url, 'https://site.test/gallery', '41') == url

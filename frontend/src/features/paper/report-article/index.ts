@@ -10,6 +10,7 @@ import { indexHeadings } from './headings';
 import type { HeadingEntry } from './contracts';
 export { buildReportTableOfContents } from './headings';
 export { mountReportArticle, releaseReportArticle, destroyReportArticles } from './lifecycle';
+export { syncReportFinishTag } from './metadata';
 
 export function enhanceReportArticle(article: HTMLElement,
   translate: (key: 'paper.imageZoomHint') => string): HeadingEntry[] {

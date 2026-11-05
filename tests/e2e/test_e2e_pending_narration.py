@@ -7,6 +7,8 @@ observable instead of merely asserting the settled transcript.
 """
 from __future__ import annotations
 
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+
 import json
 import threading
 import time
@@ -111,7 +113,7 @@ def narrated_tools(monkeypatch, page):
 
     monkeypatch.setenv('TOFU_OPEN_MODE_RPM', '0')
     reset_for_test()
-    monkeypatch.setattr(llm_call, 'stream_llm_response', stream)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream)
     monkeypatch.setattr(search_core, 'perform_web_search', search)
     monkeypatch.setattr(tofu_search, 'perform_web_search', search)
     try:
@@ -271,7 +273,7 @@ def test_first_round_narration_is_single_while_tools_pending(
     assert len(narrated_tools['streams']) == 2
 
     assert page.evaluate('window.__pendingNarrationTest.maxCopies()') == 1
-    page.locator('.conversation-history-process > summary').click()
+    # Narration is prose: it stays mounted after settlement, outside the tool panel.
     page.wait_for_function('window.__pendingNarrationTest.sample().copies === 1')
     assert page.evaluate('window.__pendingNarrationTest.sample().copies') == 1
     # The cold snapshot must agree with the live stream, not merely hide the
@@ -284,7 +286,6 @@ def test_first_round_narration_is_single_while_tools_pending(
         '(text) => document.querySelector("#chatInner").innerText.includes(text)',
         arg=_FINAL, timeout=30000)
     page.evaluate(_OBSERVE, _NARRATION)
-    page.locator('.conversation-history-process > summary').click()
     page.wait_for_function('window.__pendingNarrationTest.sample().copies === 1')
     assert page.evaluate('window.__pendingNarrationTest.sample().copies') == 1
     page.evaluate('window.__pendingNarrationTest.stop()')

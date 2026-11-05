@@ -12,6 +12,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 from typing import Callable
@@ -43,12 +44,16 @@ def redact(text: str) -> str:
 def run_command(
     command: list[str], *, cwd: str | None = None, timeout: float = 300,
     emit: Callable[[str], None] | None = None, env: dict[str, str] | None = None,
+    stdin_program: bytes | None = None,
 ) -> tuple[int, str]:
     """Return (exit code, <=64 KiB tail); timeout=124; reap our process tree.
 
     A reader uses bounded chunks, including for output with no newlines. The
     watchdog is independent of that pipe, so silent/stuck children expire too.
-    No stdin is inherited: repair/package-manager prompts must never hang.
+    No terminal stdin is inherited: repair/package-manager prompts must never
+    hang. ``stdin_program`` is the one exception: those exact bytes (the body
+    of a ``python -`` program) are written to the child and stdin is then
+    closed, so the child still observes EOF instead of a prompt.
     """
     output: deque[str] = deque()
     size = 0
@@ -60,7 +65,8 @@ def run_command(
                      UV_NO_PROGRESS='1', PYTHONUNBUFFERED='1')
     try:
         process = subprocess.Popen(
-            command, cwd=cwd, env=child_env, stdin=subprocess.DEVNULL,
+            command, cwd=cwd, env=child_env,
+            stdin=subprocess.DEVNULL if stdin_program is None else subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             start_new_session=(os.name != 'nt'),
         )
@@ -89,9 +95,27 @@ def run_command(
         time.sleep(0.2)
         kill_tree(signal.SIGKILL if os.name != 'nt' else signal.SIGTERM)
 
+    def feed_program() -> None:
+        assert process.stdin is not None
+        try:
+            process.stdin.write(stdin_program or b'')
+        except OSError:
+            pass  # The child exited before reading; its exit status reports why.
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+
     watchdog = threading.Timer(timeout, terminate)
     watchdog.daemon = True
     watchdog.start()
+    # A writer thread: a child that fills its stdout pipe before it finishes
+    # reading a large program must not deadlock against this reader.
+    feeder = None
+    if stdin_program is not None:
+        feeder = threading.Thread(target=feed_program, daemon=True)
+        feeder.start()
     try:
         assert process.stdout is not None
         while chunk := process.stdout.readline(4096):
@@ -130,6 +154,8 @@ def run_command(
     finally:
         watchdog.cancel()
         watchdog.join(timeout=1)
+        if feeder is not None:
+            feeder.join(timeout=1)
         if process.stdout:
             process.stdout.close()
     tail = ''.join(output)
@@ -148,6 +174,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--timeout', type=float, default=300)
     parser.add_argument('--retry-network', action='store_true')
+    parser.add_argument(
+        '--stdin-program', action='store_true',
+        help='Read this process stdin to EOF once and give those bytes to the '
+             'child (and to its single network retry); for `python -` programs.')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if not 0 < args.timeout <= 3600:
@@ -155,9 +185,11 @@ def main() -> int:
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     if not command:
         parser.error('a command is required')
+    program = sys.stdin.buffer.read() if args.stdin_program else None
     for attempt in range(2 if args.retry_network else 1):
         rc, tail = run_command(command, timeout=args.timeout,
-                               emit=lambda line: print(line, flush=True))
+                               emit=lambda line: print(line, flush=True),
+                               stdin_program=program)
         if rc == 0 or rc == 124 or _PERMANENT.search(tail) or not _TRANSIENT.search(tail):
             return rc if rc >= 0 else 128 - rc
         if attempt == 0 and args.retry_network:

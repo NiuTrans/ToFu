@@ -13,8 +13,65 @@ statuses are:
 |---|---|
 | `completed` | provider/agent finished normally |
 | `interrupted` | cooperative user/supersession stop or service recovery |
-| `truncated` | provider limit or content filter cut output short |
+| `truncated` | provider limit or content filter cut output short (cause `model_refusal` / `content_filter` presents as Refused) |
 | `failed` | generation, provider stream, or executor startup failed |
+
+### Content-filter outcomes
+
+A verified HTTP 200 `content_filter` finish — Claude's `stop_reason: refusal`
+with `stop_details`, or an OpenAI-compatible filter — is a model refusal. A
+provider 5xx whose normalized error message starts with `user sensitive words
+detected:` is the same deterministic refusal: it skips same-model/key retries
+and takes the configured fallback immediately; other 5xx classifications stay
+unchanged. The fallback layer (`lib/tasks_pkg/llm_fallback/_refusal.py`) bills the attempt as
+a non-authoring `R<n>-REFUSED` round, retires its partial text and early tool
+work (`delta_reset(discard=true)`), and retries the round once on the
+configured fallback model.
+
+The fallback is NOT latched for the rest of the turn. The stale assumption
+"same-model resends usually refuse again" conflated re-sending the REFUSED
+request with trying the primary again on the NEXT round: a refusal fires on
+what the model is about to produce, so once the fallback's answer replaces
+the refused trajectory, the primary usually continues fine. The owner
+experiment (2026-10-26, conv mvkpayqrsm02t5) replayed the exact round-12
+post-fallback context onto claude-opus-5.5 through the production
+`/api/v4/chat/completions` surface with `disableModelFallback` and opus
+answered normally for 10+ rounds. So after ONE served fallback round the
+next round probes the primary (`stream.phase.refusalSwitchback`); a probe
+that ALSO refuses proves the trigger lives in the conversation, so the
+fallback latches for the rest of the turn instead of paying one refused
+attempt per round. Anthropic's sticky-routing recommendation is a cost
+optimization against a known-trigger request (fallback credit compensates
+the fallback model's cache write), not a permanent quality downgrade.
+
+Without a distinct fallback (none configured, `disableModelFallback`, or
+already on it), or when the fallback refuses too, it settles without a
+same-model resend or pool rescue. An HTTP 450 gateway block never switches
+models.
+
+Both settle `truncated`, cause `model_refusal` (model) or `content_filter`
+(gateway), evidence `provider_limit`, and `settlement.error` carries the typed
+`content_filter` envelope (`context` `model-refusal` / `gateway-content-filter`,
+refusal-specific `titleKey`/`hintKey`; automatic turns get a hint that does
+not ask the user to rephrase). The producer stamps the envelope under
+`task._contentFilterSettlement`, never `task.error`, so the verdict stays
+`truncated` and OpenAI-compatible adapters keep their `200
+finish_reason=content_filter`; the Anthropic-compatible adapter answers
+`stop_reason: refusal`. Clients label these turns Refused and render the
+envelope beside the bubble; historical `content_filter` rows without an
+envelope also present as Refused.
+
+Problem: a refusal returned as a successful round, so no fallback ran, the
+finalizer replaced the empty answer with canned "rephrase your question"
+text, and the turn was labelled Truncated. Decision: retry on the configured
+fallback and settle typed evidence through the existing truncated status
+with a dedicated cause. Alternatives rejected: a new top-level `refused`
+status — the closed enum is validated by both storage engines, the compiled
+TofuDB binary, the v3 snapshot schema and the browser reducer, so any missed
+site fails snapshots or leaves turns spinning, for no presentation the cause
+cannot carry; `failed` — adapters would turn an ordinary provider refusal
+into a server error; resending to the same model — Anthropic documents that
+it usually refuses again.
 
 An `interrupted/user_abort` verdict is reserved for stops the user (or a
 superseding task) actually requested. Internal storage/attempt fences —
@@ -55,6 +112,60 @@ and usage/tool receipts stay truthful; diagnostics expose numeric silence and
 threshold only. Explicit Stop is checked first and remains `interrupted/user_abort`
 (Swarm `cancelled`), with no cancelled-only automatic wake or new UI taxonomy.
 
+Tool admission refusals raise `ToolAdmissionRefused`, an `AbortedError`
+subclass, so every abort fence still halts model and tool effects. The fatal
+path settles them as `failed` with a non-retryable `tool_call_rejected` envelope
+that names the tool and the refusal, never as `interrupted/user_abort`.
+Problem: project-dispatch refusals (for example a Worker without its registered
+isolated worktree) rendered as unexplained user Stops with the reason erased.
+Decision: the raise site types the refusal; only cooperative Stop keeps
+`user_abort`. Alternative rejected: returning the refusal as a tool result would
+let a fenced Worker continue past an authority check.
+
+Project-dispatch authority stops settle `failed` with `evidence:
+external_authority` and a cause naming the authority: `dispatch_grant_revoked`
+(the grant was revoked, or withdrawn by a durable Stop in the Coordinator or
+recipient conversation) or `dispatch_authority_lost` (lost grant carrier,
+changed task identity, execution association or registered workspace, or an
+unreadable grant record). The site where the authority fails stamps
+`_abort_reason` with the cooperative abort, so the task stops before any further
+provider or tool call; the grant-withdrawal cancel port
+(`abort_project_attempt`) stamps `dispatch_grant_revoked` on the live executor
+or on the settled Turn when none is live, together with its provenance
+(`_abortReasonDetail`: who revoked it and through which path), which the error
+detail appends. The settlement error is a
+non-retryable envelope whose kind equals the cause, so whole-turn auto-retry
+never applies (the manual resume options of a failed Turn are unchanged), and
+the request-complete activity row reports `failed` with that `errorKind`. The first cause wins: a person's Stop
+keeps `interrupted/user_abort` even when the grant is revoked or the port
+arrives afterwards, and a dispatch stamp never replaces an earlier one. The
+decision record lives in `docs/PROJECT_COORDINATION.md` ("Dispatch authority
+stop causes").
+
+Admission judges only calls that can execute. Project-dispatch batch admission
+(`tool_dispatch/_pipeline.py`) admits every such call of a response before any
+of them runs, so a refusal still precedes all sibling effects. A call that parse
+or its tool contract already rejected never executes: it is not admitted, and
+its existing rejection with the next_action is its result. Problem: admitting
+those calls failed the whole Worker for an argument mistake (`read_files` with
+neither `path` nor `reads`) or an ungranted tool name, hiding the next_action.
+Alternatives rejected: returning admission refusals as tool results (above),
+and admitting rejected calls under a relaxed scope (a second admission policy).
+Specification: `tests/project_mod/test_project_dispatch_tool_contract_rejection.py`.
+
+The file scope's argument shape is contract-class, not authority. The shared
+`read_files` rule is at-least-one of `path`/`reads` (the canonical tool ignores
+`path` beside `reads`), so the dispatch copy's "exactly one", nonempty batch,
+ordered range and exact entry fields are checked by `project_dispatch/scope.py`
+`_paths`. `admit_tool` types those refusals as `ToolContractError` (still a
+`ValueError`; for `read_files` with the shared rule's next_action), and batch
+admission turns them into that call's ordinary contract rejection. Path
+canonicality, runtime metadata, prefix and workspace refusals stay authority
+refusals and fail the turn. Problem: a plain `ValueError` failed the Worker for
+a correctable shape. Alternatives rejected: a surface-keyed second alternatives
+rule or a global exactly-one rule (two rule sources, or a changed canonical
+contract), and a root `oneOf` (providers reject root combinators).
+
 The existing error envelope carries the bounded `invocationStopReason` extension
 (`stalled` / `deadline`), minted only by `context: invocation-guard`,
 `source: task-engine`. Canonical error serialization preserves it for cold task
@@ -92,12 +203,49 @@ new model-backed paths must carry `streamState`.
 
 A provider stream that ends without its finish marker is never
 `completed/provider_finished`. When partial prose exists, the live executor
-first preserves that prose, emits a `phase: retrying` status, and performs a
-bounded continuation from the preserved prefix. If those lossless
-continuations are exhausted, the turn settles as
+discards that attempt's prose and reasoning (`delta_reset` with
+`discard: true`), emits a `phase: retrying` status (`bucket:
+partial_stream`), and resends the unchanged request within the classic
+transport budget, exactly like a cut that produced only reasoning or truncated
+tool arguments. If those retries are exhausted, the turn settles as
 `failed/provider_stream_error` with `providerFinishReason: premature_close`;
-the partial projection remains durable (and prefill-capable models expose it to
-`continue`) and is never cleared by the whole-turn regeneration retry path.
+the last attempt's partial projection stays visible until a resume rolls it
+back.
+
+### Interruption recovery: rewind and resend
+
+Problem: a cut partial reply was continued with a trailing assistant prefill
+(non-Claude models) or a `[SYSTEM: LOSSLESS STREAM CONTINUATION REQUIRED]`
+user turn (Claude), and resume offered a prefill `continue` with a
+`contentPrefix` display seed. No provider continues an unfinished reply from a
+bare trailing assistant message: Claude 4.6+ and Gemini 3.6+ reject it with
+HTTP 400, and OpenAI Chat Completions/Responses treat it as a finished earlier
+reply, so the model answered again and Tofu concatenated both. The nudge
+changed the model-visible history and the request prefix.
+
+Decision: every interruption (transport cut, Stop, process restart) is
+recovered by rewinding to the last protocol-valid boundary — the user message
+or the last complete tool result — and resending that exact request. Nothing
+synthetic is appended to model context; the unfinished tail (prose, reasoning,
+unverified tool arguments) is regenerated. Live retries leave `messages`
+untouched, so the resend is byte-identical and reuses the provider prompt cache
+written by the interrupted request; resume replays the retained checkpoint in
+the same canonical form as settled history. A tool call interrupted after
+entry is closed with its effect receipt (see
+[tool effect recovery](TOOL_EFFECT_RECOVERY.md)), never re-executed blindly.
+The cost is regenerating the cut output tokens.
+
+Alternatives rejected: a bare trailing-assistant prefill (rejected or answered
+as a new message by every documented provider); a continuation user prompt
+(alters the history and the next request's prefix); provider-specific prefix
+flags (DeepSeek/Mistral `prefix`, Kimi/Qwen `partial`, vLLM
+`continue_final_message`) — they would have to be selected per dispatched
+slot, and a retry may land on a slot without them; add them only with a
+route-level capability and the same rollback as the fallback. Specs:
+`tests/tasks_pkg/test_stream_truncation_guards.py` (G2),
+`tests/llm/test_llm_replay_scenarios.py::test_partial_stream_cut_resends_the_identical_request`
+(equal recorded request digests for the cut attempt and its retry),
+`tests/tasks_pkg/test_resume_executor_config.py`.
 
 For a tool-bearing stream, parseable argument JSON proves only a complete
 prefix. Problem: the legacy recovery classifier admitted that prefix while
@@ -128,7 +276,10 @@ is intermediate work even when the response closes with `stop`. With no tool
 calls, a valid unchanged phase replay triggers at most two continuations per
 task, independent of the failed-tool nudge and stream-retry budgets. The
 existing `intent_stall_nudge` phase and durable intervention note show the
-reason and limit. Exhaustion ends with `abnormal_stop`, never success.
+reason and limit. The vetoed commentary leaves the live answer and renders
+once as process prose; the failed-tool nudge instead keeps its vetoed answer
+as the provisional answer (see [vetoed answers](../RENDER_CONTRACT.md#vetoed-answers-have-one-owner)).
+Exhaustion ends with `abnormal_stop`, never success.
 Cancellation, malformed streams, provider errors, token limits, pending human
 guidance and explicit end-turn declarations retain precedence. Unphased or
 `final_answer` output is never reclassified by matching prose.
@@ -317,6 +468,23 @@ user Stop. The session is durably restart-paused rather than terminated, and
 cooperative child cancellation does not publish a terminal cancellation or end
 a retained assignment. Startup alone does not authorize execution.
 
+For a Project-dispatch Worker, the already-authorized grant is the resume
+authority: startup recovery accepts an existing execution only when its attempt
+and Turn are both `interrupted` with `settlement.cause=server_restart`. It calls
+the ordinary Continue command in that same conversation, retaining the original
+transcript, grant, deterministic workspace task and checkout. The dispatch
+association follows the new attempt after exact predecessor/successor validation;
+its status, result, delivery and terminal Coordinator wake then use that attempt.
+Background completion uses this same resume rather than an unbound parallel turn.
+A `blocked: task_background_commands_running` receipt remains an unfinished
+publication, not proof that the old process survived: startup command recovery
+publishes either the actual result or an explicit server-restart death result,
+and the existing delivery owner clears the hold only after that work and the
+resumed task have settled. Problem, alternatives and verification live in
+[Project coordination](../PROJECT_COORDINATION.md#restart-paused-worker-continuation).
+User Stop, completed/reviewed execution, a live predecessor or changed lineage
+never acquires this recovery path.
+
 Accepted resume config carries authority-written `_resumeSource` (exact prior
 attempt/task, status and settlement cause). SQL/native acceptance overwrite any
 caller-supplied value in the same CAS transaction; execution reads this receipt,
@@ -331,9 +499,12 @@ Natural parent completion still permits its admitted detached children.
 Use current principal and executable tools intersected with the saved scope. Completed children and acknowledged deliveries remain settled; pending
 children and safe unfinished checkpoints reconstruct new execution instances.
 Paid token/cost receipts, elapsed work and tool counters carry forward once.
-Write-ahead model/tool intent and settled receipts define recovery. Unknown tool
-outcomes fail visibly, never replay blindly; their transitive unfinished dependents
-fail with `restart_dependency_reconciliation_required` before scheduler admission.
+Write-ahead model/tool intent and settled receipts define recovery. An interrupted
+tool round is never replayed: its own agent resumes with each call's recorded result,
+or an explicit unknown-outcome result, plus a recovery notice. Malformed transcripts
+and rounds whose foreground command may still run fail visibly; their transitive
+unfinished dependents fail with `restart_dependency_reconciliation_required` before
+scheduler admission.
 Finished evidence and unrelated children remain intact. Dependency input includes
 canonical status/error, never partial prose presented as ordinary success.
 In-flight model usage is incomplete;
@@ -412,19 +583,26 @@ the recovery allowance. Specs: `tests/swarm/test_swarm_failure_continuation.py`,
 
 Recovery is explicit. Each entry has an `operation` and a durable `anchor`.
 
-- `continue`: lossless assistant prefill is available for a model that
-  supports it and a non-empty partial projection. The executor config pairs
-  the prefill with the retained checkpoint tool rounds — the same pre-gap
-  retention a `checkpoint_resume` anchor computes — so the resumed model
-  keeps every tool fact it produced before the interruption instead of
-  continuing blind to the history the user still sees. Replay inside the
-  executor still uses the causal prefix.
-- `checkpoint_resume`: completed tool rounds provide a stable checkpoint.
-  The anchor retains every pre-gap round, display/progress carriers
-  included, and amputates the result-less in-flight tail; only explicitly
-  superseded provider-attempt artifacts are filtered.
+- `continue` (`replay_only` anchor): the interrupted tail has no prose —
+  completed tool rounds and/or a reasoning tail. The executor replays the
+  retained checkpoint rounds — the same pre-gap retention a
+  `checkpoint_resume` anchor computes — so the resumed model keeps every tool
+  fact it produced before the interruption; the reasoning tail moves into
+  `rolledBack`. Replay inside the executor still uses the causal prefix.
+- `checkpoint_resume`: completed tool rounds or a prose tail. The anchor
+  retains every pre-gap round, display/progress carriers included, and
+  amputates the result-less in-flight tail; only explicitly superseded
+  provider-attempt artifacts are filtered. With no retained round the
+  checkpoint is the turn input. The prose and reasoning tail moves into
+  `rolledBack`.
 - `regenerate`: restart from turn input; always available for a non-successful
   terminal turn.
+
+No resume continues a prose tail ([rewind and
+resend](#interruption-recovery-rewind-and-resend)): the model wire ends at the
+replayed checkpoint and the executor seeds no prose or reasoning. Settlements
+written before this rule may still offer `continue` with a `lossless_prefill`
+anchor; accepting one regenerates the tail the same way.
 
 All resume operations, including `answer_guidance`, supersede the later lane
 tail and its rooted branches atomically, just like regeneration. Resume keeps

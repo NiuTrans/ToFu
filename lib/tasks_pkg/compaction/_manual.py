@@ -37,9 +37,16 @@ recently-accessed files). It does NOT rewrite any summary logic.
         is never used to slice the raw list.
 
 Public surface:
+  * ``schedule_protected_compaction`` — cheap classification; a protected
+    (coordinator/project) conversation records a scheduled working-view
+    compaction instead of rewriting canonical Turns. Safe while a task runs.
+  * ``schedule_busy_compaction`` — the same working-view request for an
+    ordinary conversation whose task is running.
+  * ``cancel_scheduled_compaction`` — withdraw a pending request before a
+    model call claims it.
   * ``compact_conversation_now`` — authority-aware orchestrator (load → plan →
     archive → summarize → atomic persist). Idle-only (caller gates on
-    activeTaskId).
+    activeTaskId); protected conversations are scheduled instead.
   * ``plan_manual_compaction``   — pure: computes system_end / boundary /
     anchor / old-region / reserve-region.  No DB, no LLM.
   * ``apply_manual_compaction``  — pure: rebuilds the raw message list.
@@ -83,7 +90,9 @@ from lib.tasks_pkg.compaction._tokens import (
 )
 from lib.tasks_pkg.compaction._receipt import build_compaction_receipt
 from lib.tasks_pkg.compaction._context_lifecycle import (
-    ManualCompactionRefused, manual_compaction_rejection,
+    BUSY_COMPACTION_REASON, PROTECTED_COMPACTION_SCOPES, ManualCompactionRefused,
+    clear_scheduled_working_view_compaction, manual_compaction_rejection,
+    schedule_working_view_compaction, scheduled_working_view_compaction,
 )
 
 logger = get_logger(__name__)
@@ -574,6 +583,108 @@ def _fold_watermark(plan: dict) -> int:
     return watermark
 
 
+def _schedule_protected(conv_id, *, store, user_id, rejection):
+    """Serve a destructive-rewrite refusal with the working-view marker."""
+    return _schedule_working_view(
+        conv_id, store=store, user_id=user_id, reason=rejection,
+        protection=PROTECTED_COMPACTION_SCOPES[rejection])
+
+
+def _wake_live_tasks(conv_id, *, user_id, request_id=''):
+    """Hint this owner's live tasks after a committed marker write/delete."""
+    from lib.tasks_pkg.compaction._pipeline import applies_scheduled_compaction
+    from lib.tasks_pkg.manager import hint_scheduled_compaction
+    return hint_scheduled_compaction(
+        conv_id, user_id=user_id, eligible=applies_scheduled_compaction,
+        request_id=request_id)
+
+
+def _schedule_working_view(conv_id, *, store, user_id, reason, protection):
+    """Record the durable marker, then wake live tasks that can apply it.
+
+    ``appliesAt`` is ``next_model_call`` when a running publishing task was
+    woken (it compacts before its next model call, or the next reply does
+    when it makes none) and ``next_reply`` otherwise.
+    """
+    marker = schedule_working_view_compaction(
+        conv_id, store=store, user_id=user_id, reason=reason)
+    if marker is None:
+        return {'ok': False, 'error': 'turn_protocol_unsupported'}
+    woken, _claimed = _wake_live_tasks(conv_id, user_id=user_id)
+    logger.info('[ManualCompact] conv=%s working-view compaction scheduled '
+                'request=%s created=%s reason=%s woken=%d', conv_id[:8],
+                marker['requestId'][:8], marker['created'], reason, woken)
+    return {'ok': True, 'scheduled': True,
+            'alreadyScheduled': not marker['created'],
+            'requestId': marker['requestId'],
+            'requestedAt': marker['requestedAt'],
+            'protection': protection,
+            'appliesAt': 'next_model_call' if woken else 'next_reply'}
+
+
+def schedule_busy_compaction(conv_id: str, *, user_id, store=None):
+    """Schedule an ordinary conversation's compaction while a task runs.
+
+    The destructive rewrite stays idle-only. A working-view compaction never
+    touches canonical Turns or the running Turn's events: the running task's
+    next model call (or the next reply) runs the forced L2 path on its
+    request-local view and ordinary checkpoint publication adopts it.
+    """
+    return _schedule_working_view(
+        conv_id, store=store or get_conversation_store(), user_id=user_id,
+        reason=BUSY_COMPACTION_REASON, protection=None)
+
+
+def cancel_scheduled_compaction(conv_id: str, *, user_id, request_id: str, store=None):
+    """Withdraw exactly ``request_id`` before a model call applies it.
+
+    The version-checked marker delete commits first, then live tasks are
+    woken to re-read it. A task that already claimed the request keeps its
+    compacted working view (``applying``); canonical Turns are never touched.
+    """
+    store = store or get_conversation_store()
+    cancelled = clear_scheduled_working_view_compaction(
+        conv_id, store=store, user_id=user_id, request_id=request_id)
+    _woken, applying = _wake_live_tasks(
+        conv_id, user_id=user_id, request_id=request_id)
+    logger.info('[ManualCompact] conv=%s scheduled compaction %s cancel: '
+                'cancelled=%s applying=%s', conv_id[:8], request_id[:8],
+                cancelled, applying)
+    return {'ok': True, 'cancelled': cancelled, 'applying': applying}
+
+
+def _retire_superseded_schedule(conv_id, *, store, user_id):
+    """A completed persistent compaction fulfils any pending busy-time request."""
+    try:
+        marker = scheduled_working_view_compaction(conv_id, store=store, user_id=user_id)
+        if marker:
+            clear_scheduled_working_view_compaction(
+                conv_id, store=store, user_id=user_id, request_id=marker['requestId'])
+    except Exception as exc:
+        # The retained marker only costs the next reply one declined attempt.
+        logger.warning('[ManualCompact] conv=%s superseded schedule kept: %s',
+                       conv_id[:8], type(exc).__name__)
+
+
+def schedule_protected_compaction(conv_id: str, *, user_id, messages=(), store=None):
+    """Schedule a protected conversation's compaction; None keeps the manual rewrite.
+
+    Protection comes from the store's own policy read, never request input.
+    Canonical Turns, grants and reports stay untouched: the next model call of
+    the conversation runs the forced L2 path and ordinary checkpoint
+    publication adopts the summarized view. Repeated requests while pending
+    return the same marker.
+    """
+    store = store or get_conversation_store()
+    rejection = manual_compaction_rejection(
+        conv_id, store=store, user_id=user_id, messages=messages)
+    if rejection is None:
+        return None
+    if rejection not in PROTECTED_COMPACTION_SCOPES:
+        return {'ok': False, 'error': rejection}
+    return _schedule_protected(conv_id, store=store, user_id=user_id, rejection=rejection)
+
+
 def compact_conversation_now(
     conv_id: str,
     *,
@@ -615,10 +726,11 @@ def compact_conversation_now(
         return {'ok': False, 'error': 'not_found'}
     raw_messages, updated_at, _load_rev = loaded
 
-    rejection = manual_compaction_rejection(
-        conv_id, store=store, user_id=user_id, messages=raw_messages)
-    if rejection:
-        return {'ok': False, 'error': rejection}
+    # Report provenance is visible only in the loaded projection.
+    scheduled = schedule_protected_compaction(
+        conv_id, user_id=user_id, messages=raw_messages, store=store)
+    if scheduled is not None:
+        return scheduled
     turn_native = bool(raw_messages) and all(
         isinstance(message, dict) and bool(message.get('_turnId'))
         for message in raw_messages)
@@ -932,6 +1044,12 @@ def compact_conversation_now(
                 user_id=user_id)
         except ManualCompactionRefused as exc:
             receipt = _settle_aborted_archive(exc.reason, attempts)
+            if exc.reason in PROTECTED_COMPACTION_SCOPES:
+                # Protection began during preparation: the rewrite stays
+                # refused and the owner's request moves to the working view.
+                return {**_schedule_protected(conv_id, store=store, user_id=user_id,
+                                              rejection=exc.reason),
+                        'archiveId': archive_id, 'receipt': receipt}
             return {'ok': False, 'error': exc.reason, 'archiveId': archive_id,
                     'receipt': receipt}
         if affected:
@@ -993,6 +1111,8 @@ def compact_conversation_now(
                 'msgs: %d → %d  archive=%s',
                 log_id, tokens_before, tokens_after, reduction_pct,
                 msgs_before, msgs_after, archive_id)
+
+    _retire_superseded_schedule(conv_id, store=store, user_id=user_id)
 
     # B — terminal push: the card swaps its live-growing text for the settled
     # boundary card (same stats the REST response carries). Best-effort.

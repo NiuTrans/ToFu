@@ -2,7 +2,7 @@
 This guide owns the detailed compaction policy referenced by the
 [context-engineering domain map](modules/context_engineering.md).
 Automatic compaction bounds the request view without rewriting durable Turns. Working-state summaries retain known repository/root attribution for paths as rootname-relative or original absolute paths. A new task worktree is not evidence that every historical path moved. Unknown attribution stays unresolved; fresh environment mappings govern execution.
-Manual compaction writes a persistent summary boundary through the conversation command service, guarded against intervening Turns. Both share summarization and token-budget primitives, never persistence semantics.
+Manual compaction of an idle ordinary conversation writes a persistent summary boundary through the conversation command service, guarded against intervening Turns; a protected (coordinator or coordinated-project) conversation, and any conversation whose task is running, schedules a working-view compaction instead and keeps every canonical Turn. They share summarization and token-budget primitives, never persistence semantics.
 
 
 ### Manual admission ownership
@@ -28,52 +28,265 @@ coordinator lifecycle tests.
 
 ### Coordinator context lifecycle
 
-**Problem:** manual `turn.compact` deletes old canonical Turns and folds their
-projections. Dispatch grants refer to the exact original human Turn and assistant
-Turn/Attempt; report attention refers to canonical report Turns. Rebinding a new
-conversation or rewriting these rows is not a working-context reset.
+**Problem:** coordinator (Router) conversations live for months, but manual
+`turn.compact` deletes old canonical Turns and folds their projections. Dispatch
+grants refer to the exact original human Turn and assistant Turn/Attempt, and
+report attention refers to canonical report Turns, so the rewrite stayed refused
+(409) and the owner of a long-lived Router could not compact on request at all.
+Rebinding a new conversation or rewriting these rows is not a working-context
+reset.
 
-**Decision:** the common manual service refuses protected coordinator transcripts
-before archival/summary work, and `DefaultConversationStore.compact_turn_transcript`
-rechecks before issuing the destructive command. `POST /api/v4/conversations/{id}/compact`
-returns 409 with problem detail `coordinator_context_compaction_unsupported` for
-owned coordinator creation identities, current bindings (including unavailable
-targets), and canonical report provenance. A nonzero binding epoch conservatively
-protects every conversation still in that owned project, returning
-`project_context_compaction_unsupported`; no partial history page is treated as
-proof of absent source references. Ordinary never-coordinated conversations keep
-the existing manual command. Ownership failures and unknown storage/binding reads
-never authorize a rewrite. Existing active-work rejection remains in force.
+**Decision:** a protected conversation's compaction is a **scheduled
+working-view compaction**; canonical Turns, Attempts, grants, reports, bindings
+and budgets are never rewritten.
 
-There is **no same-conversation fresh/reset API**: durable model-continuation
-publication is monotonic at the settled Turn frontier and rejects a different
-projection at the same frontier. An atomic, idle-only working-view epoch/replace
-port is required before fresh context can be offered. Deleting then replacing a
-checkpoint, fabricating a summary Turn, replacing the coordinator binding, and
-adding a parallel transcript store are rejected alternatives. Current creation
-IDs stay protected across unbinding/project moves. A legacy arbitrary coordinator
-ID moved out of its original project without report provenance has no complete
-reverse-reference index; this is an unresolved identification gap, not supported
-reset behavior.
+- Protection is the store's own policy read
+  (`ConversationStore.manual_compaction_rejection`): owned coordinator creation
+  identities, current bindings (including unavailable targets) and canonical
+  report provenance (`coordinator_context_compaction_unsupported`), and every
+  conversation still in an owned project with a nonzero binding epoch
+  (`project_context_compaction_unsupported`; no partial history page proves
+  absent source references). Current creation IDs stay protected across
+  unbinding/project moves. Ownership failures and unknown storage/binding reads
+  never authorize anything.
+- `POST /api/v4/conversations/{id}/compact` serves those refusals by recording
+  one durable owner-scoped marker
+  (`ConversationStore.schedule_working_view_compaction`; generic record
+  namespace `conversation.working_view_compaction.v1`, keyed by owner and
+  conversation digest, value repeating both identities and verified on every
+  read) and returns `{ok, scheduled: true, alreadyScheduled, requestId,
+  requestedAt, protection}`. A repeated request while one is pending returns the
+  same `requestId` (CAS create; a concurrent loser reads the winner). Scheduling
+  touches no Turn, so it is accepted while a task runs. A store without the port
+  refuses with `turn_protocol_unsupported`. Protection that begins during a
+  destructive preparation still fails the commit-time recheck
+  (`DefaultConversationStore.compact_turn_transcript`) and lands on the marker.
+- The conversation's next model call applies it: the first
+  `run_compaction_pipeline` of a root, checkpoint-publishing task (never a child
+  invocation, transient runtime, Flow or Goal run) reads the marker once (again
+  after a [wake hint](#busy-time-scheduling-and-cancellation)) and runs
+  the existing forced manual L2 path (`trigger=manual`, no economic gate, the
+  manual preservation budget). The carrier records `scheduledRequestId`, which a
+  later summary folding it inherits; the existing L2 receipt and compaction
+  archive mark the point in the transcript.
+- Ordinary checkpoint publication adopts the summarized view. After terminal
+  persistence `settle_scheduled_compaction` retires exactly that `requestId`
+  (version-checked delete) only when the stored checkpoint
+  (`_modelReplayPublishStatus == stored`) carries its carrier. A declined or
+  failed summary, nothing foldable, a refused publication or a failed delete
+  keeps the marker; the next publishing task retries, and a view that already
+  carries the request only retries the delete.
+- Ordinary never-coordinated conversations keep the destructive idle-only manual
+  command. While their task runs, the same request schedules this marker
+  (`protection: null`) instead; see
+  [busy-time scheduling](#busy-time-scheduling-and-cancellation).
+- The context meter's compaction action shows the scheduled state from the reply
+  (`frontend/src/features/conversation-bar/scheduled-compaction.ts`) until the
+  run that applies it settles; it reloads nothing, because nothing was
+  rewritten. The acknowledgment is page memory: the server marker stays the
+  authority, and a repeated request reports `alreadyScheduled`.
 
-Automatic L2 remains a request-view operation. A validated automatic coordinator
-continuation may summarize only with its **existing exact physical ExecutionBudget**
-passed through the ordinary `model_budget_admit` transport port. Its observers
-charge the same dispatch grant and original request allowance; no new source
-account, tokens, model requests, or deadline are issued. Original human-task
-summaries reuse their already attached account too. Swapped/missing accounts,
-withdrawn grants, expired requests and unknown paid usage fail closed; other
-consultation/worker profiles retain the auxiliary-summary prohibition. Summary
-receipts/cost telemetry remain separate from authorization accounting.
+**Alternatives rejected:** keeping the 409 (a months-long Router cannot bound its
+context on request); a same-conversation fresh/reset API (continuation
+publication is monotonic at the settled Turn frontier, and a reset discards
+working state); deleting then replacing a checkpoint, fabricating a summary Turn,
+replacing the coordinator binding or adding a parallel transcript store (each
+rewrites or duplicates evidence that grants and reports reference); summarizing
+immediately in the route (the working view belongs to the next model call; an
+out-of-band summary races the running task's publication and needs a second
+adoption path); retiring the marker when the summary is generated (a refused
+publication would silently drop the request).
+
+A legacy arbitrary coordinator ID moved out of its original project without
+report provenance has no complete reverse-reference index and is classified as
+ordinary; this is an unresolved identification gap.
+
+Executable specifications: `tests/tasks_pkg/test_coordinator_context_lifecycle.py`
+(real SQLite and native authorities: scheduling leaves every canonical snapshot
+unchanged, idempotent and owner-scoped markers),
+`tests/compaction/test_scheduled_working_view_compaction.py` (pipeline
+application, inheritance, publication and retirement) and the manual engine and
+route tests.
+
+### Busy-time scheduling and cancellation
+
+**Problem:** long-lived Router conversations are busy most of the time, and
+manual compaction refused every conversation with a running task (409
+`task_active`), so the owner could not bound context on request. Rewriting
+canonical Turns under a running Turn would race its events and publication.
+
+**Decision:** while a task runs, the manual request schedules the working-view
+compaction above for every conversation; the destructive rewrite stays
+idle-only.
+
+- `schedule_busy_compaction` records the same durable marker, and only after
+  that commit `hint_scheduled_compaction` sets a volatile wake hint on this
+  owner's live tasks of the conversation that can apply it
+  (`applies_scheduled_compaction`: root, checkpoint-publishing, not transient,
+  forced compaction not disabled). The reply adds `appliesAt`:
+  `next_model_call` when such a task was woken (its next
+  `run_compaction_pipeline` re-reads the marker and compacts that running
+  Turn's request-local working view through the forced L2 path, which keeps
+  tool-call/result pairs and anchors like automatic intra-turn compaction and
+  touches no canonical Turn or event; if it makes no further model call the
+  next reply applies it), otherwise `next_reply`. Protected conversations
+  report `appliesAt` the same way.
+- Retirement is unchanged: ordinary checkpoint publication adopts the view and
+  `settle_scheduled_compaction` deletes exactly that `requestId`. A later idle
+  persistent compaction also fulfils (deletes) a pending marker.
+- `DELETE /api/v4/conversations/{id}/compact/scheduled/{requestId}` withdraws
+  exactly that request (version-checked marker delete), then wakes live tasks
+  to re-read it, and returns `{ok, cancelled, applying}`. A task claims a
+  request atomically with the hints (`claim_scheduled_compaction` refuses while
+  a hint is pending, so the pipeline re-reads first): a cancel committed before
+  the claim is never applied. `applying` reports that a running reply had
+  already claimed it; that working view stays compacted and no later model
+  call repeats it.
+- The hint only accelerates. The marker stays the authority, a lost hint
+  degrades to the next reply, and each task attempts a `requestId` at most
+  once.
+- The context meter stays usable while a task runs: without a request its
+  action reads "Compact at the next model call"; with one, a status line names
+  when it applies and the action becomes "Cancel scheduled compaction"
+  (`frontend/src/features/conversation-bar/context-meter.ts`).
+
+**Alternatives rejected:** keeping the 409 (the owner of a busy Router can
+never compact); stopping or waiting for the running reply (loses or delays work
+the owner did not ask to stop); rewriting canonical Turns under a running Turn
+(races its events and publication and could fold the Turn being written);
+summarizing in the route (needs a second adoption path, as above); re-reading
+the marker before every model call (one storage read per round for a rare
+request, where the post-commit hint costs nothing without one).
+
+Executable specifications: `tests/compaction/test_scheduled_working_view_compaction.py`
+(wake, claim and cancel ordering), `tests/tasks_pkg/test_manual_compaction_route.py`,
+`tests/tasks_pkg/test_manual_compaction_engine.py` and the context-meter and
+scheduled-compaction Vitest specifications.
+
+### Summary coverage and recall
+
+**Problem:** an L2 carrier did not say which history it replaced or how to read
+it again, so after months of successive compactions a Router could not tell
+which Turns a summary stands for or recall their exact text.
+
+**Decision:** the visible carrier names its covered Turn range before the
+summary: `Covered history: Turns <first> through <last>[ and its reply]. Their
+exact text stays in the durable transcript: get_conversation(conversation_id="<this
+conversation>", before=<N>) ends at the last covered Turn; a smaller before pages
+to older Turns.` The same facts are private metadata
+(`_compactionHandoff.coverage`, contract `compaction_handoff_v1`). The first Turn
+is inherited from a folded prior carrier; live rows without `_turnId` belong to
+the reply Turn of the nearest preceding identified input (`throughReply`). `N`
+is get_conversation's 1-based exclusive cursor: the last covered main-lane
+ordinal plus 2, plus 1 for its reply. It is exact while ordinals equal positions
+and otherwise an upper bound that never hides covered history; an unreadable
+ordinal omits only the cursor. Child invocations, transient runtimes and
+unidentified rows carry no coverage. The line precedes the summary, so
+prior-receipt carry-forward (which starts at the first summary heading) never
+copies a stale range. Reading the current conversation is the recall tool's
+contract (`lib/conv_ref/`).
+
+**Alternatives rejected:** metadata only (providers never see private fields);
+copying covered text into the carrier (defeats compaction); timestamps as the
+cursor (get_conversation pages by message number). Specs:
+`tests/compaction/test_summary_coverage.py`.
+
+### Auxiliary summaries under dispatch grants
+
+**Problem:** a project Worker (and any consult or files grant) that reached its
+window raised `Project consultation cannot purchase auxiliary compaction
+summaries` and aborted, although the [no-spending-ceiling
+decision](PROJECT_COORDINATION.md#no-spending-ceiling-2026-10-decision) gives
+Workers the same ceiling-free grants as Coordinator continuations.
+
+**Decision:** automatic L2 remains a request-view operation, and every dispatch
+profile summarizes under **its own grant's existing physical ExecutionBudget**
+through the ordinary `model_budget_admit` transport port, exactly like a
+continuation. `summary_model_admission` revalidates the bound grant
+(`validate_task(require_account=True)`: grant, birth execution, current Attempt
+and account identity) before preparation and again at physical admission, and
+refuses a swapped carrier. The account's observers record each occurrence on that
+grant, so finite legacy or consult grants keep their recorded ceilings and
+unknown-usage fences. Missing, swapped or withdrawn accounts, revoked grants and
+unknown authority stop the task with the typed dispatch cause. No new source
+account, tokens, model requests or deadline are issued; original human-task
+summaries reuse their already attached account, and summary receipts/cost
+telemetry remain separate from authorization accounting. **No profile stays
+prohibited:** consult grants expose no tools, but a summary reads only the task's
+own working messages through the same accounted port, so it adds neither data
+nor tool authority, and their finite ceilings already bound it.
+
+**Alternatives rejected:** keeping the Worker/consult prohibition (a long Worker
+aborts at its window); a separate summary allowance (a second ledger beside the
+grant); charging the delegating Coordinator's request (a Worker would spend
+another grant's account).
 
 Executable specifications: `tests/tasks_pkg/test_coordinator_context_lifecycle.py`
 (real isolated semantic storage, exact source/Attempt/report/grant/budget snapshots)
-and `tests/tasks_pkg/test_coordinator_summary_accounting.py` (real grant/account
-observers with simulated provider transport, exhaustion and unknown usage).
+and `tests/tasks_pkg/test_coordinator_summary_accounting.py` plus
+`tests/tasks_pkg/test_consult_summary_accounting.py` (real grant/account observers
+with simulated provider transport, exhaustion and unknown usage).
+
+### Continuation checkpoints
+
+**Steered turns — Problem:** routers receive frequent steers (human mid-turn
+messages, timer and channel deliveries all enter with `inject_mode='steer'`), and
+publication refused every Turn carrying `_userSteerInjects`, so a busy
+conversation rarely checkpointed and each next request rebuilt every Turn. That
+rebuild cannot even restore what the model consumed: the Turn projection keeps
+only a 1,200-character display preview of each steer, never its carrier.
+**Decision:** a steered Turn publishes its verified model view, consumed steer
+carriers included. The round drain marks the task (`_inboxDeliveryUnverified`)
+whenever it appends an inbox carrier, and only the verified provider-return flush
+(`flush_deferred_peer_and_steer`, shared by the Python and native loops) clears
+the mark. Publication refuses `unverified_inbox_delivery` while it is set,
+because such a carrier's payload is salvaged to the durable queue (steer) or
+redelivered from its durable row (peer, background, swarm). Steers that missed
+the final step keep the existing queue path and enter the next Turn exactly once.
+**Rejected:** keeping the refusal (unbounded rebuilds, consumed steers lost on
+every rebuild); stripping unconsumed carriers from the published view (the final
+answer was generated with them in view, so the stored view would be one the model
+never saw); rebuilding steers from the Turn sidecar (lossy preview, a second
+transcript authority). **Multi-Turn runs keep their refusal** (`multi_turn_run`):
+Flow and Goal phases settle as later visible Turns while settlement witnesses only
+the root Turn, so a root-frontier checkpoint would replay every phase again as the
+uncovered suffix. Routers never run visible multi-Turn flows: dispatch grants
+force `autopilot`/`activeFlow` off, and swarm auto-continue Turns already publish.
+Specs: `tests/tasks_pkg/test_steered_checkpoint_publication.py`.
+
+**Policy drift — Problem:** any witnessed policy drift discarded the checkpoint and
+rebuilt every Turn, and even a route switch rebuilt whenever the checkpoint held
+reasoning or native Responses/Anthropic items, which every reasoning model
+produces. A months-long conversation lost its bounded context on each model or
+effort change. **Decision:** the checkpoint's field map names the drifted fields
+(`policy_witness_drift`). Drift confined to route and effort fields
+(`PORTABLE_DRIFT_FIELDS`: model, provider, preset, `modelRef`, preferred
+provider, routing, `thinkingDepth`, `thinkingEnabled`, `defaultThinkingDepth`)
+restores the portable projection (`restored_portable`): provider continuation
+state (reasoning text and signatures, `reasoning_details`, opaque Responses
+items, native Anthropic blocks) is stripped, Composer carriers are recomposed for
+the destination, tool calls/results and Tofu carriers (steers, inbox and mailbox
+receipts, handoffs) keep their exact bytes, and only the uncovered suffix is
+rebuilt. Every other witnessed field is authority-bearing and still refuses
+(`policy_changed`): permissions, project scope, tool authority and capability
+toggles, experiment flags, instructions, principal, goal mode and the interaction
+mode. Plan and Delegate now witness `interactionMode`; Standard keeps the absent
+value, so existing digests are unchanged. Media and unknown private state still
+refuse (`nonportable_checkpoint`), legacy checkpoints without a field map keep
+the route-free digest comparison, and the tool latch and goal state remain
+same-policy only. **Rejected:** refusing on reasoning (no reasoning-model
+checkpoint survives a route change, and a cold rebuild never replays foreign
+reasoning either); an allowlist of authority fields (a new witnessed field would
+silently become portable; default deny instead); keeping full signed views on
+every effort change (signatures and caches are route-bound; only the same-model
+Opus effort witness keeps them). Specs:
+`tests/model_routing/test_model_continuation_policy.py`,
+`tests/project_mod/test_coordinator_replay_policy.py`.
 
 L1 receives an API-form working projection and replaces only cold tool/image bulk; it performs no conversation read, projection update or change notification.
 Completed ordinary chat turns publish this bounded view through the owner-scoped durable continuation repository. The next turn validates it and transforms only uncovered Turns; restarts/cache eviction do not resurrect summarized history. Missing/invalid checkpoints rebuild unchanged Turns and pass fresh admission.
 **Continuation boundary:** display updates previously invalidated summaries, while shared eligibility wrongly blocked completed Continue publication. Decision: semantic proof v2 preserves typed content/tool/Attempt/policy/media fences; Continue proves its input baseline, retains fresh suffixes, and publishes only verified complete model content. Rejected: weaker witnesses, history deletion or higher thresholds. Old proofs rebuild once with explicit reasons. Details: `contracts/model_context_v1.schema.json` and [storage operations](STORAGE_OPERATIONS.md#model-context-semantic-version).
+**History length:** a lane keeps publishing and restoring checkpoints for any number of Turns. Both authorities stream the v2 proof digest over every header and materialize only the uncovered suffix; proof counts are plain counters and only legacy per-Turn witness lists keep a count bound. Rejected: raising the former 10,000-Turn ceiling. Details: [long-horizon context reads](TOFUDB_CONTEXT_READ.md#streamed-proof-walks-without-a-turn-ceiling).
 Ordinary `excludeLast` excludes the empty output target, not continuation itself: validate that boundary. Actual resume payloads and nonempty resume targets cannot blindly restore a completed prefix; fresh execution boundaries and changed historical witnesses also refuse restoration.
 
 **Ingress-policy continuity — Problem:** Continue/resume could exit prefix admission before pinning its policy, then publish a checkpoint hashed from runtime-normalized configuration. An unchanged next request rejected that checkpoint and rebuilt already-folded history. **Decision:** pin strict, portable and supported effort witnesses with the input history baseline before resume exclusions; successful, verified completion publishes those original witnesses. Real policy/project/permission changes still reject reuse. A validated-prefix refusal that requires a full-history reread preserves and logs its original reason (for example `policy_changed`), not the internal `replay_disabled` fallback status. **Rejected:** increasing compaction thresholds, equating absent policy with false, or bypassing owner/history/media fences. Specs: `tests/model_routing/test_model_continuation_policy.py`, `test_model_context_read.py`.
@@ -161,6 +374,65 @@ Missing conversation identity keeps the legacy no-affinity path; an invalid
 explicit owner fails closed.
 ### Durable adoption and Continue
 
+**Local L2 ownership.** Problem: one entrypoint mixed source selection, economic
+eligibility, summary fidelity and final window checks with durable adoption.
+Decision: `_layer2/_source_plan.py` returns whole source units and output reserve;
+`_candidate_policy.py` distinguishes preflight cost from paid-summary accounting
+and future adoption cost; `_summary_acceptance.py` validates critical state and
+fits optional recovery hints; `_projection.py` shares retained-shell construction
+and candidate convergence. `_compact.py` alone orders generation, cancellation,
+archive creation, accepted receipt persistence and model-view adoption. Named
+ports bind its existing injected policies; phase records are per-call values,
+not another durable state machine. Phase diagnostics keep the established
+`_layer2._compact` logger so existing listeners still receive every decision.
+Alternatives rejected: moving the full function
+unchanged, hidden imports back into the entrypoint, or independent persistence
+owners in each phase. Frozen-source comparisons require identical messages,
+metadata, owner state, usage and ordered side effects before component clocks.
+
+Economic eligibility estimates run only for proactive compaction. Manual and
+hard-window compaction still enforce source preservation, fidelity, capacity and
+durable adoption, but do not scan cold history or restored snapshots for unused
+return-on-cost estimates. Paid summary usage remains accounted on every path.
+Keeping those scans on mandatory paths adds history-sized work without changing
+their admission decision; sharing the candidate policy keeps the economic path
+and its conservative restoration reserve intact.
+
+**Unverified-pricing deferral.** Problem: most proactive declines lack verified
+main-route pricing, yet each first built the journal-backed turn diff and
+selected a summary route, about 70% of a deferred attempt's wall time in a
+production profile. Decision: without verified
+main-route rates for the current prompt (`main_route_pricing_verified`, the
+lookup behind `pricing_known`), payback is infinite for every candidate and
+route. One per-attempt verdict therefore skips both steps and declines through
+the unchanged `cache_negative` branch: same message, retry floor and witness.
+The decline line reports `route_reason=main_route_pricing_unverified`; the plan
+reserves no diff text for a continuation never built, so a diff that alone
+would exhaust the plan now defers instead of refusing. Priced input keeps the
+full path, including an unpriced resource summary route; forced, hard-window
+and dispatch-guard attempts never consult the probe. Alternatives rejected:
+per-task route memoization (input size and credential health vary by round;
+the cost is routing-document normalization owned by `lib/model_routing`), a
+candidate-free retry floor for unpriced declines (changes later attempt
+timing) and a bounded turn diff kept in the plan (its first section is
+unbounded and owned by `commit_round`). Spec:
+`tests/compaction/test_l2_unverified_pricing_deferral.py`.
+
+**Summary request ownership.** Problem: evidence formatting, routing authority,
+credential cleanup, transport completion and usage accounting shared one large
+closure. Decision: `_summary_input.py` assembles owner-scoped receipts and bounded
+evidence; `_summary_transport.py` keeps provider-work observations and call usage
+for one logical summary. `_summary.py` retains route/quote revalidation, the
+credential lifetime and final budget settlement. It passes the current authorized
+route into each transport attempt; credential requalification still requires a
+proven unsent failure. Typed stream verification, paid incomplete usage,
+parent affinity/pin restoration and the original diagnostic stream remain shared.
+Alternatives rejected: module-global transport state can mix concurrent owners;
+separate streaming and chat retry policies duplicate the dispatch authority;
+moving credential cleanup into transport hides failures from budget settlement.
+The summary-routing, credential-failure and route-cleanup tests specify these
+boundaries.
+
 **Problem:** a long archive exceeded native ordinary literal limits; adopting a summary after failed archival left Continue rebuilding cold history and hid the compaction marker. Startup compaction also lacked a zero-tool-prefix witness. **Decision:** native archive bodies use their declared 64 MiB blob budget and a compact, digest-bound outbox; ordinary literals keep the 8 MiB budget. For a Turn-bound task, the accepted post view and receipt commit before model-view adoption. Create/update failure retains the original input, emits an explicit failed compaction fact without an archive link, and stops provider dispatch. The pending compacting phase stays visible before an archive exists. An empty tool prefix is a valid startup witness. A closed suspended task saves its bounded working view through the same owner-scoped archive repository, including delivered background context and exact tool receipts. This checkpoint retains the original audit snapshot, makes no model call, emits no fictitious compaction, and follows the existing archive retention limit. Owner, Turn, history, policy, media and complete tool-prefix checks still fence restoration; changed or unproved input rebuilds rather than weakening those fences. Current logical-Turn loaded Skill batches remain verbatim through L1/L2; older Turns remain eligible for normal compaction. **Alternatives rejected:** raising all native literal limits broadens unrelated operations; adopting unsaved summaries breaks recovery; hiding pending or failed work makes repeated summarization invisible; relying on a tool-count watermark alone loses late background evidence. Specs: `test_continue_working_context.py`, the cross-backend large archive/restart producer test, and `test_visual_continue_compaction.py`.
 
 Accepted L2 work emits `phase=compacting` before summary I/O; declined preflights stay silent and archive completion retains its durable boundary.
@@ -172,10 +444,11 @@ abort never falls through to the text-tier retry. Synthetic task dicts
 (manual /compact, standalone callers) keep the non-streaming dispatch path
 unwired.
 Default task-owned summaries use a separate request-owned owner/tenant route.
-API summaries retain cost-first/highest-AA qualification; subscription summaries
-may use declared sufficient Luna-tier models or authorized known-cost paid APIs
-under an explicit resource-tier policy. `summaryMaxCostUsd` caps worst-case paid
-spend; subscription marginal cost remains unknown. Preflight does not resolve
+Known-price organization-billed paid APIs rank before the owner's
+subscription/OAuth/local resources, which a paid main that fits the summary never
+borrows; each class ranks cost first, then highest AA. A route without its own
+rate card is priced at its model's maintained price, and there is no summary cost
+ceiling; subscription marginal cost remains unknown. Preflight does not resolve
 secrets. Dispatch binds the planned catalog revision/identities, mints only one
 candidate with no widened fallback, nests/restores the parent provider scope and
 cleans credential references after complete-output accounting. The parent Codex
@@ -191,6 +464,10 @@ clipped or provider-truncated summaries cannot safely replace source context.
 429 retries remain effective, without a detached worker. Failed identical requests
 latch against repeated cost; changed evidence/route changes the request digest.
 Completed late output is accepted normally.
+Owner Stop is rechecked after final post-summary measurement; it withdraws any
+current credential-failure projection and follows the existing cancellation path,
+never login-recovery diagnostics or another main dispatch. A stopped task cannot
+reconstruct earlier credential authority from a still-held usage projection.
 Only nonempty provider-verified normal completions can become candidates.
 Length-limit, filtered, tool-call and unverified endings are rejected, including
 nonstream calls. Complete output is never clipped to the nominal summary target.
@@ -206,6 +483,14 @@ refuses spending if its route changes or its quote exceeds the approved allowanc
 Usage is recorded even for rejected/failed attempts. Receipts distinguish generation
 from adoption, show measured route capacity/prompt/reserves/economic target, and identify
 the summary route/API-equivalent USD estimate. Unknown usage/prices never mean savings.
+**1-hour cache writes (2026-10-23).** Problem: summary call costs kept
+`pricingSnapshot.rates.cacheWrite1hMul` but dropped `cacheWrite1hTokens`, so a receipt
+could neither show which writes paid the 1-hour rate nor recompute its amount.
+Decision: priced calls and validated stored rows carry the count emitted by
+`lib.cost.compute_cost`; a stored count must equal the engine's share of that call's
+usage, and rows priced before 1-hour rates existed carry none and stay valid evidence.
+Rejected: deriving the share from receipt usage (no TTL breakdown) or repricing stored
+rows. Spec: `tests/compaction/test_summary_cost_economics.py`.
 Logs expose identity, reasoning length and first-text latency, never reasoning content.
 **Rejected.** A 60/120-second deadline, clipping, pricing-as-capacity or destructive
 live recovery improves apparent latency at the expense of state. Executable specs:
@@ -221,7 +506,7 @@ returns False, then the dispatch-guard admission pass repeats the summary and
 raises a fatal `ContextCompactionError`. The failed attempts also left no
 terminal fact, so the UI showed two stuck `running` "compressing" ghosts with
 meaningless durations (the muu1klptjtwd3t incident).
-**Decision.** Three scoped changes, none of which weaken the lossy-recovery
+**Decision.** Four scoped changes, none of which weaken the lossy-recovery
 invariants for live/transient tasks:
 1. Summaries reuse the main request's bounded credential-recovery owner for
    proven transient failures before provider ingress: at most three attempts
@@ -229,18 +514,43 @@ invariants for live/transient tasks:
    approved quote. Cancellation interrupts backoff; permanent credential faults,
    local payload defects and observed provider work never retry. An alternate
    model name is insufficient authority to move a pinned or quoted summary.
-2. The dispatch-guard admission pass may fall through to the bounded deterministic
-   `_head_truncate` when its summary cannot run and the conversation is over the
-   admission ceiling, for non-bounded tasks — the final boundary must bound the
-   context rather than surface a fatal error. Live/transient bounded tasks keep
-   their no-lossy-recovery discipline; the proactive `working_set` pass keeps its
-   summary-only economic path.
+   An unquoted request-owned auxiliary summary may then independently recompile
+   another credential source, with at most three qualified routes in the same
+   SummaryBudget. An unsent sign-in requirement (`SubscriptionLoginRequiredError`,
+   e.g. a Codex login whose refresh was rejected) skips the same-login retry and
+   requalifies the same way, but is never availability evidence. Full owner/tenant/revision, parent identity, policy, capacity
+   and paid-quote checks remain in force; the previous group closes first.
+   All transport attempts must be free of observed ingress/work, not merely
+   the final local exception. Exact-source exclusions stay local to this
+   auxiliary request. If nothing independent qualifies, one bounded attempt
+   on the task's own authorized main route follows, unless every slot of that
+   main shares the failed Codex resolver. Details and expiry are in
+   [compression-first routing](CONTEXT_BUDGET_POLICY.md#aa-cheapest-compression-first-routing).
+2. Explicit legacy utility callers may opt into deterministic `_head_truncate`
+   when a summary cannot run and the conversation exceeds the usable window.
+   The dispatch-guard trigger grants no additional permission. Live/transient
+   bounded tasks keep their no-lossy-recovery discipline; the proactive
+   `working_set` pass keeps its summary-only economic path.
 3. A failed `working_set`/`window`/`dispatch_guard` attempt settles as one
    terminal `compaction_done` whose receipt carries `status='failed'` and the real
    `outcomeReason`, bridging the live phase row through the existing reactive
    archive seam so the frontend renders an honest failed compaction row instead
    of a ghost. Reactive/backfill/heal and deterministic-recovery paths keep their
    own terminal accounting and are untouched.
+4. The canonical receipt adds bounded `summary.failure` and `summary.attempts`
+   fields: at most three routes, allowlisted source/availability reasons and
+   known ingress facts, never raw errors, credentials, source references or
+   request digests. Final admission attaches the existing typed subscription
+   cause only from the current issued in-process SummaryBudget projection.
+   Copies/JSON can retain diagnostic data but cannot acquire that authority.
+   Cancelled, malformed, stale or prior-ingress evidence cannot project an
+   overall unsent login outage; later cancellation, fatal exits and teardown
+   defects withdraw earlier credential causes. Generic pipeline faults remain
+   internal. When all qualified sources are unavailable, live/transient
+   history stays unchanged, and an overfull main request is never built/sent.
+   Physical headroom may still defer optional compaction under the same safety
+   and output-reservation checks. Metadata is not authorization to rebind an
+   account or delete source history.
 `llm_fallback/_call.py` applies the same discrimination: a subscription-credential
 outage rotates like any primary-model failure (and permits pool rescue), while a
 payload defect still refuses rotation.
@@ -250,7 +560,38 @@ encodes); blanket rotation of every `LocalRequestPreparationError` (replays loca
 payload bugs across the pool); settling every failed attempt (double-counts the
 reactive path's own receipts). Executable specs:
 `tests/compaction/test_compaction_failed_settlement.py`,
-`tests/compaction/test_summary_credential_rotation.py`.
+`tests/compaction/test_summary_credential_rotation.py`,
+`tests/compaction/test_summary_credential_resilience.py` (real compiler, mint,
+transport observer, compactor and ROOT refusal boundaries), and
+`tests/compaction/test_summary_failure_projection.py`.
+
+**Utility settlement ownership — Problem:** successful and no-progress utility
+recovery duplicated archive updates and completion events, making usage, scope
+and outcome fields prone to drift. **Decision:** `_layer2/_compact.py` keeps
+admission, pre-mutation archival, cancellation and mutation in the coordinator;
+one local settlement helper publishes the chosen outcome. Only successful
+recovery supplies a detached post snapshot; no progress remains a failed
+receipt. Missing archive identity emits no completion, and receipt-write and
+event-publication failures retain their independent best-effort behavior.
+**Alternative rejected:** routing cancellation or model-summary adoption through
+that utility helper would conflate their distinct persistence and failure
+contracts. Executable specs: `test_compaction_fallback_dispatch_attribution.py`
+and `test_compaction_handoff.py` under `tests/compaction/`.
+
+**Auxiliary teardown ownership.** `ExitStack` consumes a failed callback, so
+one failed physical detach could otherwise leave a credential-bearing slot
+callable after its request ended. The summary owner fences only its issued
+slot objects before release and joins one retry of the existing idempotent
+disposer when the group is still incomplete. The first cleanup failure remains
+visible, prohibits adoption/requalification, and withdraws credential-outage
+authority; owner Stop still settles as cancellation. Persistent failure stays
+explicit and uncallable, not an unbounded retry. Rejected alternatives: replaying
+model work, changing global credential health, or swallowing release failures.
+This control assumes physical release can fail before disposal commits; remove
+it when the shared disposer guarantees atomic release or owns equivalent bounded
+joining. `tests/compaction/test_summary_route_cleanup_owner.py` covers transient
+and persistent detach failure, success, outage, fatal exit and Stop.
+
 Opaque reasoning is never locally tokenized as if ciphertext length were model
 tokens. The counter starts from the previous provider-measured input, estimates
 the visible appended suffix, and adds the provider-reported hidden-thinking
@@ -268,8 +609,10 @@ after compaction. Tool-call/result pairing is derived only from the adjacent
 assistant/result run; duplicate IDs pair by occurrence. Orphans remain
 unpaired, so a later success can never authorize or relabel an earlier call.
 L1's ordinary tool-result hot tail is the intersection of a 40-result ceiling
-and a 48K estimated-token ceiling. Its ordinary pass never edits the warm cache prefix and
-always protects the newest complete tool-call batch, even when that batch alone
+and a 48K estimated-token ceiling. Its ordinary pass never edits what the previous
+request sent, except that request's last tool step when the exact next-request price
+admits it ([sent-prefix admission](modules/context_engineering.md#l1-sent-prefix-admission)),
+and always protects the newest complete tool-call batch, even when that batch alone
 exceeds 48K. Older reconstructible results become request-local placeholders;
 their durable tool results and artifact references remain untouched. The opt-in
 `adaptive_hot_tail` experiment is not a second default authority.
@@ -388,11 +731,21 @@ Provider adapters preserve explicit system/developer policies: Anthropic
 projects both into its supported system envelope in source order; Responses
 native compaction retains both before pruning old dynamic history. User/tool
 text is never promoted merely because it contains an instruction-like label.
-Proactive cache economics include a conservative summary-call estimate before
-dispatch. Current and candidate prompt prices are resolved independently, so a
+Proactive cache economics charge the summary call before dispatch at the quote
+of the exact request dispatch sends
+([quote contract](CONTEXT_BUDGET_POLICY.md#aa-cheapest-compression-first-routing)).
+Current and candidate prompt prices are resolved independently, so a
 provider-declared context-tier change affects the calculation without a model
 special case. Recurring savings compare the observed warm prefix before and
 after the rewrite; uncached tail tokens are not assumed to become cache reads.
+The warm prefix is the last same-task, same-model/provider round's cache read
+plus its cache write, so a cold full write (read 0) is fully warm for the next
+round. After two consecutive failed readbacks (read below half of the prior warm
+prefix) only the read counts: a route that stopped reading back does not shield
+its prefix (`_cache_evidence.current_warm_prefix_tokens`). On such a cold route
+every token outside the read prefix is billed again each round, so dropping it
+counts as recurring savings at the plain input price; while a route still reads
+back, dropped uncached tokens claim nothing.
 Once a summary has been generated, that cost is sunk and adoption compares only
 the future prefix rewrite with future input savings. Archive and UI token
 counters are explicitly heuristic (`tokenCountKind=estimated`), not
@@ -420,12 +773,20 @@ Route propagation and coordinated L1/L2 adoption: [CONTEXT_BUDGET_POLICY.md](CON
 Receipts distinguish a local economic decline from an attempted summary failure;
 locally measured token counts are never labelled upstream-reported usage.
 
-The activity header distinguishes `window` ("Context budget threshold reached" /
-"达到上下文预算阈值"), `dispatch_guard` ("Request too large before sending" /
-"发送前请求过大"), and `context_overflow` ("Provider context overflow" /
-"提供商报告上下文超限"). The first two describe local preventive admission,
-not a provider-reported overflow. Raw trigger/details and summary-model attribution
-remain unchanged. Summarization uses a separately prepared, bounded request: the
+The compaction receipt is one quiet full-width activity row, not a tinted
+callout: header (status, bare summarizer name, duration, always-visible
+"View snapshot" action), then the token flow plus one plain-language cause.
+Every recorded trigger has a label in `activity.compaction.trigger.*`:
+`working_set` (economic threshold, "Long conversation" / "对话内容较多"),
+`window` (model-window safety, "Context limit reached" / "接近上下文上限"),
+`dispatch_guard` (pre-send admission, "Message too large to send" / "发送内容过大"),
+`context_overflow` / `reactive` (provider-reported overflow),
+`manual`, `force` and `checkpoint` (saved on interruption). The first three
+describe local preventive admission, not a provider-reported overflow.
+Internal budget names, raw threshold strings, the trigger id and routing ids
+(main model, summary provider, selected model) live only inside the disclosure;
+an unrecorded summarizer renders no invented name, only an honest tooltip.
+Summarization uses a separately prepared, bounded request: the
 main context's threshold does not imply that the summarizer received that entire
 context or reached its own route limit. UI specs: `activity-block.test.ts` and
 `tests/visual/test_visual_compaction_trigger_wording.py`.

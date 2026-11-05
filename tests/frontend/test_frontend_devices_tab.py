@@ -22,7 +22,8 @@ from pathlib import Path
 
 import pytest
 
-from tests._jsdom import JS_DIR, ROOT, run_harness
+from tests._jsdom import _SHARED_HARNESS, require_node_modules, ROOT, run_harness
+from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
 
@@ -53,7 +54,7 @@ def test_panel_fragment_exists_with_matching_id():
                               'devices.html'))
     assert 'id="settingsTab_devices"' in frag, (
         '片段 id 必须是 settingsTab_devices(switchSettingsTab 按此约定寻址)')
-    for el in ('devicesAgentsList', 'devicesTokensList'):
+    for el in ('devicesAgentsList', 'devicesWaitsList', 'devicesTokensList'):
         assert el in frag, f'面板缺关键元素 #{el}'
     for retired in ('devicesMintBtn', 'devicesMintedBox',
                     'devicesMintedToken', 'devicesMintName'):
@@ -83,7 +84,8 @@ def test_i18n_keys_present_both_langs():
     locales = [json.loads((locale_dir / f'{lang}.json').read_text())
                for lang in ('zh', 'en')]
     for key in ('settings.tabDevices', 'devices.tokensDesc',
-                'devices.revoke', 'devices.empty'):
+                'devices.revoke', 'devices.empty',
+                'devices.waitsTitle', 'devices.noWaits'):
         assert all(key in locale and locale[key] for locale in locales), \
             f'i18n 缺双语键 {key}'
 
@@ -100,7 +102,17 @@ const FRAG = process.argv[4];
 const fs = require('fs');
 const html = '<!DOCTYPE html><body>' + fs.readFileSync(FRAG, 'utf8') + '</body>';
 
-const calls = { get: [], del: [] };
+const calls = { get: [], del: [], waits: [], cancel: [], toasts: [] };
+const wait = (id, createdAt, name) => ({
+  waitId: id, conversationId: 'conv-' + id, reason: 'Run the backup for ' + id,
+  createdAt, state: 'pending', device: { selector: name, agentId: null, name: null },
+});
+// The pending view arrives in pointer (device) order across pages.
+const waitPages = {
+  '': { waits: [wait('dw-2', 1785000002000, 'winbox')], nextCursor: 'k-1' },
+  'k-1': { waits: [wait('dw-1', 1785000001000, 'macbook')], nextCursor: null },
+};
+let waitsFail = false;
 const fixture = {
   agents: [
     { agent_id: 'aaaaaaaabbbb', name: 'macbook', platform: 'darwin',
@@ -119,11 +131,19 @@ const { check, report } = setup({
   globals: {
     t: (k) => k,
     escapeHtml: (s) => String(s),
-    showToast: () => {},
+    showToast: (message) => { calls.toasts.push(message); },
     Api: {
       desktop: {
         devices: async () => { calls.get.push(1); return fixture; },
         revokeToken: async (id) => { calls.del.push(id); return { revoked: id }; },
+        deviceWaits: async (cursor) => {
+          calls.waits.push(cursor || '');
+          return waitsFail ? null : waitPages[cursor || ''];
+        },
+        cancelDeviceWait: async (id) => {
+          calls.cancel.push(id);
+          return { waitId: id, state: 'cancelled' };
+        },
       },
     },
   },
@@ -162,6 +182,41 @@ _renderDeviceAgents([]);
 check('empty_state', document.getElementById('devicesAgentsList')
       .innerHTML.includes('devices.empty'));
 
+// ── device waits: every page, registration order, cancel → POST + refresh ──
+// The harness neuters setTimeout; setImmediate runs once queued microtasks drain.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+const waitsLane = document.getElementById('devicesWaitsList');
+await settle();  // the revoke's refresh settles before this read starts
+calls.waits.length = 0;
+await owner.populateDevicesTab();
+check('waits_follow_every_page', calls.waits.join(',') === ',k-1');
+const waitRows = () => [...waitsLane.querySelectorAll('.devices-wait-row')];
+check('waits_in_registration_order',
+      waitRows().map((row) => row.dataset.waitId).join(',') === 'dw-1,dw-2');
+check('wait_row_names_device_reason_and_conversation',
+      waitRows()[0].textContent.includes('macbook')
+      && waitRows()[0].textContent.includes('Run the backup for dw-1')
+      && waitRows()[0].textContent.includes('conv-dw-1'));
+const cancelButton = waitRows()[0].querySelector('button.devices-wait-cancel-btn');
+check('wait_cancel_button', Boolean(cancelButton)
+      && cancelButton.textContent === 'devices.waitCancel');
+calls.waits.length = 0;
+cancelButton.click();
+await settle();
+await settle();
+check('wait_cancel_posts_then_refreshes', calls.cancel.join(',') === 'dw-1'
+      && calls.waits.join(',') === ',k-1'
+      && calls.toasts.includes('devices.waitCancelled'));
+
+owner.renderDeviceWaits([]);
+check('waits_empty_state', waitsLane.textContent.includes('devices.noWaits'));
+
+waitsFail = true;
+await owner.populateDevicesTab();
+check('waits_failure_stays_in_its_lane',
+      Boolean(waitsLane.querySelector('.devices-load-failed'))
+      && document.querySelectorAll('.devices-agent-row').length === 2);
+
 report();
 process.exit(0);
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -169,6 +224,7 @@ process.exit(0);
 
 
 def _compile_devices(tmp_path):
+    require_node_modules('vite')
     built = tmp_path / 'devices.js'
     proc = subprocess.run(
         [str(ESBUILD), str(DEVICES_TS), '--bundle', '--format=iife',
@@ -181,7 +237,6 @@ def _compile_devices(tmp_path):
     return built
 
 
-@pytest.mark.skipif(not ESBUILD.is_file(), reason='vite test bundler not installed')
 def test_devices_tab_behaviour_jsdom(tmp_path):
     built = _compile_devices(tmp_path)
     run_harness(
@@ -189,7 +244,7 @@ def test_devices_tab_behaviour_jsdom(tmp_path):
         body_js=_DEVICES_BODY,
         extra_targets=[os.path.join(PROJECT_ROOT, 'static',
                                     'settings_panels', 'devices.html')],
-        min_pass=8,
+        expect_pass=15,
         label='devices tab',
     )
 
@@ -227,51 +282,26 @@ process.exit(0);
 
 
 def test_neuter_hook_means_blank_tab():
-    """NEUTER:core_panel 摘掉 devices 钩子后,切页签不再填充 ——
-    先证带钩子会填充,再证摘钩子(用未挂钩版本)不填充。"""
-    # 正控制:真实 core_panel.js 带钩子 → POPULATED
-    run_harness(
-        target_js=os.path.join(JS_DIR, 'settings', 'core_panel.js'),
+    """The real tab switch reads the registry hook on each activation."""
+    owner = native_module_path(
+        'settings-core-panel-devices.js',
+        ROOT + '/frontend/src/features/settings/core-panel.ts')
+    output = run_harness(
+        target_js=owner,
         body_js=_NEUTER_HOOK_BODY,
         min_pass=1,
         label='devices hook present',
     )
-    # NEUTER:临时副本摘钩子 → 断言行不通(填充不再发生)
-    import subprocess
-    import tempfile
-    src = _read(os.path.join(JS_DIR, 'settings', 'core_panel.js'))
-    anchor = "if (tabId === 'devices' && typeof _populateDevicesTab === 'function') {"
-    assert anchor in src, 'neuter 锚点不在 —— 钩子形态变了?'
-    neutered = src.replace(anchor, "if (false) {", 1)
-    tmp = []
-    try:
-        with tempfile.NamedTemporaryFile(
-            'w', suffix='.js', dir=os.path.join(JS_DIR, 'settings'),
-            delete=False, encoding='utf-8') as fh:
-            npath = fh.name
-            fh.write(neutered)
-        tmp.append(npath)
-        with tempfile.NamedTemporaryFile(
-            'w', suffix='.js', dir=os.path.dirname(os.path.abspath(__file__)),
-            delete=False, encoding='utf-8') as hf:
-            harness = hf.name
-            hf.write(_NEUTER_HOOK_BODY.replace(
-                "check('hook_fills_tab',",
-                "check('neuter_tab_stays_blank',").replace(
-                "=== 'POPULATED'", "!== 'POPULATED'"))
-        tmp.append(harness)
-        _harness_js = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   '_jsdom_harness.js')
-        proc = subprocess.run(
-            ['node', harness, npath, ROOT],
-            capture_output=True, text=True, timeout=60,
-            env={**os.environ, 'JSDOM_HARNESS': _harness_js})
-        out = (proc.stdout or '').strip()
-        assert 'PASS neuter_tab_stays_blank' in out, (
-            f'NEUTER 未咬:摘掉钩子后页签仍被填充?\n{out}')
-    finally:
-        for p in tmp:
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+    assert 'PASS hook_fills_tab' in output
+    output = run_harness(
+        target_js=owner,
+        body_js=_NEUTER_HOOK_BODY.replace(
+            'window._populateDevicesTab = global._populateDevicesTab = () => {',
+            'delete featureRegistry._populateDevicesTab;\n'
+            'window._populateDevicesTab = global._populateDevicesTab = () => {',
+        ).replace("check('hook_fills_tab',", "check('neuter_tab_stays_blank',")
+        .replace("=== 'POPULATED'", "!== 'POPULATED'"),
+        min_pass=1,
+        label='devices hook removed',
+    )
+    assert 'PASS neuter_tab_stays_blank' in output

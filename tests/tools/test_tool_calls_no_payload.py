@@ -1,6 +1,6 @@
 """Guards for the tool_calls-finish-WITHOUT-payload defense (2026-08-06 incident).
 
-Incident replay (conv msh3qeplzneph5, task 153fccfc, round 3): the sankuai
+Incident replay (conv msh3qeplzneph5, task 153fccfc, round 3): the example-corp
 gateway closed a kimi-k3 stream CLEANLY — [DONE] received, no transport
 anomaly — reporting ``finish_reason=tool_calls``, yet not a single tool_call
 delta was in the 61 chunks (~150 of 213 completion tokens vanished). Every
@@ -208,7 +208,7 @@ def _usage(cause='gateway_no_payload'):
         '_chunks_received': 61,
         'trace_id': 'M-VOID-TEST',
         'stream_elapsed_ms': 128448,
-        '_dispatch': {'key': 'sankuai_key_1', 'model': 'kimi-k3'},
+        '_dispatch': {'key': 'example_corp_key_1', 'model': 'kimi-k3'},
     }
     if cause is not None:
         u['_tool_calls_void'] = cause
@@ -227,14 +227,15 @@ _INCIDENT_MSG = {'role': 'assistant', 'content': '。',
                  'reasoning_content': '先查 402 的完整链路…' * 20}
 
 
-def test_incident_replay_retries_instead_of_fake_stop():
+@pytest.mark.parametrize('finish_reason', ['tool_calls', 'tool_use'])
+def test_incident_replay_retries_instead_of_fake_stop(finish_reason):
     """Epic acceptance: finish_reason=tool_calls + 0 assembled calls → the
     round MUST be retried (action='continue'), not normalized to 'stop'
     and delivered as a preamble."""
     task = _fresh_task(phase_counter=0)
     decision = analyse_stream_result(
         assistant_msg=dict(_INCIDENT_MSG),
-        last_finish_reason='tool_calls',
+        last_finish_reason=finish_reason,
         task=task, tid='void', model='kimi-k3',
         round_num=2, _premature_retry_count=0,
         messages=list(_WORK_TAIL), usage=_usage(),
@@ -274,14 +275,15 @@ def test_retry_resets_round_text_to_base():
     assert residue and residue[-1]['content'] == '。', residue
 
 
-def test_retries_exhausted_settles_honest_premature_close():
+@pytest.mark.parametrize('finish_reason', ['tool_calls', 'tool_use'])
+def test_retries_exhausted_settles_honest_premature_close(finish_reason):
     """At the cap: break with a premature_close error envelope — an honest
     terminal state (Continue stays available), never the fake 'stop' that
     delivered the incident's preamble."""
     task = _fresh_task(phase_counter=_TOOL_CALLS_NO_PAYLOAD_RETRY_MAX)
     decision = analyse_stream_result(
         assistant_msg=dict(_INCIDENT_MSG),
-        last_finish_reason='tool_calls',
+        last_finish_reason=finish_reason,
         task=task, tid='void', model='kimi-k3',
         round_num=4, _premature_retry_count=_TOOL_CALLS_NO_PAYLOAD_RETRY_MAX,
         messages=list(_WORK_TAIL), usage=_usage(),

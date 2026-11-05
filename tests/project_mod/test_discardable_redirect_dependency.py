@@ -22,10 +22,3 @@ def test_file_writes_interior_redirects_and_heredocs_are_not_discarded(source):
     from lib.project_mod.command_analysis import command_segment_discardable_redirect_split
     assert command_segment_discardable_redirect_split(source) is None
 
-
-def test_actual_command_admission_separates_reader_and_named_output(tmp_path):
-    from lib.project_mod.run_command import command_write_lease_claims
-
-    assert command_write_lease_claims(str(tmp_path), 'ls -d . 2>/dev/null') == ()
-    claims = command_write_lease_claims(str(tmp_path), 'printf x >result.txt')
-    assert ('file', str(tmp_path / 'result.txt')) in claims

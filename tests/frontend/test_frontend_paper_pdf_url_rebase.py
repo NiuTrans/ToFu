@@ -30,7 +30,6 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -44,12 +43,6 @@ ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 VIEWER_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'pdf-viewer.ts')
 ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -130,8 +123,6 @@ def _assert_url_rebase(proc):
     assert out.count('PASS') >= 5, f'expected >=5 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
-                    reason='node + jsdom + vite test bundler dev-deps not installed')
 def test_vite_pdf_url_rebased_onto_live_base_path(tmp_path):
     built = tmp_path / 'paper-pdf-viewer.js'
     compiled = compile_feature_owner(ESBUILD, VIEWER_TS, built, tmp_path)

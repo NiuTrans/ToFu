@@ -2,7 +2,7 @@
 never reach the wire.
 
 PRODUCTION INCIDENT (epic pt_8ffba515096142af, forensics in JOURNAL 2026-07-26):
-the sankuai OpenAI-compat gateway streams Opus 5 thinking as ``reasoning_content``
+the example-corp OpenAI-compat gateway streams Opus 5 thinking as ``reasoning_content``
 but NEVER returns a signature (0/92 thinking segments across 15 recent done
 tasks; live state snapshots show assistant turns with ``reasoning_content`` and
 no ``thinking_signature``).  Replaying those turns puts an UNSIGNED thinking
@@ -89,6 +89,29 @@ def test_unsigned_reasoning_content_stripped_through_build_body():
         if m.get('role') == 'assistant':
             assert 'reasoning_content' not in m, (
                 f'build_body emitted unsigned reasoning_content to {OPUS5}')
+
+
+def test_strip_warns_once_for_a_fresh_turn_then_stays_quiet(caplog):
+    """The same unsigned history turn is stripped again on every round; only
+    the round where it is the newest assistant turn is new evidence (632
+    per-round WARNINGs for 9 conversations on 2026-10-23)."""
+    import logging
+    fresh = [{'role': 'user', 'content': 'go'}, _unsigned_tool_turn(),
+             {'role': 'tool', 'tool_call_id': 'c1', 'content': 'r'}]
+    with caplog.at_level(logging.DEBUG, logger='lib.llm.body._model_tweaks'):
+        _inject_claude_reasoning_details(copy.deepcopy(fresh), OPUS5)
+    assert [r.levelname for r in caplog.records
+            if 'Stripped unsigned' in r.message] == ['WARNING']
+
+    caplog.clear()
+    later = fresh + [{'role': 'assistant', 'content': 'done',
+                      'reasoning_content': 't', 'thinking_signature': 'S'}]
+    with caplog.at_level(logging.DEBUG, logger='lib.llm.body._model_tweaks'):
+        _inject_claude_reasoning_details(later, OPUS5)
+    assert 'reasoning_content' not in later[1]
+    assert [r.levelname for r in caplog.records
+            if 'Stripped unsigned' in r.message] == ['DEBUG']
+    assert not [r for r in caplog.records if r.levelno >= logging.INFO]
 
 
 # ═══════════════════════════════════════════════════════════════════════════

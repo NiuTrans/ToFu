@@ -140,6 +140,7 @@ function check(name, cond, extra) {
 }
 
 eval(stateSrc);
+window.TradingApp.bindHost({ version: 1, api: { trading: { ...window.Api.trading, raw: () => Promise.reject(new Error("unused raw request")) } }, markdown: { parse: text => text, sanitize: html => html } });
 eval(recSrc);
 const F = window.TradingApp;
 const doc = window.document;
@@ -351,23 +352,6 @@ def test_neuter_stripping_skipped_renderer_kills_the_empty_state():
 # ════════════════════════════════════════════════════════════
 #  Static guards: cascade order + data-label contract
 # ════════════════════════════════════════════════════════════
-
-@pytest.mark.unit
-def test_theme_bridge_loads_after_trading_css_and_reconcile_before_init():
-    html = open(os.path.join(ROOT, 'tofu_trading', 'templates', 'trading.html'),
-                encoding='utf-8').read()
-    # Anchored on the file names, not on a leading slash: the refs are
-    # page-relative so the page survives a prefixed mount (see
-    # tests/test_page_asset_paths.py). This guard is about CASCADE ORDER only.
-    i_trading = html.index('trading-static/trading.css')
-    i_bridge = html.index('trading-static/theme-bridge.css')
-    assert i_trading < i_bridge, (
-        'theme-bridge must load AFTER trading.css or it loses the cascade '
-        'and the host token mapping never applies')
-    i_rec = html.index('trading-static/js/trading/reconcile.js')
-    i_init = html.index('trading-static/js/trading/init.js')
-    assert i_rec < i_init, 'reconcile.js must load before init.js (nav switch calls it)'
-
 
 @pytest.mark.unit
 def test_mobile_card_layout_has_a_data_label_for_every_holdings_cell():

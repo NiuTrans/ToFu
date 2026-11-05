@@ -23,6 +23,12 @@ ERROR_CODES = frozenset({
     'database_busy',
     'database_unavailable',
     'database_timeout',
+    # The authority refused one request against a deterministic per-request
+    # bound (storage.v2 reason domain_resource_bound, e.g. a transcript above
+    # the response byte budget). Replaying the identical request re-hits the
+    # bound, so it is never transient: shrink the request. Transient load
+    # shedding keeps 'database_unavailable'.
+    'database_resource_exhausted',
     'database_conflict',
     # The caller supplied an identity that conflicts with the operation's
     # explicit owner boundary. Keep this distinct from malformed payloads and
@@ -102,6 +108,16 @@ class StorageError(RuntimeError):
         )
 
 
+class ProjectionRebaseRequired(StorageError):
+    """A task producer invalidated its rejected projection before retry.
+
+    This is local replay-safety evidence, never reconstructed from a wire
+    error. The event/carrier stays exact; its producer must reread the current
+    attempt and rebuild the projection CAS. Ordinary editor CAS conflicts
+    remain permanent for their original payload.
+    """
+
+
 #: Storage classifications that are always safe to retry with the identical
 #: operation (see lib.storage.retry for the replay-safety argument).
 TRANSIENT_STORAGE_CODES = frozenset({
@@ -110,20 +126,51 @@ TRANSIENT_STORAGE_CODES = frozenset({
     'database_unavailable',
 })
 
+_SQL_FRAME_TOO_LARGE_MESSAGE = 'Storage frame exceeds the size limit'
+
+
+def is_resource_bound_refusal(exc: BaseException | None) -> bool:
+    """The authority refused one read against a deterministic per-request bound.
+
+    A smaller window or page of the same read can succeed; replaying the
+    identical read cannot. Current native engines answer a non-retryable
+    ``database_resource_exhausted``; engines predating the
+    domain_resource_bound classification shed it as retryable
+    ``database_unavailable`` carrying the wire code as its message, and the
+    SQL Sidecar cannot encode the response frame at all.
+    """
+    seen = 0
+    current: BaseException | None = exc
+    while current is not None and seen < 8:
+        if isinstance(current, StorageError):
+            return (
+                current.code == 'database_resource_exhausted'
+                or (current.code == 'database_unavailable'
+                    and current.message == 'database_resource_exhausted')
+                or (current.code == 'database_protocol_error'
+                    and _SQL_FRAME_TOO_LARGE_MESSAGE in current.message)
+            )
+        current = current.__cause__ or current.__context__
+        seen += 1
+    return False
+
 
 def is_transient_storage_error(exc: BaseException | None) -> bool:
     """Classify by code through the cause chain.
 
     Wrappers such as ``EventDurabilityError`` lose the original
     ``StorageError`` flag surface but keep it as ``__cause__``; walk the
-    chain (bounded) so classification happens at the site that catches.
+    chain (bounded) so classification happens at the site that catches. The
+    nearest typed verdict wins: an append fallback's permanent refusal must
+    not inherit retryability from the earlier batch timeout in its context.
     """
     seen = 0
     current: BaseException | None = exc
     while current is not None and seen < 8:
-        if (isinstance(current, StorageError)
-                and current.code in TRANSIENT_STORAGE_CODES):
+        if isinstance(current, ProjectionRebaseRequired):
             return True
+        if isinstance(current, StorageError):
+            return current.code in TRANSIENT_STORAGE_CODES
         current = current.__cause__ or current.__context__
         seen += 1
     return False
@@ -181,7 +228,7 @@ def http_status_for_storage_error(error: StorageError) -> int:
 
 
 __all__ = [
-    'ERROR_CODES', 'StorageError', 'describe_storage_failure',
-    'TRANSIENT_STORAGE_CODES', 'is_transient_storage_error',
-    'http_status_for_storage_error',
+    'ERROR_CODES', 'StorageError', 'ProjectionRebaseRequired', 'describe_storage_failure',
+    'TRANSIENT_STORAGE_CODES', 'is_resource_bound_refusal',
+    'is_transient_storage_error', 'http_status_for_storage_error',
 ]

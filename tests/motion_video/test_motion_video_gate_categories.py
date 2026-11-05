@@ -491,28 +491,25 @@ def test_matches_template_does_not_flag_a_genuine_composition():
                                 scene_index=5, total_scenes=6)
 
 
-def test_resumed_authored_composition_counts_as_authored():
-    """Measured: a rescue run with all six compositions intact printed
-    authored 0/6 while shipping six authored frames, because the counter only
-    incremented on the fresh-authoring path. A fully-resumed film then read
-    as "every scene fell back" in both the verdict and the panel.
-    """
-    from lib.motion_video import engine
-    from tests._source_scan import python_block
+def test_resumed_authored_composition_counts_as_authored(tmp_path, monkeypatch):
+    """A resumed authored scene keeps its identity without a fresh model call."""
+    from lib.motion_video import engine, _scene_author
+    from tests.motion_video.test_motion_video_engine import _engine_task
+    from tests.motion_video.test_motion_video_workflow import _film, _offline_author
 
-    src = inspect.getsource(engine.run_motion_task)
-    # The prepared-resume branch must inspect whether the reused composition
-    # is the fallback card before it can count it. The author batch stores only
-    # the existence verdict, then this single-writer branch rereads the bytes.
-    #
-    # Indent-matched, not a fixed 600-byte window (charter #24 / pt_b95c6d39).
-    # ``run_motion_task`` is ~16.7 KB, so the old window covered under 4% of it
-    # and stopped well short of this branch's end. This is a POSITIVE assertion,
-    # which is the dangerous polarity for a truncating window: it passes today
-    # only because the token happens to sit early in the branch, and would go
-    # quietly green if the check moved a few lines down.
-    branch = python_block(src, "elif prepared['has_existing']:")
-    assert 'is_template_composition' in branch, (
-        'the resume branch must ask whether the reused composition is the '
-        'fallback card before counting it as authored — an authored resume '
-        'is authored work, a template resume is still a degrade')
+    task, _ = _film(tmp_path, monkeypatch)
+    _offline_author(monkeypatch, task)
+    engine.run_motion_task(task)
+    assert task['status'] == 'done', task.get('error')
+    assert task['authored_scenes'] == task['total_scenes'] > 0
+
+    def must_reuse(*args, **kwargs):
+        raise AssertionError('an authored scene was regenerated on recovery')
+
+    monkeypatch.setattr(_scene_author, 'author_scene', must_reuse)
+    resumed = _engine_task(tmp_path, narration=False)
+    resumed['scene_author'] = True
+    engine.run_motion_task(resumed)
+    assert resumed['status'] == 'done', resumed.get('error')
+    assert resumed['authored_scenes'] == resumed['total_scenes'] > 0
+    assert not any(event['type'] == 'scene_authored' for event in resumed['events'])

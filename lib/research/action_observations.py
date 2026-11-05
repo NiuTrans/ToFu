@@ -19,6 +19,7 @@ import jsonschema
 
 from lib.identity import require_user_id
 from lib.storage.errors import StorageError
+from lib.error_envelope import BadRequest
 from .persistence import research_direction_hash
 
 INTENT_NAMESPACE = 'research.action_observation_intents.v1'
@@ -57,7 +58,7 @@ def _task_prefix(user_id, task_id):
     try:
         jsonschema.Draft202012Validator(task_schema).validate(task_id)
     except jsonschema.ValidationError as exc:
-        raise ValueError('Invalid Research observation task identity') from exc
+        raise BadRequest('Invalid Research observation task identity', field='task_id') from exc
     return uid, f"{uid}:{_digest({'task_id': task_id})}:"
 
 
@@ -356,13 +357,13 @@ def capture_action_observation(task, workspace, round_entry, result):
 
 def _validate_page_parameters(prefix, limit, cursor):
     if type(limit) is not int or not 1 <= limit <= 16:
-        raise ValueError('Research observation page limit must be 1..16')
+        raise BadRequest('Research observation page limit must be 1..16', field='limit')
     if (not isinstance(cursor, str) or len(cursor) > 512
         or (cursor and (not cursor.startswith(prefix)
             or not cursor[len(prefix):].isascii()
             or not cursor[len(prefix):].isdigit()
             or cursor[len(prefix):].startswith('0')))):
-        raise ValueError('Invalid Research observation page cursor')
+        raise BadRequest('Invalid Research observation page cursor', field='cursor')
 
 
 def load_action_observation_page(task_id, *, user_id, limit=8, cursor=''):
@@ -379,7 +380,7 @@ def load_action_observation_page(task_id, *, user_id, limit=8, cursor=''):
 def prepare_action_observation_export(task_id, ordinal, *, user_id):
     from lib.storage import get_storage_client
     if type(ordinal) is not int or ordinal < 1:
-        raise ValueError('Research observation ordinal must be positive')
+        raise BadRequest('Research observation ordinal must be positive', field='ordinal')
     repository = ActionObservations.open(get_storage_client(), user_id=user_id, task_id=task_id)
     return repository.prepare_original_export(ordinal) if repository is not None else None
 

@@ -357,7 +357,7 @@ def compact_tool_results(ctx: CompactionContext) -> int:
 
     # A no-op is the overwhelmingly common steady-state outcome. Keep it
     # available for diagnosis without emitting one INFO record per model round.
-    _log_pass = logger.info if compacted_count else logger.debug
+    _log_pass = logger.info if compacted_count and not ctx.dry_run else logger.debug
     _log_pass('[L1] conv=%s  cold=%d  compacted=%d  '
               'skipped_short=%d  skipped_already=%d  '
               '~%d tokens saved',

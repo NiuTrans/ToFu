@@ -14,8 +14,10 @@ All offline: the LLM is a fake callable injected via ``SearchConfig``.
 """
 
 import inspect
+import logging
 
 import pytest
+import requests
 
 import tofu_search.fetch.content_filter as cf
 from tofu_search.config import SearchConfig
@@ -176,6 +178,87 @@ def test_llm_error_returns_raw_text():
     out = filter_web_content(raw, url='https://example.com/err', query='q', config=cfg)
     assert out == raw                            # filtering never blocks the page
 
+
+
+# ── Best-effort budget and failure severity ──
+
+def _search_records(caplog, minimum):
+    return [record for record in caplog.records
+            if record.name.startswith('tofu_search') and record.levelno >= minimum]
+
+
+def test_remaining_budget_that_cannot_fit_a_call_skips_the_llm(caplog):
+    calls = []
+    raw = 'Real article body. ' * 400
+    cfg = _cfg(_fake_llm(calls, '[USEFUL]'))
+    with caplog.at_level(logging.DEBUG, logger='tofu_search'):
+        out = filter_web_content(raw, url='https://example.com/late', query='q',
+                                 timeout=1.08756, config=cfg)
+    assert out == raw
+    assert calls == []
+    skips = [record for record in caplog.records
+             if record.name == 'tofu_search.fetch.content_filter'
+             and 'SKIP (budget' in record.getMessage()]
+    assert [record.levelno for record in skips] == [logging.INFO]
+    assert not _search_records(caplog, logging.WARNING)
+
+
+def test_budget_floor_does_not_skip_a_call_that_fits():
+    calls = []
+    raw = 'Real article body. ' * 400
+    cfg = _cfg(_fake_llm(calls, '[USEFUL]'))
+    filter_web_content(raw, url='https://example.com/fits', query='q',
+                       timeout=cf._MIN_CALL_BUDGET_SECS, config=cfg)
+    assert len(calls) == 1
+    assert calls[0]['kwargs']['timeout'] == cf._MIN_CALL_BUDGET_SECS
+
+
+def test_cached_verdict_still_applies_when_no_call_fits():
+    calls = []
+    raw = 'Login wall. ' * 400
+    cfg = _cfg(_fake_llm(calls, '§§IRRELEVANT§§'))
+    kwargs = dict(url='https://example.com/wall', query='q', config=cfg)
+    assert filter_web_content(raw, **kwargs) == IRRELEVANT_SENTINEL
+    assert filter_web_content(raw, timeout=0.5, **kwargs) == IRRELEVANT_SENTINEL
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('expiry', [
+    TimeoutError('Response read timed out (timeout budget: 2s)'),
+    requests.ReadTimeout('read timed out'),
+])
+def test_budget_timeout_is_reported_below_error(caplog, expiry):
+    def _expire(messages, **kwargs):
+        raise expiry
+    raw = 'Real article body. ' * 400
+    cfg = _cfg(_fake_llm([], handler=_expire))
+    with caplog.at_level(logging.DEBUG, logger='tofu_search'):
+        out = filter_web_content(raw, url='https://example.com/slow', query='q',
+                                 timeout=2.0, config=cfg)
+    assert out == raw
+    assert not _search_records(caplog, logging.ERROR)
+    warnings = _search_records(caplog, logging.WARNING)
+    assert [record.name for record in warnings] == ['tofu_search.fetch.content_filter']
+    assert 'TIMEOUT' in warnings[0].getMessage()
+    assert warnings[0].exc_info is None
+
+
+@pytest.mark.parametrize('failure', [
+    RuntimeError('HTTP 500 from gateway'),
+    requests.ConnectTimeout('endpoint did not accept a connection'),
+])
+def test_real_filter_failure_is_still_an_error(caplog, failure):
+    def _fail(messages, **kwargs):
+        raise failure
+    raw = 'Real article body. ' * 400
+    cfg = _cfg(_fake_llm([], handler=_fail))
+    with caplog.at_level(logging.DEBUG, logger='tofu_search'):
+        out = filter_web_content(raw, url='https://example.com/broken', query='q',
+                                 timeout=2.0, config=cfg)
+    assert out == raw
+    errors = _search_records(caplog, logging.ERROR)
+    assert 'tofu_search.fetch.content_filter' in {record.name for record in errors}
+    assert all(record.exc_info for record in errors)
 
 # ── Empty-response anomaly (fail-open, never cached) ──
 

@@ -1185,7 +1185,7 @@ def test_storage_timeouts_keep_retryable_taxonomy(
         assert response.status_code == 503
         assert response.headers["Retry-After"] == "1"
         body = response.get_json()
-        assert body["error"]["kind"] == "server_busy"
+        assert body["error"]["kind"] == "storage_unavailable"
         assert body["error"]["storageCode"] == "database_timeout"
         assert body["error"]["retryable"] is True
         assert body["retryAfterMs"] == 25

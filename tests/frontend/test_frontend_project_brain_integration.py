@@ -185,7 +185,6 @@ def test_integration_center_uses_app_i18n_seam() -> None:
     )
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
 def test_integration_icons_exist_in_typed_owner() -> None:
     """Every icon requested by the panel resolves through the public owner.
 

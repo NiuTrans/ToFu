@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import json
 import os
@@ -54,11 +54,13 @@ class ProjectLease:
         expected_parent_pid: int | None = None,
         owner_kind: str = 'storage_authority_sql',
         owner_label: str = 'Storage sidecar',
+        server_owner_verifier: Callable[[int], bool] | None = None,
     ) -> None:
         self._lock_path = data_dir / '.storage-sidecar.lock'
         self._lease_path = data_dir / '.storage-sidecar-lease.json'
         self._server_lock_path = data_dir / '.server.lock'
         self._expected_parent_pid = expected_parent_pid
+        self._server_owner_verifier = server_owner_verifier
         normalized_kind = str(owner_kind or '').strip().lower()
         if (not normalized_kind or len(normalized_kind) > 64
                 or any(character not in 'abcdefghijklmnopqrstuvwxyz0123456789_.'
@@ -83,6 +85,9 @@ class ProjectLease:
             owner_pid = int(pid_text) if separator and pid_text.isdigit() else None
             if (owner_pid is not None
                     and owner_pid == self._expected_parent_pid):
+                return
+            if (owner_pid is not None and self._server_owner_verifier is not None
+                    and self._server_owner_verifier(owner_pid)):
                 return
             if os.name == 'nt':  # pragma: no cover - Windows CI
                 if owner_pid is None:
@@ -332,13 +337,10 @@ def run_filesystem_preflight(data_dir: Path) -> PreflightReport:
     finally:
         for path in (source, target, lock_path):
             path.unlink(missing_ok=True)
+    # Reported, never a refusal: the checks above prove durability, and a slow
+    # or loaded mount must not stop storage ("Hardware never limits work",
+    # docs/RESOURCE_CONTROL.md).
     fsync_ms = (time.monotonic() - started) * 1000
-    maximum_ms = float(os.environ.get('TOFU_STORAGE_PREFLIGHT_MAX_MS') or 5000)
-    if fsync_ms > maximum_ms:
-        raise StorageError(
-            'database_unavailable',
-            'Project filesystem latency exceeds the configured safety bound',
-        )
     mount = describe_mount(data_dir)
     return PreflightReport(
         filesystem=str(data_dir),

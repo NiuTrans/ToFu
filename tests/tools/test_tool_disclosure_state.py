@@ -204,3 +204,36 @@ def test_unique_short_name_program_search_uses_visible_invocation_hint():
     assert result['resolved_name'] == 'mcp__first__inspect_record'
     assert 'uniquely matches' in result['notice']
     assert 'tools.invoke' in result['notice'] and 'execute_tools' not in result['notice']
+
+
+def test_concurrent_searches_keep_every_disclosure():
+    """Calls of one round run concurrently (owner decision 2026-10-28); two
+    searches folding into the same task must not drop each other's schemas."""
+    import threading
+
+    from lib.tools.disclosure_state import TOOL_DISCLOSURE_STATE_TASK_KEY
+
+    readers = threading.Barrier(2)
+
+    class RacingTask(dict):
+        """Both searches read the ledger before either writes, unless serialized."""
+
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            if key == TOOL_DISCLOSURE_STATE_TASK_KEY:
+                try:
+                    readers.wait(timeout=1)
+                except threading.BrokenBarrierError:
+                    pass
+            return value
+
+    task = RacingTask()
+    catalog = [_tool("alpha"), _tool("beta")]
+    workers = [threading.Thread(target=record_search_items, args=(
+        task, [{"name": name}]), kwargs={"catalog": catalog}) for name in ("alpha", "beta")]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(10)
+
+    assert {row["name"] for row in disclosed_entries(task)} == {"alpha", "beta"}

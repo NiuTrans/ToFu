@@ -4,6 +4,7 @@ from typing import Any
 from collections.abc import Mapping
 from lib.storage_authority_sql.adapters.base import Session
 from lib.storage.errors import StorageError
+from lib.error_envelope import BadRequest
 from lib.conversation_sync.dispatch_contract import (
     ATTEMPT_DISPATCH_MODES,
 )
@@ -700,6 +701,11 @@ def _turn_steer_commit(session: Session, payload: Mapping[str, Any]) -> Any:
     images = payload.get("images")
     if not isinstance(images, list):
         images = []
+    author = payload.get("author")
+    if author is not None and not isinstance(author, Mapping):
+        raise StorageError(
+            "database_protocol_error", "Invalid author in storage request"
+        )
     session.lock_key("turn_conversation", f"{user_id}:{conv_id}")
     session.lock_key("turn_attempt", attempt_id)
     row = session.fetch_one(
@@ -733,13 +739,17 @@ def _turn_steer_commit(session: Session, payload: Mapping[str, Any]) -> Any:
         preview: dict[str, Any] = {"text": text[:1200]}
         if images:
             preview["images"] = images
-        records.append({
+        record: dict[str, Any] = {
             "blockId": block_id,
             "commandId": command_id,
             "count": 1,
             "previews": [preview],
             "deliveryState": "pending",
-        })
+        }
+        # TurnSteerAuthor: stored once with its record; a replay keeps it.
+        if author is not None:
+            record["author"] = dict(author)
+        records.append(record)
     next_projection["_userSteerInjects"] = records
     base_revision = int(row["projection_revision"] or 0)
     target_revision = base_revision + 1
@@ -1587,8 +1597,10 @@ def _turn_projection_update(session: Session, payload: Mapping[str, Any]) -> Any
         from lib.human_gate_contract import require_declared_choice_response, answered_guidance_round
         try:
             require_declared_choice_response(question, response)
-        except ValueError as exc:
+        except BadRequest as exc:
             raise StorageError('database_invalid_payload', str(exc)) from exc
+        except ValueError as exc:
+            raise StorageError('database_integrity', str(exc)) from exc
         next_projection = dict(previous)
         next_projection['toolRounds'] = [
             answered_guidance_round(dict(r), response, command_id) if r is question else r

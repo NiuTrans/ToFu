@@ -17,22 +17,25 @@ public struct HTTPRequest: Sendable {
     public var headers: [String: String]
     public var body: Body?
     /// false = expose the raw 3xx (login handshake); true = resolve the
-    /// redirect chain before the caller parses the body (login-form discovery,
-    /// meta preflight).
+    /// redirect chain before returning. Authentication explicitly disables it.
     public var followRedirects: Bool
+    /// Optional protocol body bound, enforced while receiving bytes.
+    public var maximumResponseBytes: Int?
 
     public init(
         url: String,
         method: String = "GET",
         headers: [String: String] = [:],
         body: Body? = nil,
-        followRedirects: Bool = true
+        followRedirects: Bool = true,
+        maximumResponseBytes: Int? = nil
     ) {
         self.url = url
         self.method = method
         self.headers = headers
         self.body = body
         self.followRedirects = followRedirects
+        self.maximumResponseBytes = maximumResponseBytes
     }
 }
 
@@ -60,8 +63,8 @@ public struct HTTPResponse: Sendable, Equatable {
     }
 }
 
-/// The transport seam. Blocking-callable from async context; the production
-/// impl applies the Android timeouts (connect 10s / read 40s for supervisor).
+/// Nonblocking transport port. URLSession owns cancellation and response
+/// lifetimes; authentication supplies its own redirect and body policies.
 public protocol HTTPClient: Sendable {
     func send(_ request: HTTPRequest) async throws -> HTTPResponse
 }

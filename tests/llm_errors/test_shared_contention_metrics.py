@@ -2,7 +2,7 @@
 """tests/llm_errors/test_shared_contention_metrics.py — shared-project 429 contention
 must not pollute model health metrics (epic pt_47594accfe654410).
 
-The incident (2026-07-28): the sankuai gateway's shared Moonshot project
+The incident (2026-07-28): the example-corp gateway's shared Moonshot project
 (50M TPM) was saturated by OTHER tenants (local traffic measured ~2M/min
 ≈ 4% of the pipe). 782 contention 429s in ~80 minutes were each recorded
 as a model error, crushing the kimi-k3 card's success rate to 24% — while
@@ -193,12 +193,12 @@ class TestModelHealthFold:
     def test_fold_carries_contention(self):
         from lib.dispatch_stats import aggregate_model_health
         out = aggregate_model_health([
-            {'provider_id': 'sankuai', 'model': 'kimi-k3',
+            {'provider_id': 'example-corp', 'model': 'kimi-k3',
              'total_requests': 2, 'total_errors': 1, 'contention_errors': 9},
-            {'provider_id': 'sankuai', 'model': 'kimi-k3',
+            {'provider_id': 'example-corp', 'model': 'kimi-k3',
              'total_requests': 3, 'total_errors': 0, 'contention_errors': 5},
         ])
-        row = out['providers']['sankuai']['kimi-k3']
+        row = out['providers']['example-corp']['kimi-k3']
         assert row['contention_errors'] == 14
         assert row['total_errors'] == 1
         assert row['success_rate'] == 0.8

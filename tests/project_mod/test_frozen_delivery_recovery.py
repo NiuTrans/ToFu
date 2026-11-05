@@ -1,6 +1,8 @@
 """Frozen task checkpoints recover independently of mutable source admission."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+import errno
+import subprocess
 import threading
 
 import pytest
@@ -25,7 +27,10 @@ def held_source(work, *, metadata=False):
                      workspace_file_write_lease(str(work / 'later.txt')))
         with admission:
             entered.set()
-            assert release.wait(15)
+            # The main test owns the contention window. Its finally releases
+            # this holder even on pytest timeout; wall-clock expiry would
+            # silently remove contention while delivery is still running.
+            release.wait()
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(hold)
@@ -98,6 +103,72 @@ def test_failed_release_validation_no_longer_prevents_workspace_delivery(repo, m
         assert delivery.resume_pending_workspace_deliveries()
     assert receipt(root)['state'] == 'delivered', (receipt(root).get('reason'), receipt(root).get('taskOutcome'), receipt(root).get('phase'))
     assert (root / 'task.txt').read_text() == 'task\n'
+
+
+@pytest.mark.parametrize('error_number', [errno.EAGAIN, errno.EINTR, errno.ENOMEM])
+def test_transient_git_spawn_failure_during_capture_resumes_pending_delivery(
+        repo, monkeypatch, error_number):
+    root, _, _ = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'task.txt').write_text('completed task bytes\n')
+    run = subprocess.run
+
+    def fail_git_diff_spawn(argv, *args, **kwargs):
+        if 'diff' in argv:
+            raise OSError(error_number, errno.errorcode[error_number])
+        return run(argv, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ic.subprocess, 'run', fail_git_diff_spawn)
+        first = automatic_settle(repo)
+    assert first['state'] == 'pending', first['reason']
+    assert 'Errno %d' % error_number in first['reason']
+    assert not (root / 'task.txt').exists()
+
+    assert automatic_settle(repo)['state'] == 'delivered'
+    assert (root / 'task.txt').read_text() == 'completed task bytes\n'
+
+
+def test_deterministic_git_failure_during_capture_stays_blocked(repo, monkeypatch):
+    root, _, _ = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'task.txt').write_text('unpublishable task bytes\n')
+    run = subprocess.run
+
+    def reject_git_diff(argv, *args, **kwargs):
+        if 'diff' in argv:
+            return subprocess.CompletedProcess(argv, 128, '', 'invalid object name')
+        return run(argv, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ic.subprocess, 'run', reject_git_diff)
+        first = automatic_settle(repo)
+    assert first['state'] == 'blocked', first
+    assert 'invalid object name' in first['reason']
+    checkpoint = first['checkpointSha']
+    with monkeypatch.context() as patch:
+        def unexpected_capture(*args, **kwargs):
+            raise AssertionError('a blocked deterministic capture must not be recaptured')
+        patch.setattr(ic, 'checkpoint_workspace', unexpected_capture)
+        assert automatic_settle(repo) == first
+    assert not (root / 'task.txt').exists()
+    assert receipt(root)['checkpointSha'] == checkpoint
+
+
+def test_legacy_transient_capture_receipt_recovers_through_resume_queue(repo, monkeypatch):
+    root, _, owner = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'task.txt').write_text('completed before restart\n')
+    queue_completion(root, monkeypatch, owner)
+    ic.checkpoint_workspace(str(root), 'automatic', user_id=owner)
+    row = state.get_workspace(str(root), 'automatic', user_id=owner)
+    delivery._save(row, delivery._receipt(row), state='blocked', phase='checkpoint',
+                   reason='git diff failed: [Errno 11] Resource temporarily unavailable',
+                   checkpointSha=row['checkpoint_sha'])
+
+    assert delivery.resume_pending_workspace_deliveries()
+    assert receipt(root)['state'] == 'delivered', receipt(root)
+    assert (root / 'task.txt').read_text() == 'completed before restart\n'
 
 
 def test_initial_capture_still_requires_source_writer_admission(repo, monkeypatch):

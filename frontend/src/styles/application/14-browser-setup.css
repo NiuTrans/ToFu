@@ -1,0 +1,55 @@
+/* ═══════════════════════════════════════════
+   ★ Browser Bridge Modal & UI
+   ═══════════════════════════════════════════ */
+.browser-modal{max-width:540px}
+.browser-modal .modal-desc{color:var(--text-secondary,#888);font-size:var(--font-size-md);margin:0 0 var(--space-4)}
+.browser-status-box{padding:var(--space-3) var(--space-4);border-radius:10px;margin-bottom:var(--space-4);background:rgba(56,189,248,0.06);border:1px solid rgba(56,189,248,0.15)}
+.browser-status-indicator{display:flex;align-items:center;gap:var(--space-2);font-size:var(--font-size-md);font-weight:600}
+.browser-status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.browser-status-dot.connected{background:#22c55e;box-shadow:0 0 6px rgba(34,197,94,0.5);animation:pulse 1.5s infinite}
+.browser-status-dot.disconnected{background:#888}
+.browser-status-text{color:var(--text-primary,#e0e0e0)}
+
+.browser-local-shortcut{padding:var(--space-3) var(--space-4);border-radius:10px;margin-bottom:var(--space-4);background:rgba(34,197,94,0.07);border:1px solid rgba(34,197,94,0.2)}
+.browser-local-shortcut strong{display:block;font-size:var(--font-size-md);color:var(--text-primary,#e0e0e0);margin-bottom:var(--space-1)}
+.browser-local-shortcut p{font-size:var(--font-size-sm);line-height:1.5;color:var(--text-secondary,#888);margin:0 0 var(--space-2)}
+.browser-local-shortcut code{background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:4px;font-size:var(--font-size-sm);font-family:'JetBrains Mono',monospace}
+.browser-local-shortcut code.copyable-url{position:relative;font-size:var(--font-size-sm);color:#22c55e;transition:background-color .2s ease,box-shadow .2s ease,color .2s ease}
+.browser-local-shortcut code.copyable-url:hover{background:rgba(34,197,94,0.15);box-shadow:0 0 0 2px rgba(34,197,94,0.2)}
+.browser-local-shortcut code.copyable-url::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:var(--space-2);font-size:var(--font-size-xs);padding:3px var(--space-2);border-radius:5px;background:#1e293b;color:#e2e8f0;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s}
+.browser-local-shortcut code.copyable-url:hover::after{opacity:1}
+.browser-local-shortcut code.copyable-url.copied{background:rgba(34,197,94,0.18);color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,0.25)}
+
+.browser-lna-warning{padding:var(--space-3) var(--space-4);border-radius:10px;margin:var(--space-3) 0 0;background:rgba(245,158,11,0.07);border:1px solid rgba(245,158,11,0.25)}
+.browser-lna-warning strong{display:block;font-size:var(--font-size-md);color:#f59e0b;margin-bottom:var(--space-1)}
+.browser-lna-warning p{font-size:var(--font-size-sm);line-height:1.5;color:var(--text-secondary,#888);margin:0 0 var(--space-2)}
+.browser-lna-warning code{background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:4px;font-size:var(--font-size-sm);font-family:'JetBrains Mono',monospace}
+.browser-lna-warning code.copyable-url{position:relative;color:#f59e0b;transition:background-color .2s ease,box-shadow .2s ease,color .2s ease}
+.browser-lna-warning code.copyable-url:hover{background:rgba(245,158,11,0.15);box-shadow:0 0 0 2px rgba(245,158,11,0.2)}
+.browser-lna-warning code.copyable-url::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:var(--space-2);font-size:var(--font-size-xs);padding:3px var(--space-2);border-radius:5px;background:#1e293b;color:#e2e8f0;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s}
+.browser-lna-warning code.copyable-url:hover::after{opacity:1}
+.browser-lna-warning code.copyable-url.copied{background:rgba(245,158,11,0.18);color:#f59e0b;box-shadow:0 0 0 2px rgba(245,158,11,0.25)}
+.browser-lna-path{font-size:var(--font-size-sm);line-height:1.5;color:var(--text-secondary,#888);margin:var(--space-2) 0 0}
+[data-theme="light"] .browser-local-shortcut{background:rgba(22,163,74,0.06);border-color:rgba(22,163,74,0.18)}
+[data-theme="light"] .browser-local-shortcut code.copyable-url{color:#16a34a}
+.browser-setup-steps{display:flex;flex-direction:column;gap:var(--space-3);margin-bottom:var(--space-4)}
+.setup-step{display:flex;gap:var(--space-3);align-items:flex-start}
+.step-num{width:24px;height:24px;border-radius:50%;background:rgba(56,189,248,0.15);color:#38bdf8;font-size:var(--font-size-sm);font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px}
+.step-content{flex:1;font-size:var(--font-size-md);line-height:1.5}
+.step-content strong{display:block;color:var(--text-primary,#e0e0e0);margin-bottom:2px}
+.step-content p strong{display:inline;margin-bottom:0}
+.step-content p{color:var(--text-secondary,#888);margin:0 0 6px}
+.step-content code{background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:4px;font-size:var(--font-size-sm);font-family:'JetBrains Mono',monospace}
+.step-content code.copyable-url{transition:background-color .2s ease,box-shadow .2s ease,color .2s ease;color:#38bdf8}.step-content code.copyable-url:hover{background:rgba(56,189,248,0.15);box-shadow:0 0 0 2px rgba(56,189,248,0.2)}.step-content code.copyable-url::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);font-size:var(--font-size-xs);padding:3px var(--space-2);border-radius:5px;background:#1e293b;color:#e2e8f0;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s}.step-content code.copyable-url:hover::after{opacity:1}.step-content code.copyable-url.copied{background:rgba(34,197,94,0.15);color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,0.2)}.step-content code.copyable-url.copied::after{background:#166534;color:#bbf7d0}
+[data-theme="light"] .step-content code.copyable-url{color:#0284c7}[data-theme="light"] .step-content code.copyable-url:hover{background:rgba(2,132,199,0.1);box-shadow:0 0 0 2px rgba(2,132,199,0.15)}[data-theme="light"] .step-content code.copyable-url.copied{background:rgba(22,163,74,0.1);color:#16a34a}
+
+#browserToggle.active{background:rgba(56,189,248,0.15);color:#38bdf8;border-color:rgba(56,189,248,0.3)}
+
+[data-theme="light"] .browser-status-box{background:rgba(2,132,199,0.04);border-color:rgba(2,132,199,0.12)}
+[data-theme="light"] .step-num{background:rgba(2,132,199,0.1);color:#0284c7}
+[data-theme="light"] .step-content code{background:rgba(0,0,0,0.05)}
+[data-theme="light"] #browserToggle.active{background:rgba(2,132,199,0.1);color:#0284c7;border-color:rgba(2,132,199,0.25)}
+
+/* ── Desktop Agent toggle ── */
+#desktopToggle.active{background:rgba(168,85,247,0.15);color:#a855f7;border-color:rgba(168,85,247,0.3)}
+[data-theme="light"] #desktopToggle.active{background:rgba(126,34,206,0.1);color:#7e22ce;border-color:rgba(126,34,206,0.25)}

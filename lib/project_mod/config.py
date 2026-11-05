@@ -136,8 +136,13 @@ MAX_COMMAND_TIMEOUT = None      # no timeout limit for run_command
 MAX_COMMAND_OUTPUT  = 100_000   # max chars of command output to return
 SHELL_PREFIX = os.environ.get('SHELL_PREFIX', '')  # e.g. 'source ~/.bashrc &&'
 
-# Dangerous command patterns to block
-# Includes both Unix and Windows equivalents for cross-platform safety.
+# Raw dangerous-command patterns, Unix and Windows: the fail-closed fallback
+# of ``command_analysis.dangerous_command_rule`` for text whose shell
+# structure is unknown (the parser cannot delimit it, or a wrapper's options
+# are not understood). Parsed commands are judged by their program words and
+# operands instead, so a word inside data never matches. A new rule there
+# needs its pattern here; keep each pattern anchored on a literal word so the
+# scan stays linear on long text.
 #
 # NOTE: there is deliberately NO ``rm -rf /`` pattern here. Delete commands
 # are guarded by the argument-PARSING ``_is_catastrophic_delete`` (depth
@@ -157,10 +162,11 @@ DANGEROUS_PATTERNS = [
     r'\bmkfs\b',               # format disk
     r'\bdd\s+.*of=/',          # dd overwrite
     r'>\s*/dev/sd',            # overwrite block device
-    r'\b:(){ :\|:& };:',      # fork bomb
+    r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:',  # fork bomb
     r'\bshutdown\b',
     r'\breboot\b',
     r'\binit\s+0\b',
+    r'\bchmod\s+-[a-zA-Z]*R[a-zA-Z]*\s+(?:\S+\s+)?/[*.]?(?:\s|$)',  # chmod -R … /
     # ── Windows ──
     r'\bformat\s+[a-zA-Z]:',  # format C:
     r'\brd\s+/s\s+/q\b',      # rd /s /q (recursive delete)
