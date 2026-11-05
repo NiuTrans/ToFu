@@ -194,7 +194,11 @@ def execute_scheduler_tool(fn_name, fn_args):
             updates = fn_args.get('updates', {})
             if not updates:
                 return 'Error: No updates provided'
-            changed = mgr.update_task(task_id, user_id=user_id, **updates)
+            try:
+                changed = mgr.update_task(task_id, user_id=user_id, **updates)
+            except ValueError as e:
+                logger.warning('[Scheduler] schedule_manage update validation failed: %s', e, exc_info=True)
+                return f'Error: {e}'
             return (f'Task {task_id} updated: {", ".join(updates.keys())}'
                     if changed else 'Error: Task not found')
 

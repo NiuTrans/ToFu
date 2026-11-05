@@ -82,6 +82,16 @@ def _validated_scheduler_process_principal(
 _CODE_EXEC_TASK_TYPES = frozenset({"command", "python"})
 
 
+def _require_agent_command(command) -> None:
+    """A scheduled agent's command is the instruction it executes when ready."""
+    if not str(command or "").strip():
+        raise ValueError(
+            "task_type='agent' requires a non-empty command: it is the "
+            "instruction the agent executes when ready (condition_command "
+            "only decides when), so an agent without one could never act."
+        )
+
+
 def _application_managed_storage_backups_enabled() -> bool:
     """Personal storage is app-owned; distributed PostgreSQL is platform-owned."""
     from runtime_guards import resolve_deployment_mode
@@ -265,7 +275,8 @@ class ScheduledTaskManager:
             principal: Authenticated owner authorizing the standing task
             name: Human-readable task name
             schedule: Cron expression ('*/5 * * * *') or 'once:YYYY-MM-DD HH:MM'
-            command: Shell command, Python code, LLM prompt, or agent instruction
+            command: Shell command, Python code, LLM prompt, or the agent's
+                     instruction executed when ready (required for 'agent')
             task_type: 'command' (shell), 'python' (Python code), 'prompt' (LLM),
                        'agent' (proactive agentic task with tools + SSE)
             description: What this task does
@@ -305,6 +316,10 @@ class ScheduledTaskManager:
                     "or 'agent' for LLM-driven tasks."
                 )
 
+        # ── Agent instruction ──
+        if task_type == "agent":
+            _require_agent_command(command)
+
         # ── Schedule validation ──
         if schedule.startswith("once:"):
             raw = schedule[5:].strip()
@@ -335,17 +350,11 @@ class ScheduledTaskManager:
 
         task_id = task_id or str(uuid.uuid4())[:12]
         now = datetime.now().isoformat()
-        # Predicate condition paradigm (shared with timer_watchers): a proactive
-        # agent (task_type='agent') can carry a shell PREDICATE that reconciles
-        # against the poll LLM and auto-promotes to zero-cost `code`. The kind is
-        # derived from the parameter combination, NEVER exposed as an LLM knob.
-        from lib.scheduler._shared import derive_condition_kind
+        # A proactive agent's shell PREDICATE decides from creation (zero-cost
+        # `code`). The kind is derived, NEVER exposed as an LLM knob.
+        from lib.scheduler._shared import derive_scheduled_condition_kind
 
-        condition_kind = (
-            derive_condition_kind(command, condition_command)
-            if task_type == "agent"
-            else "llm"
-        )
+        condition_kind = derive_scheduled_condition_kind(task_type, condition_command)
 
         payload = {
             "task_id": task_id,
@@ -493,6 +502,20 @@ class ScheduledTaskManager:
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return False
+        if "command" in updates or "task_type" in updates:
+            current = self.get_task(task_id, user_id=user_id)
+            if current is None:
+                return False
+            task_type = updates.get("task_type", current["task_type"])
+            if task_type == "agent":
+                _require_agent_command(updates.get("command", current["command"]))
+            # The predicate is not updatable, so only a real type change can
+            # alter the kind creation would derive; stored kinds stay otherwise.
+            if task_type != current["task_type"]:
+                from lib.scheduler._shared import derive_scheduled_condition_kind
+
+                updates["condition_kind"] = derive_scheduled_condition_kind(
+                    task_type, current.get("condition_command", ""))
 
         updates["updated_at"] = datetime.now().isoformat()
 
@@ -1114,7 +1137,7 @@ class ScheduledTaskManager:
         if kind == "code":
             # Pure predicate — ZERO LLM. Ambiguous/errored predicate → NOT act
             # (never a false-positive trigger); a sustained ambiguity run demotes
-            # back to hybrid so the LLM re-takes the wheel (self-healing).
+            # to hybrid so the LLM takes the wheel with `command` (self-healing).
             outcome = apply_reconcile_poll(
                 task, pred, llm_ready=None, llm_available=False
             )
