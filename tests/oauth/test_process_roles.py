@@ -46,6 +46,13 @@ def test_all_role_owns_every_split_capability():
             assert process_role_has('all', capability)
 
 
+def test_execution_role_owns_worker_and_scheduler_without_http():
+    assert capabilities_for_role('execution') == (
+        capabilities_for_role('worker') | capabilities_for_role('scheduler'))
+    assert not process_role_has('execution', CAPABILITY_REQUEST_SERVICES)
+    assert not process_role_has('execution', CAPABILITY_FRONTEND)
+
+
 def test_unknown_role_or_capability_is_rejected():
     with pytest.raises(ValueError, match='process role'):
         capabilities_for_role('web')

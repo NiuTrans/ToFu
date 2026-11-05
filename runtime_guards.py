@@ -62,7 +62,9 @@ _DEPLOYMENT_MODES = frozenset({'personal', 'distributed'})
 # Legacy Coordinator maxConcurrent schema/catalog value. Never use this
 # value to size execution or refuse admission; active work is unlimited.
 MAX_TASK_CONCURRENCY = 4096
-_PROCESS_ROLES = frozenset({'all', 'api', 'worker', 'scheduler'})
+from bootstrap_pkg.process_roles import (
+    PERSONAL_PROCESS_ROLES, VALID_PROCESS_ROLES as _PROCESS_ROLES,
+)
 _REMOVED_DEPLOYMENT_ENV = (
     'TOFU_REQUIRE_PG',
     'TOFU_REPLICA_RING',
@@ -913,7 +915,7 @@ def load_deployment_configuration(
     role = (env.get('TOFU_PROCESS_ROLE') or 'all').strip().lower()
     if role not in _PROCESS_ROLES:
         raise RuntimeError(
-            'TOFU_PROCESS_ROLE must be all, api, worker, or scheduler')
+            'TOFU_PROCESS_ROLE must be one of: ' + ', '.join(sorted(_PROCESS_ROLES)))
 
     removed = sorted(
         name for name, value in env.items()
@@ -930,8 +932,9 @@ def load_deployment_configuration(
             'removed deployment configuration is set: ' + ', '.join(removed))
 
     if mode == 'personal':
-        if role != 'all':
-            raise RuntimeError('personal mode requires TOFU_PROCESS_ROLE=all')
+        if role not in PERSONAL_PROCESS_ROLES:
+            raise RuntimeError('personal mode requires one of: ' +
+                               ', '.join(sorted(PERSONAL_PROCESS_ROLES)))
         unexpected = [
             name for name in (
                 'TOFU_DISTRIBUTED_PREVIEW_MODE',

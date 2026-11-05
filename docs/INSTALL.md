@@ -429,6 +429,11 @@ when an operator wants any occupied port to be a hard preflight failure.
 The standalone installer and Docker Compose are the personal topology:
 `TOFU_DEPLOYMENT_MODE=personal`, `TOFU_PROCESS_ROLE=all`, and one SQLite
 authority at `data/tofu.db`. They never install or start a PostgreSQL server.
+The role contract also accepts the local split into `api` and `execution`.
+`execution` combines worker, recovery, scheduler and event maintenance
+ownership; it has no HTTP watchdog or API restart watcher. Backend selection
+remains explicit and unchanged. The existing all-in-one entry point remains
+available; declaring a role alone does not compose a resident execution host.
 
 The distributed topology is delivered through Kubernetes. Each API, worker,
 or scheduler Pod runs a local Storage Sidecar that connects to the same
@@ -637,7 +642,7 @@ issue.
 |---|---|
 | `TOFU_DEPLOYMENT_MODE=personal|distributed` | Selects the topology; absence means `personal` |
 | `TOFU_DISTRIBUTED_PREVIEW_MODE=read-only` | Mandatory temporary distributed latch; rejects HTTP/WebSocket/Sidecar writes and background execution |
-| `TOFU_PROCESS_ROLE=all|api|worker|scheduler` | Declares lifecycle ownership; personal mode requires `all` |
+| `TOFU_PROCESS_ROLE=all|api|execution|worker|scheduler` | Declares lifecycle ownership; personal mode accepts `all`, `api` or `execution`; separate `worker`/`scheduler` roles belong to distributed composition |
 | `TOFU_POSTGRES_DSN_FILE` | Absolute PostgreSQL secret file; required only in distributed mode |
 | `TOFU_REDIS_URL_FILE` | Absolute `rediss://` secret file; required only in distributed mode |
 | `TOFU_REPLICA_ID` | Stable, unique replica identity; required only in distributed mode |

@@ -145,6 +145,7 @@ def register_serving_loop_lifecycle(
 ) -> bool:
     """Register loop-bound owners once, before production startup handlers."""
     from lib.process_roles import (
+        CAPABILITY_REQUEST_SERVICES,
         CAPABILITY_TASK_RECOVERY,
         CAPABILITY_TASK_WORKERS,
         normalize_process_role,
@@ -152,6 +153,7 @@ def register_serving_loop_lifecycle(
     )
 
     process_role = normalize_process_role(process_role)
+    owns_request_services = process_role_has(process_role, CAPABILITY_REQUEST_SERVICES)
     owns_task_recovery = process_role_has(
         process_role, CAPABILITY_TASK_RECOVERY)
     owns_task_workers = process_role_has(
@@ -209,18 +211,19 @@ def register_serving_loop_lifecycle(
         runtime = _create_loop_runtime(
             loop, stop_event, logger=log, environ=environ)
         state['runtime'] = runtime
-        state['watchdog'] = _create_watchdog(
-            loop,
-            stop_event,
-            host=host,
-            port=port,
-            hooks=hooks,
-            fault_shm_log=fault_shm_log,
-            fault_log=fault_log,
-            logger=log,
-            ready_event=gate,
-            environ=environ,
-        )
+        if owns_request_services:
+            state['watchdog'] = _create_watchdog(
+                loop,
+                stop_event,
+                host=host,
+                port=port,
+                hooks=hooks,
+                fault_shm_log=fault_shm_log,
+                fault_log=fault_log,
+                logger=log,
+                ready_event=gate,
+                environ=environ,
+            )
 
         try:
             await asyncio.to_thread(_load_write_freshness_snapshot)
@@ -228,15 +231,16 @@ def register_serving_loop_lifecycle(
             log.warning(
                 '[Server] write-freshness snapshot replay failed: %s', exc)
 
-        try:
-            state['auto_restart_started'] = await asyncio.to_thread(
-                _start_auto_restart, stop_event)
-            if state['auto_restart_started']:
-                log.info(
-                    '[Server] Auto-restart watcher armed '
-                    '(TOFU_AUTO_RESTART=1)')
-        except Exception as exc:
-            log.warning('[Server] Auto-restart watcher setup failed: %s', exc)
+        if owns_request_services:
+            try:
+                state['auto_restart_started'] = await asyncio.to_thread(
+                    _start_auto_restart, stop_event)
+                if state['auto_restart_started']:
+                    log.info(
+                        '[Server] Auto-restart watcher armed '
+                        '(TOFU_AUTO_RESTART=1)')
+            except Exception as exc:
+                log.warning('[Server] Auto-restart watcher setup failed: %s', exc)
 
         async def _run_orphan_queue_redispatch() -> None:
             await gate.wait()

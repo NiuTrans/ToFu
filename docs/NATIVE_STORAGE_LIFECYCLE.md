@@ -14,8 +14,10 @@ resolves to `daemon`, `server_manager.LifecycleManager` now owns a persistent
 and `StorageSupervisor`; it owns the native child, its close-on-exec stdin lease,
 crash budget, readiness handshake and graceful shutdown. Restarting the Web
 worker closes only that worker's authenticated clients. Storage caches and
-background engine ownership survive. Explicit embedded transport, SQL storage
-and explicitly supplied external connection files retain their existing owners.
+background engine ownership survive. The same host now retains an explicitly
+selected SQL Sidecar across Web restarts, publishing its existing authenticated
+v1 handoff; native transport keeps the v2 identity contract. Explicit embedded
+transport and explicitly supplied external connection files retain their owners.
 
 This supersedes the worker-only lifetime decision in
 `STORAGE_TOFUDB.md` (“Worker restarts re-open the authority in-process”).
@@ -104,6 +106,46 @@ varies each one. Alternatives rejected: hashing the whole repository replaces
 the host, and pays a full authority reopen, on every application-only change;
 importing the planner eagerly at host start removes skew within one host
 lifetime but still leaves a stale host serving after the files change.
+
+The manager's process lifecycle is shared through
+`serverctl_pkg/resident_service.py`: PID/start identity, inherited exclusive
+lease, private record publication and verified shutdown have one owner.
+`NativeStorageService` supplies storage preparation, connection-file identity
+and authority-lease recognition. The common lifecycle's source bytes also
+participate in host replacement. This preserves the existing record format,
+paths, crash budget and manager-exec behavior while making the same physical
+ownership rules available to the execution host. A second independent PID/stop
+implementation was rejected because it could disagree about physical release.
+
+The historical native host/module and private-record names remain compatible
+while the policy follows the selected backend. SQL generation preparation hashes
+its storage implementation, authority configuration and configured secret-file
+contents; only digests enter the private plan. It neither selects another store
+nor enables the distributed preview. SQLite and PostgreSQL process tests attach,
+write, detach, kill the owned SQL child and reconnect while the same storage host
+retains the authority and rotates its transport token.
+
+Headless execution uses the same resident owner and the common application
+BootRunner/shutdown. Its generation covers Python application sources and launch
+policy; it excludes frontend artifacts and reveals no secret values. Preparation
+and application construction reject source changes. Lazy imports reuse
+`PinnedImportSource`, retaining its documented limits for late package imports
+and non-Python assets rather than copying a second application tree. Manager
+production composition and durable conversation admission are still pending.
+One preparation measurement covered 2,807 Python files in 7.683 seconds and
+produced a 345-byte plan. The private execution record replaces one fixed file;
+temporary preparation files are removed, and no source archive or history
+journal is retained. This is an inventory measurement, not a throughput claim.
+
+The resident protocol also passes an inherited manager-control pipe. Only the
+manager owns its writer; its descriptor remains inheritable across manager exec
+and is excluded from child `Popen` descriptors. The private record retains its
+descriptor, device and inode so an exec'd manager can verify the same endpoint
+and close only its own writer after physical host exit. Hosts verify the read
+endpoint and treat EOF as withdrawal of manager ownership. This needs no new
+polling schedule and works on the running kernel where `pidfd_open` returns
+`ENOSYS`. It changes neither task authority nor the storage connection format.
+The existing post-Popen PID publication handshake remains shared and bounded.
 
 Draining the native daemon at host replacement or full stop gets
 `restart_budget.NATIVE_DAEMON_STOP_SECONDS` (90 s); the manager's host stop

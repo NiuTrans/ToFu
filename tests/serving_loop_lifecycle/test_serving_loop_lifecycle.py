@@ -226,7 +226,8 @@ def test_api_role_does_not_own_attempt_dispatch_recovery(monkeypatch):
     asyncio.run(exercise())
 
 
-def test_worker_role_owns_attempt_dispatch_recovery(monkeypatch):
+@pytest.mark.parametrize('role', ['worker', 'execution'])
+def test_worker_role_owns_attempt_dispatch_recovery(monkeypatch, role):
     app = create_base_app('serving-loop-worker-role', {'TESTING': True})
     calls = []
     runtime = _Runtime(calls)
@@ -237,13 +238,16 @@ def test_worker_role_owns_attempt_dispatch_recovery(monkeypatch):
         shutdown_requested=stop,
         hooks=object(),
         environ={},
-        process_role='worker',
+        process_role=role,
     )
 
     async def exercise():
         async with app.test_app():
             state = app.extensions['tofu_serving_loop_lifecycle']
-            assert state['process_role'] == 'worker'
+            assert state['process_role'] == role
+            assert state['watchdog'] is None
+            assert state['auto_restart_started'] is False
+            assert not any(name == 'watchdog-start' for name, _ in calls)
             assert state['owns_task_recovery'] is True
             assert state['owns_task_workers'] is True
             assert state['owns_attempt_dispatch_recovery'] is True

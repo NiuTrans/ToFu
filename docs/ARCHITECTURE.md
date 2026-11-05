@@ -264,8 +264,19 @@ The delivery dependencies and completion evidence are:
    or accounting. The common durable service now has a commit-owned authority
    watch on all three backends. Empty-queue wake, subscribe/probe gaps, remote
    Stop, COMMIT acknowledgement loss and joined shutdown have executable
-   specifications. Independent host composition and production admission remain
-   the next cutover boundary.
+   specifications. Resident-process ownership now lives in
+   `serverctl_pkg/resident_service.py`; storage and headless execution share its
+   PID/start identity, inherited launch lease and manager EOF channel. The
+   `execution` role combines worker/recovery/scheduler ownership without HTTP
+   watchdogs. Headless execution awaits the existing BootRunner and application
+   shutdown, preserving physical joins and the existing pinned-import source
+   owner. Real processes prove manager exec retention, owner-death wake and no
+   clean-stop receipt before worker exit. Generation preparation hashes the
+   existing Python source boundary and launch policy; frontend artifacts do not
+   replace execution. The selected SQL Sidecar now shares the resident storage
+   lifetime through its existing v1 handoff. Inbound bot connections belong to
+   task workers, so API composition does not duplicate them. Manager execution
+   composition and qualified default admission remain the next cutover boundary.
 4. **Execution facts and read projections.** Keep committed execution facts and
    their accounting authoritative while projection/delivery can drain and
    reconstruct independently. Browser observation, reconnect and transcript

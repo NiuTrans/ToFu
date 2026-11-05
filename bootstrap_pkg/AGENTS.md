@@ -10,6 +10,9 @@ belongs to the owners named in `docs/modules/infra_runtime.md`.
 
 - Keep import-time dependencies minimal and tolerate the documented lean
   fallback environment. Do not import application modules merely for constants.
+- `process_roles.py` owns the standard-library role/capability map used by
+  launcher validation and application lifespan composition; `lib/process_roles.py`
+  is its application import port.
 - Preserve explicit environment re-exec, provider setup, install status, and
   error reporting. A partial install must be recoverable and must not be
   reported as healthy.
