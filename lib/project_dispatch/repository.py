@@ -960,7 +960,7 @@ class ProjectDispatchRepository:
             if execution != previous or assignment['review'] is not None:
                 raise ProjectDispatchError('Execution continuation source changed')
             predecessor = self.get_attempt(previous['attemptId'])
-            successor = self.attempt_get(attempt_id, user_id=self.owner)
+            successor = self.get_attempt(attempt_id)
             if (not isinstance(predecessor, Mapping)
                     or predecessor.get('attemptId') != previous['attemptId']
                     or predecessor.get('turnId') != previous['turnId']
