@@ -313,10 +313,6 @@ def _restored_identity(config, *, task=None):
     assignment = repository_for(binding).validate(binding)
     runtime_path = config.get('projectPath')
     profile = profile_for(assignment)
-    if runtime_path != binding['projectPath']:
-        if task is None or profile['mode'] not in ('files', 'project'):
-            raise PermissionError('Project dispatch project path differs from its accepted grant')
-        owned_workspace(task, binding)
     if (config.get('_turnOwnerUserId') != binding['owner']
             or config.get('_turnPrincipalTenantId', '') != (binding['tenant'] or '')
             or config.get('projectPaths') != []
@@ -329,6 +325,10 @@ def _restored_identity(config, *, task=None):
             or config.get('autoTranslate') is not False
             or '_conversationExecutionIdentity' in config):
         raise PermissionError('Project dispatch config differs from its accepted grant')
+    if runtime_path != binding['projectPath']:
+        if task is None or profile['mode'] not in ('files', 'project'):
+            raise PermissionError('Project dispatch project path differs from its accepted grant')
+        owned_workspace(task, binding)
     if profile['mode'] in ('project', 'coordinator'):
         original = assignment['request']['delegation']['policy']['config']
         # humanGuidanceEnabled is fenced exactly above: the shared policy config
@@ -371,8 +371,13 @@ def validated_dispatch(task, *, require_account=True):
     execution association); it is never retained, so every later admission
     validates live authority again.
     """
+    if not is_dispatch_task(task):
+        return None
+    from lib.tasks_pkg.persistence_wait import wait_for_persistence
     try:
-        return _validated_binding(task, require_account=require_account)
+        return wait_for_persistence(task,
+            lambda: _validated_binding(task, require_account=require_account),
+            label='project dispatch authority', effect_free=True)
     except AbortedError as error:
         stop_on_authority_failure(task, error)
         raise
@@ -430,7 +435,10 @@ def bind_account(task):
     budget = _ensure_execution_budget(task)
 
     from .accounting import holder_consumption
-    assigned = repository_for(binding).read(binding['assignmentId'])
+    from lib.tasks_pkg.persistence_wait import wait_for_persistence
+    assigned = wait_for_persistence(task,
+        lambda: repository_for(binding).read(binding['assignmentId']),
+        label='project dispatch account', effect_free=True)
 
     resume = (task.get('config') or {}).get('_resumeSource') or {}
     account_nonce = next((row['account_nonce'] for row in assigned.get('modelAttempts', [])
@@ -451,7 +459,10 @@ def bind_account(task):
                     or event['reservation_ordinal'] not in (counter['count'], counter['count'] + 1)):
                 raise AbortedError('Worker tool reservation differs from its physical occurrence')
             counter['count'] = event['reservation_ordinal']
-        repository_for(binding).mutate(binding['assignmentId'], record)
+        wait_for_persistence(task,
+            lambda: repository_for(binding).mutate(binding['assignmentId'], record),
+            label='project dispatch tool reservation')
+        validate_task(task)
 
     if shared_id:
         def register_counter(row):
@@ -459,7 +470,9 @@ def bind_account(task):
             if row.get('toolReservations') is not None and row['toolReservations'] != counter:
                 raise AbortedError('Worker tool reservations cannot be replenished')
             row['toolReservations'] = counter
-        repository_for(binding).mutate(binding['assignmentId'], register_counter)
+        wait_for_persistence(task,
+            lambda: repository_for(binding).mutate(binding['assignmentId'], register_counter),
+            label='project dispatch reservation account')
     def observe(event):
 
         event = {**event, 'account_nonce': account_nonce}
@@ -475,8 +488,9 @@ def bind_account(task):
                 from .repository import DispatchGrantRevoked
                 raise DispatchGrantRevoked('Project dispatch revocation refuses a new request')
             attempts = assignment['modelAttempts']
-            if event['phase'] == 'dispatch_intent' and limited:
+            if event['phase'] == 'dispatch_intent' and limited and event not in attempts:
                 # Earlier finite grants keep their recorded ceiling.
+                # An exact intent replay after a lost ACK is not a new request.
                 policy = assignment['request']['budget']
                 if (len(attempts) >= policy['maxModelRequests']
                         or sum(row['reported_tokens'] for row in attempts) + event['reserved_tokens'] > policy['maxTokens']
@@ -488,7 +502,10 @@ def bind_account(task):
                 fold_settled_models(assignment)
             return assignment
         try:
-            repository.mutate(binding['assignmentId'], record)
+            wait_for_persistence(task,
+                lambda: repository.mutate(binding['assignmentId'], record),
+                label='project dispatch model occurrence',
+                cancellable=event['phase'] == 'dispatch_intent')
         except AbortedError:
             raise
         except Exception as error:
@@ -541,7 +558,10 @@ def bind_account(task):
                 fold_settled_tools(row, CONTRACT['terminalToolPhases'])
             return row
         try:
-            repository_for(binding).mutate(binding['assignmentId'], record)
+            wait_for_persistence(task,
+                lambda: repository_for(binding).mutate(binding['assignmentId'], record),
+                label='project dispatch tool occurrence',
+                cancellable=event['phase'] == 'intent')
         finally:
             if event['phase'] != 'intent':
                 active_tools.discard(event['tool_ordinal'])

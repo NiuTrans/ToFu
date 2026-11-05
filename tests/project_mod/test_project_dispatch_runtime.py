@@ -403,6 +403,8 @@ def test_file_workspace_isolation_comes_from_live_profile(context, monkeypatch, 
     task = {'config': {admission.KEY: binding}}
     assert admission.requires_isolated_workspace(task) is True
     # Selecting storage is not permission for an unbound task to execute.
+    monkeypatch.setattr(admission, 'owned_workspace',
+                        lambda *a: pytest.fail('Malformed carrier reached workspace storage'))
     with pytest.raises((AbortedError, ValueError, PermissionError)):
         admission.validate_task(task)
     c.repo.revoke(row['id'], 1)
