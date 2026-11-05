@@ -4,6 +4,34 @@
 //! event; adjacent_tests covers ordinary composed event transactions.
 use super::*;
 
+#[test]
+#[ignore = "isolated process-wide materialization counters; run with --test-threads=1"]
+fn terminal_record_reuses_the_already_verified_turn_instead_of_reloading_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+    let revision = seed_projection(&mut database, canonical_projection(), true);
+    let mut terminal = request(revision, 0);
+    terminal.terminal = true;
+    terminal.status = "completed".into();
+    terminal.settlement = json!({"outcome":"completed","cause":"finished","resumeOptions":[]})
+        .as_object().unwrap().clone();
+    let before = crate::fsync_stats::counters().projection_checkpoint_bytes;
+    let mut read = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+    load_event_record_state(&database, &mut read, &terminal, true).unwrap().unwrap();
+    let one_read = crate::fsync_stats::counters().projection_checkpoint_bytes - before;
+    assert!(one_read > 0);
+    drop(read);
+    let before = crate::fsync_stats::counters().projection_checkpoint_bytes;
+    commit_step(&mut database, &terminal, true).unwrap();
+    let terminal_reads = crate::fsync_stats::counters().projection_checkpoint_bytes - before;
+    assert_eq!(terminal_reads, one_read,
+        "updating the Attempt lane must reuse the same transaction's verified Turn");
+    let expected = state(&database);
+    assert_eq!(expected["turn"]["status"], "completed");
+    drop(database);
+    assert!(state(&AuthorityDatabase::open(directory.path()).unwrap()) == expected);
+}
+
 fn canonical_projection() -> Value {
     json!({"content":"before", "thinking":"", "largeStableEvidence":"s".repeat(256*1024),
         "toolRounds":[],"segments":[{"type":"text","blockId":"text:terminal",

@@ -10541,11 +10541,7 @@ fn store_attempt_document(
     document: &Map<String, Value>,
     committed_at_ms: u64,
 ) -> io::Result<()> {
-    if attempt_is_live(&loaded.document) != attempt_is_live(document) {
-        let turn_id = document
-            .get("turnId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid_data("attempt turn identity is malformed"))?;
+    let lane_id = if attempt_is_live(&loaded.document) != attempt_is_live(document) {
         let turn = load_current_turn_for_attempt(
             database,
             transaction,
@@ -10554,11 +10550,33 @@ fn store_attempt_document(
             &loaded.conversation_id,
         )?
         .ok_or_else(|| invalid_data("attempt owner Turn is missing"))?;
-        let lane_id = turn
+        Some(turn
             .document
             .get("laneId")
             .and_then(Value::as_str)
-            .ok_or_else(|| invalid_data("attempt lane identity is malformed"))?;
+            .ok_or_else(|| invalid_data("attempt lane identity is malformed"))?
+            .to_owned())
+    } else { None };
+    store_attempt_document_with_verified_lane(database, transaction, attempt_id,
+        loaded, document, committed_at_ms, lane_id.as_deref())
+}
+
+/// The event owner already loaded and verified the current Turn in this same
+/// transaction. Reuse its lane instead of rebuilding its entire projection to
+/// read one metadata field. Other writers retain the full loader above.
+fn store_attempt_document_with_verified_lane(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    attempt_id: &str,
+    loaded: &LoadedAttemptForUpdate,
+    document: &Map<String, Value>,
+    committed_at_ms: u64,
+    lane_id: Option<&str>,
+) -> io::Result<()> {
+    if attempt_is_live(&loaded.document) != attempt_is_live(document) {
+        let turn_id = document.get("turnId").and_then(Value::as_str)
+            .ok_or_else(|| invalid_data("attempt turn identity is malformed"))?;
+        let lane_id = lane_id.ok_or_else(|| invalid_data("attempt lane identity is malformed"))?;
         set_lane_live_attempt(
             database,
             transaction,
@@ -10581,7 +10599,7 @@ fn store_attempt_document(
             key: loaded.key.clone(),
             namespace: "generation_attempts".to_owned(),
             logical_key: attempt_id.to_owned(),
-            value_json: serde_json::to_vec(&Value::Object(document.clone()))
+            value_json: serde_json::to_vec(document)
                 .map_err(|_| invalid_data("attempt cannot be encoded"))?,
             expected_version: Some(loaded.physical_version),
             updated_at_ms: committed_at_ms,
@@ -13971,13 +13989,14 @@ fn event_record_with_projection(database: &AuthorityDatabase, transaction: &mut 
         attempt.insert("settledAt".to_owned(), Value::from(request.now_ms));
     }
     if starts_attempt || request.terminal {
-        store_attempt_document(
+        store_attempt_document_with_verified_lane(
             database,
             transaction,
             &request.attempt_id,
             &loaded_attempt,
             &attempt,
             request.now_ms,
+            Some(&lane_id),
         )?;
     }
     if request.terminal && request.status == "superseded" {
@@ -14027,13 +14046,17 @@ fn event_record_with_projection(database: &AuthorityDatabase, transaction: &mut 
             };
         }
     }
+    // Keep exactly one owned body. Inline/terminal storage takes that body;
+    // compact heads retain it for publication and the next adjacent event.
+    let mut retained_projection = Some(next_projection);
     if let Some(head) = &next_projection_head {
         turn.insert("projection".to_owned(), json!({}));
         turn.insert("_projectionHead".to_owned(), projection_head_value(head));
     } else {
         turn.insert(
             "projection".to_owned(),
-            Value::Object(next_projection.clone()),
+            Value::Object(retained_projection.take()
+                .ok_or_else(|| invalid_data("Turn projection ownership is missing"))?),
         );
         turn.remove("_projectionHead");
     }
@@ -14102,15 +14125,19 @@ fn event_record_with_projection(database: &AuthorityDatabase, transaction: &mut 
         text_update.as_ref().map(|update| update.projection_bytes),
         projection_bytes,
     )?;
+    let publication_projection = retained_projection.as_ref()
+        .or_else(|| turn.get("projection").and_then(Value::as_object))
+        .ok_or_else(|| invalid_data("Turn publication projection is missing"))?;
     let response = publish_event_record(database, transaction, request, EventPublication {
         conversation_id: &loaded_attempt.conversation_id, turn: &turn,
-        attempt: &attempt, projection: &next_projection, projection_bytes,
+        attempt: &attempt, projection: publication_projection, projection_bytes,
         replay_patch, starts_attempt,
     })?;
     if next_projection_head.is_some() && text_update.is_none() && frame_update.is_none() {
         if let Some(slot) = adjacent {
             *slot = Some(AdjacentEventProjection {
-                key: loaded_turn.key, header: turn, projection: next_projection,
+                key: loaded_turn.key, header: turn, projection: retained_projection
+                    .ok_or_else(|| invalid_data("Adjacent Turn projection is missing"))?,
             });
         }
     }

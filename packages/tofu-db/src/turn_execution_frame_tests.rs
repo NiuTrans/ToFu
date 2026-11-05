@@ -65,9 +65,15 @@ fn request(revision: u64, index: usize) -> EventRecordRequest {
 
 fn ir(revision: u64, count: usize, receipts: bool) -> TransactionIr {
     let requests: Vec<_> = (0..count).map(|index| request(revision+index as u64,index)).collect();
+    ir_for_requests(requests, receipts)
+}
+
+fn ir_for_requests(requests: Vec<EventRecordRequest>, receipts: bool) -> TransactionIr {
+    let count = requests.len();
     let payload = serde_json::to_vec(&json!({"format":"tofu.experimental-execution-frame/v1",
         "user_id":11,"attempt_id":ATTEMPT,"task_id":TASK,
         "events":requests.iter().map(|r|json!({"patch":r.projection_patch,"event":r.event_payload,
+            "terminal":r.terminal,"status":r.status,"settlement":r.settlement,
             "now":r.now_ms,"raw":r.task_event.as_ref().map(|e|&e.payload_json)})).collect::<Vec<_>>() })).unwrap();
     TransactionIr { tenant_id:7, owner_user_id:11, operation:"turn.event.record".into(),
         operation_kind:StorageOperationKind::Command,
@@ -162,28 +168,44 @@ fn execution_frame_error_abandons_prefix_and_forbids_effect_boundaries() {
     }
 }
 
-fn seeded_vfs()->(Arc<DeterministicVfs>,AuthorityDatabase,u64) {
+fn seeded_vfs_with_history(bytes: usize)->(Arc<DeterministicVfs>,AuthorityDatabase,u64) {
     let vfs=Arc::new(DeterministicVfs::new(None));vfs.create_dir(Path::new("/data")).unwrap();
     vfs.sync_directory(Path::new("/")).unwrap();
     let mut database=AuthorityDatabase::initialize_with_vfs(Path::new("/data"),vfs.clone()).unwrap();
-    let revision=seed(&mut database,4096);database.configure_logical_outbox(&[72;32],1024*1024,128*1024).unwrap();
+    let revision=seed(&mut database,bytes);database.configure_logical_outbox(&[72;32],1024*1024,128*1024).unwrap();
     vfs.arm_fault(None).unwrap();(vfs,database,revision)
 }
 
 #[test]
 fn execution_frame_receipt_retry_and_every_commit_fault_keep_atomic_state() {
-    assert_event_batch_commit_faults(true);
+    assert_event_batch_commit_faults(true, false);
 }
 
 #[test]
 fn adjacent_event_receipt_retry_and_every_commit_fault_keep_atomic_state() {
-    assert_event_batch_commit_faults(false);
+    assert_event_batch_commit_faults(false, false);
 }
 
-fn assert_event_batch_commit_faults(frame: bool) {
-    let (vfs,mut baseline,revision)=seeded_vfs();let before=state(&baseline);vfs.arm_fault(None).unwrap();
-    let command=ir(revision,3,true);let expected_response=execute(&mut baseline,&command,frame).unwrap();
+#[test]
+fn large_terminal_receipt_retry_and_every_commit_fault_keep_atomic_state() {
+    assert_event_batch_commit_faults(false, true);
+}
+
+fn assert_event_batch_commit_faults(frame: bool, terminal: bool) {
+    let seed_bytes = if terminal { 128 * 1024 } else { 4096 };
+    let (vfs,mut baseline,revision)=seeded_vfs_with_history(seed_bytes);
+    let before=state(&baseline);vfs.arm_fault(None).unwrap();
+    let mut requests: Vec<_> = (0..3).map(|index| request(revision+index as u64,index)).collect();
+    if terminal {
+        let last = requests.last_mut().unwrap();
+        last.terminal = true;
+        last.status = "completed".into();
+        last.settlement = json!({"outcome":"completed","cause":"finished","resumeOptions":[]})
+            .as_object().unwrap().clone();
+    }
+    let command=ir_for_requests(requests,true);let expected_response=execute(&mut baseline,&command,frame).unwrap();
     let trace=vfs.trace().unwrap();let after=state(&baseline);
+
     let bytes=baseline.wal_len().unwrap();assert_eq!(execute(&mut baseline,&command,frame).unwrap(),expected_response);
     assert_eq!(baseline.wal_len().unwrap(),bytes,"receipt retry appended a frame");
     assert_eq!(baseline.logical_outbox_pending(7,11,10).unwrap().len(),1);
@@ -193,7 +215,7 @@ fn assert_event_batch_commit_faults(frame: bool) {
         for action in [FaultAction::ErrorBefore(io::ErrorKind::Other),FaultAction::ShortWrite(7),FaultAction::DropSync] {
             if !matches!(operation,Operation::Write) && matches!(action,FaultAction::ShortWrite(_)) {continue;}
             if matches!(operation,Operation::Write) && matches!(action,FaultAction::DropSync) {continue;}
-            let (vfs,mut database,_)=seeded_vfs();
+            let (vfs,mut database,_)=seeded_vfs_with_history(seed_bytes);
             let occurrence=trace[..=index].iter().filter(|observed|*observed==operation).count();
             vfs.arm_operation_fault(*operation,occurrence,action).unwrap();
             let result=execute(&mut database,&command,frame);
