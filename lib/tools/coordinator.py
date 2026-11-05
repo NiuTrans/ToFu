@@ -10,6 +10,34 @@ def _tool(name, description, properties, required):
 
 
 COORDINATOR_TOOLS = [
+    _tool('get_conversation_status',
+          'Inspect the canonical execution state of an owned conversation: Turns, current Attempts, '
+          'running/queued state, errors, settlement and available resume operations. Passive; never wakes it. '
+          'Use when the owner delegates management of a concrete Session, then get_conversation for content. '
+          'Project Coordinators inspect their project; the Global Router can inspect any owned conversation. '
+          'Pass turn_id to focus one Turn. Preserve its currentAttemptId and projectionRevision for control_conversation.',
+          {'conversation_id': {'type': 'string', 'minLength': 1},
+           'turn_id': {'type': 'string', 'minLength': 1}}, ['conversation_id']),
+    _tool('control_conversation',
+          'Operate an existing Session within the current authorized request using the same commands as the owner: '
+          'continue (Continue generating), checkpoint_resume, regenerate (retry from the start), or stop. '
+          'Read get_conversation_status first. Pin the Turn, its source Attempt and observed projection revision; '
+          'use only a resume operation offered by settlement.resumeOptions, copying its anchor when present. '
+          'Resumes retain the target model, config, context and existing grants. Stop targets only that exact '
+          'current Attempt and withdraws its conversation dispatch as the owner Stop does. Resuming an earlier '
+          'Turn can discard later same-lane Turns; inspect the latest state before choosing the Turn. Stop '
+          'does not need expected_revision. Never send a synthetic human message or approve '
+          'a human question. Project Coordinators control their project; the Global Router can control any owned '
+          'conversation. An automatic continuation may control only its original request dispatched Workers. '
+          'After a lost response, retry identical arguments and idempotency_key. Acceptance is not completion.',
+          {'conversation_id': {'type': 'string', 'minLength': 1},
+           'turn_id': {'type': 'string', 'minLength': 1},
+           'attempt_id': {'type': 'string', 'minLength': 1},
+           'action': {'type': 'string', 'enum': ['continue', 'checkpoint_resume', 'regenerate', 'stop']},
+           'expected_revision': {'type': 'integer', 'minimum': 1},
+           'resume_anchor': {'type': 'object', 'description': 'Exact anchor from settlement.resumeOptions.'},
+           'idempotency_key': {'type': 'string', 'minLength': 1, 'maxLength': 200}},
+          ['conversation_id', 'turn_id', 'attempt_id', 'action', 'idempotency_key']),
     _tool('create_conversation',
           'Create an empty independent conversation in this Coordinator project, '
           'contained in this Coordinator’s collapsible sidebar conversation group, not a loose ordinary-list row. Does not start a task, send '

@@ -9,6 +9,7 @@ from tofu_db._loopback import create_connection
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from collections.abc import Mapping
 from typing import Any
 
@@ -116,14 +117,15 @@ class StorageClient:
             operation, {'owner_user_id': owner, **payload}, timeout=remaining, command_id=None,
             priority='user', deadline_unix_ms=deadline_unix_ms)
 
-    def worker_watch(self, *, cursor, deadline_unix_ms):
+    def worker_watch(self, *, cursor, deadline_unix_ms, cancellation=None):
         """Wait for authority-committed queue/control changes without a DB read."""
         from lib.storage.generated_worker_control import WATCH_OPERATION
         remaining = deadline_unix_ms / 1000 - time.time()
         if remaining <= 0:
             raise StorageError('database_timeout', 'Worker watch deadline elapsed')
         return self._attempt('query', WATCH_OPERATION, {'cursor': cursor}, timeout=remaining,
-                             command_id=None, priority='maintenance', deadline_unix_ms=deadline_unix_ms)
+                             command_id=None, priority='maintenance', deadline_unix_ms=deadline_unix_ms,
+                             cancellation=cancellation)
 
     def native_checkpoint_available(self, *, user_id: int) -> bool:
         return self._checkpoint_port.available(user_id=user_id)
@@ -261,6 +263,7 @@ class StorageClient:
         command_id: str | None,
         priority: str,
         deadline_unix_ms: int | None = None,
+        cancellation=None,
     ) -> Any:
         request_id = uuid.uuid4().hex
         response_reservation = None
@@ -286,14 +289,16 @@ class StorageClient:
             request['priority'] = priority
         try:
             with create_connection(self.endpoint, timeout=timeout) as sock:
-                sock.settimeout(timeout + _SOCKET_GRACE_S)
-                send_frame(sock, request)
-                try:
-                    response = recv_frame(
-                        sock, before_payload=admit_response_frame)
-                finally:
-                    if response_reservation is not None:
-                        response_reservation.close()
+                binding = (cancellation.bind(lambda: sock.shutdown(socket.SHUT_RDWR))
+                           if cancellation is not None else nullcontext())
+                with binding:
+                    sock.settimeout(timeout + _SOCKET_GRACE_S)
+                    send_frame(sock, request)
+                    try:
+                        response = recv_frame(sock, before_payload=admit_response_frame)
+                    finally:
+                        if response_reservation is not None:
+                            response_reservation.close()
         except StorageError:
             raise
         except (TimeoutError, socket.timeout) as exc:

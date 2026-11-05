@@ -81,6 +81,9 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict, *, runtime_
     from lib.storage.errors import StorageError
     try:
         scope = _scope(task)
+        if name in {'get_conversation_status', 'control_conversation'}:
+            from .session_control import execute_session_tool
+            return execute_session_tool(task, scope, name, arguments)
         if name == 'create_conversation':
             result = _create(scope, arguments)
         elif name in {'delegate_project_work', 'await_project_workers'}:

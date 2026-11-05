@@ -1075,6 +1075,7 @@ pub static EXECUTABLE_STORAGE_OPERATIONS: &[&str] = &[
     "turn.timing_trace.get",
     "turn.timing_trace.list",
     "turn.visible.sync",
+    "worker_job.active.list",
     "worker_job.claim_horizon",
     "worker_job.claim_next",
     "worker_job.claim_state",

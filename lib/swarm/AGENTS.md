@@ -7,7 +7,9 @@ engine. It is not a second model loop, event taxonomy, persistence authority, or
 project board.
 
 `agent.py` adapts scheduling to `lib/tasks_pkg/child_invocation.py`, the shared
-Goal/Swarm factory. `master.bind_assignment_contexts` owns wave preparation and current-caller grants
+Goal/Swarm factory. Its child artifact tools ride the typed `RunArtifactTools`
+port, which project dispatch admits by exact type; never install artifact
+handlers as an ad-hoc `_tool_env` object. `master.bind_assignment_contexts` owns wave preparation and current-caller grants
 for retained runs and follow-up waves; persisted field names remain compatible.
 `lib/tasks_pkg/child_invocation.py` owns execution; see
 `docs/TASK_EXECUTION_MODES.md` for input, cancellation and evidence contracts.

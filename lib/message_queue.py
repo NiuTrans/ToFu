@@ -947,12 +947,20 @@ def dispatch_completed_background_batch(conv_id: str, *, user_id: int) -> str | 
                 assignment = trusted.checked()
                 if assignment['execution'] is not None:
                     from lib.conversation_sync.runtime import conversation_turn_commands
+                    command_id = 'project-dispatch-background:' + queue_id
+                    resumed = trusted.repository.get_attempt(
+                        assignment['execution']['attemptId'])
+                    if (isinstance(resumed, dict) and resumed.get('commandId') == command_id
+                            and resumed.get('status') not in ('pending', 'running')):
+                        # This batch's one Continue already settled; replaying its
+                        # command starts nothing. The receipts wait for the next turn.
+                        return None
                     latest = trusted.repository.turn_get(
                         conv_id, assignment['execution']['turnId'], user_id=user_id,
                         include_projection=False)
                     outcome = conversation_turn_commands.resume_turn(
                         conv_id, assignment['execution']['turnId'], user_id, {
-                            'commandId': 'project-dispatch-background:' + queue_id,
+                            'commandId': command_id,
                             'operation': 'continue',
                             'expectedProjectionRevision': latest['projectionRevision'],
                             'config': config,

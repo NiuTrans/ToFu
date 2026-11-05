@@ -5316,6 +5316,8 @@
   "tool.blocked": "blocked",
   "tool.blockedTip": "A safety or authority check blocked this valid tool before execution.",
   "tool.didYouMean": "did you mean",
+  "tool.requestParams": "request parameters",
+  "tool.requestParamsTruncated": "… truncated to {size} KB; the wire keeps the full arguments",
   "agentDock.allMessages": "All communications",
   "swarm.messagesReceiptDetails": "Delivery details",
   "swarm.messagesRunId": "Run ID",
@@ -7080,5 +7082,7 @@
   "toolHumanGuidance.repliedInChat": "Replied in chat",
   "toolHumanGuidance.replyDrafted": "Your reply is in the composer — send it when ready",
   "toolHumanGuidance.supersededRow": "Not answered · you replied in chat instead",
-  "toolsInv.tool.update_task_progress": "Update the task board shown to the user above the Coordinator conversation."
+  "toolsInv.tool.update_task_progress": "Update the task board shown to the user above the Coordinator conversation.",
+  "toolsInv.tool.get_conversation_status": "Inspect a conversation’s execution state and available continuation actions.",
+  "toolsInv.tool.control_conversation": "Continue, retry or stop an authorized conversation using its existing context."
 }

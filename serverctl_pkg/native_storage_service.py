@@ -69,6 +69,17 @@ class NativeStorageService(ResidentService):
         env.pop('TOFU_STORAGE_CONNECTION_FILE', None)
         return env
 
+    def shared_environment(self, environment: dict[str, str]) -> dict[str, str]:
+        """Independent managed clients need the selected authority's RPC owner.
+
+        This changes only automatic native transport selection. Explicit
+        embedded topology and the configured storage backend remain intact.
+        """
+        env = dict(environment)
+        if (env.get('TOFUDB_TRANSPORT') or 'auto').strip().lower() == 'auto':
+            env['TOFUDB_TRANSPORT'] = 'daemon'
+        return env
+
     def stop(self, timeout: float = NATIVE_SERVICE_STOP_SECONDS) -> None:
         super().stop(timeout)
 

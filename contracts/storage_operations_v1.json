@@ -3,9 +3,9 @@
   "generatedBy": "scripts/gen_storage_operation_catalog.py",
   "sourceProtocol": "storage.v1",
   "sourceSchemaVersion": 70,
-  "sourceRegistryVersion": 54,
-  "operationCount": 383,
-  "operationsSha256": "444e7ae80de2cfe3b96c487303e915f754aa78f5fe44a0b4a2d8e11a4cdff7d2",
+  "sourceRegistryVersion": 55,
+  "operationCount": 384,
+  "operationsSha256": "182fdf59007c7f6dd81f92ade6be8985976547cc237f09ee0aabb80ca3189685",
   "operations": [
     {
       "name": "artifact.create",
@@ -2996,6 +2996,14 @@
       "name": "turn.visible.sync",
       "domain": "turns",
       "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "worker_job.active.list",
+      "domain": "worker_jobs",
+      "kind": "query",
       "receiptRequired": false,
       "transactionTimeoutSeconds": null,
       "ownerScope": "handler-enforced"

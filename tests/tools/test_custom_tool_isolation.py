@@ -8,6 +8,9 @@ Verifies the contamination contract from docs/CUSTOM_TOOLS.md:
 * two concurrent envs each resolve to their OWN handler (no cross-leak);
 * the dispatch-time write/idempotent partition unions the env's flags;
 * the client-handoff request/resolve round-trips;
+* a swarm worker applies the request environment's partitions, confirmation,
+  result reuse and handoff ownership exactly as the request task does,
+  without widening a scoped worker's tools;
 * AST guard: no /api/v1 request module imports/calls register_tool_spec or
   tool_registry.register (the global-mutation forbidden surface).
 """
@@ -25,9 +28,14 @@ pytestmark = pytest.mark.unit
 
 from lib.tools.tool_env import (
     CUSTOM_TOOL_PREFIX, MAX_CUSTOM_TOOL_CALL_ID_CHARS, CustomToolError,
-    ToolLimits, count_tool_envs, dispose_tool_env, mint_tool_env,
+    ToolEnvironment, ToolLimits, count_tool_envs, dispose_tool_env, mint_tool_env,
     request_client_tool_result, resolve_client_tool_result,
 )
+from tests.goals import test_goal_invocation_integration as goal_fixture
+from tests.goals.test_goal_invocation_integration import TOOL
+from tests.swarm.test_swarm_invocation import agent_for, reply, scripted_provider, tool_call
+
+runtime = goal_fixture.runtime
 
 
 def _fn(name, mode='client', **extra):
@@ -38,6 +46,17 @@ def _fn(name, mode='client', **extra):
         tool['execution'] = {'mode': mode, **extra.pop('execution', {})}
     tool.update(extra)
     return tool
+
+
+def _swarm_worker_port(env):
+    """The task-local port a swarm worker of the environment's task holds."""
+    from lib.swarm.agent import RunArtifactTools
+    return RunArtifactTools({}, env)
+
+
+# The same request environment, held by its own task or by a swarm worker.
+ENVIRONMENT_HOLDERS = pytest.mark.parametrize(
+    'holder', [lambda env: env, _swarm_worker_port], ids=['request task', 'swarm worker'])
 
 
 # ── Validation ──────────────────────────────────────────────────────
@@ -302,14 +321,15 @@ class TestClientHandoff:
                 timeout=1,
             )
 
-    def test_bounds_result_before_waiter_consumes_it(self):
+    @ENVIRONMENT_HOLDERS
+    def test_bounds_result_before_waiter_consumes_it(self, holder):
         call_id = 'call_result_bound'
         task = {'id': 'task-result-bound', '_userId': 1}
         env = mint_tool_env(
             tools=[_fn('custom__bounded')],
             limits=ToolLimits(max_result_chars=8),
         )
-        task['_tool_env'] = env
+        task['_tool_env'] = holder(env)
         result = {}
         waiter = threading.Thread(
             target=lambda: result.setdefault(
@@ -442,16 +462,17 @@ class TestClientHandoff:
         waiter.join(timeout=3)
         assert result['first'] == ('first result', False)
 
-    def test_dispose_unblocks_only_its_own_pending_handoffs(self):
+    @ENVIRONMENT_HOLDERS
+    def test_dispose_unblocks_only_its_own_pending_handoffs(self, holder):
         env_one = mint_tool_env(
             tools=[_fn('custom__one')], owner='owner:1')
         env_two = mint_tool_env(
             tools=[_fn('custom__two')], owner='owner:2')
         tasks = {
             'one': {'id': 'task-dispose-1', '_userId': 1,
-                    '_tool_env': env_one},
+                    '_tool_env': holder(env_one)},
             'two': {'id': 'task-dispose-2', '_userId': 2,
-                    '_tool_env': env_two},
+                    '_tool_env': holder(env_two)},
         }
         results = {}
         waiters = [
@@ -631,3 +652,128 @@ def test_shell_contract_is_request_owned_and_never_inferred_from_name():
         assert env.contract_documents['custom__remote']['shellCommandArgument'] == 'script'
     finally:
         dispose_tool_env(env)
+
+
+# ── Swarm workers apply the request environment's policy ────────────
+# A worker's task-local tool port (lib.swarm.agent.RunArtifactTools) serves
+# its run's artifact tools and decorates the request environment it inherits.
+
+DEPLOY = _fn('custom__deploy', write=True)
+LOOKUP = _fn('custom__lookup', idempotent=True)
+
+
+def _clean(tool):
+    return {'type': 'function', 'function': tool['function']}
+
+
+def _declared_environment(handler=None):
+    """A task-local environment that also declares an always-confirm tool."""
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        resolve=lambda name: handler if name == 'custom__deploy' else None,
+        schemas=[_clean(DEPLOY), _clean(LOOKUP)],
+        write_names=frozenset({'custom__deploy'}),
+        idempotent_names=frozenset({'custom__lookup'}),
+        confirmation_names=frozenset({'custom__deploy'}))
+
+
+def _recorded_client_backend(monkeypatch, result):
+    calls = []
+
+    def backend(self, tool, task, *rest):
+        calls.append((tool.name, task['id']))
+        return result, False
+    monkeypatch.setattr(ToolEnvironment, '_run_client', backend)
+    return calls
+
+
+@pytest.mark.parametrize('kind', ['no environment', 'request environment', 'declared environment'])
+def test_swarm_worker_applies_its_parents_custom_tool_policy(runtime, monkeypatch, kind):
+    """The worker a swarm builds classifies every inherited tool exactly as its parent.
+
+    These sets drive write approval, Plan Mode and read-only bans, concurrency
+    bounds, write-sensitive caching, attended confirmation and result reuse.
+    """
+    from lib.swarm.protocol import ArtifactStore
+    from lib.tasks_pkg.child_invocation import close_unstarted_child_invocation
+    from lib.tasks_pkg.tool_dispatch._flags import (
+        _task_confirmation_tools, _task_idempotent_tools, _task_partitions)
+    env = {'no environment': None,
+           'request environment': mint_tool_env(tools=[DEPLOY, LOOKUP]),
+           'declared environment': _declared_environment()}[kind]
+    runtime.parent.pop('_tool_env')
+    if env is not None:
+        runtime.parent['_tool_env'] = env
+    workers = []
+
+    def capture(child):
+        workers.append(child)
+        close_unstarted_child_invocation(child, reason='Policy specification complete')
+    monkeypatch.setattr('lib.tasks_pkg.child_invocation.run_child_invocation', capture)
+    try:
+        agent_for(runtime, artifact_store=ArtifactStore()).run()
+    finally:
+        dispose_tool_env(env)
+
+    def policy(task):
+        write, reusable = _task_partitions(task)
+        return write, reusable, _task_confirmation_tools(task), _task_idempotent_tools(task)
+    assert policy(workers[0]) == policy(runtime.parent)
+    write, reusable, confirmation, idempotent = policy(workers[0])
+    assert ('custom__deploy' in write) is (env is not None)
+    assert ('custom__lookup' in reusable & idempotent) is (env is not None)
+    assert ('custom__deploy' in confirmation) is (kind == 'declared environment')
+
+
+def test_swarm_worker_never_runs_an_inherited_confirmation_tool_unattended(runtime, monkeypatch):
+    """A worker owns no human port, so an always-confirm inherited tool is refused, not run."""
+    ran = []
+
+    def deploy(task, tc, name, call_id, args, rn, row, *rest):
+        ran.append(task['id'])
+        return call_id, 'deployed', False
+    runtime.parent['_tool_env'] = _declared_environment(deploy)
+    # A refused round followed by prose is re-driven once (intent-stall nudge).
+    scripted_provider(monkeypatch, runtime, [reply(calls=[tool_call(name='custom__deploy')]), reply(), reply()])
+    agent_for(runtime, tools=[_clean(DEPLOY)]).run()
+    assert ran == []
+    assert [(row['toolName'], row['status'], row['rejection']['kind'])
+            for row in runtime.children[0]['toolRounds']] == [
+        ('custom__deploy', 'rejected', 'confirmation_required')]
+    refusal = [message['content'] for message in runtime.calls[1]['messages'] if message.get('role') == 'tool']
+    assert len(refusal) == 1 and 'requires attended human confirmation' in str(refusal[0])
+
+
+def test_swarm_worker_reuses_an_inherited_idempotent_result(runtime, monkeypatch):
+    env = mint_tool_env(tools=[LOOKUP])
+    backend = _recorded_client_backend(monkeypatch, 'lookup result')
+    runtime.parent['_tool_env'] = env
+    scripted_provider(monkeypatch, runtime, [
+        reply(calls=[tool_call(call_id, name='custom__lookup', arguments='{"q": "same"}')])
+        for call_id in ('first', 'second')] + [reply()])
+    try:
+        result = agent_for(runtime, tools=env.schemas).run()
+    finally:
+        dispose_tool_env(env)
+    assert result.status == 'completed', result.error_message
+    assert backend == [('custom__lookup', runtime.children[0]['id'])]
+    assert result.tool_calls_made == 2
+
+
+def test_scoped_swarm_worker_gains_no_inherited_tool_outside_its_scope(runtime, monkeypatch):
+    """The port contributes no schemas: the worker's scoped catalog stays its tool membership."""
+    from lib.swarm.protocol import SubTaskSpec
+    env = mint_tool_env(tools=[DEPLOY])
+    backend = _recorded_client_backend(monkeypatch, 'deployed')
+    runtime.parent['_tool_env'] = env
+    scripted_provider(monkeypatch, runtime, [reply(calls=[tool_call(name='custom__deploy')]), reply()])
+    spec = SubTaskSpec(role='general', objective='Inspect only', tools=[TOOL['function']['name']])
+    try:
+        agent_for(runtime, spec=spec, tools=[TOOL, *env.schemas]).run()
+    finally:
+        dispose_tool_env(env)
+    worker = runtime.children[0]
+    assert [tool['function']['name'] for tool in worker['_executable_tool_catalog']] == [TOOL['function']['name']]
+    assert [(row['toolName'], row['status'], row['rejection']['kind']) for row in worker['toolRounds']] == [
+        ('custom__deploy', 'rejected', 'hallucinated')]
+    assert backend == []

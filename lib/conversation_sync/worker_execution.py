@@ -4,8 +4,8 @@ Entry: execute_claimed_attempt, a synchronous durable-worker handler. Turn and
 task-result authorities retain settlement; the shared invocation owns model,
 tool, child and account lifecycles. Pending attempts enter once before any
 preparation effects. Running attempts require domain recovery evidence and
-are never blindly replayed after lease takeover. This adapter alone does not
-qualify a production worker kind or change application dispatch composition.
+are never blindly replayed after lease takeover. conversation_registration joins
+the common durable service; admission remains the command service's concern.
 """
 from collections.abc import Mapping
 
@@ -164,6 +164,19 @@ def settle_claimed_failure(context, payload, error):
         task = chat_task_runtime.get(context.claim.task_id)
         attempt = recover_exited_attempt(context, attempt, turn, task=task)
         return _settled_outcome(context, attempt, task=task)
+
+
+def conversation_registration():
+    """Register the common invocation and its fenced domain recovery ports.
+
+    Cross-authority entry, descendants, model/tool admission, Stop, physical
+    exit and unknown settlement specifications live beside this adapter. An
+    unprovable outcome remains unconfirmed, never a fresh invocation.
+    """
+    from lib.durable_worker import WorkerKindRegistration, WorkerKindSafety
+    return WorkerKindRegistration('conversation-attempt', execute_claimed_attempt,
+        WorkerKindSafety(True, True, True, True), cancel_handler=cancel_claimed_attempt,
+        failure_handler=settle_claimed_failure)
 
 
 def cancel_claimed_attempt(context, payload):

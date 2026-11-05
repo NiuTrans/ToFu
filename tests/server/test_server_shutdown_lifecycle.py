@@ -144,7 +144,7 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(
     import lib.tasks_pkg.event_log as event_log
     import lib.usage_tracker as usage_tracker
     import routes
-    from lib.automations import runtime as automation_runtime
+    from lib.durable_worker import runtime as automation_runtime
 
     calls = []
     serving_loop_threads = []

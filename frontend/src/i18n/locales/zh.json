@@ -5316,6 +5316,8 @@
   "tool.blocked": "执行前已拦截",
   "tool.blockedTip": "该工具真实存在，但在执行前被安全或权限规则拦截。",
   "tool.didYouMean": "是否想用",
+  "tool.requestParams": "请求参数",
+  "tool.requestParamsTruncated": "…已截断至 {size} KB，完整参数仍保留在原始请求中",
   "agentDock.allMessages": "全部通信",
   "swarm.messagesReceiptDetails": "投递详情",
   "swarm.messagesRunId": "运行 ID",
@@ -7080,5 +7082,7 @@
   "toolHumanGuidance.repliedInChat": "已在对话中回复",
   "toolHumanGuidance.replyDrafted": "回复已放入输入框，确认后发送",
   "toolHumanGuidance.supersededRow": "未作答 · 你在对话中直接回复了",
-  "toolsInv.tool.update_task_progress": "更新协调者对话上方显示给用户的任务进展。"
+  "toolsInv.tool.update_task_progress": "更新协调者对话上方显示给用户的任务进展。",
+  "toolsInv.tool.get_conversation_status": "查看具体对话的执行状态和可用续跑操作。",
+  "toolsInv.tool.control_conversation": "沿用现有上下文，继续生成、重试或停止已授权的对话。"
 }

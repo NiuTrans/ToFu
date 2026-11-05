@@ -5316,6 +5316,8 @@
   "tool.blocked": "実行前にブロック",
   "tool.blockedTip": "このツールは有効ですが、安全性または権限のチェックにより実行前にブロックされました。",
   "tool.didYouMean": "もしかして",
+  "tool.requestParams": "リクエストパラメーター",
+  "tool.requestParamsTruncated": "…{size} KB に切り詰めて表示しています。完全な引数は元のリクエストに保持されています",
   "agentDock.allMessages": "すべての通信",
   "swarm.messagesReceiptDetails": "配信の詳細",
   "swarm.messagesRunId": "実行ID",
@@ -7080,5 +7082,7 @@
   "toolHumanGuidance.repliedInChat": "チャットで回答済み",
   "toolHumanGuidance.replyDrafted": "回答を入力欄に入れました。準備ができたら送信してください",
   "toolHumanGuidance.supersededRow": "未回答 · チャットで直接返信しました",
-  "toolsInv.tool.update_task_progress": "コーディネーターの会話の上にユーザー向けに表示されるタスクの進捗を更新します。"
+  "toolsInv.tool.update_task_progress": "コーディネーターの会話の上にユーザー向けに表示されるタスクの進捗を更新します。",
+  "toolsInv.tool.get_conversation_status": "会話の実行状態と、続行に利用できる操作を確認します。",
+  "toolsInv.tool.control_conversation": "既存のコンテキストを使って、操作が許可された会話を続行、再試行、または停止します。"
 }

@@ -76,3 +76,17 @@ def test_unreadable_package_cannot_disappear_from_prepared_identity(tmp_path, mo
     monkeypatch.setattr(os, 'scandir', unreadable)
     with pytest.raises(PermissionError, match='inaccessible'):
         prepare_plan(project, {}, python='/env/python')
+
+
+@pytest.mark.parametrize('package', ['tofu_db', 'tofu_workers', 'scripts', 'new_runtime_owner'])
+def test_every_importable_runtime_package_changes_generation(tmp_path, package):
+    from serverctl_pkg.execution_plan import prepare_plan
+    project = _source(tmp_path)
+    owner = project / package
+    owner.mkdir()
+    (owner / '__init__.py').write_text('')
+    module = owner / 'lazy.py'
+    module.write_text('VALUE = 1\n')
+    plan = prepare_plan(project, {}, python='/env/python')
+    module.write_text('VALUE = 2\n')
+    assert plan != prepare_plan(project, {}, python='/env/python')

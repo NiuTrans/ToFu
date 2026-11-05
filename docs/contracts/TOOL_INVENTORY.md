@@ -3,7 +3,7 @@
 Generate: `python3 scripts/gen_tool_inventory.py`; guard: `tests/tools/test_tool_inventory_generated.py --check`.
 
 Rows derive from the live registry and per-facet tables; host-specific third-party diagnostics are available with `--json`.
-Registered built-in tools: **144**; compatibility-only: **12**. Current means a supported declaration, not that every request enables it.
+Registered built-in tools: **146**; compatibility-only: **12**. Current means a supported declaration, not that every request enables it.
 Exposure is the declared default: eager stays direct, deferred is found through Tool Search, pinned stays direct whenever assembled, toggle is deferred until its composer toggle pins it, direct is a protocol-required direct call, and gateway is injected by the discovery backend.
 
 ## Gaps
@@ -11,7 +11,7 @@ Exposure is the declared default: eager stays direct, deferred is found through 
 | gap | count | meaning |
 |---|---|---|
 | write tool with no approval preview | 0 | specialized or generic argument disclosure must be available |
-| no UI label | 110 | the raw tool name is shown in the activity line |
+| no UI label | 112 | the raw tool name is shown in the activity line |
 | no reachable handler | 0 | schema advertised to the model but nothing executes it |
 | description cannot disambiguate | 6 | the model cannot tell this tool apart from its neighbours and picks the wrong one |
 | confusable tool pairs | 3 | two same-category tools open with near-identical sentences, so the model picks the wrong one |
@@ -80,10 +80,12 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 | send_project_message | conversation | project_integration | current | deferred | SET | ✓ |  |  |  | generic |  |  |  |  |  | ✓ |
 | await_project_workers | coordination | coordinator | current | eager | SET |  |  | ✓ |  |  |  |  |  |  |  | ? |
 | cancel_project_work | coordination | coordinator | current | eager | SET | ✓ |  | ✓ | ✓ | specialized |  |  |  |  |  | ? |
+| control_conversation | coordination | coordinator | current | eager | SET | ✓ |  |  |  | generic |  |  |  |  |  | ? |
 | create_conversation | coordination | coordinator | current | eager | SET | ✓ |  |  |  | generic |  |  |  |  |  | ? |
 | delegate_project_work | coordination | coordinator | current | eager | SET | ✓ |  | ✓ | ✓ | specialized |  |  |  |  |  | ? |
 | dispatch_project_assignment | coordination | coordinator | current | eager | SET | ✓ |  |  |  | generic |  |  |  |  |  | ? |
 | finish_project_request | coordination | coordinator | current | eager | SET | ✓ |  | ✓ | ✓ | specialized |  |  |  |  |  | ? |
+| get_conversation_status | coordination | coordinator | current | eager | SET |  |  |  |  |  |  |  |  |  |  | ? |
 | get_project_assignment | coordination | coordinator | current | eager | SET |  |  |  |  |  |  |  |  |  |  | ? |
 | get_project_workers | coordination | coordinator | current | eager | SET |  |  | ✓ |  |  |  |  |  |  |  | ? |
 | get_router_projects | coordination | coordinator | current | eager | SET |  |  |  |  |  |  |  |  |  |  | ? |

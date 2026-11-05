@@ -38,6 +38,7 @@ def _mk(tid, conv, *, created, last_event=None, heartbeat=None,
     """Build a synthetic task dict shaped like the registry's live tasks."""
     return {
         'id': tid,
+        '_userId': 7,
         'convId': conv,
         'status': status,
         'aborted': aborted,
@@ -53,6 +54,8 @@ def _install(monkeypatch, task_list, *, max_silent=300):
     """Install a public-runtime snapshot and pin the liveness threshold."""
     import lib.tasks_pkg.liveness as liveness
     import lib.tasks_pkg.manager._registry as _registry
+    monkeypatch.setattr('lib.durable_worker.activity.list_active_conversation_tasks',
+                        lambda **kwargs: [])
     runtime = SimpleNamespace(snapshot=lambda: list(task_list))
     monkeypatch.setattr(_registry, 'chat_task_runtime', runtime, raising=True)
     monkeypatch.setattr(liveness, 'stall_threshold_seconds',

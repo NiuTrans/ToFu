@@ -413,6 +413,7 @@ def _coordinator_tool_spec() -> ToolSpec:
         description='Independent worker conversations and authorized dispatch',
         gate='项目中绑定的 Coordinator 对话',
         provides=frozenset({
+            'get_conversation_status', 'control_conversation',
             'create_conversation', 'dispatch_project_assignment', 'get_project_assignment',
             'report_to_user', 'update_task_progress', 'delegate_project_work', 'await_project_workers',
             'review_project_work', 'get_project_workers', 'cancel_project_work', 'finish_project_request',
@@ -421,6 +422,7 @@ def _coordinator_tool_spec() -> ToolSpec:
             'watchdog_snapshot', 'watchdog_resolve_signals', 'watchdog_schedule_recheck',
             'watchdog_message', 'watchdog_notify_router', 'watchdog_configure_review'}),
         write_tools=frozenset({
+            'control_conversation',
             'create_conversation', 'dispatch_project_assignment', 'report_to_user', 'update_task_progress',
             'delegate_project_work', 'review_project_work', 'cancel_project_work',
             'finish_project_request', 'request_user_decision',
@@ -428,6 +430,7 @@ def _coordinator_tool_spec() -> ToolSpec:
             'watchdog_resolve_signals', 'watchdog_schedule_recheck', 'watchdog_message',
             'watchdog_notify_router', 'watchdog_configure_review'}),
         idempotent_tools=frozenset({
+            'get_conversation_status', 'control_conversation',
             'get_project_assignment', 'report_to_user', 'update_task_progress', 'delegate_project_work',
             'await_project_workers', 'review_project_work', 'get_project_workers', 'cancel_project_work',
             'finish_project_request', 'request_user_decision', 'route_to_project', 'get_router_projects',

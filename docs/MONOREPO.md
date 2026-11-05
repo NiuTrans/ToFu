@@ -228,6 +228,19 @@ inheritance. Alternatives rejected: deleting ancestor manifests can affect
 unowned files; rewriting only the staged manifest breaks source attestation.
 Real Cargo workspace-discovery regressions cover clean and legacy cache layouts
 in `tests/server/test_native_engine_root_inputs.py`.
+Problem: Cargo assigns a crate to the nearest ancestor `[workspace]` that does
+not exclude it, so the root manifest claimed third-party crates that uv builds
+from sdists under the launcher cache (`data/mcp-cache/uv/sdists-*`, e.g.
+pydantic-core via maturin); `cargo metadata` refused them and the MCP server
+exited before its handshake. Worktrees under `.tofu/` were captured the same
+way for every crate their own root excludes. Decision: the root workspace
+excludes the runtime trees `data` and `.tofu` (Cargo's exclusion is a path
+prefix). Alternatives rejected: an empty `[workspace]` per sdist would edit
+third-party sources inside a reconstructible cache; moving launcher caches out
+of `data/` would change the writable-cache contract that MCP and commands
+share; per-launcher Cargo environment overrides would leave command builds
+captured. `tests/mcp_protocol/test_mcp_launcher_cargo_workspace.py` runs real
+`cargo metadata` over the actual root manifest for both layouts.
 The runtime foundation is a development artifact; its [guide](../packages/tofu-runtime/README.md)
 names the implemented physical executor and remaining domain integrations.
 
@@ -427,6 +440,17 @@ coordination check skips when its deliberately unshipped export package is absen
  Internal-provider acceptance
 tests stay with their excluded adapters; portable measurement and qualification
 helpers remain available to the public tests that exercise them.
+The export test-surface gate (`export_pkg/_verify.py`, mirrored by
+`tests/export/test_export_open_surface_projection.py`) follows module-scope
+imports and literal repository-root `importlib.util.spec_from_file_location`
+loads. Problem: measurement self-checks read their helper at fixture setup, so
+six shipped tests path-loaded dropped `benchmarks/` files that only an
+import-statement gate could not see. Decision: a literal chain under a
+first-party source directory that exists in the source and not in the export
+fails like a missing import; module-relative and dynamic paths are not
+repository files. Alternatives rejected: rewriting the tests to import
+(changes the measured load path) and excluding them from the public tree
+(drops portable self-checks documented in `benchmarks/AGENTS.md`).
  The privacy drift gate also
 runs in linked Git worktrees (`.git` is a pointer file); a failed Git inventory
 read is an error, not an empty clean snapshot. Broadly publishing `scripts/` or

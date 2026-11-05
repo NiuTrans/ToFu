@@ -425,21 +425,17 @@ Decision: receipt-free demand-driven execution with event-driven claims. The
 coordinator first asks the read-only `worker_job.claim_horizon`
 ([storage](STORAGE.md#durable-worker-jobs)); only a 0 answer enters `claim_next`,
 which re-validates under the writer. Otherwise it sleeps until that horizon, a
-command named in `claimWakeOperations` of `contracts/automation_runtime_v1.json`
-acknowledged in this process (`subscribe_committed_operations` in
-`lib/storage/commit_events.py`; the contract test pins every reserved-kind
-producer), or a settled claim. A probe clears the wake hint before it reads, so a
+committed authority notification, or a settled claim. The common application
+service composes automation and conversation kinds under
+`contracts/durable_worker_runtime_v1.json` and subscribes once through
+`StorageWorkerWakeSource`; commits from independent producers wake the same
+coordinator, including when the producer loses its acknowledgement. A probe clears the wake hint before it reads, so a
 producer committing during the probe forces one more probe; no wakeup is lost. A
 lost race (horizon 0, claim empty) retries after `failureBackoffMilliseconds`.
 Monotonic waits stop during host suspend and drift from UTC under clock slew, so
 a pending horizon is re-read at least every `horizonReanchorMilliseconds`: one
 calendar minute, the `x-schedule` precision whose skip mode admits a slot only in
-its current UTC minute. An empty queue costs no storage call at all. Commits from
-another process are not observed directly; every supported topology runs
-producers and workers in one process (personal mode requires role `all`, and the
-distributed preview starts no background services). Such a commit is still found
-at the next pending-horizon re-read, settled claim, local producer hint or restart.
-Measured idle cost on a fresh authority (base poll vs event-driven, per minute,
+its current UTC minute. An empty queue costs no storage call at all. Measured idle cost on a fresh authority (base poll vs event-driven, per minute,
 two runs): native `command_execute` dispatches and writer acquisitions 232–236 →
 0, SQLite writer jobs 231–234 → 0, coordinator process CPU 0.14–0.17 s → ≤0.02 s.
 Four CPU-bound GIL spinners slowed the old poll to 94–111 exclusive claims per

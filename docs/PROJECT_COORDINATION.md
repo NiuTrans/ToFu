@@ -90,7 +90,10 @@ process-local reference to the live Worker task; every admission and workspace
 resolution revalidates that root, so the children use the Worker's isolated
 workspace and stop with its Stop, revocation or settlement. Alternative
 rejected: copying the grant carrier into each child, which would let a child
-outlive or diverge from the Worker's authority.
+outlive or diverge from the Worker's authority. A child's artifact port
+(`RunArtifactTools`) is first-party, not a custom tool environment, and a
+Worker grant holding `spawn_agents` admits the artifact tools its runs give
+children ([Project-dispatch execution admission](contracts/TOOL_EXECUTION_POLICY.md#project-dispatch-execution-admission)).
 
 Problem: the per-call role refusal (`Coordinator policy unavailable`, fail
 closed) converted every lookup exception, so a project-dispatch task whose
@@ -1033,6 +1036,47 @@ completion deletes transport records, never messages.
 
 ### Stable capabilities, discoverable conversations and diagnosis
 
+#### Session execution control
+
+Problem: a Coordinator could read transcripts and manage its own assignments,
+but could not inspect or operate a concrete existing conversation as the owner
+could through Continue and Stop. Decision: `get_conversation_status` and
+`control_conversation` share `lib/conversations/session_control.py`. The Global
+Router can address the owner's conversations; a project Coordinator addresses
+conversations in its project. The live binding and owner are checked on every
+call. The Watchdog and ordinary Workers receive neither control capability.
+
+Status reads the canonical synchronization snapshot and exposes Turn/Attempt
+identities, revisions, settlement/resume options, queue and active phase without
+execution config. An explicit Turn ID reads that Turn; `get_conversation` remains
+the transcript reader. Status is passive and is never cached as authorization.
+
+Control supports `continue`, `checkpoint_resume`, `regenerate` and exact-attempt
+`stop`. It validates the current authorized Coordinator request through the
+existing delegation boundary, then reuses the conversation command service used
+by the browser. Resumes retain the target's accepted model/config and identity;
+they add no human message, answer, approval or enlarged tool grant. Dispatch
+attempts retain their exact `TrustedDispatch` admission; an automatic Coordinator
+continuation may control only its original request's dispatched Workers.
+Ordinary session resumes retain their existing human-authorized execution.
+Nonhuman notifications without an authorized request cannot issue controls.
+
+Callers pin the source Attempt, Turn revision and idempotency key. A retry uses
+the same command identity and stored source config; conflicts require a fresh
+status read, never a silently selected successor. Stop targets only the named
+current Attempt and uses the ordinary Stop/withdrawal owner; a terminal Attempt
+is a no-op so replay cannot withdraw newer work. Resuming an earlier Turn has the
+same later-history removal semantics as the browser command. A lost mutation ACK
+is reported as uncertain, not as proof that nothing started. Read-only sessions
+cannot be mutated. The tool call and ordinary command receipts retain provenance.
+
+Alternatives rejected: generating a new user message would change the meaning of
+Continue; starting a private executor would split lifecycle authority; granting
+an arbitrary synthetic user the owner's identity would bypass dispatch grants.
+Session settings, new messages, human confirmations and deletion remain separate
+commands. Verification: `tests/project_mod/test_coordinator_session_control.py`
+and `tests/conversation/test_coordinator_session_control.py`.
+
 Problem: permitted Coordinator tools were absent from default keyword-routed
 wire schemas and had to be rediscovered on every new task. Decision:
 `coordinator_policy.prepare_coordinator_tool_surface` derives required-direct
@@ -1519,9 +1563,27 @@ isolated checkout, its uncommitted bytes,
 checkpoint lineage and delivery receipt continue instead of being recreated.
 A trusted continuation revalidates the live grant, requires an exact settled,
 unreviewed predecessor and its accepted successor, then advances the association
-to that successor. The accepted `_resumeSource` also restores the assignment's
-conserved model account: its last ordinal, cumulative usage and original nonce
-continue once, never restart at one or fabricate another occurrence account.
+to that successor. The accepted `_resumeSource` of a restart Continue also restores
+the assignment's conserved model and tool accounts: the last model ordinal,
+cumulative usage and original nonce, the last tool-occurrence ordinal and the
+shared-request tool-reservation counter continue once, never restart at one or
+fabricate another occurrence account.
+Problem: `bind_account` proposed a zero reservation counter for every generation
+and refused any stored counter that differed, so every restarted Worker that had
+reserved a tool failed to start (`Worker tool reservations cannot be
+replenished`); with only that changed, its first tool still collided with stored
+tool-occurrence ordinal one. Decision: a validated
+restart Continue whose stored counter names the same root task and nonce keeps
+that counter, and `ExecutionBudget.restore_tool_account` continues both tool
+sequences without restoring spent slots (a finite tool cap refuses, as for the
+model account). A fresh start, another root or nonce, or a predecessor that is
+not `interrupted` still refuses. Alternatives rejected: resetting the counter
+erases the request's recorded tool usage and is the replenishment the fence
+exists to stop; a fresh nonce per generation forks the one durable account; and
+accepting reservation ordinals beyond `count + 1` would hide lost or forged
+reservations. Specs: `tests/project_mod/test_coordinator_request_budget.py::test_restart_resumed_worker_continues_its_tool_reservation_counter`,
+`::test_resumed_worker_cannot_replenish_or_adopt_another_tool_reservation_counter`
+and `tests/agent_core/test_tool_account_restore.py`.
 A background-command completion for an eligible unfinished execution uses this
 same Continue path; its receipts stay durable and are replayed into the resumed
 Worker turn. The
@@ -1537,6 +1599,23 @@ revoked assignments. Alternative rejected: allowing Continue on a reviewed or
 completed assignment would reopen accepted work. Stop, a live predecessor,
 changed source or lost
 workspace/lineage evidence refuses recovery rather than starting a second writer.
+
+Problem: a Continue whose executor refused to start (for example `Worker tool
+reservations cannot be replenished`) settles the Turn `failed` with Regenerate as
+its only resume option, so the Turn authority refused every later batch Continue and
+the maintenance tick re-issued it, failing with `database_conflict`, forever.
+Decision: a bound batch resumes only through the Continue its execution Turn offers.
+A settled execution Turn without that option is closed: the batch settles once as
+evidence on it through the same path, logging `cause=execution_not_continuable`
+with the Turn status and settlement cause; the failed settlement stays unchanged.
+A batch whose own deterministic Continue attempt has already settled is not
+replayed; its receipts wait for the next explicit turn. Unbound receipts keep the
+ordinary wake. Alternatives rejected: Regenerate discards the Worker's transcript
+and checkpoint; classifying refusals by retry count or error text adds a knob and
+still re-issues the refused command; a fresh queued turn has no exact
+predecessor/successor association. Specs:
+`tests/project_mod/test_coordinator_workers.py::test_worker_execution_without_continue_settles_its_background_batch_once`
+and `::test_background_batch_issues_its_continue_once`.
 
 `blocked: task_background_commands_running` means that durable publication was
 captured while the Worker's background commands were still running; it is not a

@@ -11,6 +11,6 @@
     "idle": "A wait consumes no semantic transaction, command receipt or queue query. Its existing request deadline bounds the connection; an unchanged response does not trigger a probe.",
     "reconnect": "A new authority epoch or lost response invalidates the queue and active claim observations.",
     "retention": "Only generations and currently waiting connections are retained. No notification log or durable user data is created.",
-    "shutdown": "Authority shutdown wakes every waiting connection before joining transport workers."
+    "shutdown": "Authority shutdown wakes every waiting connection before joining transport workers. A client joins its watch by interrupting only the socket exclusively borrowed by that request; a cancelled pooled session is retired before reuse."
   }
 }

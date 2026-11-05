@@ -8,6 +8,7 @@ One admission validates its grant once and decides from that validated row; the
 decision table per authority fault is the one a second validation gave.
 """
 from collections import Counter
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ import pytest
 
 from lib.llm.llm_errors import AbortedError, ToolAdmissionRefused
 from lib.project_dispatch import admission
+from lib.project_dispatch.delegation import capture_worker_policy
 from tests.project_mod.test_project_dispatch_runtime import runtime as consult_runtime
 from tests.project_mod.test_coordinator_continuation import (
     activate, base_runtime, context, ready, run, runtime,
@@ -313,3 +315,152 @@ def test_bound_worker_root_loop_runs_tools_in_its_registered_workspace(runtime, 
     with pytest.raises(ToolAdmissionRefused) as refused:
         tools.execute_tool('read_files', {'path': 'notes.txt'}, canonical, **call)
     assert repr(canonical) in str(refused.value) and repr(str(workspace)) in str(refused.value)
+
+
+def _worker_swarm(runtime, monkeypatch, tmp_path, catalog=None, environment=None):
+    """A bound Worker, its registered checkout and the swarm a ``spawn_agents`` call starts."""
+    from lib.swarm.master import MasterOrchestrator
+    from lib.swarm.protocol import SubTaskSpec
+    from lib.tools.project import READ_FILES_TOOL
+    if catalog is not None:
+        capture_worker_policy(runtime.task, runtime.task['config'],
+                              [{'function': {'name': name}} for name in catalog], 'model-a',
+                              worker_model='model-a')
+    worker, row = _worker_task(runtime)
+    worker['_tenant_id'] = admission.principal_for(worker['config'][admission.KEY]).tenant_id
+    if environment is not None:
+        worker['_tool_env'] = environment
+    workspace = (tmp_path / 'worker-checkout').resolve()
+    workspace.mkdir()
+    (workspace / 'notes.txt').write_text('worker copy\n')
+    worker['config']['projectPath'] = str(workspace)
+    monkeypatch.setattr(admission, 'owned_workspace',
+                        lambda task, binding=None: {'workspace_path': str(workspace)})
+    spec = SubTaskSpec(role='general', objective='Inspect notes.txt and share the finding')
+    # A storage-free run keeps swarm checkpoints out of this fixture's record store.
+    master = MasterOrchestrator(worker['id'], worker['convId'], [spec], user_id=7,
+                                project_path=str(workspace), model='model-a', all_tools=[READ_FILES_TOOL],
+                                parent_config={**deepcopy(worker['config']), '_transientRuntime': True},
+                                parent_task=worker)
+    return SimpleNamespace(worker=worker, row=row, workspace=str(workspace), master=master,
+                           agent=master._make_agent(spec))
+
+
+def _scripted_child_rounds(monkeypatch, calls):
+    """The child invocation's real pipeline with only context hooks and transport scripted."""
+    import json
+    import lib.tasks_pkg.manager._stream as stream
+    import lib.tasks_pkg.orchestrator._ports as ports
+    import lib.tasks_pkg.orchestrator._root_agent_loop as loop
+    import lib.tasks_pkg.orchestrator._run as runner
+    from lib.llm.stream_result import ProviderStreamResult
+    for name in ('start_prefetches', 'stop_prefetches', 'maybe_run_memory_prefetch',
+                 'inject_context_and_emit_chips', 'setup_project_context'):
+        monkeypatch.setattr(runner, name, lambda *a, **kw: None)
+    monkeypatch.setattr(runner, 'run_turn_prelude', lambda task, cfg, tid: cfg)
+    monkeypatch.setattr(runner, 'check_autopilot_kick', lambda task: False)
+    monkeypatch.setattr(loop, 'run_round_message_hygiene', lambda *a, **kw: None)
+    monkeypatch.setattr(loop, 'drain_and_inject_inbox', lambda **kw: None)
+    monkeypatch.setattr(ports, 'build_request_body', lambda model, messages, **kw: {
+        'model': model, 'messages': deepcopy(messages), 'tools': deepcopy(kw['tools'])})
+    # The Worker's human Turn configures no requirements.
+    monkeypatch.setattr('lib.acceptance.turns.read_execution_requirements', lambda *a, **kw: None)
+    requests = []
+
+    def provider(body, **kwargs):
+        requests.append(deepcopy(body))
+        assert len(requests) <= 2, 'unexpected extra provider dispatch'
+        message = {'role': 'assistant', 'content': 'Shared the finding.'}
+        if len(requests) == 1:
+            message = {'role': 'assistant', 'content': '', 'tool_calls': [
+                {'id': f'child-{name}', 'type': 'function',
+                 'function': {'name': name, 'arguments': json.dumps(args)}}
+                for name, args in calls]}
+        return ProviderStreamResult.from_legacy(
+            message, 'tool_calls' if len(requests) == 1 else 'stop',
+            {'prompt_tokens': 20, 'completion_tokens': 3, 'total_tokens': 23})
+    monkeypatch.setattr(stream, 'dispatch_stream', provider)
+    return requests
+
+
+CHILD_CALLS = (('read_files', {'path': 'notes.txt'}),
+               ('store_artifact', {'key': 'finding', 'content': 'notes.txt says: worker copy'}))
+
+
+def test_worker_swarm_child_runs_ordinary_and_artifact_tools(runtime, monkeypatch, tmp_path):
+    """A Worker's ``spawn_agents`` child runs its tools under the Worker's live grant.
+
+    The child holds no grant of its own (``share_dispatch_root``). Its artifact
+    port serves only its run's in-process store, so it is not a custom tool
+    environment, and the artifact tools ride the Worker's swarm capability.
+    The first child call used to fail the child with "cannot be shadowed by a
+    custom tool environment".
+    """
+    swarm = _worker_swarm(runtime, monkeypatch, tmp_path)
+    requests = _scripted_child_rounds(monkeypatch, CHILD_CALLS)
+    result = swarm.agent.run()
+    assert result.status == 'completed', result.error_message
+    assert result.tool_calls_made == 2
+    assert swarm.master.artifact_store.get('finding') == 'notes.txt says: worker copy'
+    replies = {message.get('tool_call_id'): message.get('content') for message in requests[1]['messages']
+               if message.get('role') == 'tool'}
+    assert 'worker copy' in str(replies['child-read_files'])
+    assert 'Stored artifact' in str(replies['child-store_artifact'])
+    assert not swarm.worker.get('aborted')
+    # The Worker's durable tool ledger settles the child's calls under its own grant.
+    from lib.project_dispatch.repository import CONTRACT
+    attempts = admission.repository_for(swarm.worker['config'][admission.KEY]).read(swarm.row['id'])['toolAttempts']
+    assert sorted(row['tool_name'] for row in attempts) == ['read_files', 'store_artifact']
+    assert all(row['phase'] in CONTRACT['terminalToolPhases'] and row['task_id'] != swarm.worker['id']
+               for row in attempts)
+
+
+class _CustomEnvironment:
+    def __init__(self):
+        self.resolved = []
+
+    def resolve(self, name):
+        self.resolved.append(name)
+        return lambda *args: ('shadow', 'custom handler ran', False)
+
+
+# (Worker catalog override, Worker holds a custom environment, decision per child call)
+SWARM_CHILD_DECISIONS = {
+    'worker swarm': (None, False, {'read_files': 'admitted', 'store_artifact': 'admitted'}),
+    # Artifact tools come with the swarm capability, never on their own.
+    'no swarm capability': (('run_command', 'read_files', 'write_file'), False,
+                            {'read_files': 'admitted', 'store_artifact': 'capability ceiling'}),
+    # Tools the Worker's own task-local environment would resolve stay refused.
+    'inherited custom environment': (None, True,
+                                     {'read_files': 'cannot be shadowed', 'store_artifact': 'cannot be shadowed'}),
+}
+
+
+@pytest.mark.parametrize('case', SWARM_CHILD_DECISIONS)
+def test_swarm_child_admission_follows_the_workers_grant(runtime, monkeypatch, tmp_path, case):
+    """The child the swarm actually builds is admitted exactly as its Worker's grant allows."""
+    from lib.project_dispatch.scope import admit_tool
+    from lib.tasks_pkg.child_invocation import close_unstarted_child_invocation
+    catalog, inherits, expected = SWARM_CHILD_DECISIONS[case]
+    environment = _CustomEnvironment() if inherits else None
+    swarm = _worker_swarm(runtime, monkeypatch, tmp_path, catalog=catalog, environment=environment)
+    decisions = {}
+
+    def admit_unstarted(child, **kwargs):
+        try:
+            for name, args in CHILD_CALLS:
+                try:
+                    admit_tool(child, name, dict(args), project_path=child['config']['projectPath'])
+                    decisions[name] = 'admitted'
+                except ToolAdmissionRefused as refused:
+                    assert refused.tool_name == name
+                    decisions[name] = next(phrase for phrase in ('capability ceiling', 'cannot be shadowed')
+                                           if phrase in str(refused))
+        finally:
+            close_unstarted_child_invocation(child, reason='Admission spec complete')
+    monkeypatch.setattr('lib.tasks_pkg.child_invocation.run_child_invocation', admit_unstarted)
+    swarm.agent.run()
+    assert decisions == expected
+    assert not swarm.worker.get('aborted')
+    if environment is not None:
+        assert environment.resolved == []

@@ -41,24 +41,36 @@ class WorkerControlSignals:
 
 class StorageWorkerWakeSource:
     def __init__(self, client_factory, policy):
+        from tofu_db._request_cancellation import RequestCancellation
         self._factory, self._policy = client_factory, policy
         self.signals = WorkerControlSignals()
         self._stop = threading.Event()
         self._thread = None
+        self._lifecycle_lock = threading.Lock()
+        self._cancellation = RequestCancellation()
 
     def start(self, hint):
         # Enroll before the first queue read. A commit in the startup gap is
         # returned by the next watch instead of relying on a local producer.
-        cursor = self._watch(None)['cursor']
-        thread = threading.Thread(target=self._run, args=(cursor, hint),
-                                  name='durable-worker-wake', daemon=True)
-        self._thread = thread
-        thread.start()
+        try:
+            cursor = self._watch(None)['cursor']
+        except Exception:
+            if not self._stop.is_set():
+                raise
+            return self.close
+        with self._lifecycle_lock:
+            if self._stop.is_set():
+                return self.close
+            thread = threading.Thread(target=self._run, args=(cursor, hint),
+                                      name='durable-worker-wake', daemon=True)
+            thread.start()
+            self._thread = thread
         return self.close
 
     def _watch(self, cursor):
         response = self._factory().worker_watch(cursor=cursor,
-            deadline_unix_ms=int(time.time() * 1000) + self._policy['heartbeatIntervalMilliseconds'])
+            deadline_unix_ms=int(time.time() * 1000) + self._policy['heartbeatIntervalMilliseconds'],
+            cancellation=self._cancellation)
         if (not isinstance(response, dict) or set(response) != {'format', 'cursor', 'cancelTasks'}
                 or response['format'] != FORMAT or not isinstance(response['cursor'], dict)
                 or set(response['cursor']) != {'epoch', 'queue', 'cancel'}
@@ -84,13 +96,21 @@ class StorageWorkerWakeSource:
                     self.signals.refresh(response['cancelTasks'])
                 cursor = current
             except Exception as error:
+                if self._stop.is_set():
+                    return
                 logger.warning('[DurableWorker] authority watch interrupted: %s', type(error).__name__)
                 cursor = None
                 self.signals.refresh(None)
                 # The established failure policy owns retries. No idle DB poll.
                 self._stop.wait(self._policy['failureBackoffMilliseconds'] / 1000)
 
-    def close(self):
+    def interrupt(self):
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join()
+        self._cancellation.cancel()
+
+    def close(self):
+        self.interrupt()
+        with self._lifecycle_lock:
+            thread = self._thread
+        if thread is not None:
+            thread.join()
