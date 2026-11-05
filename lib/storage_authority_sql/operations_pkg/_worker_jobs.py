@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import hashlib
 import time
-from typing import Any
+from typing import Any, TypeGuard
 
 from lib.storage.errors import StorageError
 from lib.storage.generated_worker_job_contract import (
@@ -89,7 +89,9 @@ def _lease_authority(session: Session) -> WorkerLeaseAuthoritySnapshot:
     return snapshot
 
 
-def _live_claim(row, worker_id, fence, epoch, now):
+def _live_claim(
+    row: Mapping[str, Any] | None, worker_id, fence, epoch, now,
+) -> TypeGuard[Mapping[str, Any]]:
     return (row is not None and str(row['status']) == 'running'
             and str(row['claim_owner']) == worker_id
             and int(row['fencing_token']) == fence

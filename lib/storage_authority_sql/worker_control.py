@@ -4,6 +4,7 @@ The SQL adapter publishes staged hints after COMMIT. Transport waits hold only
 this condition, never a database connection. Queue and cancellation generations
 are distinct so ordinary queue traffic never fans out to running handlers.
 """
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import threading
 import time
@@ -17,7 +18,7 @@ from lib.storage.generated_worker_control import FORMAT
 class WorkerCommitHints:
     queue_changed: bool = False
     cancelled_tasks: set[str] = field(default_factory=set)
-    publisher: object = None
+    publisher: Callable[[bool, set[str]], None] | None = None
 
     def publish(self):
         if self.publisher is not None and (self.queue_changed or self.cancelled_tasks):
