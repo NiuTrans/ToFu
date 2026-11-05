@@ -645,9 +645,12 @@ _SPECS: tuple[EventSpec, ...] = (
                       'fallbackReason': '(optional) why fallback happened',
                       'fallbackKind': '(optional) fallback classification',
                       'modifiedFiles': '(optional) checkpoint-merged '
-                                       'modified path list',
+                                       'changed-path count',
                       'modifiedFileList': '(optional) checkpoint-merged '
                                           'rich modified-file dicts',
+                      'modifiedFilesTruncated': '(optional) true when the '
+                                                'bounded changed-path list '
+                                                'is incomplete',
                       'cost': '(optional) priced cost snapshot for the turn',
                       'costExperiment': '(optional) cost-experiment outcome '
                                         'dict when an arm is active',
@@ -684,8 +687,9 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('fallbackFrom', 'str'),
                   FieldSpec('fallbackReason', 'str'),
                   FieldSpec('fallbackKind', 'str'),
-                  FieldSpec('modifiedFiles', 'list'),
+                  FieldSpec('modifiedFiles', 'int'),
                   FieldSpec('modifiedFileList', 'list'),
+                  FieldSpec('modifiedFilesTruncated', 'bool'),
                   FieldSpec('cost', 'dict'),
                   FieldSpec('costExperiment', 'dict'),
                   FieldSpec('latestLiveTaskId', 'str'),
@@ -1982,12 +1986,22 @@ _SPECS: tuple[EventSpec, ...] = (
     # ───────────────────────── swarm ─────────────────────────
     EventSpec(EventType.SWARM_PHASE, _C.SWARM,
               'Top-level swarm orchestration phase.',
-              fields={'phase': 'spawning|error|complete|spawn_more',
+              fields={'phase': 'spawning|spawn_more|error|complete|'
+                               'interrupted',
                       'content': 'human-readable phase detail',
                       'swarmKey': '(optional) swarm grouping key',
                       'agents': '(optional) spawned agent descriptors '
                                 '{agentId, role, objective, model, depends_on}',
                       'error': '(optional) driver error text',
+                      'outcome': '(complete) driver settlement outcome: '
+                                 'completed|failed|stalled|cancelled|'
+                                 'incomplete|interrupted',
+                      'outcomeCounts': '(complete) per-agent outcome counts '
+                                       '{completed, failed, cancelled, '
+                                       'stalled, unknown}',
+                      'reasonCodes': '(complete) bounded non-success reason '
+                                     'codes (driver_error, liveness_stall, '
+                                     'abort_requested, agent_<status>)',
                       'agentCount': '(complete) total agents',
                       'failedCount': '(complete) failed agents',
                       'totalTokens': '(complete) aggregate token usage'},
@@ -1997,6 +2011,9 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('swarmKey', 'str'),
                   FieldSpec('agents', 'list'),
                   FieldSpec('error', 'str'),
+                  FieldSpec('outcome', 'str'),
+                  FieldSpec('outcomeCounts', 'dict'),
+                  FieldSpec('reasonCodes', 'list'),
                   FieldSpec('agentCount', 'int'),
                   FieldSpec('failedCount', 'int'),
                   FieldSpec('totalTokens', 'int'),
@@ -2098,6 +2115,8 @@ _SPECS: tuple[EventSpec, ...] = (
                                'tool_authority',
                       'roundNum': 'sub-agent round index',
                       'role': 'sub-agent role',
+                      'model': '(optional) sub-agent model id the round '
+                               'runs on',
                       'preview': '(optional, done) full final answer',
                       'toolNames': '(optional, tool_use) tools in flight'},
               # build-then-mutate via SwarmEvent.to_legacy (see
@@ -2109,6 +2128,7 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('phase', 'str'),
                   FieldSpec('roundNum', 'int'),
                   FieldSpec('role', 'str'),
+                  FieldSpec('model', 'str'),
                   FieldSpec('preview', 'str'),
                   FieldSpec('toolNames', 'list'),
               )),
@@ -2156,9 +2176,21 @@ _SPECS: tuple[EventSpec, ...] = (
                       'phase': 'tool_use',
                       'roundNum': 'sub-agent round index',
                       'role': 'sub-agent role',
+                      'model': 'sub-agent model id the call runs under',
                       'callId': 'tool-call correlation id',
+                      'inspectorRef': 'exact {taskId, roundNum, turn} '
+                                      'persisted evidence address of the '
+                                      'child round (null when none exists)',
                       'argsBrief': 'bounded args summary',
-                      'callStatus': 'running|done|error status',
+                      'argsBriefFullChars': 'untruncated args summary chars',
+                      'argsBriefTruncated': 'args summary was truncated',
+                      'callStatus': 'running|done|failed status',
+                      'editedPath': '(done) workspace path a successful '
+                                    'edit tool changed; empty otherwise, '
+                                    'null when the call arguments were not '
+                                    'an object',
+                      'resultMeta': 'bounded structured result metadata '
+                                    '(null until the result arrives)',
                       'callElapsed': '(finish) call wall-clock seconds',
                       'preview': '(finish) bounded result preview',
                       'previewTruncated': '(finish) preview was truncated',
@@ -2177,9 +2209,15 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('phase', 'str'),
                   FieldSpec('roundNum', 'int'),
                   FieldSpec('role', 'str'),
+                  FieldSpec('model', 'str'),
                   FieldSpec('callId', 'str'),
+                  FieldSpec('inspectorRef', 'dict | None'),
                   FieldSpec('argsBrief', 'str'),
+                  FieldSpec('argsBriefFullChars', 'int'),
+                  FieldSpec('argsBriefTruncated', 'bool'),
                   FieldSpec('callStatus', 'str'),
+                  FieldSpec('editedPath', 'str | None'),
+                  FieldSpec('resultMeta', 'dict | None'),
                   FieldSpec('callElapsed', 'number'),
                   FieldSpec('preview', 'str'),
                   FieldSpec('previewTruncated', 'bool'),

@@ -327,10 +327,12 @@ export interface DoneEvent {
   fallbackReason?: string;
   /** (optional) fallback classification */
   fallbackKind?: string;
-  /** (optional) checkpoint-merged modified path list */
-  modifiedFiles?: unknown[];
+  /** (optional) checkpoint-merged changed-path count */
+  modifiedFiles?: number;
   /** (optional) checkpoint-merged rich modified-file dicts */
   modifiedFileList?: unknown[];
+  /** (optional) true when the bounded changed-path list is incomplete */
+  modifiedFilesTruncated?: boolean;
   /** (optional) priced cost snapshot for the turn */
   cost?: Record<string, unknown>;
   /** (optional) cost-experiment outcome dict when an arm is active */
@@ -2553,7 +2555,7 @@ export interface FlowCompleteEvent {
 /** Top-level swarm orchestration phase. */
 export interface SwarmPhaseEvent {
   type: 'swarm_phase';
-  /** spawning|error|complete|spawn_more */
+  /** spawning|spawn_more|error|complete|interrupted */
   phase: string;
   /** human-readable phase detail */
   content: string;
@@ -2563,6 +2565,12 @@ export interface SwarmPhaseEvent {
   agents?: unknown[];
   /** (optional) driver error text */
   error?: string;
+  /** (complete) driver settlement outcome: completed|failed|stalled|cancelled|incomplete|interrupted */
+  outcome?: string;
+  /** (complete) per-agent outcome counts {completed, failed, cancelled, stalled, unknown} */
+  outcomeCounts?: Record<string, unknown>;
+  /** (complete) bounded non-success reason codes (driver_error, liveness_stall, abort_requested, agent_<status>) */
+  reasonCodes?: unknown[];
   /** (complete) total agents */
   agentCount?: number;
   /** (complete) failed agents */
@@ -2773,6 +2781,8 @@ export interface SwarmAgentProgressEvent {
   roundNum?: number;
   /** sub-agent role */
   role?: string;
+  /** (optional) sub-agent model id the round runs on */
+  model?: string;
   /** (optional, done) full final answer */
   preview?: string;
   /** (optional, tool_use) tools in flight */
@@ -2910,12 +2920,24 @@ export interface SwarmAgentToolCallEvent {
   roundNum?: number;
   /** sub-agent role */
   role?: string;
+  /** sub-agent model id the call runs under */
+  model?: string;
   /** tool-call correlation id */
   callId?: string;
+  /** exact {taskId, roundNum, turn} persisted evidence address of the child round (null when none exists) */
+  inspectorRef?: Record<string, unknown> | null;
   /** bounded args summary */
   argsBrief?: string;
-  /** running|done|error status */
+  /** untruncated args summary chars */
+  argsBriefFullChars?: number;
+  /** args summary was truncated */
+  argsBriefTruncated?: boolean;
+  /** running|done|failed status */
   callStatus?: string;
+  /** (done) workspace path a successful edit tool changed; empty otherwise, null when the call arguments were not an object */
+  editedPath?: string | null;
+  /** bounded structured result metadata (null until the result arrives) */
+  resultMeta?: Record<string, unknown> | null;
   /** (finish) call wall-clock seconds */
   callElapsed?: number;
   /** (finish) bounded result preview */
