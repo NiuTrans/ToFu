@@ -5316,6 +5316,8 @@
   "tool.blocked": "заблокировано",
   "tool.blockedTip": "Проверка безопасности или полномочий заблокировала этот допустимый инструмент до выполнения.",
   "tool.didYouMean": "возможно, вы имели в виду",
+  "tool.requestParams": "параметры запроса",
+  "tool.requestParamsTruncated": "… показ обрезан до {size} КБ; в исходном запросе аргументы сохранены полностью",
   "agentDock.allMessages": "Вся переписка",
   "swarm.messagesReceiptDetails": "Сведения о доставке",
   "swarm.messagesRunId": "ID запуска",

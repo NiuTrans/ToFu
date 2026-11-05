@@ -5316,6 +5316,8 @@
   "tool.blocked": "Blockiert",
   "tool.blockedTip": "Eine Sicherheits- oder Berechtigungsprüfung hat dieses gültige Tool vor der Ausführung blockiert.",
   "tool.didYouMean": "meinten Sie",
+  "tool.requestParams": "Anfrageparameter",
+  "tool.requestParamsTruncated": "… auf {size} KB gekürzt; die ursprüngliche Anfrage enthält die vollständigen Argumente",
   "agentDock.allMessages": "Gesamte Kommunikation",
   "swarm.messagesReceiptDetails": "Zustellungsdetails",
   "swarm.messagesRunId": "Ausführungs-ID",

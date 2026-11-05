@@ -49,6 +49,26 @@ def test_i18n_usage_checker_has_a_missing_key_negative_control():
     assert 'undefined key contract.__missing_probe__' in result.stdout
 
 
+def test_i18n_usage_checker_sees_a_translator_received_as_tr():
+    probe = """
+      import { inspectScript } from './scripts/check_i18n_usage.mjs';
+      const problems = [];
+      inspectScript(
+        '/synthetic/i18n-probe.js',
+        "function render(round, tr) {"
+          + " return tr('contract.__param_probe__') + this.tr('contract.__member_probe__');"
+          + " }",
+        new Set(['contract.known']),
+        problems,
+      );
+      process.stdout.write(JSON.stringify(problems));
+    """
+    result = _node('--input-type=module', '--eval', probe)
+    assert result.returncode == 0, result.stderr
+    assert 'undefined key contract.__param_probe__' in result.stdout
+    assert 'undefined key contract.__member_probe__' in result.stdout
+
+
 def test_i18n_usage_checker_has_a_placeholder_negative_control():
     probe = """
       import { inspectScript } from './scripts/check_i18n_usage.mjs';

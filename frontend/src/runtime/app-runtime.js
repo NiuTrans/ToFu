@@ -8223,14 +8223,13 @@ function _rejectedCallArgsHtml(round, tr) {
   if (!text) return "";
   const clipped = text.length > REJECTED_ARGS_VIEW_CHARS;
   if (clipped) text = text.slice(0, REJECTED_ARGS_VIEW_CHARS);
-  const label = escapeHtml(tr("tool.requestParams", "request parameters"));
+  const label = escapeHtml(tr("tool.requestParams"));
   const open = text.length <= REJECTED_ARGS_INLINE_CHARS ? " open" : "";
   const size = Math.ceil(text.length / 1024);
   const more = clipped
-    ? `<span class="ptool-reject-args-more">${escapeHtml(tr(
-        "tool.requestParamsTruncated",
-        "… truncated to %d KB; the wire keeps the full arguments"
-      ).replace("%d", String(Math.round(REJECTED_ARGS_VIEW_CHARS / 1024))))}</span>`
+    ? `<span class="ptool-reject-args-more">${escapeHtml(tr("tool.requestParamsTruncated", {
+        size: Math.round(REJECTED_ARGS_VIEW_CHARS / 1024),
+      }))}</span>`
     : "";
   const count = open
     ? ""
