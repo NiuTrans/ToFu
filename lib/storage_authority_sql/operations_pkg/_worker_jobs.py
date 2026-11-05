@@ -97,6 +97,20 @@ def _live_claim(row, worker_id, fence, epoch, now):
             and int(row['lease_deadline_ms']) > now)
 
 
+def _starts_tool_effect(event: Any) -> bool:
+    """Initial effect ACK is admission; later reconciliation is draining evidence.
+
+    The common tool owner emits this exact write-ahead event before invoking a
+    handler. Reconciliation references only attach to an already entered effect.
+    Ordinary progress never pays a history read or acquires effect authority.
+    """
+    if not isinstance(event, Mapping) or event.get('type') != 'tool_effect':
+        return False
+    effect = event.get('executionEffect')
+    return (isinstance(effect, Mapping) and effect.get('state') == 'entered'
+            and effect.get('reconciliation') is None)
+
+
 def _require_conversation_publication_claim(
     session: Session, *, attempt_id: str, task_id: str, user_id: int,
     proof: Any, terminal: bool = False, drain_entered: bool = False,

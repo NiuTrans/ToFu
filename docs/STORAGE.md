@@ -1048,6 +1048,17 @@ discarding or bypassing the FIFO head loses accounting/effect evidence; allowing
 an expired claim to drain would defeat fencing. Backend entry evidence, not a
 caller flag, selects the cancellation drain rule.
 
+**Effect admission:** the common tool owner requires the initial `tool_effect`
+`entered` event's exact durable ACK before handler entry. That frame has no
+reconciliation reference and therefore requires an uncancelled claim inside
+the publication transaction. Turn wrappers (including terminal and batched
+frames), Flow phases and standalone replay enforce the same rule. Later
+reconciliation references and returned/unknown evidence may drain. Treating
+every entered Attempt write as drainage would allow a new effect after Stop;
+checking cancellation only in the caller leaves a race with its durable commit.
+This closes root tool admission only; it does not qualify provider or child
+admission, or turn a receipt into permission to replay an unknown effect.
+
 For `conversation-attempt`, queued cancellation keeps the existing job claimable
 until its domain handler commits the terminal Turn; transport cancellation alone
 cannot orphan a pending Attempt. `abort_attempt` commits this control intent

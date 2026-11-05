@@ -241,7 +241,11 @@ The delivery dependencies and completion evidence are:
    caller's physical thread until the ordinary invocation and cleanup exit.
    Entry commits before preparation effects. Unentered cancellation settles
    without constructing an executor. Controlled runs exercise these paths on
-   real authorities; entered/unknown work remains refused for replay. Qualify
+   real authorities; entered/unknown work remains refused for replay.
+   Root tool-entry acknowledgement now revalidates cancellation inside the
+   same Turn or replay transaction; terminal wrappers cannot turn new entry
+   into cancellation drainage. Child and provider admission still need the
+   same root authority before production qualification. Qualify
    provider calls, tools, terminal accounting, never-entered cancellation and
    unknown acknowledgements with crash injection before registering the kind.
    An uncertain external effect

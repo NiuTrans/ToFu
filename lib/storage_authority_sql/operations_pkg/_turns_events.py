@@ -184,12 +184,18 @@ def _turn_event_record(session: Session, payload: Mapping[str, Any], *,
     if (turn is None or int(turn["user_id"]) != user_id
             or turn["current_attempt_id"] != attempt_id):
         return {"applied": False}
-    from ._worker_jobs import _require_conversation_publication_claim
+    from ._worker_jobs import _require_conversation_publication_claim, _starts_tool_effect
+    task_event = payload.get('task_event')
+    starts_effect = isinstance(task_event, Mapping) and (
+        _starts_tool_effect(task_event.get('event')) or any(
+            isinstance(row, Mapping) and _starts_tool_effect(row.get('event'))
+            for row in (task_event.get('preceding_events') or ())))
     _require_conversation_publication_claim(
         session, attempt_id=flow_root or attempt_id,
         task_id=str((parent if flow_root else attempt)['task_id'] or ''),
         user_id=user_id, proof=payload.get('worker_claim'),
-        terminal=bool(payload.get('terminal')), drain_entered=True)
+        terminal=bool(payload.get('terminal')) and not starts_effect,
+        drain_entered=not starts_effect)
     now = int(payload.get("now") or time.time() * 1000)
     old_revision = int(turn["projection_revision"])
     new_revision = old_revision + 1

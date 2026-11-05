@@ -243,3 +243,30 @@ def test_batch_rolls_back_a_valid_prefix_when_a_later_claim_is_missing(execution
     refused_without_writes(execution, lambda: command(execution, 'turn.event.record_batch', entries=entries))
     entries[1]['worker_claim'] = proof(job)
     assert all(row['applied'] for row in command(execution, 'turn.event.record_batch', entries=entries))
+
+@pytest.mark.parametrize('boundary', ['replay', 'turn', 'terminal-turn'])
+def test_cancel_refuses_new_tool_entry_but_drains_prior_effect(execution, boundary):
+    job = claim(execution)
+    start(execution, worker_claim=proof(job))
+    event = {'type': 'tool_effect', 'toolName': 'write', 'toolCallId': 'call',
+             'roundNum': 1, 'executionEffect': {'operationId': 'before-stop',
+                 'state': 'entered', 'recovery': 'reconcile', 'scope': 'attempt'}}
+    assert command(execution, 'event.append', task_id=job['taskId'], sequence=1,
+                   event=event, worker_claim=proof(job))['inserted']
+    command(execution, 'worker_job.request_cancel', task_id=job['taskId'],
+            now_ms=wall_ms(), reason='Stop')
+    entry = {**event, 'executionEffect': {**event['executionEffect'], 'operationId': 'after-stop'}}
+    row = {'task_id': job['taskId'], 'sequence': 2, 'event': entry}
+    if boundary == 'replay':
+        before = snapshot(execution)
+        refused = command(execution, 'event.append', **row, worker_claim=proof(job))
+        assert refused['rejected'] == 'worker_claim_stale'
+        assert snapshot(execution) == before
+    else:
+        payload = event_payload(execution, terminal=boundary == 'terminal-turn')
+        payload.pop('user_id')
+        refused_without_writes(execution, lambda: command(execution, 'turn.event.record',
+            **payload, task_event=row, worker_claim=proof(job)))
+    result = {**event, 'executionEffect': {**event['executionEffect'], 'state': 'returned'}}
+    assert command(execution, 'event.append', task_id=job['taskId'], sequence=2,
+                   event=result, worker_claim=proof(job))['inserted']

@@ -13615,6 +13615,11 @@ fn load_event_record_state(
     if attempt_flow_root != request.flow_root_attempt_id {
         return Ok(None);
     }
+    let mut starts_effect = false;
+    for event in request.task_event.iter().chain(request.preceding_task_events.iter()) {
+        starts_effect |= crate::worker_job::starts_tool_effect(
+            &event.event_type, &event.payload_json)?;
+    }
     if !attempt_flow_root.is_empty() {
         let parent_current_and_live =
             match load_attempt_for_update(database, transaction, attempt_flow_root)? {
@@ -13622,7 +13627,7 @@ fn load_event_record_state(
                     crate::worker_job::require_conversation_publication_claim(
                         database, transaction, attempt_flow_root,
                         parent.document.get("taskId").and_then(Value::as_str).unwrap_or(""),
-                        request.worker_claim.as_ref(), request.terminal, true)?;
+                        request.worker_claim.as_ref(), request.terminal && !starts_effect, !starts_effect)?;
                     attempt_is_live(&parent.document)
                         && parent.conversation_id == loaded_attempt.conversation_id
                         && load_current_turn_for_attempt(
@@ -13666,7 +13671,7 @@ fn load_event_record_state(
     if attempt_flow_root.is_empty() {
         crate::worker_job::require_conversation_publication_claim(
             database, transaction, &request.attempt_id, stored_task_id,
-            request.worker_claim.as_ref(), request.terminal, true)?;
+            request.worker_claim.as_ref(), request.terminal && !starts_effect, !starts_effect)?;
     }
 
     Ok(Some((loaded_attempt, loaded_turn)))

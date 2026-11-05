@@ -96,9 +96,11 @@ fn execute_fenced_indexed_append(
 ) -> io::Result<Vec<u8>> {
     if request.task_id.starts_with("conversation-attempt:") || worker_claim.is_some() {
         let attempt_id = request.task_id.strip_prefix("conversation-attempt:").unwrap_or("");
+        let starts_effect = crate::worker_job::starts_tool_effect(
+            &request.event_type, &request.payload_json)?;
         if let Err(error) = crate::worker_job::require_conversation_publication_claim(
             database, transaction, attempt_id, &request.task_id, worker_claim,
-            matches!(request.event_type.as_str(), "done" | "error" | "aborted"), true) {
+            matches!(request.event_type.as_str(), "done" | "error" | "aborted"), !starts_effect) {
             if error.kind() != io::ErrorKind::AlreadyExists { return Err(error); }
             return serde_json::to_vec(&json!({"inserted": false,
                 "rejected": "worker_claim_stale", "task_id": request.task_id,

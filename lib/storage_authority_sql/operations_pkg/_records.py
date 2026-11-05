@@ -1400,7 +1400,7 @@ def _append_event_row(
     )
     if not turn_publication_checked and (
             task_id.startswith('conversation-attempt:') or payload.get('worker_claim') is not None):
-        from ._worker_jobs import _require_conversation_publication_claim
+        from ._worker_jobs import _require_conversation_publication_claim, _starts_tool_effect
         attempt_id = task_id.removeprefix('conversation-attempt:')
         owner = (_integer(payload, 'user_id', minimum=1)
                  if payload.get('worker_claim') is not None and task_id.startswith('conversation-attempt:') else 0)
@@ -1409,7 +1409,8 @@ def _append_event_row(
                 session, attempt_id=attempt_id, task_id=task_id,
                 user_id=owner,
                 proof=payload.get('worker_claim'),
-                terminal=event_type in ('done', 'error', 'aborted'), drain_entered=True)
+                terminal=event_type in ('done', 'error', 'aborted'),
+                drain_entered=not _starts_tool_effect(event))
         except StorageError as error:
             if error.code != 'database_conflict':
                 raise
