@@ -57,6 +57,44 @@ checkout/committed baseline excludes normal development; committing the entire
 workspace misattributes other writers' WIP; blind copying overwrites concurrent
 changes; waiting for the background worker prevents immediate confirmation.
 
+**Restart handoff.** Live task completion still attempts delivery synchronously.
+Boot recovery only acknowledges the same owner-scoped durable terminal intent
+before finishing an orphaned work item. Checkpoint capture, merge, validation
+and source reclamation belong to the existing lifecycle-owned integration worker.
+Problem: a boot recovery called the live completion path and waited more than
+eight minutes in one network-volume `git add -A`, holding HTTP readiness closed.
+Decision: expose intent recording separately through the common settlement
+owner; its receipt remains pending until the worker actually delivers or
+preserves the checkpoint. A failed intent commit leaves the work item active
+for retry, and failed/cancelled outcomes still cannot become publishable.
+Worker startup discovers these durable receipts even if the process dies before
+any wake hint. No new queue or worker is introduced. Alternatives rejected:
+declaring delivery complete before capture loses evidence; imposing a Git wall
+deadline interrupts valid work; replaying checkpoint capture inside boot couples
+all service availability to the slowest old checkout. Verification:
+`tests/project_mod/test_startup_workspace_intent.py`, existing delivery recovery,
+revocation, pagination and startup lifecycle specifications.
+
+Equivalent-work measurement (2026-11-05): three disposable SQLite-authority/Git
+trials per path, each with the same 1,500 new text files of 4 KiB plus their
+ordinal. Time starts after workspace registration and file creation. The old
+boot receiver is `settle_task_workspaces`; the restart receiver is
+`record_task_workspace_intents`. The existing resume pass then runs for both,
+and every canonical file is compared byte-for-byte after delivered ACK.
+
+| Receiver | Boot receiver median (range), seconds | Complete delivery median, seconds | Full Git adds before boot handoff |
+|---|---|---|---|
+| Synchronous settlement | 44.455 (41.801–51.602) | 44.480 | 4 |
+| Durable intent handoff | 0.182 (0.170–0.218) | 43.259 | 0 |
+
+Kept: boot receiver waiting fell 99.6%, while the same capture/publication work
+still completed through the existing worker (complete delivery ranges overlap).
+This measures critical-path separation, not faster total Git processing or a
+production/native-store whole-restart guarantee. No tuning settings, retention
+changes or durability reductions are introduced. The correctness tests inject
+unavailable capture, failed intent writes, a crash between intent ACK and
+work.finish, repeated recovery and attempted cancellation upgrades.
+
 The immutable registered baseline includes dirty/untracked context. Only its
 difference to the task checkpoint is merged. A private Git index initialized
 from a current workspace snapshot computes the three-way merge, including binary

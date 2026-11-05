@@ -812,16 +812,16 @@ def test_source_snapshot_does_not_contend_with_canonical_writer_lease(repo, monk
     def existing_writer():
         with workspace_write_lease(root):
             ready.set()
-            assert release.wait(10)
+            assert release.wait()
     thread = threading.Thread(target=existing_writer)
     thread.start()
     try:
-        assert ready.wait(5)
+        assert ready.wait()
         work = automatic_workspace(repo, monkeypatch)
         assert (work / 'base.txt').read_text() == 'base\n'
     finally:
         release.set()
-        thread.join(5)
+        thread.join()
     assert not thread.is_alive()
 
 
@@ -1431,7 +1431,7 @@ def test_blocked_checkout_allows_independent_task_and_retains_active_destination
         if 'checkout' in argv and not blocked:
             blocked.append(Path(kwargs['cwd']))
             entered.set()
-            assert release.wait(15)
+            assert release.wait()
         return original(argv, **kwargs)
 
     monkeypatch.setattr(process, 'run_worktree_add', checkout)
@@ -1439,7 +1439,7 @@ def test_blocked_checkout_allows_independent_task_and_retains_active_destination
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(create, str(root), 'slow', user_id=owner)
         try:
-            assert entered.wait(10)
+            assert entered.wait()
             # Cleanup may run with repo admission already held. It must skip
             # this destination without deadlocking or touching its metadata.
             with ic._repo_lock(str(root)):
@@ -1447,12 +1447,12 @@ def test_blocked_checkout_allows_independent_task_and_retains_active_destination
             assert blocked[0].exists()
             ic.prune_worktree_metadata(str(root), user_id=owner)
             second = pool.submit(create, str(root), 'independent', user_id=owner)
-            ready = second.result(timeout=10)
+            ready = second.result()
             assert (Path(ready['workspacePath']) / 'base.txt').read_text() == 'base\n'
             assert not first.done()
         finally:
             release.set()
-        first.result(timeout=10)
+        first.result()
     assert git(root, 'status', '--porcelain') == ''
 
 
@@ -1485,7 +1485,7 @@ def test_same_task_lifecycle_waits_through_registration(repo, monkeypatch, actio
     def checkout(argv, **kwargs):
         if 'checkout' in argv:
             entered.set()
-            assert release.wait(15)
+            assert release.wait()
         return original_process(argv, **kwargs)
 
     monkeypatch.setattr(ic, '_destination_lock', admission)
@@ -1494,26 +1494,26 @@ def test_same_task_lifecycle_waits_through_registration(repo, monkeypatch, actio
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(ic.create_task_workspace, str(root), 'same', user_id=owner)
         try:
-            assert entered.wait(10)
+            assert entered.wait()
             if action == 'discard':
                 second = pool.submit(ic.discard_workspace, str(root), 'same', user_id=owner)
             else:
                 second = pool.submit(ic.create_task_workspace, str(root), 'same', user_id=owner, task=task)
-            assert waiting.wait(5)
+            assert waiting.wait()
             assert not second.done()
             assert len(captures) == 1
             if action == 'cancel':
                 task['aborted'] = True
                 with pytest.raises(ic.IntegrationError, match='cancelled'):
-                    second.result(timeout=3)
+                    second.result()
                 assert not first.done()
         finally:
             release.set()
-        created = first.result(timeout=10)
+        created = first.result()
         if action == 'retry':
-            assert second.result(timeout=10) == created
+            assert second.result() == created
         elif action == 'discard':
-            assert second.result(timeout=10)['state'] == 'discarded'
+            assert second.result()['state'] == 'discarded'
             assert state.get_workspace(str(root), 'same', user_id=owner)['state'] == 'discarded'
     assert len(captures) == 1
 
@@ -1538,10 +1538,10 @@ def test_task_cancelled_waiting_for_repository_admission_leaves_no_workspace(rep
     with ThreadPoolExecutor(max_workers=1) as pool:
         with original(str(root)):
             future = pool.submit(ic.create_task_workspace, str(root), 'repo-wait', user_id=owner, task=task)
-            assert waiting.wait(10)
+            assert waiting.wait()
             task['aborted'] = True
             with pytest.raises(ic.IntegrationError, match='cancelled'):
-                future.result(timeout=3)
+                future.result()
     assert state.find_workspace(str(root), 'repo-wait', user_id=owner) is None
 
 

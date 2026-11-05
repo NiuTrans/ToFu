@@ -230,8 +230,15 @@ def settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
     return result
 
 
+def record_task_workspace_intent(project_path: str, task_id: str, *, user_id: int,
+                                  outcome: str) -> dict | None:
+    """Acknowledge restart debt; the lifecycle worker owns capture and delivery."""
+    return _settle_task_workspace(
+        project_path, task_id, user_id=user_id, outcome=outcome, record_only=True)
+
+
 def _settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
-                           outcome: str) -> dict | None:
+                           outcome: str, record_only: bool = False) -> dict | None:
     """Persist intention BEFORE checkpoint/submit, so restart can finish it."""
     ic = _control()
     if outcome not in {'completed', 'failed', 'cancelled', 'stopped'}:
@@ -246,7 +253,8 @@ def _settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
             held = _publication_hold(existing, _receipt(existing))
             if held is not None:
                 return held
-            _reclaim_completed_source(existing)
+            if not record_only:
+                _reclaim_completed_source(existing)
         return _receipt(existing)
     bound = bind_task_workspace(project_path, task_id, user_id=user_id)
     if bound is None:
@@ -266,7 +274,7 @@ def _settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
         if receipt.get('taskOutcome') != original_outcome or receipt.get('state') == 'working':
             receipt = _save(row, receipt, state='pending', phase='checkpoint',
                             taskOutcome=original_outcome, reason='')
-    if (row.get('origin') or {}).get('executionMode') == 'isolated-task':
+    if not record_only and (row.get('origin') or {}).get('executionMode') == 'isolated-task':
         result = _settle_registered(row, receipt)
         if result.get('state') not in {'delivered', 'preserved'}:
             ic._start_or_wake_worker()
