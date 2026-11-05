@@ -10,12 +10,19 @@ earlier-issued sibling gateway call of the response has settled.
 These specs run real JavaScript programs through the real gateway handler and
 dispatch pipeline and replace only the leaf executor, so a task-wide lock
 anywhere on the path breaks a rendezvous instead of letting siblings meet.
+
+An occurrence holds its place until the worker that runs it returns, so an
+expired collection deadline never releases an earlier program that may still
+mutate. Only occurrences the runtime will run take a place: one the native
+runtime refuses without a callback, or whose callback fails first, never
+holds back a later sibling.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import threading
+import time
 import uuid
 
 import pytest
@@ -176,6 +183,83 @@ def _runs(task):
 def _row_status(task, call_id):
     return next(row.get('status') for row in task['toolRounds']
                 if row.get('toolCallId') == call_id)
+
+
+def _until(predicate, timeout=_WAIT):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+_LATER_WRITE = ('await tools.invoke("probe_read", {}); '
+                'await tools.invoke("write_file", {path: "notes.txt", content: "b"}); '
+                'return "b";')
+
+
+def _native_round(leaves, calls, callbacks, *, permissions=None):
+    """Settle one native response, then deliver only ``callbacks``.
+
+    ``callbacks`` maps a model call ID to the (name, arguments) its native
+    callback carries; a call left out is one the native runtime never ran. A
+    round still waiting at the deadline is stopped, as the native host would.
+    """
+    from lib.agent_core.admission import fire_terminal_callbacks
+    from lib.agent_core.native_process import (
+        NativeToolOrder, RoundRequest, RoundSettlement, ToolRequest,
+    )
+    from lib.observability import InstrumentedThreadPoolExecutor
+    from lib.tasks_pkg.native_gateway import NativeGateway
+    from tests.tasks_pkg.test_native_gateway import principal, task as native_task
+
+    owner = native_task()
+    owner['id'] = f'native-sibling-{uuid.uuid4().hex[:12]}'
+    leaves.tasks.add(owner['id'])
+    owner['_executable_tool_catalog'] = list(_CATALOG)
+    owner['_tool_gateway_names'] = [EXECUTE_PROGRAM_NAME, EXECUTE_TOOLS_NAME]
+    definitions = [
+        _schema(EXECUTE_PROGRAM_NAME, code={'type': 'string'}),
+        _schema(EXECUTE_TOOLS_NAME, calls={'type': 'array'}, execution={'type': 'string'})]
+    permissions = permissions or {EXECUTE_PROGRAM_NAME: 'read', EXECUTE_TOOLS_NAME: 'read'}
+
+    async def run(executor):
+        gateway = NativeGateway(
+            principal=principal(), task=owner, executor=executor, configuration=dict(_CFG),
+            tool_list=definitions, permissions=permissions,
+            project_path=None, project_enabled=False, model='fixture',
+            round_source=lambda: 0, decision_policy=None, pending_calls=16,
+            pending_bytes=1 << 20)
+        gateway.select_concurrent_dispatch()
+        try:
+            gateway.prepare_response(RoundSettlement(
+                RoundRequest(principal(), owner['id'], 'round-0', 0, 0),
+                {'kind': 'returned', 'model_calls': calls}, None, NativeToolOrder()))
+            requests = [gateway.execute(ToolRequest(
+                principal(), owner['id'], f'run-{call_id}', name, arguments, call_id,
+                model_round=0, model_call_id=call_id))
+                for call_id, (name, arguments) in callbacks.items()]
+            try:
+                return await asyncio.wait_for(
+                    asyncio.gather(*requests, return_exceptions=True), _WAIT)
+            except asyncio.TimeoutError:
+                return 'stopped at the deadline'
+        finally:
+            gateway.close()
+
+    try:
+        with InstrumentedThreadPoolExecutor(
+                max_workers=1, metric_pool='tool',
+                thread_name_prefix='native-sibling-programs') as executor:
+            return asyncio.run(run(executor)), owner
+    finally:
+        fire_terminal_callbacks(owner['id'])
+
+
+def _native_call(call_id, arguments, *, name=EXECUTE_PROGRAM_NAME):
+    return {'id': call_id, 'type': 'function', 'function': {
+        'name': name, 'arguments': json.dumps(arguments)}}
 
 
 def test_sibling_programs_overlap_children_that_meet_on_a_barrier(leaves, make_task):
@@ -400,3 +484,172 @@ def test_native_sibling_program_callbacks_overlap(leaves):
     assert not barrier.broken, 'native sibling programs still execute one at a time'
     assert leaves.count('rendezvous_read') == 2, results
     assert [json.loads(result) for result in results] == [{'met': True}, {'met': True}]
+
+
+def test_an_expired_earlier_sibling_keeps_its_place_until_its_worker_returns(
+        leaves, make_task, monkeypatch):
+    """A collection deadline gives up on a receipt, never on the call order.
+
+    The earlier program is still inside an unbounded write when both programs
+    outlive their collection deadline and the round settles with timeout
+    receipts. Its later write to the shared file must still land before the
+    later program's write, because the earlier worker has not returned.
+    """
+    import lib.tools.registry as registry
+    monkeypatch.setenv('TOOL_PARALLEL_TIMEOUT', '1')
+    monkeypatch.setattr(registry, 'declared_tool_timeout_ms', lambda *_args, **_kwargs: None)
+    release = threading.Event()
+    shared_writes = []
+    later_wrote = threading.Event()
+    leaves.behaviors['probe_read'] = lambda task, _args: {'probe': True}
+
+    def write(task, args):
+        if args['path'] == 'hold.txt':
+            release.wait(_WAIT * 2)
+        else:
+            shared_writes.append(args['content'])
+            if args['content'] == 'b':
+                later_wrote.set()
+        return {'wrote': True}
+
+    leaves.behaviors['write_file'] = write
+    task = make_task()
+    earlier = ('await tools.invoke("write_file", {path: "hold.txt", content: "x"}); '
+               'await tools.invoke("write_file", {path: "notes.txt", content: "a"}); '
+               'return "a";')
+    round_ = _Round(task, [('program-a', earlier), ('program-b', _LATER_WRITE)])
+    try:
+        assert leaves.event('probe_read').wait(_WAIT)
+        assert round_.done.wait(_WAIT), 'the collection deadline did not settle the round'
+        # A released later write would land here, before the earlier one.
+        later_wrote.wait(1.0)
+    finally:
+        release.set()
+    assert later_wrote.wait(_WAIT)
+    assert shared_writes == ['a', 'b'], (
+        'the later write overtook an expired earlier sibling that was still running')
+    assert _until(lambda: [_runs(task).get(call_id, {}).get('status')
+                           for call_id in ('program-a', 'program-b')]
+                  == ['completed', 'completed'])
+
+
+@pytest.mark.parametrize('earlier', ['awaits_a_native_approval', 'callback_failed'])
+def test_a_native_sibling_that_never_runs_does_not_hold_back_a_later_write(
+        leaves, earlier):
+    """Only occurrences the native runtime will run take a place in the order.
+
+    A gateway call under a write or approval permission runs only after a host
+    decision, and never when it is denied; a dispatched callback can also fail
+    before its pipeline. Neither may leave a later sibling's ordered child
+    waiting for Stop or the native deadline.
+    """
+    leaves.behaviors['probe_read'] = lambda task, _args: {'probe': True}
+    leaves.behaviors['write_file'] = lambda task, _args: {'wrote': True}
+    later = {'calls': [
+        {'name': 'probe_read', 'arguments': {}},
+        {'name': 'write_file', 'arguments': {'path': 'notes.txt', 'content': 'b'}}]}
+    permissions = {EXECUTE_PROGRAM_NAME: 'read', EXECUTE_TOOLS_NAME: 'read'}
+    callbacks = {'native-b': (EXECUTE_TOOLS_NAME, later)}
+    if earlier == 'awaits_a_native_approval':
+        permissions[EXECUTE_PROGRAM_NAME] = 'approval'
+    else:
+        callbacks = {'native-a': (EXECUTE_PROGRAM_NAME,
+                                  {'code': 'return "not the declared program";'}),
+                     **callbacks}
+
+    results, owner = _native_round(leaves, [
+        _native_call('native-a', {'code': 'return "a";'}),
+        _native_call('native-b', later, name=EXECUTE_TOOLS_NAME)],
+        callbacks, permissions=permissions)
+
+    assert results != 'stopped at the deadline', 'the later sibling waited for a call that never ran'
+    assert not owner.get('aborted'), results
+    assert leaves.count('write_file') == 1, results
+
+
+def test_a_native_later_write_waits_for_the_earlier_native_sibling(leaves):
+    """Both native callbacks run: the later write still follows the earlier program."""
+    release = threading.Event()
+    observed = {}
+    leaves.behaviors['hold_read'] = lambda task, _args: (
+        release.wait(_WAIT * 2), {'held': True})[1]
+    leaves.behaviors['probe_read'] = lambda task, _args: {'probe': True}
+
+    def write(task, _args):
+        observed['earlier_released'] = release.is_set()
+        return {'wrote': True}
+
+    leaves.behaviors['write_file'] = write
+    earlier = 'await tools.invoke("hold_read", {}); return "a";'
+    timer = threading.Timer(1.0, release.set)
+    timer.start()
+    try:
+        results, owner = _native_round(
+            leaves, [_native_call('native-a', {'code': earlier}),
+                     _native_call('native-b', {'code': _LATER_WRITE})],
+            {'native-a': (EXECUTE_PROGRAM_NAME, {'code': earlier}),
+             'native-b': (EXECUTE_PROGRAM_NAME, {'code': _LATER_WRITE})})
+    finally:
+        timer.cancel()
+        release.set()
+
+    assert not owner.get('aborted'), results
+    assert observed == {'earlier_released': True}, 'the later write overtook the earlier sibling'
+    assert [json.loads(result) for result in results] == ['a', 'b']
+
+
+def test_a_nested_gateway_call_keeps_its_parents_place(leaves, make_task):
+    """A write reached through a nested execute_tools still follows earlier siblings."""
+    release = threading.Event()
+    observed = {}
+    leaves.behaviors['hold_read'] = lambda task, _args: (
+        release.wait(_WAIT * 2), {'held': True})[1]
+    leaves.behaviors['probe_read'] = lambda task, _args: {'probe': True}
+
+    def write(task, _args):
+        observed['earlier_row'] = _row_status(task, 'program-a')
+        return {'wrote': True}
+
+    leaves.behaviors['write_file'] = write
+    task = make_task()
+    task['_executable_tool_catalog'] = list(_CATALOG) + [
+        _schema(EXECUTE_TOOLS_NAME, calls={'type': 'array'}, execution={'type': 'string'})]
+    nested = ('await tools.invoke("probe_read", {}); '
+              'await tools.invoke("execute_tools", {calls: [{name: "write_file", '
+              'arguments: {path: "notes.txt", content: "b"}}]}); return "b";')
+    round_ = _Round(task, [
+        ('program-a', 'await tools.invoke("hold_read", {}); return "a";'),
+        ('program-b', nested)])
+    try:
+        assert leaves.event('hold_read').wait(_WAIT)
+        assert leaves.event('probe_read').wait(_WAIT)
+        # A nested write that skipped the order would run here.
+        leaves.event('write_file').wait(0.5)
+    finally:
+        release.set()
+    round_.finish()
+
+    assert leaves.count('write_file') == 1
+    assert observed['earlier_row'] in {'done', 'error'}, observed
+    assert _runs(task)['program-b']['status'] == 'completed'
+
+
+def test_a_reused_call_id_never_takes_a_published_siblings_place(make_task):
+    """An occurrence is its published call ID and row, not a bare call ID."""
+    from lib.tasks_pkg.tool_dispatch._ordering import (
+        gateway_sibling_adopter, gateway_sibling_turn, publish_gateway_sibling_order,
+        release_gateway_siblings,
+    )
+    task = make_task()
+    earlier = _program_item(task, 'program-a', 'return "a";', 1)
+    later = _program_item(task, 'program-b', 'return "b";', 2)
+    publish_gateway_sibling_order(task, 0, [earlier, later])
+    impostor = earlier[:5] + (dict(earlier[5]), None)
+    waits_for = gateway_sibling_turn(task, 'program-b', 0, later[5]).earlier
+
+    assert gateway_sibling_turn(task, 'program-a', 0, impostor[5]) is None
+    assert gateway_sibling_adopter(task, impostor) is None
+    release_gateway_siblings(task, [impostor])
+    assert not any(settled.done() for settled in waits_for)
+    release_gateway_siblings(task, [earlier])
+    assert all(settled.done() for settled in waits_for)

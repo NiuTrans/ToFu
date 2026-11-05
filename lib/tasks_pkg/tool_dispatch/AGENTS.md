@@ -11,7 +11,8 @@ canonical result settlement and ordered replay. See `docs/modules/tools_executio
   file, memory and browser-tab mutations, `todo_write`, and `run_command`
   directories frozen at admission. Ordered children of a sibling gateway call
   also wait for the earlier-issued gateway calls of its response
-  (`GatewaySiblingOrder`). `api.plan_concurrent_round` exposes the same
+  (`GatewaySiblingOrder`) until the worker running each returns; only
+  occurrences the runtime will run take a place. `api.plan_concurrent_round` exposes the same
   rules to the native gateway, whose scheduler keeps them in Rust.
   Approval and hooks run on the call's own worker; settlement is serialized by
   the invocation's settle lock.

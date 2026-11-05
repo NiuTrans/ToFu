@@ -117,11 +117,13 @@ def _replay_execute_gateway_receipt(task, receipt, tc_id, rn, round_entry,
 #
 # Sibling gateway calls of one response run concurrently (owner decision
 # 2026-11-04, docs/contracts/TOOL_EXECUTION_POLICY.md "Sibling gateway calls
-# run concurrently"). ``_gateway_lock`` is the leaf publication lock of the
+# run concurrently"). ``_gateway_lock`` is the publication lock of the
 # task-shared gateway state: receipt table, child round numbers, program
 # ledger IDs, authoring-failure latches and the direct-sibling delegation
 # registry. It is never held across normalization, a program, a child batch's
-# execution or settlement. One occurrence executes under its receipt claim.
+# execution or settlement. Child row allocation also announces those rows, so
+# the lock is taken before the task's event-lane locks and never while holding
+# one. One occurrence executes under its receipt claim.
 _GATEWAY_LOCKS = WeakLockPool(threading.RLock)
 _GATEWAY_RECEIPT_CLAIMS = WeakLockPool(threading.RLock)
 # Concurrent search_tools calls of one round bump the same per-task counts.
@@ -638,6 +640,11 @@ def _execute_call_batch(
             parsed, _ = parse_tool_calls(
                 assistant, task, llm_round, _gateway_round_base(task),
                 project_enabled, early_announced=None)
+        if sibling_turn is not None:
+            # A nested gateway call keeps this call's place in its response.
+            for _call, name, _call_id, _args, _number, row, _error in parsed:
+                if name in (EXECUTE_TOOLS_NAME, EXECUTE_PROGRAM_NAME):
+                    sibling_turn.inherit(row)
         row_by_call_object = {
             id(parsed_call): parsed_row
             for parsed_call, _name, _call_id, _args, _round_num, parsed_row,
@@ -1201,7 +1208,7 @@ def handle_execute_tools(
                 task, receipt, tc_id, rn, round_entry, fn_name)
         llm_round = _gateway_llm_round(round_entry, rn)
         # Ordered children of this call follow its earlier response siblings.
-        sibling_turn = gateway_sibling_turn(task, tc_id, llm_round)
+        sibling_turn = gateway_sibling_turn(task, tc_id, llm_round, round_entry)
         normalized = normalize_execute_request(
             fn_args, catalog=_executable_catalog(task, all_tools),
             namespace_by_name=(

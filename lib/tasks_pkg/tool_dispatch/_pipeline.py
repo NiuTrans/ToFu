@@ -77,8 +77,8 @@ from lib.tasks_pkg.tool_dispatch._heartbeat import (
     _start_tool_heartbeat,
 )
 from lib.tasks_pkg.tool_dispatch._ordering import (
-    call_predecessors, gateway_sibling_settler, plan_command_working_dirs,
-    publish_gateway_sibling_order, restore_command_sticky_cwd,
+    call_predecessors, gateway_sibling_adopter, plan_command_working_dirs,
+    publish_gateway_sibling_order, release_gateway_siblings, restore_command_sticky_cwd,
 )
 from lib.tasks_pkg.tool_dispatch._unchanged import (
     UnchangedProjection,
@@ -2646,8 +2646,8 @@ def _plan_admitted_calls(task, admitted, project_path, write_tools,
     lane's limits: no pool ceiling, no declared timer, their own receipt after
     Stop. Every other call keeps the ordinary bounded-pool contract. Children
     of a gateway call (``sibling_turn``) also follow the earlier sibling
-    gateway calls of its response, and a published gateway occurrence settles
-    its place in that order when its worker is done.
+    gateway calls of its response, and a published gateway occurrence is
+    adopted by its worker, which settles its place in that order on return.
     """
     predecessors = call_predecessors(task, project_path, admitted, write_tools)
     return [
@@ -2658,7 +2658,7 @@ def _plan_admitted_calls(task, admitted, project_path, write_tools,
             sibling_predecessors=(
                 sibling_turn.predecessors(task, project_path, item, write_tools)
                 if sibling_turn is not None else ()),
-            on_finished=gateway_sibling_settler(task, item))
+            adopt_settlement=gateway_sibling_adopter(task, item))
         for item in admitted
     ]
 
@@ -2744,12 +2744,10 @@ def execute_tool_pipeline(
             publish_direct_gateway_siblings=publish_direct_gateway_siblings,
             sibling_turn=sibling_turn)
     finally:
-        # A gateway occurrence this invocation refused, failed before starting
-        # or ran leaves its response order here at the latest (idempotent).
-        for item in parsed_tcs:
-            settle = gateway_sibling_settler(task, item)
-            if settle is not None:
-                settle()
+        # A published gateway occurrence this invocation never handed to a
+        # worker (refused, failed before submission, Stop) will not run. One a
+        # worker adopted settles only when that worker returns.
+        release_gateway_siblings(task, parsed_tcs)
 
 
 def _run_tool_pipeline(

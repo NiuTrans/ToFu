@@ -56,9 +56,10 @@ def repair_prepared_call_ids(task, parsed_calls, round_num, project_path):
         if item[2] != original:
             remap_prefetch(task, item[1], original, item[2], item[3], item[5], project_path)
 
-def publish_prepared_response_siblings(task, parsed_calls, round_num):
+def publish_prepared_response_siblings(task, parsed_calls, round_num, *, gateway_calls):
     """Publish one response's direct occurrences for qualified gateway reuse,
-    and its gateway calls' provider order for their ordered children."""
+    and the provider order of ``gateway_calls``, the gateway occurrences the
+    runtime will dispatch, for their ordered children."""
     from lib.tools.gateway import EXECUTE_TOOLS_NAME, EXECUTE_PROGRAM_NAME, SEARCH_TOOLS_NAME
     from lib.tasks_pkg.tool_dispatch._flags import _publish_execute_gateway_direct_siblings
     from lib.tasks_pkg.tool_dispatch._ordering import publish_gateway_sibling_order
@@ -66,11 +67,13 @@ def publish_prepared_response_siblings(task, parsed_calls, round_num):
     direct=[(name,call_id,arguments) for _,name,call_id,arguments,_,_,error in parsed_calls
             if name not in gateways and not error]
     _publish_execute_gateway_direct_siblings(task,round_num,direct)
-    publish_gateway_sibling_order(task,round_num,parsed_calls)
+    publish_gateway_sibling_order(task,round_num,gateway_calls)
 
 from lib.tasks_pkg.tool_dispatch._parse import parse_tool_calls, publish_tool_call_entry
 from lib.tasks_pkg.tool_dispatch._pipeline import execute_tool_pipeline
-from lib.tasks_pkg.tool_dispatch._ordering import restore_command_sticky_cwd
+from lib.tasks_pkg.tool_dispatch._ordering import (
+    release_gateway_siblings, restore_command_sticky_cwd,
+)
 
 
 def authorize_prepared_tool_call(task, parsed_call, *, configuration, project_path, round_num, model):
@@ -136,4 +139,4 @@ def withdraw_prepared_tool_call(task, parsed_call, *, status='aborted'):
     _finalize_tool_round(task, number, row, [meta], status=status)
 
 
-__all__ = ['execute_tool_pipeline', 'parse_tool_calls', 'authorize_prepared_tool_call', 'withdraw_prepared_tool_call', 'publish_prepared_response_siblings', 'publish_tool_call_entry', 'parallel_tool_names', 'plan_concurrent_round', 'repair_prepared_call_ids', 'restore_command_sticky_cwd']
+__all__ = ['execute_tool_pipeline', 'parse_tool_calls', 'authorize_prepared_tool_call', 'withdraw_prepared_tool_call', 'publish_prepared_response_siblings', 'publish_tool_call_entry', 'parallel_tool_names', 'plan_concurrent_round', 'release_gateway_siblings', 'repair_prepared_call_ids', 'restore_command_sticky_cwd']
