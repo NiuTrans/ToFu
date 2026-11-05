@@ -116,8 +116,11 @@ def _self_check(image: BinaryIO, command: str, directory: Path, timeout: float, 
                 remaining=deadline-time.monotonic()
                 if remaining<=0:raise _refuse('self-check timed out')
                 for key,_ in selector.select(remaining):
-                    stream = key.fileobj
-                    if not isinstance(stream, BinaryIO):
+                    if key.fileobj is stdout:
+                        stream = stdout
+                    elif key.fileobj is stderr:
+                        stream = stderr
+                    else:
                         raise _refuse('self-check stream is invalid')
                     chunk=os.read(stream.fileno(),min(65536,output_bytes-total+1))
                     if not chunk:selector.unregister(key.fileobj);continue
