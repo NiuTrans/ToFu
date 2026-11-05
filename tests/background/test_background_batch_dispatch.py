@@ -205,6 +205,23 @@ def test_recovery_scan_wakes_a_receipt_only_conversation(monkeypatch):
     assert sum(row['kind'] == message_queue.KIND_WORKFLOW for row in rows) == 1
 
 
+def test_failed_batch_drain_identifies_exact_conversation_and_traceback(monkeypatch, caplog):
+    conv_id = 'worker-2-full-conversation-identity'
+    seed_conversation(conv_id, user_id=1, title='Batch failure')
+    _receipt(conv_id, 'bg_failed_drain')
+
+    def fail_dispatch(*args, **kwargs):
+        raise RuntimeError('database_conflict')
+
+    monkeypatch.setattr(message_queue, 'dispatch_completed_background_batch', fail_dispatch)
+    assert message_queue.drain_idle_background_batches() == []
+    records = [record for record in caplog.records
+               if 'background batch drain failed' in record.getMessage()]
+    assert any(conv_id in record.getMessage() for record in records)
+    record = next(record for record in records if conv_id in record.getMessage())
+    assert record.exc_info and record.exc_info[0] is RuntimeError
+
+
 def test_failed_delivery_is_retried_before_collective_wake(monkeypatch):
     conv_id = 'batch-delivery-retry'
     _command(conv_id, 'bg_retry', published=True)

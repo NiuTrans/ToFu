@@ -1004,7 +1004,7 @@ def drain_idle_background_batches() -> list[str]:
                 spawned.append(attempt_id)
         except Exception as exc:
             logger.warning('[Queue] background batch drain failed conv=%s: %s',
-                           conv_id[:8], exc)
+                           conv_id, exc, exc_info=True)
     return spawned
 
 
