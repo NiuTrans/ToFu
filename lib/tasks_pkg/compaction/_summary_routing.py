@@ -350,7 +350,9 @@ def select_summary_route(task, input_tokens, output_tokens, *,
         owner = task_user_id(dict(task))
         principal = _mapping(task.get('_principalContext'))
         tenant = principal.get('tenant_id', task.get('_tenant_id'))
-        if task.get('_tenant_id') is not None and task['_tenant_id'] != tenant:
+        # Task registration stores no tenant as '', while PrincipalContext
+        # serializes the same owner scope as None. Named tenants must still match.
+        if task.get('_tenant_id') is not None and task['_tenant_id'] != (tenant or ''):
             result['reason'] = 'conflicting_tenant_identity'
             return result
         from lib.llm_dispatch.native_context_scope import native_compaction_route_ready
