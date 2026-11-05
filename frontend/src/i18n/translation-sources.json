@@ -4999,6 +4999,7 @@
     "stream.phase.modelRouted": "3a9f8f6ecda362fb",
     "stream.phase.partialStreamRetry": "4e47378e47afc5ce",
     "stream.phase.planning": "f60216955a56528c",
+    "stream.phase.preparingToolCall": "f8e6d94f3c7f832f",
     "stream.phase.reactiveCompact": "470d49b9049f9b6f",
     "stream.phase.refusalFallback": "9c9d83c719e620b7",
     "stream.phase.refusalSwitchback": "f7d9db05c377c804",

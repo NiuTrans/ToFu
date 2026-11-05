@@ -1686,7 +1686,9 @@ class SSEAccumulator:
                     _argument_delta = ''
                 if self.progress.mark_tool_delta(
                         recognized=_new_recognized,
-                        argument_delta=_argument_delta):
+                        argument_delta=_argument_delta,
+                        name=_progress_fn.get('name'),
+                        call_id=_incoming_id):
                     self._notify_actionable_output()
                 # OBSERVATION: an absent ``index`` silently lands in slot 0,
                 # which would merge two distinct tool calls. Never observed on

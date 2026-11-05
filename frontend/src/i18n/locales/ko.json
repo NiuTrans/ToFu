@@ -4997,6 +4997,7 @@
   "stream.phase.modelRouted": "모델 라우팅: {from} → {to}({role}, {tier} 등급)",
   "stream.phase.partialStreamRetry": "⚠️ {chars}자를 생성한 후 업스트림 스트림이 끊겼습니다. 불완전한 응답을 버리고 같은 요청을 다시 보내는 중({attempt}/{max})…",
   "stream.phase.planning": "작업 계획 중…",
+  "stream.phase.preparingToolCall": "도구 호출 준비 중({elapsed}초): {tool}",
   "stream.phase.reactiveCompact": "⚡ 프롬프트가 너무 깁니다 — 자동 압축됨(reactive compact {attempt}/{max})…",
   "stream.phase.refusalFallback": "⚠️ {model}이(가) 응답을 거부했습니다 — {fallback}(으)로 다시 시도하는 중…",
   "stream.phase.refusalSwitchback": "🔁 {model}(으)로 다시 전환하여 한 라운드 시험합니다 — 다시 거부하면 이 턴의 나머지 동안 {fallback}을(를) 유지합니다",

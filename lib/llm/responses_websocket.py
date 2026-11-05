@@ -456,7 +456,8 @@ def _exchange(plan, key, session, payload, request, *, on_thinking,
         session.connection.send(frame)
         session.last_used = time.monotonic()
         import lib.llm._transport as _tp
-        progress = StreamProgress(0, started_at=plan.t0)
+        progress = StreamProgress(
+            0, started_at=plan.t0, on_tool_call_open=on_stream_wait)
         progress.mark_response_headers()
         acc = SSEAccumulator(
             plan.body, plan.trace_id, plan.raw_dumper, plan.wire_translator,

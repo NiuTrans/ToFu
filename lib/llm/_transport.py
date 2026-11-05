@@ -459,6 +459,10 @@ class StreamWaitStatus:
     reasoning_chars: int
     content_chars: int
     tool_call_count: int
+    # The tool call the model is writing; set only for ``preparing_tool_call``.
+    tool_name: str = ''
+    tool_call_id: str = ''
+    tool_call_elapsed_s: float = 0.0
 
 
 class StreamProgress:
@@ -467,7 +471,12 @@ class StreamProgress:
     _MAX_DIAGNOSTICS = 4
     _MAX_DIAGNOSTIC_CHARS = 240
 
-    def __init__(self, timeout_s=0, *, monotonic=None, started_at=None):
+    def __init__(self, timeout_s=0, *, monotonic=None, started_at=None,
+                 on_tool_call_open=None):
+        """``on_tool_call_open(status)`` reports each newly opened tool call
+        at once: unlike reasoning and text, argument chunks produce no
+        visible frame, so the status row could not name this work until
+        the next heartbeat."""
         self._timeout_s = max(0.0, float(timeout_s or 0))
         self._monotonic = monotonic or time.monotonic
         self._lock = threading.Lock()
@@ -486,6 +495,14 @@ class StreamProgress:
         self._tool_call_count = 0
         self._tool_argument_chars = 0
         self._tool_argument_chunks = 0
+        # Channel of the latest semantic output: reasoning, content or
+        # tool_call. The current channel, not the attempt's history, says
+        # what the model is doing now.
+        self._output_channel = ''
+        self._tool_call_name = ''
+        self._tool_call_id = ''
+        self._tool_call_opened_at = origin
+        self._on_tool_call_open = on_tool_call_open
         self._provider_finish_seen = False
         self._done_seen = False
         self._client_aborted = False
@@ -530,6 +547,7 @@ class StreamProgress:
         with self._lock:
             self._reasoning_chars += len(text)
             self._reasoning_chunks += 1
+            self._output_channel = 'reasoning'
             self._last_semantic_progress_at = current
         return True
 
@@ -540,12 +558,14 @@ class StreamProgress:
         with self._lock:
             self._content_chars += len(text)
             self._content_chunks += 1
+            self._output_channel = 'content'
             self._last_semantic_progress_at = current
         return True
 
     def mark_tool_delta(
             self, *, recognized: bool = False, argument_delta: object = '',
-            now=None) -> bool:
+            name: object = '', call_id: object = '', now=None) -> bool:
+        """``recognized`` opens a new call; ``name``/``call_id`` identify it."""
         argument = argument_delta if isinstance(argument_delta, str) else ''
         if not recognized and not argument:
             return False
@@ -553,10 +573,19 @@ class StreamProgress:
         with self._lock:
             if recognized:
                 self._tool_call_count += 1
+                self._tool_call_name = name.strip() if isinstance(name, str) else ''
+                self._tool_call_id = call_id if isinstance(call_id, str) else ''
+                self._tool_call_opened_at = current
             if argument:
                 self._tool_argument_chars += len(argument)
                 self._tool_argument_chunks += 1
+            self._output_channel = 'tool_call'
             self._last_semantic_progress_at = current
+        if recognized and self._on_tool_call_open is not None:
+            try:
+                self._on_tool_call_open(self.wait_status(current))
+            except Exception as e:
+                logger.debug('[StreamProgress] on_tool_call_open raised: %s', e)
         return True
 
     def mark_provider_finish(self, now=None) -> None:
@@ -639,8 +668,8 @@ class StreamProgress:
             has_semantic_progress = bool(
                 self._reasoning_chunks or self._content_chunks
                 or self._tool_call_count or self._tool_argument_chunks)
-            if (self._tool_argument_chunks and not self._reasoning_chunks
-                    and not self._content_chunks):
+            preparing = self._output_channel == 'tool_call'
+            if preparing:
                 kind = 'preparing_tool_call'
             elif has_semantic_progress:
                 kind = 'stream_stalled'
@@ -662,6 +691,11 @@ class StreamProgress:
                 reasoning_chars=self._reasoning_chars,
                 content_chars=self._content_chars,
                 tool_call_count=self._tool_call_count,
+                **({'tool_name': self._tool_call_name,
+                    'tool_call_id': self._tool_call_id,
+                    'tool_call_elapsed_s': max(
+                        0.0, current - self._tool_call_opened_at)}
+                   if preparing else {}),
             )
 
     def evidence(self, now=None) -> ProviderStreamEvidence:

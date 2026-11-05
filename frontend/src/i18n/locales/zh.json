@@ -4997,6 +4997,7 @@
   "stream.phase.modelRouted": "模型路由：{from} → {to}（{role}，{tier} 档）",
   "stream.phase.partialStreamRetry": "⚠️ 上游数据流在已生成 {chars} 个字符后中断；已丢弃这段不完整的回复，正在重新发送同一请求（{attempt}/{max}）…",
   "stream.phase.planning": "正在规划任务…",
+  "stream.phase.preparingToolCall": "正在准备工具调用（{elapsed}s）：{tool}",
   "stream.phase.reactiveCompact": "⚡ 上下文超长，已自动压缩（reactive compact {attempt}/{max}）…",
   "stream.phase.refusalFallback": "⚠️ 模型 {model} 拒绝回答 — 已自动改用 {fallback} 重新生成…",
   "stream.phase.refusalSwitchback": "🔁 已自动切回 {model} 试一轮 — 若再次被拒则本轮内保持在 {fallback}",

@@ -487,6 +487,12 @@ def _tool_wire_projection_fields(diagnostic, *, model, parent_span_id,
 def _waiting_phase_fields(status, status_kind, *, label, secs, idle_secs):
     """``(phase, detailKey, detail, detailArgs)`` for one transport-wait beat."""
     if status_kind == 'preparing_tool_call':
+        tool = str(getattr(status, 'tool_name', '') or '')
+        if tool:
+            elapsed = max(0, int(getattr(status, 'tool_call_elapsed_s', 0) or 0))
+            return (Phase.LLM_THINKING, 'stream.phase.preparingToolCall',
+                    f'{label} is preparing a {tool} call ({elapsed}s)…',
+                    {'model': label, 'tool': tool, 'elapsed': elapsed})
         return (Phase.LLM_THINKING, 'stream.phase.generatingResponse',
                 f'{label} is preparing a tool call ({secs}s total)…', {})
     if status_kind == 'stream_stalled':
@@ -861,6 +867,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             provider_id=provider_id,
         )
 
+    _announced_tool_call = None
+
     def _on_waiting(*, status=None, elapsed=None, slot=None):
         """Heartbeat from the current attempt's typed progress snapshot.
 
@@ -884,6 +892,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
            are legitimately waiting. A truly dead worker emits no beats at
         all, so the reaper keeps its real job.
         """
+        nonlocal _announced_tool_call
         task['_dispatch_heartbeat'] = time.time()
         _request_elapsed = getattr(status, 'request_elapsed_s', elapsed or 0)
         _semantic_idle = getattr(status, 'semantic_idle_s', elapsed or 0)
@@ -899,7 +908,14 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             _status_kind = 'stream_stalled' if _started else 'waiting_event'
         _phase, _detail_key, _detail, _args = _waiting_phase_fields(
             status, _status_kind, label=_label, secs=_secs, idle_secs=_idle_secs)
-        if not _retry_phase_budget.should_emit(
+        _tool_call_id = str(getattr(status, 'tool_call_id', '') or '')
+        _tool_call = ((_tool_call_id, getattr(status, 'tool_call_count', 0))
+                      if _status_kind == 'preparing_tool_call' else None)
+        if _tool_call is not None and _tool_call != _announced_tool_call:
+            # A newly opened call is a state change bounded by the model's own
+            # output, not a repeated wait beat, so sampling never drops it.
+            _announced_tool_call = _tool_call
+        elif not _retry_phase_budget.should_emit(
                 ('transport_wait', _status_kind,
                  str(getattr(status, 'cooldown_cause', '') or ''))):
             return
@@ -909,6 +925,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             detailKey=_detail_key,
             detailArgs=_args,
             model=_attempt_model or model,
+            **({'toolCallId': _tool_call_id} if _tool_call and _tool_call_id else {}),
         ))
 
     # ── Consume unusable-stream force-rotate signal ──

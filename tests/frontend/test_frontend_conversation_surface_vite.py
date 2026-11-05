@@ -3178,19 +3178,20 @@ const queueEvidence = {phase:'executor_queued',
   detailKey:'stream.phase.executorQueuedWithMetrics',
   detailArgs:{position:1, active:4, capacity:4, waitSeconds:20}};
 const provedQueue = renderText({...makeState('pending', 'task-a'), livePhase:queueEvidence});
-const staleQueue = renderText({...makeState('running', 'task-a'), livePhase:queueEvidence});
+// The queue frame is the attempt's first recorded event and marks it running.
+const queueOnStartedAttempt = renderText({...makeState('running', 'task-a'), livePhase:queueEvidence});
 const explicit = renderText({...makeState('running', 'task-a'), livePhase:{
   phase:'working', detailKey:'stream.phase.workerStarting'}});
 controller.dispose();
 dom.window.close();
-console.log(JSON.stringify({preparing, queued, running, provedQueue, staleQueue, explicit}));
+console.log(JSON.stringify({preparing, queued, running, provedQueue, queueOnStartedAttempt, explicit}));
 """)
     assert result == {
         "preparing": "stream.phase.executorPreparing",
         "queued": "stream.phase.executorPreparing",
         "running": "stream.phase.waitingWorkerStatus",
         "provedQueue": "stream.phase.executorQueuedWithMetrics",
-        "staleQueue": "stream.phase.waitingWorkerStatus",
+        "queueOnStartedAttempt": "stream.phase.executorQueuedWithMetrics",
         "explicit": "stream.phase.workerStarting",
     }
 

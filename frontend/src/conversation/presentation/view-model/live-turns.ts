@@ -111,12 +111,12 @@ export function liveAttemptPresentation(
   value: unknown,
   durableStatus: TurnRecord['status'],
 ): TransientTurnPresentation {
-  const rawPhase = value && typeof value === 'object' && !Array.isArray(value)
+  // The executor publishes its queue snapshot before worker entry and the
+  // worker's first phase replaces it. A running Turn proves no entry: the
+  // queue frame is the attempt's first recorded event, which starts it. A
+  // storage wedge withholding later frames has its own override.
+  const phase = value && typeof value === 'object' && !Array.isArray(value)
     ? value as UnknownRecord : {};
-  // A committed running Turn proves physical entry even if the following
-  // worker-start phase could not persist. An older queue frame is then stale.
-  const phase = durableStatus === 'running' && rawPhase.phase === 'executor_queued'
-    ? {} : rawPhase;
   const stringValue = (field: string): string => (
     typeof phase[field] === 'string' ? phase[field] as string : ''
   );

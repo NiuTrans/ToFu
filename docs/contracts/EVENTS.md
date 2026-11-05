@@ -713,11 +713,25 @@ For model streaming, the three progress phases have non-overlapping meaning:
   never a prefix-stripped alias; the live-status row wraps long names.
 - `stream_stalled` is the current attempt after reasoning, assistant text or
   valid tool progress has paused.
+- `llm_thinking` with `detailKey=stream.phase.preparingToolCall` is the model
+  writing a tool call's arguments: the provider stream's latest output
+  channel is a tool call (`StreamProgress` in `lib/llm/_transport.py`).
+  Each newly opened call is announced at once through the attempt's
+  wait-status port with `detailArgs {model, tool, elapsed}` and the call's
+  `toolCallId`; announcements bypass the per-round wait sampler, later
+  heartbeats for the same call keep it. That call's `tool_start` retires the
+  phase. A call without a recognized name keeps the generic
+  `stream.phase.generatingResponse` label.
 - `retrying` is emitted only after an actual failed or rate-limited provider
   attempt is being retried. Its `attempt` field is a real retry count, never a
   heartbeat sequence. Retry frames carry the physical attempt `model`, optional
   `providerId`, and `dispatchMode=strict_model|pool_rescue`; pool rescue must
   never claim that the outer logical model is being held fixed.
+
+`compacting` runs inside another activity. The manager keeps the phase it
+interrupted and `compaction_done` resumes it (re-stamped `emittedAt` and
+`seq`); a phase or delta published in between replaces what is resumed, and
+terminal events still clear the snapshot.
 
 Every phase snapshot carries the assigned event `seq`; repeated wait/stall
 heartbeats repaint through that sequence. Wait/stall phases remain transient
