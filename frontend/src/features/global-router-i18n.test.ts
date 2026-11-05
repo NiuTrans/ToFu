@@ -52,6 +52,9 @@ it('translates the card created before the locale catalog loads, then follows a 
   expect(label()).toBe('总负责人');
   expect(meta()).toBe(zh['globalRouter.entryMeta']);
   expect(card.title).toBe(zh['globalRouter.entryTitle']);
+  const copyId = card.querySelector<HTMLButtonElement>('[data-coordination-focus="copy-coordinator-id"]')!;
+  expect(copyId.title).toBe(zh['sidebar.copyConvId']);
+  expect(copyId.getAttribute('aria-label')).toBe(zh['sidebar.copyConvId']);
   expect(header.querySelector('.global-router-header-subtitle')!.textContent).toBe(zh['globalRouter.headerSubtitle']);
   expect(workerLabel()).toBe(zh['routerWorkerModel.label']);
   expect(workerHelp()).toBe(zh['routerWorkerModel.help']);
@@ -62,6 +65,8 @@ it('translates the card created before the locale catalog loads, then follows a 
   expect(label()).toBe('Main coordinator');
   expect(meta()).toBe(en['globalRouter.entryMeta']);
   expect(card.title).toBe(en['globalRouter.entryTitle']);
+  expect(copyId.title).toBe(en['sidebar.copyConvId']);
+  expect(copyId.getAttribute('aria-label')).toBe(en['sidebar.copyConvId']);
   expect(workerLabel()).toBe(en['routerWorkerModel.label']);
   expect(workerHelp()).toBe(en['routerWorkerModel.help']);
   expect(header.querySelector('.router-worker-model option')!.textContent).toBe('Your default model');
