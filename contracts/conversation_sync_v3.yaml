@@ -75,7 +75,7 @@ paths:
             Snapshot representation. The default full form is compatible with
             independent clients; refs deduplicates exact terminal projection
             content and safely settled tool blocks against their sibling
-            segment/round authorities. On completed Turns it also omits
+            segment/round authorities. On terminal Turns it also omits
             server-only provider replay, thinking signatures, unrendered
             request diagnostics and task-trace detail for the generated
             browser client; a whole-projection edit restores them from the
@@ -1093,7 +1093,7 @@ components:
           type: string
           description: >-
             Opaque provider replay evidence. Model requests read it from
-            storage; refs views of completed Turns omit it.
+            storage; refs views of terminal Turns omit it.
         result: {$ref: '#/components/schemas/TurnToolResult'}
         results:
           type: array
@@ -1274,7 +1274,7 @@ components:
           type: string
           description: >-
             Opaque provider signature of this reasoning. Never rendered; refs
-            views of completed Turns omit it.
+            views of terminal Turns omit it.
         llmRound:
           oneOf: [{type: integer, minimum: 0}, {type: 'null'}]
     TurnToolUseSegment:
