@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 import unittest
@@ -169,24 +168,138 @@ class TestBackendEmittersShipDetailKey(unittest.TestCase):
         self.assertTrue(m, 'compacting phase must ship detailKey')
 
     def test_reactive_compact_phase_carries_i18n_key(self):
-        """The reactive-compact retrying phase must localize (was hardcoded zh)."""
-        src_path = os.path.join(
-            ROOT, 'lib', 'tasks_pkg', 'llm_fallback', '_call.py')
-        with open(src_path, encoding='utf-8') as f:
-            src = f.read()
-        # The emit constructs via build_phase (the typed chokepoint), so the
-        # key is a kwarg — accept either spelling (EVENTS.md §4).
-        self.assertIn("detailKey='stream.phase.reactiveCompact'", src)
-        self.assertIn("'attempt': attempts + 1", src)
-        self.assertIn("'max': _REACTIVE_COMPACT_MAX_RETRIES", src)
+        """The reactive-compact retrying phase must localize (was hardcoded zh).
 
-    def test_waiting_model_phase_carries_i18n_key(self):
-        src_path = os.path.join(
-            ROOT, 'lib', 'tasks_pkg', 'manager', '_stream.py')
-        with open(src_path, encoding='utf-8') as f:
-            src = f.read()
-        self.assertIn("detailKey='stream.phase.waitingForModel'", src)
-        self.assertIn("detailArgs={'model': _model_label}", src)
+        Drives the real round dispatch through a provider context overflow:
+        only the provider stream, the summarizing compactor and body building
+        are faked. Every shipped locale must resolve the key with exactly the
+        arguments the backend supplies."""
+        import glob
+        import re
+        from unittest import mock
+        import lib.llm
+        import lib.tasks_pkg.compaction.api as compaction_api
+        import lib.tasks_pkg.llm_fallback._call as fallback
+        import lib.tasks_pkg.llm_fallback._retry as fallback_retry
+        import lib.tasks_pkg.llm_fallback._state as fallback_state
+        import lib.tasks_pkg.llm_fallback._transport as fallback_transport
+        from lib.llm import PromptTooLongError
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+
+        attempts = []
+
+        def _stream(_task, body, tag='', **_kwargs):
+            attempts.append((body['model'], tag))
+            if len(attempts) == 1:
+                raise PromptTooLongError('prompt is too long')
+            return ({'role': 'assistant', 'content': 'recovered'}, 'stop',
+                    {'prompt_tokens': 7, 'completion_tokens': 3})
+
+        def _build_body(model, messages, **_kwargs):
+            return {'model': model, 'messages': list(messages)}
+
+        task = chat_task_runtime.create(user_id=1)
+        messages = [{'role': 'user', 'content': 'continue'}]
+        fallback_state._reactive_compact_attempts.pop(task['id'], None)
+        try:
+            with mock.patch.object(
+                    fallback_transport, 'stream_llm_response', _stream), \
+                    mock.patch.object(
+                        fallback_retry, '_get_fallback_model',
+                        lambda _task: None), \
+                    mock.patch.object(
+                        compaction_api, 'reactive_compact',
+                        lambda *_a, **_kw: True), \
+                    mock.patch.object(lib.llm, 'build_body', _build_body):
+                result = fallback._llm_call_with_fallback(
+                    task, {'model': 'primary-model',
+                           'messages': list(messages)},
+                    'primary-model', 0, 512, False, None, messages,
+                    'low', False, {}, [])
+        finally:
+            fallback_state._reactive_compact_attempts.pop(task['id'], None)
+
+        self.assertEqual(result['assistant_msg']['content'], 'recovered')
+        self.assertEqual(attempts, [('primary-model', 'R1'),
+                                    ('primary-model', 'R1-REACTIVE')])
+        limit = fallback_state._REACTIVE_COMPACT_MAX_RETRIES
+        reactive = [e for e in task['events'] if e.get('type') == 'phase'
+                    and e.get('detailKey') == 'stream.phase.reactiveCompact']
+        self.assertEqual(len(reactive), 1, task['events'])
+        ev = reactive[0]
+        self.assertEqual(ev['phase'], 'retrying')
+        self.assertEqual(ev['detailArgs'], {'attempt': 1, 'max': limit})
+        # Legacy zh detail preserved byte-identical for headless clients.
+        self.assertEqual(
+            ev['detail'],
+            f'⚡ 上下文超长，已自动压缩 (reactive compact 1/{limit})…')
+
+        locale_paths = sorted(glob.glob(os.path.join(
+            ROOT, 'frontend', 'src', 'i18n', 'locales', '*.json')))
+        self.assertTrue(locale_paths)
+        for locale_path in locale_paths:
+            with open(locale_path, encoding='utf-8') as handle:
+                text = json.load(handle).get(ev['detailKey'])
+            self.assertTrue(text, f'{locale_path} is missing {ev["detailKey"]}')
+            self.assertEqual(set(re.findall(r'\{(\w+)\}', text)),
+                             set(ev['detailArgs']), locale_path)
+
+    def test_waiting_model_phase_names_physical_request(self):
+        """The pre-dispatch frame can only name the logical model. The first
+        provider attempt repaints it with the request name the provider
+        receives; after a failed attempt the retry frame owns the label."""
+        import threading as _thr
+        from unittest import mock
+        import lib.llm
+        import lib.tasks_pkg.manager._stream as _mgr
+        from lib.llm_dispatch import api
+        from tests.llm_dispatch.test_dispatch_stream import (
+            _FakeDispatcher, _make_slot)
+
+        request_name = 'bedrock.claude-opus-4.5-m17'
+        dispatcher = _FakeDispatcher([
+            _make_slot(model=request_name, key='k0'),
+            _make_slot(model='claude-opus-4.5-m2', key='k1')])
+        attempts = []
+
+        def _transport(*args, **kwargs):
+            attempts.append(kwargs)
+            if len(attempts) == 1:
+                raise RuntimeError('first attempt fails')
+            return {'role': 'assistant', 'content': 'ok'}, 'stop', {}
+
+        task = {'id': 'task-waiting-request-name', 'convId': 'waiting-conv',
+                '_userId': 1, 'status': 'running', '_transientRuntime': True,
+                'content': '', 'thinking': '', 'config': {'userId': 1},
+                'events': [], 'toolRounds': [], 'content_lock': _thr.Lock(),
+                'events_lock': _thr.Lock()}
+        with chat_task_fixture_guard:
+            chat_task_registry[task['id']] = task
+        try:
+            with mock.patch.object(api, 'get_dispatcher',
+                                   return_value=dispatcher), \
+                    mock.patch.object(lib.llm, 'stream_chat', _transport):
+                _mgr.stream_llm_response(
+                    task, {'model': 'claude-opus-4.5',
+                           'messages': [{'role': 'user', 'content': 'go'}]},
+                    tag='R1')
+        finally:
+            with chat_task_fixture_guard:
+                chat_task_registry.pop(task['id'], None)
+
+        self.assertEqual(len(attempts), 2)
+        waits = [e for e in task['events'] if e.get('type') == 'phase'
+                 and e.get('phase') == 'waiting_model']
+        self.assertEqual(
+            [(e['detailKey'], e['detailArgs'], e['model']) for e in waits], [
+                ('stream.phase.waitingForModel',
+                 {'model': 'claude-opus-4.5'}, 'claude-opus-4.5'),
+                ('stream.phase.waitingForModel',
+                 {'model': request_name}, request_name),
+            ])
+        self.assertEqual(
+            waits[-1]['detail'],
+            f'Sent to {request_name}, waiting for it to start replying…')
 
     def test_swarm_waiting_model_phase_carries_i18n_key(self):
         from lib.swarm.agent import SubAgent
@@ -282,15 +395,12 @@ class TestBackendEmittersShipDetailKey(unittest.TestCase):
                          {'model': 'kimi-k3', 'attempt': 1})
         self.assertEqual(ev['detail'], 'Retrying kimi-k3… (attempt 1)')
 
-    def test_on_retry_display_label_strips_gateway_prefix(self):
-        """detailArgs.model is NEW wire surface → user-facing label, so the
-        internal routing prefix must not leak (legacy detail keeps the raw
-        model for wire parity)."""
+    def test_on_retry_display_label_keeps_full_model_id(self):
+        """The label names the exact request model; the UI wraps long ids."""
         ev = self._drive_retry('Endpoint unreachable', 0,
                                model='aws.claude-opus-4.8')
-        self.assertEqual(ev['detailArgs']['model'], 'claude-opus-4.8')
-        self.assertIn('claude-opus-4.8', ev['detail'])
-        self.assertNotIn('aws.', ev['detail'])
+        self.assertEqual(ev['detailArgs']['model'], 'aws.claude-opus-4.8')
+        self.assertIn('aws.claude-opus-4.8', ev['detail'])
 
     def test_pool_rescue_names_physical_candidate_without_hold_claim(self):
         ev = self._drive_retry(
@@ -320,12 +430,6 @@ class TestBackendEmittersShipDetailKey(unittest.TestCase):
 # ═════════════════════════════════════════════════════════════════════
 
 
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
-
-
 _NATIVE_HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
@@ -336,6 +440,7 @@ global.document = dom.window.document;
 (0, eval)(fs.readFileSync(process.argv[2], 'utf8'));
 const neuter = process.argv[4] === 'neuter-reasonkey';
 const zh = {
+  'stream.phase.waitingForResponse': '已等待 {elapsed}s，正在等 {model} 开始回复…',
   'stream.phase.retryReason': '重试中…{reason}（{model}，第 {attempt} 次）',
   'stream.phase.retryCooldownWait': '{reason}（{model}）',
   'stream.phase.modelRouted': '模型路由：{from} → {to}（{role}，{tier} 档）',
@@ -425,6 +530,30 @@ if (neuter) {
     routeText.includes('模型路由')
       && routeText.includes('kimi-k3')
       && routeText.includes('deepseek-v4-pro'));
+
+  // Wait-elapsed client tick: a sparse server frame must keep counting.
+  const waitNode = document.createElement('div');
+  document.body.appendChild(waitNode);
+  const renderWait = (elapsed) => {
+    renderers.renderBlock(waitNode, {kind: 'live-status', blockId: 'live-status', value: {
+      phase: 'waiting_model', detailKey: 'stream.phase.waitingForResponse',
+      detail: `Waiting ${elapsed}s for kimi-k3 to respond…`,
+      detailArgs: { model: 'kimi-k3', elapsed },
+    }}, {});
+    return waitNode.querySelector('.stream-phase-text').textContent;
+  };
+  check('wait_renders_server_elapsed', renderWait(161) === '已等待 161s，正在等 kimi-k3 开始回复…');
+  // After 3 wall-clock seconds the local ticker must advance the count
+  // without any new server frame (this is the whole point of the fix).
+  setTimeout(() => {
+    const ticked = waitNode.querySelector('.stream-phase-text').textContent;
+    const m = ticked.match(/已等待 (\d+)s/);
+    check('wait_ticks_up_between_server_frames', !!m && Number(m[1]) >= 164);
+    // A fresh server frame re-anchors the count (no drift compounding).
+    check('wait_reanchors_on_new_frame', renderWait(200) === '已等待 200s，正在等 kimi-k3 开始回复…');
+    console.log(out.join('\n'));
+  }, 3200);
+  return;
 }
 console.log(out.join('\n'));
 """
@@ -458,12 +587,10 @@ def _run_harness(neuter=False):
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_stream_phase_i18n_frontend():
     """Frontend renderer prefers detailKey → t() over raw detail."""
     output = _run_harness()
-    assert output.count('PASS') == 13, output
+    assert output.count('PASS') == 16, output
 
 
 def test_generic_waiting_key_retired_from_locales():
@@ -488,8 +615,6 @@ def test_generic_waiting_key_retired_from_locales():
             assert key in data, f'{locale} is missing {key}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_stream_phase_retry_reasonkey_neuter():
     """NEUTER proof: bypassing reasonKey resolution in the typed renderer
     makes the raw English dispatcher token

@@ -8,16 +8,16 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 
-# ── ORT / OpenMP thread caps (must be set BEFORE ``import docling``) ──
+# ── ORT / OpenMP thread counts (must be set BEFORE ``import docling``) ──
 # Docling pulls in onnxruntime, which by default spawns one worker per
 # host CPU and pins each one to a physical core via
 # ``pthread_setaffinity_np``. On cgroup/cpuset-restricted hosts (k8s
 # pods, YARN/Hope containers, ``taskset``-launched jobs) most of those
 # cores are NOT in the process's allowed set → ``EINVAL`` storm in
-# stderr. Specifying the thread count explicitly skips the affinity
-# loop. The full per-converter cap also goes through Docling's
-# ``AcceleratorOptions(num_threads=...)`` in ``lib/pdf_parser/docling.py``;
-# this is the belt-and-braces early hint.
+# stderr. Specifying the thread count explicitly (every allowed core)
+# skips the affinity loop. The per-converter count also goes through
+# Docling's ``AcceleratorOptions(num_threads=...)`` in
+# ``lib/pdf_parser/docling.py``; this is the belt-and-braces early hint.
 def _allowed_cpu_count() -> int:
     try:
         return max(1, len(os.sched_getaffinity(0)))  # type: ignore[attr-defined]
@@ -28,8 +28,7 @@ def _allowed_cpu_count() -> int:
 
 _thread_hint = os.environ.get('TOFU_DOCLING_THREADS', '').strip()
 if not _thread_hint:
-    _thread_hint = str(min(8, _allowed_cpu_count()))
-_thread_count = int(_thread_hint)
+    _thread_hint = str(_allowed_cpu_count())
 for _var in ('OMP_NUM_THREADS', 'ORT_NUM_THREADS',
              'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'):
     os.environ.setdefault(_var, _thread_hint)

@@ -260,6 +260,7 @@ fn assert_online_gc_metric_fields(collector: &Value) {
         "total_segments_rewritten",
         "total_segments_retired",
         "total_compacted_blocks",
+        "total_compaction_segments",
         "total_consolidations",
         "total_consolidated_victims",
     ] {

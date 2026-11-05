@@ -30,6 +30,7 @@ import lib.feishu.commands as commands
 import lib.feishu.events as events
 import lib.feishu.messaging as messaging
 import lib.feishu.pipeline as pipeline
+from lib.feishu.authority import FeishuSender
 from tests.support.envelope import v1_get_json
 
 pytestmark = pytest.mark.unit
@@ -40,16 +41,20 @@ pytestmark = pytest.mark.unit
 # ═══════════════════════════════════════════════════════════
 
 @pytest.fixture
-def _isolate_feishu():
-    """Reset the dedup cache and allow-list so tests are independent.
+def _isolate_feishu(monkeypatch):
+    """Reset the dedup cache and admission state so tests are independent.
 
+    The test senders are explicitly owner-mapped (admission is default deny).
     Yields a dict of stub mocks for the collaborators ``events`` calls into
     (send_text / dispatch_command / run_task_pipeline / pending-state), each
     patched on the ``events`` module namespace where the name was bound.
     """
+    import lib.feishu._state as feishu_state
     events._processed_msgs.clear()
-    with mock.patch.object(events, "ALLOWED_USERS", set()), \
-            mock.patch.object(events, "send_text") as send_text, \
+    monkeypatch.setattr(feishu_state, "ALLOWED_USERS", set())
+    monkeypatch.setenv("FEISHU_USER_OWNER_MAP", json.dumps({"ou_user": 7, "ou_sdk": 7}))
+    monkeypatch.delenv("FEISHU_DEFAULT_OWNER_USER_ID", raising=False)
+    with mock.patch.object(events, "send_text") as send_text, \
             mock.patch.object(events, "dispatch_command", return_value=None) as dispatch, \
             mock.patch.object(events, "run_task_pipeline", return_value="pipeline-reply") as pipeline, \
             mock.patch.object(events, "get_pending", return_value=None), \
@@ -59,6 +64,9 @@ def _isolate_feishu():
             "dispatch_command": dispatch,
             "run_task_pipeline": pipeline,
         }
+
+
+OWNER = FeishuSender("ou_user", 7, True)
 
 
 def _dict_message_event(text="hello", *, message_id="m1", open_id="ou_user", chat_id="oc_chat"):
@@ -76,13 +84,11 @@ def _dict_message_event(text="hello", *, message_id="m1", open_id="ou_user", cha
     }
 
 
-def test_project_tool_failure_does_not_expose_internal_error():
+def test_project_tool_failure_does_not_expose_internal_error(tmp_path):
     secret = 'secret-tool-path-and-provider-detail'
-    with mock.patch(
-        'lib.project_mod.tools.execute_tool',
-        side_effect=RuntimeError(secret),
-    ):
-        response = pipeline.exec_project_tool('ou-tool-error', 'read_file', {})
+    with mock.patch.object(pipeline, 'authorized_project', return_value=str(tmp_path)), \
+            mock.patch('lib.project_mod.tools.execute_tool', side_effect=RuntimeError(secret)):
+        response = pipeline.exec_project_tool(OWNER, 'read_file', {})
     assert response == '❌ 工具执行失败，请稍后重试'
     assert secret not in response
 
@@ -120,7 +126,7 @@ class TestHandleMessageEvent:
         assert _isolate_feishu["run_task_pipeline"].call_count == 1
 
     def test_unauthorized_user_denied(self, _isolate_feishu):
-        with mock.patch.object(events, "ALLOWED_USERS", {"ou_allowed"}):
+        with mock.patch("lib.feishu._state.ALLOWED_USERS", {"ou_allowed"}):
             events.handle_message_event(
                 _dict_message_event("hi", open_id="ou_stranger")
             )
@@ -220,7 +226,7 @@ class TestHandleMenuEvent:
         _isolate_feishu["dispatch_command"].assert_not_called()
 
     def test_unauthorized_menu_user_denied(self, _isolate_feishu):
-        with mock.patch.object(events, "ALLOWED_USERS", {"ou_allowed"}):
+        with mock.patch("lib.feishu._state.ALLOWED_USERS", {"ou_allowed"}):
             events.handle_menu_event({
                 "event": {
                     "event_key": "help",
@@ -238,22 +244,22 @@ class TestHandleMenuEvent:
 @pytest.mark.unit
 class TestDispatchCommand:
     def test_non_command_returns_none(self):
-        assert commands.dispatch_command("ou_user", "just a sentence") is None
+        assert commands.dispatch_command(OWNER, "just a sentence") is None
 
     def test_empty_string_returns_none(self):
-        assert commands.dispatch_command("ou_user", "   ") is None
+        assert commands.dispatch_command(OWNER, "   ") is None
 
     def test_help_command_matches(self):
-        resp = commands.dispatch_command("ou_user", "/help")
+        resp = commands.dispatch_command(OWNER, "/help")
         assert resp is not None and "/help" in resp
 
     def test_prefix_requires_word_boundary(self):
         """'/helpme' must NOT match the '/help' prefix (needs exact or space)."""
-        assert commands.dispatch_command("ou_user", "/helpme") is None
+        assert commands.dispatch_command(OWNER, "/helpme") is None
 
     def test_command_with_argument(self):
         # _cmd_model with no DB dependency — just reads/writes module state
-        resp = commands.dispatch_command("ou_user", "/model gpt-4o")
+        resp = commands.dispatch_command(OWNER, "/model gpt-4o")
         assert resp is not None and "gpt-4o" in resp
 
     def test_handler_exception_is_caught_gracefully(self):
@@ -261,7 +267,7 @@ class TestDispatchCommand:
         secret = 'secret-command-detail'
         boom = mock.Mock(side_effect=RuntimeError(secret))
         with mock.patch.dict(commands.COMMAND_DISPATCH, {"/help": boom}):
-            resp = commands.dispatch_command("ou_user", "/help")
+            resp = commands.dispatch_command(OWNER, "/help")
         assert resp is not None
         assert "命令执行失败" in resp  # graceful failure marker, not a traceback
         assert secret not in resp

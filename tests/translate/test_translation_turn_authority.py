@@ -338,7 +338,7 @@ def test_idle_cache_commits_after_real_turn_settlement_and_survives_cold_read(
     monkeypatch.setattr(
         accumulator, '_translate', lambda *a, **kw: (translated, 'translator'),
     )
-    monkeypatch.setattr(accumulator, '_push', lambda _payload: None)
+    monkeypatch.setattr(accumulator, '_push', lambda _payload, **_options: None)
     accumulator._process_preview_segment(key, source)
     monkeypatch.setattr(incremental, '_accumulators', {task['id']: accumulator})
 

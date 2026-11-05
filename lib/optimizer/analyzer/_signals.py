@@ -115,7 +115,10 @@ def _collect_conversation_tool_distribution(
 ) -> dict:
     """Scan recent conversation messages for tool usage distribution.
 
-    Best-effort — on any DB error we return empty counters."""
+    A transcript too large for one storage response is read back to the
+    cutoff in message windows; a scan the authority still cannot serve
+    raises (a silently empty distribution reads as "no tool usage").
+    """
     tool_counts: Counter = Counter()
     search_urls: Counter = Counter()
     fetch_urls: Counter = Counter()
@@ -127,6 +130,7 @@ def _collect_conversation_tool_distribution(
             updated_at_gte=updated_ms,
             limit=200,
             settings_keys=[],
+            oversized_messages_since_ms=updated_ms,
         )
         # Keep iteration inside the best-effort boundary: bounded scans hydrate
         # lazily, so a later Sidecar frame can fail after earlier rows arrived.
@@ -163,8 +167,8 @@ def _collect_conversation_tool_distribution(
                             if dom:
                                 fetch_urls[dom] += 1
     except Exception as e:
-        logger.warning('[Optimizer.analyzer] conversation scan skipped: %s', e)
-        return {'tool_counts': {}, 'search_urls': [], 'fetch_urls': []}
+        logger.warning('[Optimizer.analyzer] conversation scan failed: %s', e)
+        raise
 
     return {
         'tool_counts': dict(tool_counts),

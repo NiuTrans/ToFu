@@ -8,6 +8,7 @@ from copy import deepcopy
 import time
 import uuid
 
+from lib.error_envelope import BadRequest
 from lib.identity import PrincipalContext
 from .contract import FactInputError, limit, validate
 from .repository import FactConflict, FactNotFound, FactRepository
@@ -129,7 +130,7 @@ def record_fact(conversation_id: str, command: dict, *, principal: PrincipalCont
     if previous and previous['actor'] == 'owner':
         raise PermissionError('An agent cannot overwrite an owner-confirmed, corrected or retracted fact')
     if previous is None and len(document['facts']) >= limit('maxFacts'):
-        raise ValueError('Working facts capacity reached; existing facts were preserved')
+        raise BadRequest('Working facts capacity reached; existing facts were preserved')
     view = _FactView(conversation_id, principal, document, file_sources, tool_sources)
     bindings = [view.binding(source, capture=True) for source in command['sources']]
     if any(state in {'stale', 'unavailable', 'withdrawn'} for state, _, _ in bindings):
@@ -146,7 +147,11 @@ def record_fact(conversation_id: str, command: dict, *, principal: PrincipalCont
         'producerTaskId': str(task_id), 'note': '',
         'createdAt': previous['createdAt'] if previous else now, 'updatedAt': now,
     }
-    _assert_acyclic(document['facts'])
+    try:
+        _assert_acyclic(document['facts'])
+    except ValueError as exc:
+        # The stored graph was checked when read; only these sources can close a cycle.
+        raise BadRequest(str(exc)) from exc
     from .file_sources import prune_file_seals
     prune_file_seals(document)
     from .tool_sources import prune_tool_seals
@@ -160,7 +165,7 @@ def owner_decision(conversation_id: str, command: dict, *, principal: PrincipalC
     if principal.kind != 'user':
         raise PermissionError('Owner correction requires a user principal')
     if not command['note'].strip():
-        raise ValueError('Describe the basis of the owner decision')
+        raise FactInputError('Describe the basis of the owner decision')
     repository, document = _load_for_edit(conversation_id, principal, command['revision'])
     identifier = command['id']
     fact = document['facts'].get(identifier)
@@ -168,7 +173,7 @@ def owner_decision(conversation_id: str, command: dict, *, principal: PrincipalC
         raise FactNotFound('Working fact not found in this conversation')
     if command['action'] == 'correct':
         if not command.get('text', '').strip():
-            raise ValueError('A correction requires replacement text')
+            raise FactInputError('A correction requires replacement text')
         fact.update(text=command['text'], kind='owner_assertion', sources=[], active=True)
     elif command['action'] == 'confirm':
         state = _FactView(conversation_id, principal, document).fact(identifier)['status']

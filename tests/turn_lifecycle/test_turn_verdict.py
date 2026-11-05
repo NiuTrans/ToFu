@@ -277,7 +277,7 @@ def test_stream_result_keeps_tuple_compatibility_without_faking_evidence():
 
 
 def test_done_event_projects_typed_stream_state():
-    from lib.tasks_pkg.orchestrator._finalize import _build_done_event_base
+    from lib.tasks_pkg.orchestrator._completion_receipt import build_done_event
 
     stream_result = ProviderStreamResult(
         message={'role': 'assistant', 'content': 'safe prefix'},
@@ -288,8 +288,10 @@ def test_done_event_projects_typed_stream_state():
     )
     task = {'id': 'task-stream-state', 'preset': 'medium'}
 
-    event = _build_done_event_base(
+    event = build_done_event(
         task,
+        cfg={},
+        api_rounds=[],
         last_finish_reason='premature_close',
         last_stream_result=stream_result,
         accumulated_usage={},
@@ -304,7 +306,7 @@ def test_done_event_projects_typed_stream_state():
 
 
 def test_done_event_keeps_plan_advisory_and_preserves_explicit_wait():
-    from lib.tasks_pkg.orchestrator._finalize import _build_done_event_base
+    from lib.tasks_pkg.orchestrator._completion_receipt import build_done_event
 
     snapshot = {
         'version': 3, 'update_count': 1, 'explanation': '',
@@ -315,8 +317,8 @@ def test_done_event_keeps_plan_advisory_and_preserves_explicit_wait():
         '_todo_blocked': {'reason': 'historical-checklist-gate'},
         '_waiting_on': {'kind': 'swarm', 'swarmKey': 'owned-wave'},
     }
-    event = _build_done_event_base(
-        task, last_finish_reason='stop', last_stream_result=None,
+    event = build_done_event(
+        task, cfg={}, api_rounds=[], last_finish_reason='stop', last_stream_result=None,
         accumulated_usage={}, last_usage={}, model='test', thinking_depth=None,
     )
     assert event['finishReason'] == 'stop'
@@ -483,6 +485,42 @@ def test_internal_fence_abort_is_never_a_user_abort(fence_reason):
     assert verdict.evidence is TurnTerminationEvidence.EXTERNAL_AUTHORITY
 
 
+@pytest.mark.parametrize(
+    'dispatch_reason', ['dispatch_grant_revoked', 'dispatch_authority_lost'])
+def test_dispatch_authority_abort_is_never_a_user_abort(dispatch_reason):
+    verdict = derive_turn_verdict(TurnTerminalEvidence(
+        event_type='aborted',
+        finish_reason='aborted',
+        stream_state=ProviderStreamState.CLIENT_ABORTED,
+        has_error=False,
+        aborted=True,
+        task_status='aborted',
+        abort_reason=dispatch_reason,
+    ))
+
+    assert verdict.status is TurnStatus.FAILED
+    assert verdict.cause == dispatch_reason
+    assert verdict.evidence is TurnTerminationEvidence.EXTERNAL_AUTHORITY
+
+
+def test_dispatch_authority_settlement_publishes_its_typed_error():
+    from lib.turn_lifecycle import _settlement
+
+    status, settlement = _settlement(
+        {'status': 'aborted', 'aborted': True,
+         '_abort_reason': 'dispatch_authority_lost', 'config': {}},
+        {'type': 'aborted'},
+        {'content': 'partial answer', 'toolRounds': []},
+    )
+
+    assert status == 'failed'
+    assert settlement['cause'] == 'dispatch_authority_lost'
+    assert settlement['evidence'] == 'external_authority'
+    assert settlement['error']['kind'] == 'dispatch_authority_lost'
+    assert settlement['error']['retryable'] is False
+    assert 'dispatch_authority_lost' in settlement['error']['detail']
+
+
 def test_non_fence_abort_reason_keeps_user_abort_verdict():
     verdict = derive_turn_verdict(TurnTerminalEvidence(
         event_type='done',
@@ -538,17 +576,14 @@ def test_root_internal_invocation_stop_is_failed_not_user_abort(reason):
     import json
     import time
     from threading import Event
-    from lib.tasks_pkg.invocation import invocation_abort_requested
-    from lib.swarm.liveness import ProgressBeacon
+    from lib.tasks_pkg.invocation import invocation_abort_requested, stop_stalled_invocation
     from lib.turn_lifecycle import _settlement
 
     task = {'id': 'root-guard', 'abort_event': Event(), 'config': {},
             'content': 'Safe partial output', 'usage': {'total_tokens': 23},
             'toolRounds': [{'status': 'done', 'result': 'committed receipt'}]}
     if reason == 'stalled':
-        beacon = ProgressBeacon(stall_timeout=0)
-        beacon.touch(task['id'], 'secret provider note must not escape')
-        task['_invocationProgressBeacon'] = beacon
+        assert stop_stalled_invocation(task, silent_seconds=1900.5, stall_timeout=1800)
     elif reason == 'execution_deadline':
         task['config']['executionLimits'] = {'deadline': time.time() - 1}
     else:
@@ -568,7 +603,11 @@ def test_root_internal_invocation_stop_is_failed_not_user_abort(reason):
     assert settlement['error']
     cold = json.loads(json.dumps(settlement))
     assert cold['error'] == settlement['error']
-    assert 'secret provider note' not in json.dumps(cold)
+    if reason == 'stalled':
+        # Numeric liveness facts only; no notes or provider payloads.
+        assert task['_invocationStopEvidence'] == {
+            'silentSeconds': 1900.5, 'stallTimeoutSeconds': 1800.0}
+        assert '1900.5s (stall threshold 1800s)' in json.dumps(cold)
     assert task['usage']['total_tokens'] == 23
     assert task['toolRounds'][0]['result'] == 'committed receipt'
     # Repeated abort polls cannot change cause or recapture diagnostics.

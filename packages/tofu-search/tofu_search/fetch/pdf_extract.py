@@ -1,9 +1,11 @@
 """tofu_search.fetch.pdf_extract — PDF text extraction.
 
-Uses pymupdf4llm (preferred) or pymupdf raw text as fallback.
+Entry point: extract_pdf_text. Optional native Markdown/raw readers take
+precedence; the base pypdf reader handles text when native libraries are absent.
+All readers load lazily, close documents and share literal text-budget rules.
 """
 
-import re
+import io
 import threading
 
 from tofu_search.log import get_logger
@@ -16,6 +18,7 @@ MAX_PDF_BYTES = 100 * 1024 * 1024  # 100 MB
 
 _pymupdf = None
 _pymupdf4llm = None
+_pypdf = None
 _dependencies_loaded = False
 _dependency_lock = threading.Lock()
 
@@ -25,8 +28,8 @@ class PDFExtractionError(RuntimeError):
 
 
 def _load_pdf_dependencies():
-    """Load optional native/layout libraries once, only for PDF capability use."""
-    global _pymupdf, _pymupdf4llm, _dependencies_loaded
+    """Load the available PDF reader once, only when the capability is used."""
+    global _pymupdf, _pymupdf4llm, _pypdf, _dependencies_loaded
     if _dependencies_loaded:
         return
     with _dependency_lock:
@@ -35,13 +38,20 @@ def _load_pdf_dependencies():
         try:
             import pymupdf as core
             _pymupdf = core
-        except ImportError as exc:
+        except (ImportError, OSError) as exc:
             logger.debug('PDF core unavailable: %s', exc)
-        try:
-            import pymupdf4llm as rich
-            _pymupdf4llm = rich
-        except ImportError as exc:
-            logger.debug('Rich PDF extraction unavailable: %s', exc)
+        if _pymupdf is not None:
+            try:
+                import pymupdf4llm as rich
+                _pymupdf4llm = rich
+            except (ImportError, OSError) as exc:
+                logger.debug('Rich PDF extraction unavailable: %s', exc)
+        else:
+            try:
+                import pypdf as pure
+                _pypdf = pure
+            except ImportError as exc:
+                logger.debug('Base PDF reader unavailable: %s', exc)
         _dependencies_loaded = True
 
 
@@ -94,44 +104,49 @@ def _to_markdown_classic(md_doc, **kw):
     return _pymupdf4llm.to_markdown(md_doc, **kw)
 
 
-def _strip_manuscript_line_numbers(text):
-    """Remove line numbers commonly found in review/manuscript PDFs."""
-    lines = text.split('\n')
-    non_blank = [l for l in lines if l.strip()]
-    if len(non_blank) < 10:
-        return text
-
-    standalone_num = re.compile(r'^\s*\d{1,5}\s*$')
-    num_count = sum(1 for l in non_blank if standalone_num.match(l))
-    ratio = num_count / len(non_blank)
-
-    if ratio > 0.15:
-        cleaned = [l for l in lines if not standalone_num.match(l)]
-        return '\n'.join(cleaned)
-
-    leading_num = re.compile(r'^(\d{1,5})([ \t]{2,})(.*)')
-    matches = [leading_num.match(l) for l in non_blank]
-    leading_count = sum(1 for m in matches if m and len(m.group(3).strip()) > 0)
-    leading_ratio = leading_count / len(non_blank)
-
-    if leading_ratio > 0.25:
-        nums = []
-        for m in matches:
-            if m and len(m.group(3).strip()) > 0:
-                nums.append(int(m.group(1)))
-        if len(nums) >= 5:
-            increments = sum(1 for a, b in zip(nums, nums[1:], strict=False) if 0 < b - a <= 3)
-            seq_ratio = increments / max(len(nums) - 1, 1)
-            if seq_ratio > 0.4:
-                def _strip_leading(line):
-                    m = leading_num.match(line)
-                    if m and len(m.group(3).strip()) > 0:
-                        return m.group(3)
-                    return line
-                cleaned = [_strip_leading(l) for l in lines]
-                return '\n'.join(cleaned)
-
+def _collect_page_text(pages, max_chars, page_count, separator):
+    """Project page text without guessing which source numbers are disposable."""
+    parts, used, has_source = [], 0, False
+    truncated_page = None
+    for index, page_text in enumerate(pages):
+        boundary = separator if index else ''
+        piece = boundary + page_text
+        remaining = max_chars - used if max_chars > 0 else len(piece)
+        delivered = piece[:max(0, remaining)]
+        source_delivered = delivered[len(boundary):]
+        has_source = has_source or bool(source_delivered.strip())
+        parts.append(delivered)
+        used += len(delivered)
+        if len(delivered) < len(piece):
+            truncated_page = index + 1
+            break
+        if max_chars > 0 and used >= max_chars and index + 1 < page_count:
+            truncated_page = index + 1
+            break
+    if not has_source:
+        raise PDFExtractionError('PDF contains no extractable text within the source budget.')
+    text = ''.join(parts)
+    if truncated_page is not None:
+        text += f'\n[...truncated at {used:,} chars, page {truncated_page}/{page_count}]'
     return text
+
+
+def _extract_pypdf(pdf_bytes, max_chars):
+    """Read text without native libraries, retaining upstream resource limits."""
+    if _pypdf is None:
+        raise PDFExtractionError('PDF extraction unavailable: install tofu-search with its pypdf dependency.')
+    try:
+        with io.BytesIO(pdf_bytes) as stream:
+            doc = _pypdf.PdfReader(stream)
+            try:
+                return _collect_page_text((page.extract_text() or '' for page in doc.pages),
+                                          max_chars, len(doc.pages), '\n\n')
+            finally:
+                doc.close()
+    except PDFExtractionError:
+        raise
+    except Exception as exc:
+        raise PDFExtractionError('PDF extraction failed: the document could not be parsed.') from exc
 
 
 def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '') -> str:
@@ -139,18 +154,17 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '') -> str
 
     Strategy 1: pymupdf4llm -> Markdown with table/header preservation
     Strategy 2: pymupdf raw -> plain-text page-by-page fallback
+    Without native libraries: pypdf -> plain text, including rotated text.
+    This does not perform OCR or disable upstream decompression/parser limits.
 
     Raises PDFExtractionError when extraction is unavailable or produces no
     source text. Callers must keep diagnostics outside the evidence channel.
     """
-    _load_pdf_dependencies()
-    if _pymupdf is None:
-        raise PDFExtractionError('PDF extraction unavailable: pymupdf not installed; install tofu-search[pdf].')
-
     if len(pdf_bytes) > MAX_PDF_BYTES:
         raise PDFExtractionError(f'PDF exceeds the extraction size limit ({MAX_PDF_BYTES:,} bytes).')
-
-    limit = max_chars if max_chars > 0 else 999_999_999
+    _load_pdf_dependencies()
+    if _pymupdf is None:
+        return _extract_pypdf(pdf_bytes, max_chars)
 
     if _pymupdf4llm is not None:
         try:
@@ -164,25 +178,10 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '') -> str
             finally:
                 md_doc.close()
 
-            parts = []
-            total = 0
-            for ci, chunk in enumerate(chunks):
-                page_md = chunk.get('text', '') if isinstance(chunk, dict) else str(chunk)
-                page_md = _strip_manuscript_line_numbers(page_md)
-                plen = len(page_md)
-                if total + plen > limit:
-                    remaining = limit - total
-                    if remaining > 200:
-                        parts.append(page_md[:remaining])
-                    parts.append(f'\n[...truncated at {total + remaining:,} chars, page {ci + 1}/{n}]')
-                    break
-                parts.append(page_md)
-                total += plen
-
-            if not any(part.strip() for part in parts):
-                raise PDFExtractionError('Rich PDF extraction returned no text.')
-            text = '\n\n---\n\n'.join(parts)
-            logger.debug('pymupdf4llm OK: %d pages, %s chars — %s', n, f'{total:,}', url[:60])
+            pages = (chunk.get('text', '') if isinstance(chunk, dict) else str(chunk)
+                     for chunk in chunks)
+            text = _collect_page_text(pages, max_chars, n, '\n\n---\n\n')
+            logger.debug('pymupdf4llm OK: %d pages, %s chars — %s', n, f'{len(text):,}', url[:60])
             return text
         except Exception as e:
             logger.warning('pymupdf4llm failed, falling back to raw: %s', e, exc_info=True)
@@ -192,22 +191,10 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '') -> str
         doc = _pymupdf.open(stream=pdf_bytes, filetype="pdf")
         try:
             n = len(doc)
-            parts = []
-            total = 0
-            for page in doc:
-                raw = page.get_text()
-                total += len(raw)
-                parts.append(raw)
-                if limit < 999_999_999 and total > limit:
-                    parts.append(f'\n[...truncated at {total:,} chars]')
-                    break
+            return _collect_page_text((page.get_text() for page in doc),
+                                      max_chars, n, '\n\n')
         finally:
             doc.close()
-        if not any(part.strip() for part in parts):
-            logger.info('[PDF] no extractable text (%d pages) — %s', n, url[:80] if url else '?')
-            raise PDFExtractionError('PDF contains no extractable text.')
-        full = re.sub(r'\n{3,}', '\n\n', '\n\n'.join(parts))
-        return full
     except PDFExtractionError:
         raise
     except Exception as e:

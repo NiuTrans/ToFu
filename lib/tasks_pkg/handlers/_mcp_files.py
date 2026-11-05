@@ -36,10 +36,11 @@ def _declared(info):
             and info.get('output_schema') == _definition('OverleafWriteReceiptV1'))
 
 
-def call_with_file_receipts(bridge, name, arguments, *, task):
+def call_with_file_receipts(bridge, name, arguments, *, task, runtime_context=None):
     from ._mcp_local_paths import call_with_local_paths
     return call_with_local_paths(bridge, name, arguments, task=task,
-        invoke=lambda routed, **options: _call_with_file_receipts(bridge, name, routed, task=task, **options))
+        invoke=lambda routed, **options: _call_with_file_receipts(bridge, name, routed, task=task, **options),
+        runtime_context=runtime_context)
 
 
 def _call_with_file_receipts(bridge, name, arguments, *, task, local_cancel=None):

@@ -51,6 +51,25 @@ def test_scoped_project_reads(workspace, batch, path_kind):
         assert any(word in result.lower() for word in ('denied', 'outside', 'blocked'))
 
 
+@pytest.mark.parametrize('tool, args', [
+    ('read_files', {'path': 'escape.txt'}),
+    ('read_files', {'path': 'linked/outside-only.txt'}),
+    ('list_dir', {'path': 'OUTSIDE'}),
+    ('list_dir', {'path': 'linked'}),
+    ('search_files', {'pattern': 'outside-secret', 'path': 'OUTSIDE'}),
+    ('search_files', {'pattern': 'outside-secret', 'path': 'linked'}),
+])
+def test_restricted_list_search_and_symlinked_reads_stay_inside_roots(workspace, tool, args):
+    root, inside, outside = workspace
+    (outside.parent / 'outside-only.txt').write_text('outside-secret-content\n')
+    (root / 'linked').symlink_to(outside.parent, target_is_directory=True)
+    args = {key: str(outside.parent) if value == 'OUTSIDE' else value for key, value in args.items()}
+    result = str(execute_tool(tool, args, str(root), conv_id='scope-a'))
+    assert 'outside-secret-content' not in result and 'outside-only.txt' not in result.replace(
+        args.get('path', ''), ''), result
+    assert 'denied' in result.lower(), result
+
+
 def test_scoped_authority_does_not_borrow_global_or_other_task(workspace, monkeypatch):
     root, inside, outside = workspace
     monkeypatch.setattr(config, '_roots', {'other': {'path': str(outside.parent)}})

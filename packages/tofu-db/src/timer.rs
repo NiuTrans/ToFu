@@ -40,10 +40,6 @@ fn conflict(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, message)
 }
 
-fn exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
-
 fn owner_key(tx: &AuthorityTransaction, namespace: &str, raw: &[u8]) -> io::Result<EntityKey> {
     EntityKey::new(tx.tenant_id(), tx.owner_user_id(), namespace, raw)
 }
@@ -192,7 +188,7 @@ fn validate_document(
     let encoded = serde_json::to_vec(document)
         .map_err(|_| invalid_data("timer document cannot be encoded"))?;
     if encoded.len() > MAX_TIMER_DOCUMENT_BYTES {
-        return Err(exhausted("timer document exceeds its bound"));
+        return Err(crate::resource_exhaustion::domain_bound("timer document exceeds its bound"));
     }
     Ok(())
 }
@@ -223,7 +219,7 @@ fn write_count(
         tx,
         count_key(tx, namespace)?,
         u64::try_from(count)
-            .map_err(|_| exhausted("timer count overflows"))?
+            .map_err(|_| crate::resource_exhaustion::accounting_overflow("timer count overflows"))?
             .to_le_bytes()
             .to_vec(),
     )
@@ -445,12 +441,21 @@ fn next_poll_number(
     Ok(next)
 }
 
+enum PollAppend {
+    Inserted(u64),
+    Duplicate(u64),
+    /// The watcher already settled (triggered, cancelled, retired): a poll
+    /// that finishes afterwards must not overwrite its receipt or budget.
+    Settled(String),
+}
+
 fn append_poll(
     database: &AuthorityDatabase,
     tx: &mut AuthorityTransaction,
     timer_id: &str,
     poll: &Map<String, Value>,
-) -> io::Result<(bool, u64)> {
+    require_active: bool,
+) -> io::Result<PollAppend> {
     let Some(timer) = read_document(database, tx, timer_id)? else {
         return Err(io::Error::new(io::ErrorKind::NotFound, "timer not found"));
     };
@@ -462,11 +467,14 @@ fn append_poll(
             if raw.len() != 8 {
                 return Err(invalid_data("timer poll ID claim is malformed"));
             }
-            return Ok((
-                false,
-                u64::from_le_bytes(raw.try_into().expect("length checked")),
-            ));
+            return Ok(PollAppend::Duplicate(u64::from_le_bytes(
+                raw.try_into().expect("length checked"),
+            )));
         }
+    }
+    let status = text_field(&timer, "status")?;
+    if require_active && status != "active" {
+        return Ok(PollAppend::Settled(status.to_owned()));
     }
     let poll_number = next_poll_number(database, tx)?;
     let mut document = poll.clone();
@@ -475,7 +483,7 @@ fn append_poll(
     let encoded =
         serde_json::to_vec(&document).map_err(|_| invalid_input("timer poll cannot be encoded"))?;
     if encoded.len() > MAX_TIMER_POLL_DOCUMENT_BYTES {
-        return Err(exhausted("timer poll document exceeds its bound"));
+        return Err(crate::resource_exhaustion::domain_bound("timer poll document exceeds its bound"));
     }
     database.entity_put(
         tx,
@@ -500,14 +508,14 @@ fn append_poll(
             poll_number.to_le_bytes().to_vec(),
         )?;
     }
-    Ok((true, poll_number))
+    Ok(PollAppend::Inserted(poll_number))
 }
 
+/// Progress advances only an active watcher.
 struct ProgressUpdate<'a> {
     poll_time: &'a str,
     decision: &'a str,
     reason: &'a str,
-    require_active: bool,
     updated_at_ms: u64,
 }
 
@@ -520,7 +528,7 @@ fn update_progress(
     let Some(mut document) = read_document(database, tx, timer_id)? else {
         return Ok(false);
     };
-    if update.require_active && text_field(&document, "status")? != "active" {
+    if text_field(&document, "status")? != "active" {
         return Ok(false);
     }
     let count = document["poll_count"]
@@ -840,37 +848,43 @@ pub(crate) fn execute(
             Ok(Some(br#"{"changed":true}"#.to_vec()))
         }
         Request::PollAppend { timer_id, poll } => {
-            let (inserted, id) = append_poll(database, tx, timer_id, poll)?;
-            Ok(Some(
-                serde_json::to_vec(&json!({"inserted":inserted,"id":id})).unwrap(),
-            ))
+            let response = match append_poll(database, tx, timer_id, poll, false)? {
+                PollAppend::Inserted(id) => json!({"inserted":true,"id":id}),
+                PollAppend::Duplicate(id) => json!({"inserted":false,"id":id}),
+                PollAppend::Settled(_) => {
+                    return Err(invalid_data("unguarded timer poll append reported a status"))
+                }
+            };
+            Ok(Some(serde_json::to_vec(&response).unwrap()))
         }
         Request::PollCommit {
             timer_id,
             poll,
             updated_at_ms,
         } => {
-            let (inserted, id) = append_poll(database, tx, timer_id, poll)?;
-            let advanced = if inserted {
-                update_progress(
-                    database,
-                    tx,
-                    timer_id,
-                    ProgressUpdate {
-                        poll_time: text_field(poll, "poll_time")?,
-                        decision: text_field(poll, "decision")?,
-                        reason: text_field(poll, "reason")?,
-                        require_active: false,
-                        updated_at_ms: *updated_at_ms,
-                    },
-                )?
-            } else {
-                false
+            let response = match append_poll(database, tx, timer_id, poll, true)? {
+                PollAppend::Inserted(id) => {
+                    let advanced = update_progress(
+                        database,
+                        tx,
+                        timer_id,
+                        ProgressUpdate {
+                            poll_time: text_field(poll, "poll_time")?,
+                            decision: text_field(poll, "decision")?,
+                            reason: text_field(poll, "reason")?,
+                            updated_at_ms: *updated_at_ms,
+                        },
+                    )?;
+                    json!({"inserted":true,"id":id,"advanced":advanced})
+                }
+                PollAppend::Duplicate(id) => {
+                    json!({"inserted":false,"id":id,"advanced":false})
+                }
+                PollAppend::Settled(status) => {
+                    json!({"inserted":false,"id":null,"advanced":false,"status":status})
+                }
             };
-            Ok(Some(
-                serde_json::to_vec(&json!({"inserted":inserted,"id":id,"advanced":advanced}))
-                    .unwrap(),
-            ))
+            Ok(Some(serde_json::to_vec(&response).unwrap()))
         }
         Request::Progress {
             timer_id,
@@ -884,7 +898,6 @@ pub(crate) fn execute(
             poll_time,
             decision,
             reason,
-            require_active: true,
             updated_at_ms: *updated_at_ms,
         })?}),
             )
@@ -911,7 +924,7 @@ pub(crate) fn execute(
                         .map_err(|_| invalid_data("timer poll document is malformed"))?,
                 );
             }
-            encode_response(&documents, "timer poll log")
+            encode_response(&documents, "timer poll log exceeds 8 MiB")
         }
     }
 }
@@ -975,14 +988,14 @@ where
         }
         documents.push(Value::Object(document));
     }
-    encode_response(&documents, "timer list")
+    encode_response(&documents, "timer list exceeds 8 MiB")
 }
 
-fn encode_response(documents: &[Value], name: &str) -> io::Result<Option<Vec<u8>>> {
+fn encode_response(documents: &[Value], exceeded: &'static str) -> io::Result<Option<Vec<u8>>> {
     let response = serde_json::to_vec(documents)
         .map_err(|_| invalid_data("timer response cannot be encoded"))?;
     if response.len() > MAX_LEGACY_DOCUMENT_BYTES {
-        return Err(exhausted(&format!("{name} exceeds 8 MiB")));
+        return Err(crate::resource_exhaustion::domain_bound(exceeded));
     }
     Ok(Some(response))
 }

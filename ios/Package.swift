@@ -3,7 +3,7 @@ import PackageDescription
 
 // Pure client core: the Android session/ and data/ logic ported to
 // Foundation-only Swift so every rule is testable with `swift test` on a
-// macOS CI runner — no simulator, no WebKit. The iOS app target (TofuClient/,
+// macOS or Linux runner — no simulator, no WebKit. The iOS app target (TofuClient/,
 // see project.yml) consumes this package and adds the SwiftUI/WKWebView layer.
 let package = Package(
     name: "TofuClientCore",
@@ -12,11 +12,17 @@ let package = Package(
         .library(name: "TofuClientCore", targets: ["TofuClientCore"]),
     ],
     targets: [
-        .target(name: "TofuClientCore", path: "Sources/TofuClientCore"),
+        .systemLibrary(name: "CSQLite", pkgConfig: "sqlite3", providers: [.apt(["libsqlite3-dev"])]),
+        .target(
+            name: "TofuClientCore",
+            dependencies: [.target(name: "CSQLite", condition: .when(platforms: [.linux]))],
+            path: "Sources/TofuClientCore"
+        ),
         .testTarget(
             name: "TofuClientCoreTests",
             dependencies: ["TofuClientCore"],
-            path: "Tests/TofuClientCoreTests"
+            path: "Tests/TofuClientCoreTests",
+            resources: [.copy("Fixtures")]
         ),
     ]
 )

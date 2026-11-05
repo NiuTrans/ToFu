@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from quart import request
@@ -16,6 +17,63 @@ from lib.http_transport.compat_middleware import (
 
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize('method', ['POST', 'PUT'])
+@pytest.mark.parametrize('body', [
+    b'{"value":"normal JSON"}', b' \r\n\t[1,2,3]', b'123',
+    b'true', b'false', b'null', b'{invalid JSON', b'\xff', b'',
+])
+def test_non_string_json_bodies_are_not_parsed_by_proxy_repair(
+        monkeypatch, method, body):
+    """Only a JSON string can be a proxy's extra encoding layer.
+
+    Ordinary JSON and malformed non-string data belong to the handler's
+    parser. The compatibility hook must not parse and discard them first.
+    """
+    from lib.http_transport import compat_middleware
+
+    def unexpected_parse(_value):
+        pytest.fail('proxy repair decoded a body without an encoding layer')
+
+    monkeypatch.setattr(compat_middleware, 'json',
+                        SimpleNamespace(loads=unexpected_parse,
+                                        JSONDecodeError=json.JSONDecodeError))
+    app = create_base_app('compat-no-double-parse', {'TESTING': True})
+    register_method_override(app)
+
+    @app.route('/echo', methods=['POST', 'PUT'])
+    async def echo():
+        return await request.get_data(), 200, {'Content-Type': 'application/octet-stream'}
+
+    async def exercise():
+        async with app.test_app():
+            response = await app.test_client().open(
+                '/echo', method=method, data=body,
+                headers={'Content-Type': 'application/json'})
+            assert response.status_code == 200
+            assert await response.get_data() == body
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('body', [b'"unterminated', b'"not JSON inside"'])
+def test_unrepairable_json_strings_keep_the_original_bytes(body):
+    app = create_base_app('compat-invalid-encoding', {'TESTING': True})
+    register_method_override(app)
+
+    @app.post('/echo')
+    async def echo():
+        return await request.get_data(), 200, {'Content-Type': 'application/octet-stream'}
+
+    async def exercise():
+        async with app.test_app():
+            response = await app.test_client().post(
+                '/echo', data=body, headers={'Content-Type': 'application/json'})
+            assert response.status_code == 200
+            assert await response.get_data() == body
+
+    asyncio.run(exercise())
 
 
 def test_query_method_override_is_retired_but_double_encoded_json_is_unwrapped():

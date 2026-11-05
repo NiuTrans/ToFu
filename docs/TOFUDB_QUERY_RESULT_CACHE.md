@@ -112,6 +112,18 @@ The full native suite remains mandatory. Performance qualification retains
 fresh-process A/B/B/A production builds, exact-value point reads, profiling
 calibration, cold/mixed/concurrent neighbors and observed resident memory.
 
+Problem: embedded end-to-end specifications asserted that the first eligible
+lookup is served, but two specified declines race it: the maintenance idle
+round merges the acknowledged overlay delta and publishes an equivalent
+snapshot between a read and its lookup, and the 1 ms WAL barrier worker can
+hold the health lock. Decision: presence is asserted after a bounded series of
+identical reads, each returning the acknowledged value, and every hit must equal
+that answer; post-ACK, first-observation, scope, poison and lifecycle refusals
+stay single-shot, and `query_result_cache_tests` pins exact admission counts.
+Alternatives rejected: a lock-free WAL health latch would change the specified
+contention refusal (`wal_query_cache_health_tests`); stopping maintenance in the
+specifications would leave barrier contention.
+
 The shutdown-checkpoint fault fixture uses fixed test segment IDs for both
 trace discovery and replay. Repeated probes must agree, every selected fault
 must fire, and the operation prefix must match. Recovery, acknowledged-value

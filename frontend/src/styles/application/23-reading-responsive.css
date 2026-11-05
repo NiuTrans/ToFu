@@ -74,16 +74,9 @@
   .conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content > :is(h1, h2, h3):first-child {
     font-size: var(--conversation-font-size-heading-2);
   }
-  .conversation-surface .conversation-history-process__body {
-    padding: var(--space-2);
-  }
 
   .conversation-surface .message-time {
     font-size: var(--conversation-font-size-caption);
-  }
-
-  .conversation-surface .conversation-round-header__toggle {
-    flex-wrap: wrap;
   }
 
   .conversation-surface .bilingual-header {

@@ -20,6 +20,7 @@ from lib.api_response import (
     api_payload,
 )
 from lib.log import get_logger
+from lib.http_transport.generated_frontend_vendor import KATEX_CDN_ASSETS
 from lib.paper.images.figures import (
     build_image_manifest,
     ensure_paper_images,
@@ -70,6 +71,22 @@ from lib.paper.request_policy import paper_request_policy_telemetry
 from routes.task_http import task_replay_cursor, task_replay_response
 
 logger = get_logger(__name__)
+
+# Report Markdown is model output over untrusted paper text, and Python-Markdown
+# passes raw HTML, attribute lists and javascript: links through. The export is
+# opened on the app origin, so it runs as an opaque-origin sandbox that may load
+# only the KaTeX CDN, inline styles/scripts and images; it cannot reach cookies,
+# storage, its opener or the network.
+_REPORT_HTML_EXPORT_CSP = (
+    "sandbox allow-scripts allow-modals; "
+    "default-src 'none'; "
+    "script-src https://cdn.jsdelivr.net 'unsafe-inline'; "
+    "style-src https://cdn.jsdelivr.net 'unsafe-inline'; "
+    "font-src https://cdn.jsdelivr.net data:; "
+    "img-src data: http: https:; "
+    "base-uri 'none'; "
+    "form-action 'none'"
+)
 
 from routes.paper_pkg._common import (
     _parse_report_meta,
@@ -864,55 +881,16 @@ async def export_report():
             },
         )
 
-    # HTML — render Markdown to HTML and wrap in a self-contained document.
-    # Protect math delimiters from Python's markdown processor: $...$ inline
-    # math contains underscores and asterisks (e.g. $a_i$, $f^*$) that
-    # markdown otherwise interprets as emphasis, mangling the LaTeX. We
-    # extract math regions, swap in placeholders, run markdown, then put
-    # the original math back so KaTeX's auto-render can find it client-side.
-    math_store: list[str] = []
-
-    def _stash_math(m):
-        math_store.append(m.group(0))
-        return f"\x02MATH{len(math_store) - 1}\x03"
-
-    md_protected = body_md
-    # Display math first ($$...$$ and \[...\]). Order matters — $$ would
-    # otherwise be eaten by the inline $ pattern.
-    md_protected = re.sub(r"\$\$[\s\S]+?\$\$", _stash_math, md_protected)
-    md_protected = re.sub(r"\\\[[\s\S]+?\\\]", _stash_math, md_protected)
-    # Inline math: $...$ on a single line, no $ inside, no | (table cell
-    # separator) to avoid swallowing rows when a cell holds a literal $.
-    md_protected = re.sub(
-        r"\$(?!\$)((?:[^$\\\n|]|\\.)+?)\$(?!\$)",
-        _stash_math,
-        md_protected,
-    )
-    md_protected = re.sub(r"\\\(.+?\\\)", _stash_math, md_protected)
-
+    # Keep math protection inside the parser's normalization/stash lifecycle.
     try:
-        import markdown as _md
+        from lib.paper.report_markup import render_report_markdown
 
-        body_html = _md.markdown(
-            md_protected,
-            extensions=["tables", "fenced_code", "attr_list", "sane_lists"],
-            output_format="html5",
-        )
+        body_html = render_report_markdown(body_md)
     except Exception as e:
         logger.error(
             "[Paper:Report:Export] markdown render failed: %s", e, exc_info=True
         )
         return api_internal_error("render failed")
-
-    # Restore math placeholders. KaTeX's auto-render extension (loaded
-    # below) will scan for $...$ / $$...$$ on the client and replace with
-    # rendered formulas — this works for both Standalone HTML download and
-    # the PDF print preview.
-    def _unstash(m):
-        idx = int(m.group(1))
-        return math_store[idx] if 0 <= idx < len(math_store) else m.group(0)
-
-    body_html = re.sub(r"\x02MATH(\d+)\x03", _unstash, body_html)
 
     # Embed paper-image URLs as base64 data: URIs so the standalone HTML
     # file works offline (no server reachability required) — this is the
@@ -984,22 +962,21 @@ async def export_report():
     body_starts_with_h1 = bool(re.match(r"\s*<h1\b", body_html))
     title_block = "" if body_starts_with_h1 else f"<h1>{safe_title}</h1>"
 
-    # KaTeX auto-render — paper reports are math-heavy. The client-side
-    # reading view uses KaTeX too (lib/static/js/core.js renderMarkdown),
-    # so the exported HTML/PDF must match. We load KaTeX from a public CDN
-    # so the file works offline (cached) and renders math even when opened
-    # by `file://`. ``displayMode: 'block'`` for $$ and ``\[`` only.
-    # CDN URLs only (no SRI hashes — they pin the bundle to one version, and
-    # cdn.jsdelivr.net already serves over HTTPS with reasonable caching).
+    # Standalone file:// exports use the same locked renderer as the app and
+    # artifact view. CDN access (or a browser cache) is still required; generated
+    # integrity values bind every downloaded script/style to the npm artifact.
+    katex_css = KATEX_CDN_ASSETS['stylesheet']
+    katex_js = KATEX_CDN_ASSETS['renderer']
+    katex_auto_render = KATEX_CDN_ASSETS['auto_render']
     katex_assets = (
         '<link rel="stylesheet" '
-        'href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" '
+        f'href="{katex_css["url"]}" integrity="{katex_css["integrity"]}" '
         'crossorigin="anonymous">'
         "<script defer "
-        'src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" '
+        f'src="{katex_js["url"]}" integrity="{katex_js["integrity"]}" '
         'crossorigin="anonymous"></script>'
         "<script defer "
-        'src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" '
+        f'src="{katex_auto_render["url"]}" integrity="{katex_auto_render["integrity"]}" '
         'crossorigin="anonymous" '
         'onload="renderMathInElement(document.body,{'
         "delimiters:["
@@ -1039,14 +1016,14 @@ async def export_report():
         f"<title>{safe_title}</title><style>{css}</style>{katex_assets}{auto_print_js}</head><body>"
         f"{title_block}{body_html}</body></html>"
     )
-    if inline_html:
-        return Response(html_doc, mimetype="text/html; charset=utf-8")
+    headers = {"Content-Security-Policy": _REPORT_HTML_EXPORT_CSP}
+    if not inline_html:
+        headers["Content-Disposition"] = (
+            f'attachment; filename="paper_report_{safe_slug}.html"')
     return Response(
         html_doc,
         mimetype="text/html; charset=utf-8",
-        headers={
-            "Content-Disposition": f'attachment; filename="paper_report_{safe_slug}.html"'
-        },
+        headers=headers,
     )
 
 

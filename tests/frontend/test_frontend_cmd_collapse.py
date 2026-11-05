@@ -33,11 +33,11 @@ absent (same convention as test_frontend_cmd_interrupt_button.py).
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -49,12 +49,6 @@ from _runtime_sections import runtime_section_path, shipped_source_text  # noqa:
 TOOL_ROUNDS = runtime_section_path('ui/tool_rounds.js')
 
 LONG_CMD = "grep -c 'jsonify(' routes/api_v1/browser.py && python3 - <<'EOF'\nimport pathlib\nprint('baseline tightened')\nEOF"
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -100,7 +94,7 @@ check('done_long_output_fold_chip', html1.includes('ptool-cmd-hasoutput')
   && html1.includes('data-tofu-action="_cmdOutputOpenToggle(this,event)"'));
 check('done_long_header_is_inert', !html1.includes('role="button"'));
 
-// ── 2. Done: short one-liner ⇒ stays visible ──
+// ── 2. Done: a short command retains its keyed reader-controlled fold ──
 const doneShort = {
   status: 'done', toolName: 'run_command', query: 'npm test',
   toolCallId: 'call-short-1', roundNum: 5,
@@ -108,20 +102,20 @@ const doneShort = {
               description: 'run tests' }],
 };
 const html2 = _renderUnifiedToolLine(doneShort, false);
-check('done_short_not_collapsed', !html2.includes('ptool-cmd-collapsible'));
-check('done_short_no_cmd_fold', !html2.includes('ptool-cmd-fold-cmd'));
-check('done_short_pre_visible', html2.includes('<pre class="ptool-cmd-code"><code>$ npm test</code></pre>'));
+check('done_short_collapsible', html2.includes('ptool-cmd-collapsible'));
+check('done_short_cmd_fold', html2.includes('ptool-cmd-fold-cmd'));
+check('done_short_pre_kept', html2.includes('<pre class="ptool-cmd-code ptool-cmd-collapsible"><code>$ npm test</code></pre>'));
 check('done_short_output_fold_kept', html2.includes('ptool-cmd-fold-output'));
 
-// ── 3. Done: NO description + long command ⇒ stays visible (identity) ──
+// ── 3. Done: identity is readable from the fold; the full command stays available ──
 const doneNoDesc = {
   status: 'done', toolName: 'run_command', query: LONG_CMD,
   toolCallId: 'call-nodesc-1', roundNum: 6,
   results: [{ command: LONG_CMD, output: 'x', exitCode: '0' }],
 };
 const html3 = _renderUnifiedToolLine(doneNoDesc, false);
-check('done_nodesc_not_collapsed', !html3.includes('ptool-cmd-collapsible'));
-check('done_nodesc_no_cmd_fold', !html3.includes('ptool-cmd-fold-cmd'));
+check('done_nodesc_collapsible', html3.includes('ptool-cmd-collapsible'));
+check('done_nodesc_cmd_fold', html3.includes('ptool-cmd-fold-cmd'));
 
 // ── 4. Running: same collapse rule; live output stays visible ──
 const runLong = {
@@ -206,9 +200,8 @@ process.exit(0);
 """
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_cmd_collapse_contract():
+    require_node_modules('jsdom')
     harness = os.path.join(HERE, '_cmd_collapse_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)

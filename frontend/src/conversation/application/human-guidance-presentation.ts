@@ -4,6 +4,8 @@
  * Translation progress and optimistic submit feedback are UI facts, not Turn
  * facts. This store keys them by durable conversation/guidance identity and
  * decorates a disposable renderer read model without mutating projections.
+ * A non-blocking question's round stays `done`: a local chat reply only adds
+ * `_hgRepliedInChat` so the renderer can collapse its card.
  */
 
 type UnknownRecord = Record<string, unknown>;
@@ -52,14 +54,16 @@ export function createHumanGuidancePresentationStore(): HumanGuidancePresentatio
         ? round.guidanceId : '';
       if (!conversationId || !guidanceId) return round;
       const state = states.get(keyFor(conversationId, guidanceId));
-      if (!state || round.status !== 'awaiting_human') return round;
+      const chatReply = round.guidanceBlocking === false;
+      if (!state || (round.status !== 'awaiting_human' && !chatReply)) return round;
       const options = Array.isArray(round.guidanceOptions)
         ? round.guidanceOptions as UnknownRecord[] : [];
       const translatedOptions = state.translatedOptions ?? [];
       return {
         ...round,
-        ...(state.submittedResponse == null
-          ? {} : { status: 'submitted', _hgUserResponse: state.submittedResponse }),
+        ...(state.submittedResponse == null ? {} : chatReply
+          ? { _hgRepliedInChat: state.submittedResponse }
+          : { status: 'submitted', _hgUserResponse: state.submittedResponse }),
         ...(state.translating == null ? {} : { _hgTranslating: state.translating }),
         ...(state.translatedQuestion
           ? { _translatedQuestion: state.translatedQuestion } : {}),

@@ -6,7 +6,7 @@ ARG PYTHON_IMAGE=python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b3
 
 FROM ${PYTHON_IMAGE} AS python-dependencies
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc g++ rustc \
+    && apt-get install -y --no-install-recommends gcc g++ rustc cargo \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY pyproject.toml uv.lock README.md ./
@@ -16,7 +16,10 @@ COPY pyproject.toml uv.lock README.md ./
 COPY packages/tofu-search packages/tofu-search
 COPY plugins/tofu-trading plugins/tofu-trading
 COPY packages/tofu-repo-kernel packages/tofu-repo-kernel
-RUN python -m pip install --no-cache-dir uv==0.12.5 \
+# `tofu-repo-kernel`'s setup.py builds its Rust helper with `cargo build`, so the
+# toolchain needs the cargo driver, not just rustc (separate Debian packages).
+# This stage only prepares dependencies; the runtime images above stay compile-free.
+RUN python -m pip install --no-cache-dir uv==0.13.5 \
     && UV_PROJECT_ENVIRONMENT=/opt/tofu-api \
        UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never \
        uv sync --frozen --no-dev --no-install-project --extra app --extra scale \
@@ -57,7 +60,7 @@ RUN mkdir -p /app/data/backups /app/logs /app/uploads \
     && chown -R tofu:tofu /app/data /app/logs /app/uploads
 ENV PORT=15000 \
     BIND_HOST=0.0.0.0 \
-    MALLOC_ARENA_MAX=2 \
+    MALLOC_ARENA_MAX=8 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TOFU_SERVER_WORKER=1 \
@@ -83,6 +86,9 @@ COPY --from=python-dependencies --chown=tofu:tofu \
 ENV PATH=/opt/tofu-worker/bin:$PATH \
     PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 RUN /opt/tofu-worker/bin/python -m playwright install chromium --with-deps --only-shell \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/* \
     && chown -R tofu:tofu /opt/ms-playwright
 USER tofu:tofu
 
@@ -105,7 +111,7 @@ ENV PATH=/opt/tofu-agent/bin:$PATH \
     TOFU_AGENT_HOST=0.0.0.0 \
     TOFU_AGENT_PORT=15001 \
     TOFU_AGENT_CONFIG_PATH=/home/tofu/.config/tofu-agent/provider.json \
-    MALLOC_ARENA_MAX=2 \
+    MALLOC_ARENA_MAX=8 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TOFU_MANAGED_BY=docker

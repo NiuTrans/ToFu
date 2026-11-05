@@ -31,6 +31,8 @@ class BrowserToolRuntime:
     )
     work_key: str = ''
     display_metadata: dict | None = field(default=None, repr=False, compare=False)
+    #: The calling task's abort event; browser waits and workflows observe it.
+    cancel_event: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         owner = str(self.owner_user_id or '').strip()

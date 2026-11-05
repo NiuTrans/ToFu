@@ -51,9 +51,6 @@ fn invalid_data(message: &str) -> io::Error {
 fn conflict(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, message)
 }
-fn exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
 
 fn owner_key(tx: &AuthorityTransaction, namespace: &str, raw: &[u8]) -> io::Result<EntityKey> {
     EntityKey::new(tx.tenant_id(), tx.owner_user_id(), namespace, raw)
@@ -1575,7 +1572,7 @@ pub(crate) fn execute(
             let identities =
                 expired_leases(database, tx, *now_ms, *force, MAX_QUEUE_REAP_ITEMS + 1)?;
             if identities.len() > MAX_QUEUE_REAP_ITEMS {
-                return Err(exhausted("queue reap exceeds its bound"));
+                return Err(crate::resource_exhaustion::domain_bound("queue reap exceeds its bound"));
             }
             let mut conversations = BTreeMap::new();
             for identity in identities {

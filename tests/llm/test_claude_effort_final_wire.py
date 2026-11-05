@@ -1,4 +1,6 @@
 """Effort contracts at sealed streaming and actual non-stream HTTP boundaries."""
+
+import lib.tasks_pkg.llm_fallback._recovery as _fallback_recovery
 import copy
 import importlib
 import json
@@ -130,7 +132,7 @@ def test_same_model_reactive_rebuild_preserves_effort(monkeypatch, rung):
     messages = [{'role': 'user', 'content': 'hi'}]
     body = build_body('claude-opus-5', messages, thinking_enabled=rung != 'off',
                       thinking_depth=rung)
-    retry = fallback._prepare_reactive_retry_body(
+    retry = _fallback_recovery._prepare_reactive_retry_body(
         {'id': 'synthetic', 'config': {'thinkingDepth': rung}}, body,
         'claude-opus-5', messages, [], 'medium', rung != 'off',
         PromptTooLongError('synthetic'), 'synthetic')

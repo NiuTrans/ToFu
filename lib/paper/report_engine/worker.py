@@ -1,24 +1,23 @@
 """Execute one paper-report task from dispatch through durable publication.
 
-Responsibility: own the report agent loop, live event projection, canonical
-body selection, artifact persistence, and optional post-report hooks.
+Responsibility: connect the shared agent loop to report streaming, canonical
+body projection, artifact persistence, and optional post-report hooks.
 Entry point: :func:`run_report_task`.
 Dependencies: ``report_runtime`` owns lifecycle state, ``tools`` owns tool
-execution, and sibling ``_meta``/``_hooks`` modules own bounded post-processing.
+execution, tool-round projection and bounded feedback. ``_body`` owns streamed
+text and terminal convergence; ``_publication`` owns confirmed artifact
+publication under the shared finish claim. Sibling ``_meta`` and
+``_hooks`` modules own bounded post-processing.
 """
 
-import json
 import re
 import time
-import uuid
 
 import lib as _lib
 from lib.agent_loop.agent_loop import AbortSignal
 from lib.llm_dispatch.api import dispatch_stream
 from lib.llm.llm_errors import AbortedError
 from lib.log import get_logger
-from lib.tasks_pkg.tool_display import tool_round_label as display_query_for
-from lib.tool_input_repair import parse_and_repair_tool_args
 
 from lib.paper.images.injection import inject_images_into_report
 from lib.paper.images.titles import (
@@ -30,7 +29,8 @@ from lib.paper.images.titles import (
 from lib.paper.artifact_repository import PaperArtifactRepository, PaperReport
 from lib.paper.agent_loop_policy import run_guarded_paper_agent_loop
 from lib.paper.agent_usage import PaperAgentUsageMeter
-from lib.paper.report_engine._body import resolve_canonical_report_body
+from lib.paper.report_engine._body import ReportBodyProjection
+from lib.paper.report_engine._publication import publish_report
 from lib.paper.review._lang import (
     is_rebuttal_lang,
     is_review_family,
@@ -54,11 +54,12 @@ from lib.paper.tools import (
     apply_paper_tool_epoch_guidance,
     build_paper_full_tool_epoch,
     make_paper_exec_shim,
-    paper_effective_tool_name,
+    make_paper_task_tool_executor,
 )
 
 from lib.paper.report_engine._meta import _build_report_meta
 from lib.paper.report_engine._hooks import (
+    run_report_postpasses,
     _maybe_run_insight,
     _maybe_run_termfill,
 )
@@ -114,7 +115,8 @@ def run_report_task(task, messages, images):
         'report', fallback_model=model_name)
     task['agentUsageV1'] = _agent_usage.snapshot()
     t0 = time.time()
-    full_content = ''
+    body = ReportBodyProjection(
+        task, append_event=_append_report_event, logger=logger)
     # ── Finish-tag accumulators ──
     # Sum token usage across every dispatch round (tool rounds + final write)
     # so the badge reflects the TOTAL cost of producing the report, not just
@@ -156,34 +158,11 @@ def run_report_task(task, messages, images):
         conv_id=task['task_id'])
     task['toolResultPolicyV1'] = _result_budget.telemetry()
 
-    # Per-round content buffer. Tool-calling models often emit a full interim
-    # DRAFT of the report in a round that ALSO issues a tool call, then rewrite
-    # the whole report from scratch in the final (no-tool-call) round.
-    # Accumulating across rounds would bake the draft + final copy into one
-    # document — the report rendered TWICE. So we buffer each round separately
-    # (reset in _dispatch) and discard a tool-round's draft in _begin_tool_round.
-    # Held on a mutable holder so both closures share the same per-round buffer.
-    _round = {'content': ''}
-    # Authoritative body source. The streamed deltas (``full_content``) are
-    # DISPLAY-ONLY: a mid-stream transient retry in stream_chat re-streams the
-    # WHOLE response through on_content, doubling the deltas. The dispatcher's
-    # RETURNED ``msg['content']`` of the terminal (no-tool) round is a single
-    # clean copy regardless of how the deltas arrived, so we persist/enrich from
-    # THAT — a re-emit can never double the written document. Captured in
-    # _accumulate_usage (fires with msg every round); the last no-tool round is
-    # always the terminal one (a no-tool round ends the loop).
-    _terminal = {'content': None}
-
     def _dispatch(rnd, tools):
-        _round['content'] = ''
+        body.begin_round()
 
         def _on_content(text):
-            nonlocal full_content
-            _round['content'] += text
-            full_content += text
-            task['full_text'] = full_content
-            _append_report_event(task, {'type': 'delta', 'delta': text,
-                                        'llmRound': rnd})
+            body.append_delta(text, rnd)
 
         def _on_thinking(text):
             _append_report_event(task, {'type': 'thinking', 'delta': text,
@@ -216,12 +195,7 @@ def run_report_task(task, messages, images):
         # dispatcher may fall back to a different model than asked).
         nonlocal _round_count, _resolved_model, _provider_id
         _round_count += 1
-        # Capture the CLEAN returned content of a no-tool (terminal) round as
-        # the authoritative body — immune to on_content re-streaming (retries).
-        # A round with tool_calls is not terminal; its prose is an interim draft
-        # handled by _begin_tool_round, so we only record no-tool rounds.
-        if isinstance(msg, dict) and not msg.get('tool_calls'):
-            _terminal['content'] = msg.get('content') or ''
+        body.observe_response(msg)
         if isinstance(usage, dict):
             from lib.cost import normalize_usage as _normalize_usage
             _nu = _normalize_usage(usage)
@@ -231,123 +205,23 @@ def run_report_task(task, messages, images):
             _usage_total['cache_write_tokens'] += _nu['cache_write']
             _usage_total['reasoning_tokens'] += _nu['thinking']
             _disp = usage.get('_dispatch') or {}
-            if _disp.get('model'):
-                _resolved_model = _disp['model']
+            if _disp.get('logical_model') or _disp.get('model'):
+                _resolved_model = _disp.get('logical_model') or _disp['model']
             if _disp.get('provider_id'):
                 _provider_id = _disp['provider_id']
         task['agentUsageV1'] = _agent_usage.snapshot()
 
     def _begin_tool_round(rnd, msg):
-        # This round ended with tool calls, so any prose it emitted was a
-        # premature interim draft (the model will rewrite the full report after
-        # seeing the tool results). Discard that draft from the canonical body
-        # and tell pollers/the live stream to reset their accumulated text,
-        # otherwise the draft + the final report concatenate and render twice.
-        nonlocal full_content
-        round_content = _round['content']
-        if round_content:
-            logger.info('[Paper:Report] Task %s — discarding %d-char interim draft '
-                        'emitted alongside tool calls (round %d)',
-                        task['task_id'], len(round_content), rnd + 1)
-            full_content = full_content[:-len(round_content)]
-            task['full_text'] = full_content
-            _append_report_event(task, {'type': 'delta_reset', 'llmRound': rnd})
+        body.discard_tool_draft(rnd)
         messages.append(msg)
 
-    def _execute_tool(rnd, tc):
-        # Emit chat-compatible tool_start / tool_done events + append result.
-        fn_name = tc['function']['name']
-        fn_args_raw = tc['function']['arguments']
-        tc_id = tc.get('id', '')
-
-        # Parse + schema-repair args ONCE (shared with the executor), so the
-        # display label and the actual search see the SAME normalized shape — a
-        # bare-string `queries`/`urls` is coerced to a single-element array,
-        # never iterated per-character.
-        fn_args, _ = parse_and_repair_tool_args(fn_name, fn_args_raw)
-
-        # Build chat-style round entry (subset of what
-        # lib.tasks_pkg.tool_display produces — for paper report we only have
-        # web_search / fetch_url).
-        task['round_counter'] += 1
-        rn = task['round_counter']
-
-        display_query = display_query_for(fn_name, fn_args)
-        # The dispatch/display name: run_command → code_exec in a project-less
-        # engine (chat's tool_display override, mirrored by the adapter).
-        effective_name = paper_effective_tool_name(fn_name)
-
-        round_entry = {
-            'roundNum': rn,
-            'llmRound': rnd,
-            'toolName': effective_name,
-            'query': display_query,
-            'toolCallId': tc_id,
-            'toolArgs': fn_args_raw if isinstance(fn_args_raw, str) else json.dumps(fn_args, ensure_ascii=False),
-            'status': 'searching',
-            'results': None,
-        }
-        task['tool_rounds'].append(round_entry)
-
-        _append_report_event(task, {
-            'type': 'tool_start',
-            'roundNum': rn,
-            'llmRound': rnd,
-            'toolName': effective_name,
-            'query': display_query,
-            'toolCallId': tc_id,
-            'toolArgs': round_entry['toolArgs'],
-        })
-
-        tool_t0 = time.time()
-        result, display_results, search_diag, engine_breakdown, verticals = execute_paper_tool(
-            fn_name, fn_args_raw, user_question=_report_user_question,
-            abort=abort_signal.is_set,
-            exec_shim=_exec_shim, round_entry=round_entry)
-        tool_elapsed = time.time() - tool_t0
-        logger.info('[Paper:Report:Tool] %s → %d chars in %.1fs', fn_name, len(result), tool_elapsed)
-
-        # A contract rejection is a settled non-execution, never a successful
-        # tool result. The adapter stamps it before returning.
-        tool_status = ('rejected' if round_entry.get('status') == 'rejected'
-                       else 'done')
-        round_entry['status'] = tool_status
-        round_entry['_elapsed'] = f'{tool_elapsed:.1f}s'
-        round_entry['results'] = display_results
-        if engine_breakdown:
-            round_entry['engineBreakdown'] = engine_breakdown
-        if verticals:
-            round_entry['verticals'] = verticals
-        # Preview of the tool content (capped, so polling responses stay small)
-        tool_preview = result[:4000]
-        round_entry['toolContent'] = tool_preview
-
-        tool_done_event = {
-            'type': 'tool_done',
-            'roundNum': rn,
-            'llmRound': rnd,
-            'toolName': effective_name,
-            'toolCallId': tc_id,
-            'elapsed': round(tool_elapsed, 1),
-            'toolContent': tool_preview,
-            'results': display_results,
-            'status': tool_status,
-        }
-        if round_entry.get('contractError'):
-            tool_done_event['contractError'] = round_entry['contractError']
-        if search_diag:
-            tool_done_event['searchDiag'] = search_diag
-        if engine_breakdown:
-            tool_done_event['engineBreakdown'] = engine_breakdown
-        if verticals:
-            tool_done_event['verticals'] = verticals
-        _append_report_event(task, tool_done_event)
-
-        return _result_budget.append(
-            messages, round_index=rnd, tool_name=fn_name,
-            tool_call_id=tc_id, content=result, round_entry=round_entry,
-            world_version=str(task.get('_worldVersion') or ''),
-            tool_arguments=fn_args)
+    _execute_tool = make_paper_task_tool_executor(
+        task, messages, user_question=_report_user_question,
+        abort_signal=abort_signal, exec_shim=_exec_shim,
+        result_budget=_result_budget, paper_tool_executor=execute_paper_tool,
+        on_tool_event=lambda event: _append_report_event(task, event),
+        log_prefix='[Paper:Report]', include_llm_round=True,
+    )
 
     try:
         _outcome = run_guarded_paper_agent_loop(
@@ -365,19 +239,19 @@ def run_report_task(task, messages, images):
         aborted = _outcome.aborted
         if _outcome.completed:
             logger.info('[Paper:Report] Task %s — no tool calls, report complete '
-                        '(%d chars, %.1fs)', task['task_id'], len(full_content), time.time() - t0)
+                        '(%d chars, %.1fs)', task['task_id'], len(body.text), time.time() - t0)
 
         if aborted:
             # User stopped generation. Do NOT persist the partial report or
             # emit `done` — emit a distinct `aborted` terminal event carrying
             # whatever text was produced so the frontend can show it read-only.
             logger.info('[Paper:Report] Task %s stopped by user — %d chars generated in %.1fs',
-                        task['task_id'], len(full_content), time.time() - t0)
+                        task['task_id'], len(body.text), time.time() - t0)
             _report_runtime.abort(task_id)
             _report_runtime.finish(
                 task_id,
                 terminal_event_fields={
-                    'type': 'aborted', 'partial': full_content,
+                    'type': 'aborted', 'partial': body.text,
                     'agentUsageV1': _agent_usage.snapshot(),
                 },
             )
@@ -385,46 +259,22 @@ def run_report_task(task, messages, images):
 
         elapsed = time.time() - t0
         logger.info('[Paper:Report] Task %s content stream complete — %d chars in %.1fs',
-                    task['task_id'], len(full_content), elapsed)
+                    task['task_id'], len(body.text), elapsed)
 
-        # ── Authoritative body from the terminal round's CLEAN returned content ──
-        # The streamed deltas in ``full_content`` are display-only: a mid-stream
-        # transient retry (lib/llm/stream.py) re-streams the WHOLE response
-        # through on_content, so ``full_content`` can hold the report twice. The
-        # dispatcher's RETURNED ``msg['content']`` of the terminal (no-tool)
-        # round is a single clean copy however the deltas arrived. Adopt it as
-        # the source of truth for what gets injected + persisted, and tell live
-        # pollers to converge (delta_reset) so the live stream matches the
-        # written document. Only override when it actually diverges, so the
-        # common no-retry path stays byte-identical.
-        canonical_body, projection_needs_reset = resolve_canonical_report_body(
-            full_content,
-            _terminal['content'],
-        )
-        if not (canonical_body or '').strip():
-            raise ValueError('Paper report completed without a non-empty body')
-        if projection_needs_reset:
-            logger.info('[Paper:Report] Task %s — replacing %d-char streamed body with '
-                        '%d-char terminal returned content (deltas were display-only; '
-                        'likely a mid-stream re-stream)',
-                        task['task_id'], len(full_content), len(canonical_body))
-            full_content = canonical_body
-            task['full_text'] = full_content
-            _append_report_event(task, {'type': 'delta_reset'})
-            _append_report_event(task, {'type': 'delta', 'delta': full_content})
+        body.adopt_terminal_response()
 
         # Strip LLM preamble before the first heading. Models often emit
         # "Now I have enough information..." / "Let me compile..." / multi-
         # paragraph "I'll research..." before the actual Markdown report
         # starts at the first `## ` or `# `. Strip aggressively — any text
         # before the first heading is non-report chatter regardless of length.
-        _heading_start = re.search(r'^#{1,6}\s', full_content, re.MULTILINE)
+        _heading_start = re.search(r'^#{1,6}\s', body.text, re.MULTILINE)
         if _heading_start and _heading_start.start() > 0:
-            preamble = full_content[:_heading_start.start()].strip()
+            preamble = body.text[:_heading_start.start()].strip()
             if preamble:
                 logger.info('[Paper:Report] Stripping %d-char preamble: %.120s',
                             len(preamble), preamble.replace('\n', ' '))
-                full_content = full_content[_heading_start.start():]
+                body.text = body.text[_heading_start.start():]
 
         # Resolve the best title from three sources, in priority order:
         #   1. A non-placeholder stored title (user-renamed or already-resolved
@@ -437,23 +287,23 @@ def run_report_task(task, messages, images):
         # ``arXiv:<id>`` left behind by a failed up-front lookup.
         stored_title = lookup_paper_title(
             phash, user_id=int(task['_userId'])) or task.get('client_title') or ''
-        card_title = extract_title_from_report(full_content)
+        card_title = extract_title_from_report(body.text)
 
         if not is_placeholder_title(stored_title):
             title = stored_title
         else:
             title = card_title or stored_title
-        if title and full_content:
-            existing_h1 = re.match(r'^\s*#\s+(.+?)\s*$', full_content, re.MULTILINE)
+        if title and body.text:
+            existing_h1 = re.match(r'^\s*#\s+(.+?)\s*$', body.text, re.MULTILINE)
             first_h1 = existing_h1.group(1).strip() if existing_h1 else ''
             if not existing_h1:
-                full_content = f'# {title}\n\n' + full_content.lstrip()
+                body.text = f'# {title}\n\n' + body.text.lstrip()
                 logger.info('[Paper:Report] Prepended title: %.120s', title)
             elif is_placeholder_title(first_h1) and not is_placeholder_title(title):
                 # Model baked a bare `# arXiv:<id>` placeholder as its own H1
                 # (the up-front arXiv lookup failed). Swap in the real title.
-                full_content = re.sub(r'^\s*#\s+.+?\s*$', f'# {title}',
-                                      full_content, count=1, flags=re.MULTILINE)
+                body.text = re.sub(r'^\s*#\s+.+?\s*$', f'# {title}',
+                                      body.text, count=1, flags=re.MULTILINE)
                 logger.info('[Paper:Report] Replaced placeholder H1 with title: %.120s', title)
             else:
                 logger.info('[Paper:Report] Title prepend skipped — content already starts with H1')
@@ -466,17 +316,17 @@ def run_report_task(task, messages, images):
         # persistence) so the enriched body, DB row, and `done` event all carry
         # smart quotes. Math ($...$ primes), code, and URLs are preserved.
         if _is_review:
-            _pre = full_content
+            _pre = body.text
             # Educate quotes + de-slop dashes, THEN make the body submittable:
             # strip any leaked table / dangling-* caption artifact and relocate
             # the venue scorecard below the non-submittable separator so the
             # review text a human pastes carries no scores. Deterministic belt —
             # the prompt asks for the same shape, but LLMs ignore format rules
             # (see paper-report-image-injection), so the guarantee lives here.
-            full_content = finalize_review_body(
-                strip_slop_dashes(smarten_quotes(full_content)), inj_lang)
-            if full_content != _pre:
-                task['full_text'] = full_content
+            body.text = finalize_review_body(
+                strip_slop_dashes(smarten_quotes(body.text)), inj_lang)
+            if body.text != _pre:
+                task['full_text'] = body.text
                 logger.info('[Paper:Review] Task %s — educated quotes, removed slop '
                             'dashes, and finalized submittable body', task['task_id'])
         elif _is_rebuttal:
@@ -485,15 +335,15 @@ def run_report_task(task, messages, images):
             # so a score value is never corrupted by the comma-rewrite). The
             # structured decision is parsed and stamped on the report meta so the
             # UI can highlight the OA/Confidence change without re-parsing the body.
-            _pre = full_content
-            full_content = finalize_rebuttal_body(
-                strip_slop_dashes(smarten_quotes(full_content)), inj_lang)
-            if full_content != _pre:
-                task['full_text'] = full_content
+            _pre = body.text
+            body.text = finalize_rebuttal_body(
+                strip_slop_dashes(smarten_quotes(body.text)), inj_lang)
+            if body.text != _pre:
+                task['full_text'] = body.text
                 logger.info('[Paper:Rebuttal] Task %s — educated quotes, removed slop '
                             'dashes, and relocated score decision', task['task_id'])
             try:
-                _decision = parse_rebuttal_decision(full_content)
+                _decision = parse_rebuttal_decision(body.text)
                 task['rebuttal_decision'] = _decision
                 logger.info('[Paper:Rebuttal] Task %s — decision present=%s changed=%s '
                             'OA %s→%s conf %s→%s', task['task_id'],
@@ -504,11 +354,11 @@ def run_report_task(task, messages, images):
                 logger.warning('[Paper:Rebuttal] decision parse failed (non-fatal): %s', e)
 
         # Inject figures/tables into the report (text-only for reviews)
-        enriched = inject_images_into_report(full_content, images, lang=inj_lang,
+        enriched = inject_images_into_report(body.text, images, lang=inj_lang,
                                               appendix=inj_appendix,
                                               allow_images=inj_allow_images)
         task['enriched_text'] = enriched
-        final_report = enriched or full_content
+        final_report = enriched or body.text
         if not final_report.strip():
             raise ValueError('Paper report enrichment produced an empty artifact')
 
@@ -534,7 +384,7 @@ def run_report_task(task, messages, images):
         # renders no card. Wrapped: a failure here must never break the report.
         try:
             from lib.paper.citation_audit import build_citation_audit
-            _audit = build_citation_audit(enriched or full_content)
+            _audit = build_citation_audit(enriched or body.text)
             if _audit:
                 report_meta['citationAudit'] = _audit
         except Exception as e:
@@ -553,7 +403,7 @@ def run_report_task(task, messages, images):
         if not _is_review_family:
             try:
                 from lib.paper.terminology_audit.audit import build_terminology_audit
-                _term_audit = build_terminology_audit(enriched or full_content)
+                _term_audit = build_terminology_audit(enriched or body.text)
                 if _term_audit:
                     report_meta['terminologyAudit'] = _term_audit
             except Exception as e:
@@ -565,132 +415,49 @@ def run_report_task(task, messages, images):
             report_meta['rebuttalDecision'] = task['rebuttal_decision']
 
         task['report_meta'] = report_meta
-        # Persist through storage.v1. The worker never owns a database driver,
-        # connection, cursor, or transaction. A canonical product request is
-        # successful only after the repository confirms the artifact; otherwise
-        # publishing ``done`` would make an expensive report disappear on reload.
-        if not cache_isolated:
-            saved = PaperArtifactRepository(int(task['_userId'])).put_report(
+        # The shared finish claim decides Stop versus publication. Resource
+        # cleanup must succeed before this callback can write the artifact.
+        finished = _report_runtime.finish(
+            task_id,
+            commit_result=lambda: publish_report(
+                task,
                 PaperReport(
-                    paper_hash=phash,
-                    lang=lang,
-                    report=final_report,
-                    model=report_model,
-                    meta=report_meta,
+                    paper_hash=phash, lang=lang, report=final_report,
+                    model=report_model, meta=report_meta,
                     created_at=int(time.time()),
                 ),
-                command_id=f'paper.report.upsert:{uuid.uuid4().hex}',
-            )
-            if not saved:
-                raise RuntimeError(
-                    'Paper report repository did not confirm persistence')
-            logger.info('[Paper:Report] Persisted — hash=%s lang=%s %d chars (%d imgs) '
-                        'model=%s cost=%s',
-                        phash, lang, len(final_report), len(images),
-                        report_model, report_meta.get('costCny'))
-        else:
-            logger.info(
-                '[Paper:Report] Request-local policy — canonical cache write '
-                'suppressed hash=%s policy=%s',
-                phash, request_policy.get('executionFingerprint', '')[:12])
-
-        # ── Self-heal the sidebar title ──
-        # If the library row is still stuck at a bare ``arXiv:<id>`` (the
-        # up-front arXiv lookup failed at fetch time), backfill the title the
-        # LLM extracted into the Paper Card. Only placeholder rows are touched
-        # — a user-renamed or correctly-resolved title is never clobbered. The
-        # authoritative title is carried in the ``done`` event so the frontend
-        # updates the sidebar live, with no manual reload.
-        resolved_title = ''
-        if card_title and not cache_isolated:
-            try:
-                resolved_title = backfill_library_title(
-                    phash, card_title, user_id=int(task['_userId']))
-            except Exception as e:
-                logger.warning('[Paper:Report] Title backfill failed for hash=%s: %s', phash, e)
-        _report_runtime.update_fields(
-            task_id,
-            fields={'resolved_title': resolved_title},
-            only_if_status='running',
-        )
-
-        # If enrichment changed the text, emit an enriched event so pollers
-        # replay the image-embedded version as the canonical body.
-        if enriched and enriched != full_content:
-            _append_report_event(task, {'type': 'enriched', 'text': enriched, 'paperHash': phash})
-
-        _report_runtime.finish(
-            task_id,
-            result=final_report,
+                prepared_body=body.text, images=images, card_title=card_title,
+                repository_factory=PaperArtifactRepository,
+                backfill_title=backfill_library_title, runtime=_report_runtime,
+                append_event=_append_report_event,
+            ),
             terminal_event_fields={
-                'type': 'done', 'report': final_report,
-                'paperHash': phash, 'meta': report_meta,
-                'resolvedTitle': resolved_title,
+                'type': 'aborted', 'partial': body.text,
+                'agentUsageV1': _agent_usage.snapshot(),
             },
         )
+        if not finished or task['status'] != 'done':
+            return
 
-        # ── Insight second-pass (opt-in, gated, non-destructive) ──
-        # After the fidelity report is DONE + persisted, optionally run the
-        # insight pass: score the report, and only if its own insight baseline
-        # has headroom (<= INSIGHT_GATE_THRESHOLD) generate a grounded
-        # synthesis/transfer section and persist it under the SEPARATE
-        # ``insight:<ui>`` key (never overwrites the report). Flag-gated OFF by
-        # default; skipped for Review Mode. Fully wrapped — a failure here must
-        # NEVER taint the already-emitted `done`/persisted report.
+        # Additive passes share one ordered best-effort owner. Request-local
+        # output never enters these canonical artifact-writing stages.
         if not cache_isolated:
-            try:
-                _maybe_run_insight(
-                    task, phash, inj_lang, enriched or full_content,
-                    truncated_paper=(
-                        messages[1]['content'] if len(messages) > 1 else ''),
-                    model=report_model)
-            except Exception as e:
-                logger.warning(
-                    '[Paper:Insight] second-pass wrapper failed (non-fatal) '
-                    'hash=%s: %s', phash, e, exc_info=True)
-
-        # ── Definition-backfill second-pass (opt-in, gated, non-destructive) ──
-        # After `done` + persist, optionally CURE the glossary gaps the
-        # terminology audit flagged: generate gap-closing definitions (pure body
-        # context) and append them under the SEPARATE ``termfill:<ui>`` key,
-        # kept ONLY if a re-audit proves the gap set shrank. Flag-gated OFF;
-        # skipped for Review Mode. Fully wrapped — a failure here must NEVER
-        # taint the already-emitted `done`/persisted report.
-        if not cache_isolated:
-            try:
-                _maybe_run_termfill(
-                    task, phash, inj_lang, enriched or full_content,
-                    report_meta, model=report_model)
-            except Exception as e:
-                logger.warning(
-                    '[Paper:TermFill] second-pass wrapper failed (non-fatal) '
-                    'hash=%s: %s', phash, e, exc_info=True)
-
-        # ── Checkpoint second-pass (gated, non-destructive) ──
-        # Per-section self-test flip cards (active recall), persisted under
-        # the SEPARATE ``checkpoints:<ui>`` key. Same wrapper discipline as
-        # the insight/termfill passes: a failure never taints the report.
-        if not cache_isolated:
-            try:
-                from lib.paper.report_engine._hooks import _maybe_run_checkpoints
-                _maybe_run_checkpoints(
-                    task, phash, inj_lang, enriched or full_content,
-                    model=report_model)
-            except Exception as e:
-                logger.warning(
-                    '[Paper:Checkpoints] second-pass wrapper failed (non-fatal) '
-                    'hash=%s: %s', phash, e, exc_info=True)
+            run_report_postpasses(
+                task, phash, inj_lang, enriched or body.text, report_meta,
+                messages=messages, model=report_model, insight=_maybe_run_insight,
+                termfill=_maybe_run_termfill,
+            )
 
     except AbortedError:
         # Raised by the dispatcher when an abort is detected between stream
         # retries. Same clean-stop semantics as the in-loop abort check.
         logger.info('[Paper:Report] Task %s stopped by user (stream retry) — %d chars',
-                    task['task_id'], len(full_content))
+                    task['task_id'], len(body.text))
         _report_runtime.abort(task_id)
         _report_runtime.finish(
             task_id,
             terminal_event_fields={
-                'type': 'aborted', 'partial': full_content,
+                'type': 'aborted', 'partial': body.text,
                 'agentUsageV1': _agent_usage.snapshot(),
             },
         )

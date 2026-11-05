@@ -11,7 +11,7 @@
 ) {
   box-sizing: border-box;
   min-height: var(--conversation-process-row-height);
-  padding: var(--space-2) var(--conversation-process-inset);
+  padding: var(--space-1) var(--conversation-process-inset);
   gap: var(--conversation-process-gap);
   border: 0;
   border-radius: var(--radius-sm);
@@ -117,14 +117,6 @@
 .conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header)::after {
   margin-inline-start: auto;
 }
-.conversation-surface .ptc-preview {
-  margin-block: var(--space-2);
-  color: var(--text-secondary);
-  font-size: var(--conversation-font-size-content);
-  line-height: var(--leading-body);
-  overflow-wrap: anywhere;
-}
-
 .conversation-surface :is(.ptool-result-body, .ptc-body, .ptool-todo-body, .sw-inbox-row-body, .conversation-tool-card__body),
 .conversation-surface .ptool-results-block.expanded > .ptool-results-content {
   margin: var(--space-1) var(--conversation-process-inset) var(--space-3) var(--space-4);
@@ -133,6 +125,12 @@
   border-inline-start: var(--control-edge-inset) solid var(--turn-spine);
   border-radius: 0;
   background: transparent;
+}
+/* A program result already sits on the card spine; no second rail or inset. */
+.conversation-surface .ptc-result > .ptool-result-body {
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 .conversation-surface .ptool-results-block,
@@ -273,10 +271,10 @@
 }
 
 .conversation-surface .thinking-text {
-  padding: var(--space-1) 0 var(--space-2) calc(var(--space-4) - var(--control-edge-inset));
-  margin: var(--space-1) var(--conversation-process-inset) var(--space-3) var(--space-4);
+  padding: var(--space-1) var(--conversation-process-inset) var(--space-2) 0;
+  margin: var(--space-1) var(--conversation-process-inset) var(--space-3) 0;
   border-top: 0;
-  border-left: 1px solid var(--turn-spine);
+  border-left: 0;
   color: var(--text-secondary);
   font-family: var(--font-ui);
   font-size: var(--conversation-process-font-size);
@@ -374,7 +372,7 @@
 
 .conversation-surface .conversation-block--tool .ptool-line {
   min-height: var(--conversation-process-row-height);
-  padding: var(--space-2) var(--conversation-process-inset);
+  padding: var(--space-1) var(--conversation-process-inset);
   gap: var(--conversation-process-gap);
   border: 0;
   font-size: var(--conversation-process-font-size);
@@ -408,12 +406,13 @@
   background: transparent;
 }
 
-/* Keep exceptional outcomes colored, make routine metadata readable and quiet. */
+/* Keep exceptional outcomes colored, make routine metadata readable and quiet.
+ * A running program's status stays quiet too: its glyph carries liveness. */
 .conversation-surface :is(.ptc-status, .conversation-tool-card__chip--ok, .ptool-line-status--ok, .ptool-badge-info, .ptool-badge-ok) {
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--tool-row-meta-ink);
   font-size: var(--conversation-font-size-meta);
   box-shadow: none;
   animation: none;
@@ -422,7 +421,6 @@
   color: var(--error-text);
   background: var(--error-bg);
 }
-.conversation-surface .ptc-running .ptc-status { color: var(--accent); }
 
 .conversation-surface button.ptool-results-header,
 .conversation-surface button.eb-toggle,
@@ -471,140 +469,4 @@
 
 .conversation-surface .eb-section.eb-expanded .eb-arrow {
   transform: rotate(90deg);
-}
-
-/* Historical process is a quiet turn-leading disclosure. Closing unmounts
- * evidence; inner paging and scroll remain owned by HistoricalProcess. */
-.conversation-history-process {
-  margin-block: 0;
-  color: var(--text-secondary);
-  font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
-}
-
-.conversation-history-process > summary {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  box-sizing: border-box;
-  width: fit-content;
-  max-width: 100%;
-  min-height: var(--control-h-lg);
-  padding: var(--space-2) var(--space-3);
-  border: var(--control-edge-inset) solid var(--turn-process-line);
-  border-radius: var(--conversation-process-radius);
-  background: var(--turn-process-panel);
-  list-style: none;
-  cursor: pointer;
-  line-height: var(--leading-title);
-  overflow-wrap: anywhere;
-  transition: color var(--motion-fast) ease, background var(--motion-fast) ease;
-}
-
-.conversation-history-process > summary::-webkit-details-marker { display: none; }
-.conversation-history-process > summary::after {
-  content: '';
-  flex: 0 0 auto;
-  width: var(--space-2);
-  height: var(--space-2);
-  border-inline-end: 1px solid currentColor;
-  border-block-end: 1px solid currentColor;
-  transform: rotate(-45deg);
-  transition: transform var(--motion-fast) ease;
-}
-.conversation-history-process[open] > summary::after { transform: rotate(45deg); }
-.conversation-history-process > summary:hover {
-  color: var(--text-primary);
-  background: var(--bg-secondary);
-}
-.conversation-history-process > summary:focus-visible {
-  outline: 0;
-  box-shadow: var(--focus-ring);
-}
-
-.conversation-history-process__body {
-  max-height: min(65vh, var(--conversation-reading-measure));
-  margin-block-start: var(--space-3);
-  margin-inline-start: 0;
-  padding: var(--space-3);
-  border: var(--control-edge-inset) solid var(--turn-process-line);
-  border-radius: var(--conversation-process-radius);
-  background: var(--bg-primary);
-  scrollbar-width: thin;
-  overflow: auto;
-  overscroll-behavior: contain;
-  overflow-anchor: none;
-}
-.conversation-history-process__controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  padding-block: var(--space-1) var(--space-2);
-  background: var(--bg-primary);
-  font-size: var(--conversation-font-size-meta);
-}
-.conversation-history-process__controls > span {
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
-}
-.conversation-history-process__controls[hidden] { display: none; }
-.conversation-history-notice {
-  font-size: var(--conversation-font-size-content);
-  color: var(--text-secondary);
-  overflow-wrap: anywhere;
-}
-
-
-/* A non-modal reading inspector uses the native top layer. It keeps the
- * original keyed evidence beneath its Turn for delegation and teardown. */
-.conversation-surface .conversation-answer-label > [data-conversation-part="turn-history-process"] {
-  flex: 0 0 auto;
-}
-.conversation-surface .conversation-answer-label .conversation-history-process > summary {
-  border-color: transparent;
-  background: var(--bg-secondary);
-  font-size: var(--conversation-font-size-meta);
-}
-.conversation-surface .conversation-history-process__body[popover] {
-  position: fixed;
-  inset: var(--space-16) var(--space-6) var(--space-6) auto;
-  box-sizing: border-box;
-  width: min(var(--conversation-inspector-width), calc(100vw - var(--space-12)));
-  height: auto;
-  max-height: calc(100dvh - var(--space-16) - var(--space-6));
-  margin: 0;
-  padding: var(--space-4);
-  border: var(--control-edge-inset) solid var(--border);
-  border-radius: var(--space-5);
-  background: var(--bg-primary);
-  color: var(--text-secondary);
-  box-shadow: var(--shadow);
-}
-.conversation-surface .conversation-history-process__heading {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: var(--bg-primary);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  min-height: var(--control-h-lg);
-  margin-block-end: var(--space-3);
-  padding-block-end: var(--space-3);
-  border-block-end: var(--control-edge-inset) solid var(--border-light);
-}
-.conversation-surface .conversation-history-process__heading > strong {
-  color: var(--text-primary);
-  font-size: var(--conversation-process-font-size);
-  font-weight: var(--weight-semibold);
-}
-@media (max-width: 720px) {
-  .conversation-surface .conversation-history-process__body[popover] {
-    inset: auto var(--space-2) var(--space-2);
-    width: calc(100vw - var(--space-4));
-    max-height: 78dvh;
-    border-radius: var(--space-5);
-  }
 }

@@ -1,9 +1,11 @@
 """CVE vertical — NVD (NIST) lookup."""
 
 import re
+from importlib import import_module
 
-from tofu_search.search.vertical import base
 from tofu_search.search.vertical.base import _FETCH_FAILED, logger
+
+base = import_module('tofu_search.search.vertical.base')  # leaf, not via package: base.py
 
 TYPE = 'cve'
 DOMAIN = 'security'

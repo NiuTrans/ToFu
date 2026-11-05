@@ -6,6 +6,7 @@
     "scope": "auto selects project when available; explicit project without context fails; all is owner scoped and excludes current conversation",
     "coverage": "preserve paged coverage and continuation; never equate incomplete or unknown coverage with proven absence",
     "receipt": "conversationSearch: keyword, effective scope, projectPath, returnedCount, limit, coverage, incomplete, coverageReasons, items(id,title); same-query metadata, not parsed prose",
+    "listing": "each body hit names its matching Turn ID and snippet; get_conversation(conversation_id, turn_id) reads the window around that Turn",
     "fields": "titles and indexed public text; tool arguments/results are not indexed"
   },
   "http": {
@@ -16,7 +17,7 @@
       "cursor": "optional opaque continuation bound to owner and normalized query"
     },
     "result": {
-      "items": "bounded array of id, matchField (title|id|content|thinking|originalContent|translatedContent), matchSnippet, matchRole (user|assistant|null), conversation (metadata only)",
+      "items": "bounded array of id, matchField (title|id|content|thinking|originalContent|translatedContent), matchSnippet, matchRole (user|assistant|null), matchTurnId (string|null: the matching live main-lane Turn; null for title/id hits and retained archive text), matchTurnOrdinal (integer|null: that Turn's lane ordinal, null exactly when matchTurnId is null), conversation (metadata only)",
       "nextCursor": "string|null; may be present on an empty partial page",
       "coverage": "ready|indexing|partial",
       "coverageReasons": "bounded non-sensitive reason codes; no source ids or transcript text"
@@ -25,7 +26,8 @@
   "storage": {
     "operation": "conversation.search",
     "pageFlag": "page",
-    "pageResult": "items [{id,snippet,role,match_field}], next_cursor, incomplete; projection health added at runtime boundary",
+    "pageResult": "items [{id,snippet,role,match_field,turn_id,ordinal}], next_cursor, incomplete; projection health added at runtime boundary. turn_id/ordinal identify the best chunk's live main-lane Turn and are both null for title/id hits and for history: (frozen or archive) chunk identities; identical on both authorities",
+    "anchoredWindow": "conversation.get anchor_turn_id (1-128 chars) requires message_window and excludes before_sequence; the window ends at S + 1 + message_window // 2 for the Turn's main-lane sequence S (or at 0 when the Turn is not a main-lane Turn of the conversation) and message_page.anchor_sequence reports S or null",
     "legacyResult": "items array for callers without page=true",
     "ownership": "required positive user_id, applied before candidates, joins, limits and metadata hydration",
     "order": "phrase/title/id matches first, then all-whitespace-terms matches; updated_at_ms DESC,id DESC within each phase",
@@ -85,7 +87,7 @@
     "refresh": "reconcile local metadata without requery floods; bounded refresh on relevant invalidation and explicit retry; teardown aborts work"
   },
   "nativeProjection": {
-    "formatVersion": 4,
+    "formatVersion": 5,
     "headerScanBatch": 16,
     "invalidationTokenBytes": 16,
     "legacyInvalidationTokenBytes": 8,

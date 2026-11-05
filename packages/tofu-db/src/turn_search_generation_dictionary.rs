@@ -54,13 +54,13 @@ pub(super) fn allocate(
         return Ok((id, 0));
     }
     let id = high_water.unwrap_or(0).checked_add(1).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::OutOfMemory, "search generation ID space exhausted")
+        crate::resource_exhaustion::accounting_overflow("search generation ID space exhausted")
     })?;
     let stored_key = key(transaction, NAMESPACE, digest)?;
     let added_bytes = (stored_key.key_bytes().len() + 8
         + if counter.is_none() { counter_key.key_bytes().len() + 8 } else { 0 }) as u64;
     if added_bytes > remaining_bytes {
-        return Err(io::Error::new(io::ErrorKind::OutOfMemory, "search generation dictionary exceeds owner budget"));
+        return Err(crate::resource_exhaustion::capacity_quota("search generation dictionary exceeds owner budget"));
     }
     database.entity_put(transaction, stored_key, id.to_be_bytes().to_vec())?;
     database.entity_put(transaction, counter_key, id.to_be_bytes().to_vec())?;

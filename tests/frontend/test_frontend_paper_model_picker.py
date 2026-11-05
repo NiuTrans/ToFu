@@ -174,8 +174,6 @@ def _run_harness(src_override: str | None = None, extra_argv=None) -> str:
     return proc.stdout.strip()
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_model_label_survives_language_toggle():
     out = _run_harness()
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
@@ -183,8 +181,6 @@ def test_model_label_survives_language_toggle():
     assert out.count('PASS') >= 7, f'expected >=7 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NEUTER_data_i18n_removal_is_loadbearing():
     """NEUTER: drop the ``removeAttribute('data-i18n')`` line from a COPY of
     report.js → the next _applyI18n() overwrites the model name with the
@@ -339,8 +335,6 @@ def _run_order_harness_patched(marker: str, replacement: str) -> str:
             'shipped file modified!'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_dropdown_orders_by_display_name():
     """The paper report/review pickers read the same _registeredModels as the
     toolbar picker, so they must render the same ORDER: provider sections by
@@ -352,8 +346,6 @@ def test_dropdown_orders_by_display_name():
     assert out.count('PASS') >= 3, f'expected >=3 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NEUTER_item_sort_is_loadbearing():
     """Remove the in-section model sort → items revert to arrival order and
     the display-name probe flips FAIL."""
@@ -364,8 +356,6 @@ def test_NEUTER_item_sort_is_loadbearing():
         'removing the item sort did NOT flip the order probe:\n' + out
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NEUTER_section_sort_is_loadbearing():
     """Remove the provider-section sort → sections revert to arrival order
     and the section probe flips FAIL."""
@@ -451,7 +441,6 @@ if __name__ == '__main__':
     sys.exit(0)
 
 
-@pytest.mark.skipif(not _node_deps_available(), reason='node + jsdom required')
 def test_model_dropdown_survives_document_delegated_click():
     """Exercise the actual action delegate and outside-click listener together."""
     registry = native_module_path(

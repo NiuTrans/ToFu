@@ -1,7 +1,11 @@
 """Unrepresentable native history cannot hide the primary availability error."""
+
+import lib.tasks_pkg.llm_fallback._errors as _fallback_errors
 from copy import deepcopy
 
 import pytest
+
+from lib.llm.llm_error_format import format_llm_error_for_user
 
 from lib.llm import build_body
 from lib.llm.anthropic_outbound import openai_body_to_anthropic_checked
@@ -74,7 +78,7 @@ def test_native_conversion_preserves_primary_error_and_history(
     assert result['preset'] == 'low'
     assert result['thinking_enabled'] is False
     error = task['error']
-    expected = _call.format_llm_error_for_user(primary_error, model='gpt-6-astra')
+    expected = format_llm_error_for_user(primary_error, model='gpt-6-astra')
     for field in ('kind', 'retryable', 'message', 'hint', 'detail', 'model'):
         assert error[field] == expected[field]
     assert error['context'] == 'fallback-unrepresentable (gpt-6-astra→kimi-k3)'
@@ -148,7 +152,7 @@ def test_wrapped_credential_failure_keeps_retry_and_auth_diagnostics():
     primary = LocalRequestPreparationError('credential preparation unavailable')
     primary.__cause__ = _credential_error()
     task = _base_task()
-    result = _call._settle_failed_fallback(
+    result = _fallback_errors._settle_failed_fallback(
         task, primary, original_model='gpt-6-astra', fallback_model='kimi-k3',
         preset='low', thinking_enabled=True, round_num=28,
         blocked_error=ProtocolConversionError('mandatory_continuity_unrepresentable'))

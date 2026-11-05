@@ -637,6 +637,18 @@ def _conversation_get(session: Session, payload: Mapping[str, Any]) -> Any:
             "database_protocol_error",
             "Conversation message window requires transcript projection",
         )
+    # An anchor positions the window around one main-lane Turn instead of
+    # an explicit cursor (native parity: conversation_header::get_anchored).
+    anchor_turn_id = payload.get("anchor_turn_id")
+    if anchor_turn_id is not None and (
+        not isinstance(anchor_turn_id, str)
+        or not 1 <= len(anchor_turn_id) <= 128
+        or not message_window
+        or before_sequence is not None
+    ):
+        raise StorageError(
+            "database_protocol_error", "Invalid conversation message anchor"
+        )
 
     row = session.fetch_one(
         "SELECT id, user_id, title, created_at_ms, "
@@ -649,6 +661,16 @@ def _conversation_get(session: Session, payload: Mapping[str, Any]) -> Any:
 
     messages: list[dict[str, Any]] = []
     message_page = None
+    anchor_sequence = None
+    if anchor_turn_id is not None:
+        anchor_sequence = _main_lane_sequence(
+            session, conv_id, user_id, anchor_turn_id
+        )
+        # A missing anchor selects the empty window at the head.
+        before_sequence = (
+            0 if anchor_sequence is None
+            else anchor_sequence + 1 + message_window // 2
+        )
     if include_messages:
         if message_window:
             messages, total_count, start, end = _derive_turn_message_window(
@@ -701,6 +723,8 @@ def _conversation_get(session: Session, payload: Mapping[str, Any]) -> Any:
                 "start": start,
                 "end": end,
             }
+            if anchor_turn_id is not None:
+                message_page["anchor_sequence"] = anchor_sequence
         else:
             messages = _derive_turn_messages(session, conv_id, user_id)
             if messages:
@@ -729,6 +753,28 @@ def _conversation_get(session: Session, payload: Mapping[str, Any]) -> Any:
     if message_page is not None:
         document["message_page"] = message_page
     return document
+
+
+def _main_lane_sequence(
+    session: Session, conv_id: str, user_id: int, turn_id: str,
+) -> int | None:
+    """Rank of one main-lane Turn in lane order, the windowed-read coordinate.
+
+    None when the Turn is absent or on another lane.
+    """
+    anchor = session.fetch_one(
+        "SELECT ordinal FROM storage_conversation_turns "
+        "WHERE conversation_id=? AND user_id=? AND turn_id=? AND lane_id='main'",
+        (conv_id, user_id, turn_id),
+    )
+    if anchor is None:
+        return None
+    rank = session.fetch_one(
+        "SELECT COUNT(*) AS c FROM storage_conversation_turns "
+        "WHERE conversation_id=? AND user_id=? AND lane_id='main' AND ordinal<?",
+        (conv_id, user_id, int(anchor["ordinal"])),
+    )
+    return int(rank["c"]) if rank else 0
 
 
 def _backfill_turn_message_counts(session: Session, rows: list[dict]) -> None:

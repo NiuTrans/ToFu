@@ -6,6 +6,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,6 +33,7 @@ def translation_receipt_server(tmp_path):
 @pytest.mark.parametrize('width', [390, 1280])
 @pytest.mark.parametrize('theme', ['tofu', 'light', 'dark'])
 def test_composer_translation_receipt(translation_receipt_server, browser, tmp_path, width, theme):
+    require_node_modules('vite')
     bundle = tmp_path / 'translation-status.js'
     result = subprocess.run([str(ROOT / 'scripts/vite_test_bundle.mjs'),
         str(ROOT / 'frontend/src/conversation/application/composer-translation-status.ts'),
@@ -61,7 +63,7 @@ def test_composer_translation_receipt(translation_receipt_server, browser, tmp_p
         assert '2.3s' in page.locator('.composer-translation-status').inner_text()
         pending = page.locator('.composer-translation-status').bounding_box()
         assert pending and pending['width'] > 100 and pending['height'] < 90
-        page.evaluate("receipt.finish(receiptWait,'completed','deepseek-v4-flash-meituan')")
+        page.evaluate("receipt.finish(receiptWait,'completed','deepseek-v4-flash-yourprovider')")
         # Successful attribution belongs to the durable message. Only pending
         # work and unresolved failure/cancellation stay in the composer.
         assert page.locator('.composer-translation-status').count() == 0
@@ -89,9 +91,9 @@ def test_composer_translation_receipt(translation_receipt_server, browser, tmp_p
         page.evaluate("receipt.finish(receiptWait,'completed')")
         assert page.locator('.composer-translation-status').count() == 0
         page.evaluate("receiptWait=receipt.begin('visual-conv','send');receiptClock=4600;"
-                      "receipt.finish(receiptWait,'failed','deepseek-v4-flash-meituan')")
+                      "receipt.finish(receiptWait,'failed','deepseek-v4-flash-yourprovider')")
         text = page.locator('.composer-translation-status').inner_text()
-        assert 'deepseek-v4-flash-meituan' in text and '2.3s' in text
+        assert 'deepseek-v4-flash-yourprovider' in text and '2.3s' in text
         box = page.locator('.composer-translation-status').bounding_box()
         assert box and box['x'] >= 0 and box['x'] + box['width'] <= width + 1
         page.screenshot(path=str(tmp_path / f'composer-translation-{width}.png'), full_page=True)

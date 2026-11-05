@@ -15,6 +15,7 @@ import okhttp3.Cookie
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -70,9 +71,9 @@ class SessionManagerInteractiveSsoTest {
             stamps += host
             return 1
         }
-        override suspend fun setCookieHostIfUrlMatches(id: Long, expectedUrl: String, host: String): Int {
+        override suspend fun setCookieHostIfCurrent(id: Long, expectedUrl: String, expectedAlias: String, expectedAuthType: AuthType, host: String): Int {
             val row = getById(id) ?: return 0
-            return if (row.baseUrl == expectedUrl) setCookieHost(id, host) else 0
+            return if (row.baseUrl == expectedUrl && row.alias == expectedAlias && row.authType == expectedAuthType) setCookieHost(id, host) else 0
         }
         override suspend fun touchLastUsed(id: Long, timestamp: Long): Int {
             current = current.copy(lastUsedAt = timestamp); return 1
@@ -119,7 +120,7 @@ class SessionManagerInteractiveSsoTest {
      * snapshot, any edit made meanwhile would be silently rolled back.
      *
      * Here the row is renamed and re-pathed AFTER the snapshot is taken; the
-     * stamp must set cookieHost and touch nothing else.
+     * stale identity must not be stamped, and all edited fields must survive.
      *
      * NEUTER CHECK: replace `dao.setCookieHost(...)` with
      * `dao.update(profile.copy(cookieHost = host))` and this fails — the alias
@@ -136,11 +137,22 @@ class SessionManagerInteractiveSsoTest {
 
         val stamped = mgr.noteInteractiveSignIn(stale, finishedUrl = base)
 
-        assertTrue(stamped)
+        assertFalse(stamped)
         val row = dao.getById(1)!!
-        assertEquals("the sign-in must be recorded", host, row.cookieHost)
+        assertNull("a renamed profile must reject the old sign-in", row.cookieHost)
         assertEquals("a concurrent rename must survive", "renamed", row.alias)
         assertEquals("a concurrent path edit must survive", "/srv/other", row.projectPath)
+    }
+
+    @Test
+    fun project_path_edit_keeps_identity_and_survives_session_stamp() = runTest {
+        val stale = profile()
+        val dao = FakeDao(stale)
+        val mgr = SessionManager(dao, FakeSecrets(), FakeCookieSink("code-server-session=tok"), http = http)
+        dao.update(stale.copy(projectPath = "/srv/other"))
+        assertTrue(mgr.noteInteractiveSignIn(stale, finishedUrl = base))
+        assertEquals(host, dao.getById(1)!!.cookieHost)
+        assertEquals("/srv/other", dao.getById(1)!!.projectPath)
     }
 
     /** Sitting on the IdP is not a completed sign-in. */

@@ -80,14 +80,52 @@ def _run_async(awaitable):
     return result[0] if result else None
 
 
-@pytest.mark.parametrize('automation_stop_fails', [False, True])
-def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch, automation_stop_fails):
+def test_parallel_producer_shutdown_joins_workers_before_propagating_cancellation(monkeypatch):
+    from lib.server import server_shutdown
+    entered, release, exited = threading.Event(), threading.Event(), threading.Event()
+
+    def close(module, function, **options):
+        if function == 'stop_prober':
+            entered.set()
+            assert release.wait(5)
+            exited.set()
+        elif function == 'stop_fs_keepalive':
+            raise RuntimeError('independent cleanup fault')
+
+    monkeypatch.setattr(server_shutdown, '_shutdown_loaded_module', close)
+
+    async def run():
+        cleanup = asyncio.create_task(server_shutdown._stop_independent_producers(
+            server_shutdown._MODULE_LOG))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            for _ in range(2):
+                cleanup.cancel()
+                await asyncio.sleep(.01)
+                assert not cleanup.done(), 'cancellation abandoned a running cleanup worker'
+        finally:
+            release.set()
+            result = (await asyncio.gather(cleanup, return_exceptions=True))[0]
+        assert isinstance(result, asyncio.CancelledError)
+        assert exited.is_set()
+
+    _run_async(run())
+
+
+@pytest.mark.parametrize(('automation_stop_fails', 'failing_flush', 'route_stop_fails'), [
+    (False, None, False), (True, None, False), (False, 'key-stats', False),
+    (False, 'usage', False), (False, None, True),
+])
+@pytest.mark.parametrize('parallel_producers', [False, True], ids=['normal', 'parallel'])
+def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(
+        monkeypatch, automation_stop_fails, failing_flush, parallel_producers, route_stop_fails):
     monkeypatch.setenv('TOFU_SHUTDOWN_HARD_SECS', '30')
     import lib.agent_core.admission as admission
     import lib.agent_core.push as push
     import lib.cgroup_guard as cgroup_guard
     import lib.fs_keepalive as fs_keepalive
     import lib.http_transport.client as http_client
+    import lib.key_stats as key_stats
     import lib.search.search_runtime as search_runtime
     import lib.scheduler.timer as timer_runtime
     import lib.integration_control as integration_control
@@ -104,15 +142,28 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch,
     import lib.swarm.integration as swarm_integration
     import lib.tasks_pkg.manager as task_manager
     import lib.tasks_pkg.event_log as event_log
+    import lib.usage_tracker as usage_tracker
     import routes
     from lib.automations import runtime as automation_runtime
 
     calls = []
     serving_loop_threads = []
+    producers_entered = threading.Barrier(2, timeout=5)
+    producers_joined = []
 
     def sync_call(name):
         def run(*args, **kwargs):
             calls.append((name, threading.get_ident(), kwargs))
+            if parallel_producers and name in ('netpath', 'fs-keepalive'):
+                producers_entered.wait()
+                producers_joined.append(name)
+        return run
+
+    def flush_call(name):
+        def run(*args, **kwargs):
+            calls.append((name, threading.get_ident(), kwargs))
+            if name == failing_flush:
+                raise OSError(f'{name} store unavailable')
         return run
 
     def stop_automation(*args, **kwargs):
@@ -158,9 +209,11 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch,
         integration_control, 'stop_worker', sync_call('integration'))
     monkeypatch.setattr(
         pricing, 'stop_pricing_refresh', sync_call('pricing-refresh'))
-    monkeypatch.setattr(
-        routes, 'stop_registered_background_services',
-        sync_call('route-services'))
+    def stop_routes(app, **options):
+        sync_call('route-services')(**options)
+        app.extensions['tofu_registered_background_services'] = route_stop_fails
+
+    monkeypatch.setattr(background_services, 'stop_registered_background_services', stop_routes)
     monkeypatch.setattr(mcp_client, 'disconnect_all_bridges', Bridge().disconnect_all)
     monkeypatch.setattr(
         mcp_startup, 'stop_mcp_auto_connect', sync_call('mcp-startup'))
@@ -178,6 +231,8 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch,
                         sync_call('event-batcher'))
     monkeypatch.setattr(storage, 'stop_storage', sync_call('storage'))
     monkeypatch.setattr(warmup, 'stop_keep_warm', sync_call('storage-warmup'))
+    monkeypatch.setattr(key_stats, 'shutdown_key_stats', flush_call('key-stats'))
+    monkeypatch.setattr(usage_tracker, 'flush', flush_call('usage'))
 
     stopped = threading.Event()
     stopped.set()
@@ -200,17 +255,34 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch,
         assert 'automation' in [name for name, _, _ in calls]
         assert 'storage' not in [name for name, _, _ in calls]
         return
+    if route_stop_fails:
+        with pytest.raises(RuntimeError, match='background services have not quiesced'):
+            _run_async(exercise())
+        assert 'route-services' in [name for name, _, _ in calls]
+        assert 'storage' not in [name for name, _, _ in calls]
+        return
     _run_async(exercise())
     loop_thread = serving_loop_threads[0]
     assert calls[0]==('native-host',loop_thread,{})
     calls=calls[1:]
+    if parallel_producers:
+        assert set(producers_joined) == {'netpath', 'fs-keepalive'}
 
-    assert [name for name, _, _ in calls] == [
-        'timers', 'incremental-translation', 'search-browser', 'swarm-cleanup', 'swarm-output-cleanup', 'netpath', 'lan-discovery',
-        'cgroup', 'local-health',
-        'fs-keepalive', 'presence', 'integration', 'automation', 'route-services', 'storage-warmup', 'pricing-refresh',
+    # Key-health and per-key usage counters are separate in-memory owners: a
+    # failed flush of either must neither skip the other nor later teardown.
+    names = [name for name, _, _ in calls]
+    assert names[:3] == ['timers', 'incremental-translation', 'search-browser']
+    assert set(names[3:13]) == {
+        'swarm-cleanup', 'swarm-output-cleanup', 'netpath', 'lan-discovery',
+        'cgroup', 'local-health', 'fs-keepalive', 'presence', 'integration',
+        'automation',
+    }
+    # Automation and every independent producer finish before consumers,
+    # final evidence flushes, and the storage boundary retire.
+    assert names[12:] == [
+        'automation', 'route-services', 'storage-warmup', 'pricing-refresh',
         'mcp-startup', 'mcp', 'admission', 'push', 'http', 'runtime',
-        'event-maintenance', 'event-batcher', 'storage',
+        'key-stats', 'usage', 'event-maintenance', 'event-batcher', 'storage',
     ]
     assert next(thread for name, thread, _ in calls if name == 'http') == loop_thread
     for name, thread, _ in calls:
@@ -226,6 +298,8 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch,
     assert by_owner['swarm-cleanup'] == {'timeout': 2.0}
     assert by_owner['swarm-output-cleanup'] == {'timeout': 2.0}
     assert by_owner['netpath'] == {}
+    assert by_owner['key-stats'] == {}
+    assert by_owner['usage'] == {}
     assert all(by_owner[name] == {'timeout': 2.0}
                for name in ('lan-discovery', 'cgroup', 'local-health', 'fs-keepalive', 'presence'))
     assert all(kwargs == {'timeout': 2.0} for name, _, kwargs in calls

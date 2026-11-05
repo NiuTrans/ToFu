@@ -208,17 +208,21 @@ def test_real_swarm_caller_keeps_provenance_parent_fences_and_budget(dispatch, m
              {'turnId': 'parent', 'actor': 'assistant', 'status': 'completed', 'projection': {}}]
     monkeypatch.setattr(restart_recovery, 'read_continuation_turns',
                         lambda conv, **kw: {'turns': turns})
+    from types import SimpleNamespace
+    from lib.swarm.types import SubTaskSpec
+    session = SimpleNamespace(user_id=7, task_id='run-1', specs=[SubTaskSpec(id='child')])
     monkeypatch.setattr(integration, '_key_is_live', lambda key: False)
-    monkeypatch.setattr(integration, 'get_active_session', lambda key: None)
+    monkeypatch.setattr(integration, 'get_active_session',
+                        lambda key: session if key == dispatch.conv_id else None)
     monkeypatch.setattr(integration, 'SWARM_AUTOCONTINUE_ENABLED', True)
     monkeypatch.setattr('lib.agent_core.push.push_event', lambda *a, **kw: None)
     try:
         agent_inbox.enqueue(dispatch.conv_id, 'Settled evidence', priority='later',
-                            mode='swarm-update', agent_id='child', extra={'status': 'completed'})
+                            mode='swarm-update', agent_id='child',
+                            extra={'status': 'completed', 'swarm_run_id': 'run-1'})
         integration._maybe_autocontinue(dispatch.conv_id, 7, source_id='wave')
         if plan:
             assert not dispatch.calls
-            assert integration._autocontinue_chain.get(dispatch.conv_id, 0) == 0
         else:
             payload = dispatch.calls[-1]
             assert payload['config'] == {
@@ -232,9 +236,7 @@ def test_real_swarm_caller_keeps_provenance_parent_fences_and_budget(dispatch, m
             assert payload['requireParentIsLaneTail'] is True
             assert payload['requireParentNotStopped'] is True
             assert payload['inputTurn']['_initiator'] == INITIATOR_SWARM
-            assert integration._autocontinue_chain[dispatch.conv_id] == 1
         assert agent_inbox.has_pending(dispatch.conv_id, modes=['swarm-update'])
         assert dispatch.conv_id not in integration._autocontinue_inflight
     finally:
         agent_inbox.reset_for_test(dispatch.conv_id)
-        integration.reset_autocontinue_chain(dispatch.conv_id)

@@ -37,7 +37,13 @@ use the read-only `search_knowledge` tool.
    OpenDocument/EPUB package media, and image email attachments. PDF figures
    retain page and source bounding-box provenance.
 5. Use local best-effort OCR for scanned PDFs and standalone images when the
-   local OCR stack exists.
+   local OCR stack exists. Each OCR job runs in its own owned child process,
+   never on a server thread (`docs/modules/ingest_media.md`, "Knowledge OCR
+   process ownership"). OCR reads `chi_sim+eng` once; `eng` runs only when
+   that pass cannot run, never because it found no text. Tool-result images
+   commit before their OCR text, which an owned background job publishes
+   after the receipt. Identical bytes reuse the owner's existing record and
+   its OCR text; deletion removes it and reindex recomputes it.
 6. Return the extraction method, page count, and every truncation/degradation
    warning as document metadata.
 7. Structure-aware chunking preserves headings, sheet/table context, line

@@ -231,7 +231,7 @@ def _uncovered_failure(task: dict[str, Any]) -> dict | None:
     BATCH sharing an ``llmRound`` (see ``_computeToolBatches`` on the render
     side). Sorting all rounds and taking ``[-1]`` therefore picks an arbitrary
     member of that batch — whichever happens to sort last. When a batch mixes
-    outcomes (``read_files`` fails, a sibling ``grep_search`` succeeds), that
+    outcomes (``read_files`` fails, a sibling ``search_files`` succeeds), that
     lottery decides whether criterion A sees the failure at all.
 
     A batch is ONE model decision: the model received all of its results

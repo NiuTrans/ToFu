@@ -41,9 +41,6 @@ fn invalid_input(message: &str) -> io::Error {
 fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
-fn exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
 
 fn validate_text(value: &str, maximum: usize, required: bool) -> io::Result<()> {
     if (required && value.is_empty()) || value.chars().count() > maximum {
@@ -147,13 +144,13 @@ fn write_count(
     maximum: usize,
 ) -> io::Result<()> {
     if value > maximum {
-        return Err(exhausted("paper podcast count exceeds its bound"));
+        return Err(crate::resource_exhaustion::capacity_quota("paper podcast count exceeds its bound"));
     }
     db.entity_put(
         tx,
         count_key(tx, owner, namespace)?,
         u64::try_from(value)
-            .map_err(|_| exhausted("paper podcast count cannot be represented"))?
+            .map_err(|_| crate::resource_exhaustion::accounting_overflow("paper podcast count cannot be represented"))?
             .to_be_bytes()
             .to_vec(),
     )
@@ -231,7 +228,7 @@ impl Request {
                 if script_bytes > MAX_PAPER_PODCAST_SCRIPT_BYTES
                     || meta_bytes > MAX_PAPER_PODCAST_META_BYTES
                 {
-                    return Err(exhausted("paper podcast content exceeds its bound"));
+                    return Err(crate::resource_exhaustion::domain_bound("paper podcast content exceeds its bound"));
                 }
                 Ok(identity_bytes
                     + value.status.len()
@@ -324,7 +321,7 @@ fn store<T: Serialize>(
     let raw = serde_json::to_vec(request.value)
         .map_err(|_| invalid_data("paper podcast document cannot be encoded"))?;
     if raw.len() > request.maximum {
-        return Err(exhausted("paper podcast document exceeds its byte bound"));
+        return Err(crate::resource_exhaustion::domain_bound("paper podcast document exceeds its byte bound"));
     }
     versioned_document::put_with_blob_owner_bounded(
         db,
@@ -434,7 +431,7 @@ fn upsert(
         MAX_PAPER_PODCAST_ROWS_PER_OWNER,
     )?;
     if previous.is_none() && owner_count == MAX_PAPER_PODCAST_ROWS_PER_OWNER {
-        return Err(exhausted("paper podcast owner capacity is exhausted"));
+        return Err(crate::resource_exhaustion::capacity_quota("paper podcast owner capacity is exhausted"));
     }
     let old_generating = previous
         .as_ref()
@@ -470,7 +467,7 @@ fn upsert(
         (false, true) => active_count
             .checked_add(1)
             .filter(|count| *count <= MAX_PAPER_PODCAST_ACTIVE_PER_TENANT)
-            .ok_or_else(|| exhausted("paper podcast active capacity is exhausted"))?,
+            .ok_or_else(|| crate::resource_exhaustion::capacity_quota("paper podcast active capacity is exhausted"))?,
         (true, false) => active_count
             .checked_sub(1)
             .ok_or_else(|| invalid_data("paper podcast active count underflow"))?,
@@ -573,7 +570,7 @@ fn encode(value: &Value) -> io::Result<Vec<u8>> {
     let raw = serde_json::to_vec(value)
         .map_err(|_| invalid_data("paper podcast response cannot be encoded"))?;
     if raw.len() > MAX_PAPER_PODCAST_RESPONSE_BYTES {
-        return Err(exhausted("paper podcast response exceeds its bound"));
+        return Err(crate::resource_exhaustion::domain_bound("paper podcast response exceeds its bound"));
     }
     Ok(raw)
 }
@@ -742,7 +739,7 @@ fn parse_podcast_restore(payload: Value) -> io::Result<PodcastRestoreRequest> {
         .map_err(|_| invalid_input("paper podcast metadata cannot be encoded"))?
         .len();
     if script_bytes > MAX_PAPER_PODCAST_SCRIPT_BYTES || meta_bytes > MAX_PAPER_PODCAST_META_BYTES {
-        return Err(exhausted("paper podcast content exceeds its bound"));
+        return Err(crate::resource_exhaustion::domain_bound("paper podcast content exceeds its bound"));
     }
     Ok(request)
 }
@@ -868,7 +865,7 @@ fn podcast_restore(
         MAX_PAPER_PODCAST_ROWS_PER_OWNER,
     )?;
     if owner_count == MAX_PAPER_PODCAST_ROWS_PER_OWNER {
-        return Err(exhausted("paper podcast owner capacity is exhausted"));
+        return Err(crate::resource_exhaustion::capacity_quota("paper podcast owner capacity is exhausted"));
     }
     let generating = request.status == "generating";
     let logical = identity(&key.paper_hash, &key.mode, &key.lang, &key.voice)?;
@@ -909,7 +906,7 @@ fn podcast_restore(
         let next = active_count
             .checked_add(1)
             .filter(|count| *count <= MAX_PAPER_PODCAST_ACTIVE_PER_TENANT)
-            .ok_or_else(|| exhausted("paper podcast active capacity is exhausted"))?;
+            .ok_or_else(|| crate::resource_exhaustion::capacity_quota("paper podcast active capacity is exhausted"))?;
         db.entity_put(
             tx,
             active_key(tx, owner, &key)?,

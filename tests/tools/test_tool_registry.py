@@ -50,6 +50,16 @@ def _ctx(**overrides):
     return ToolContext(**base)
 
 
+def test_content_search_is_search_files_with_retired_grep_search_dispatchable():
+    from lib.tools.project import PROJECT_TOOL_NAMES, project_tools_for_runtime
+
+    visible = {tool['function']['name'] for tool in project_tools_for_runtime()}
+    assert 'search_files' in visible and 'grep_search' not in visible
+    project = next(spec for spec in all_specs() if spec.key == 'project')
+    assert 'grep_search' in project.compatibility_tools <= project.provides
+    assert {'search_files', 'grep_search'} <= PROJECT_TOOL_NAMES
+
+
 def test_mcp_tools_carry_server_name_namespace(monkeypatch):
     """MCP tool namespaces are the owning server id, not the shared 'mcp' bucket.
 
@@ -127,7 +137,7 @@ class TestOrdering(unittest.TestCase):
         # search → fetch → read_files → inspect_image → project tools → memory (end)
         self.assertEqual(names[:6], [
             'web_search', 'fetch_url', 'read_files', 'inspect_image',
-            'grep_search', 'find_files',
+            'search_files', 'find_files',
         ])
         self.assertNotIn('list_dir', names)
         # memory tools always come last (capability phase)
@@ -467,7 +477,7 @@ class TestLegacyShim(unittest.TestCase):
         self.assertTrue(hr)
 
     def test_eager_families_are_not_misclassified_as_explicit_pins(self):
-        cfg = {'memoryEnabled': True, 'mcpEnabled': False}
+        cfg = {'memoryEnabled': True, 'mcpEnabled': False, 'plugins': []}
         tl, _ = _assemble_tool_list(
             cfg=cfg, project_path='/tmp/x', project_enabled=True,
             task_id='t', search_mode='multi', search_enabled=True,
@@ -607,7 +617,8 @@ class TestConcurrencyFlagSync(unittest.TestCase):
         self.assertIn('create_memory', _WRITE_TOOLS)
         # Idempotent read tools (base set + spec-declared).
         self.assertIn('web_search', _IDEMPOTENT_TOOLS)
-        self.assertIn('grep_search', _IDEMPOTENT_TOOLS)
+        self.assertIn('search_files', _IDEMPOTENT_TOOLS)
+        self.assertIn('grep_search', _IDEMPOTENT_TOOLS)  # retired name
         # Live browser observers are read-only but their results mutate under
         # identical arguments, so they are not in the cache partition.
         self.assertNotIn('browser_read_page', _IDEMPOTENT_TOOLS)

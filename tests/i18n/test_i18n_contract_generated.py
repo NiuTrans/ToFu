@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _node(*arguments: str) -> subprocess.CompletedProcess[str]:
+    require_node_modules('typescript')
     return subprocess.run(
         ('node', *arguments),
         cwd=ROOT,

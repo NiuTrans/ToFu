@@ -2,7 +2,8 @@
 
 check_graph rejects malformed persisted edges. states evaluates reachable evidence
 once per node, in durable insertion order, without recursive loads or execution.
-Repository ports own authority, turns/attempts and existing workspace receipts.
+Repository ports own authority, turns/attempts and existing workspace receipts;
+prerequisite result Turns are read as metadata, never as projection bodies.
 """
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ def check_graph(assignments, limit):
         earlier[row['id']] = row
 
 
-def _evidence(repository, row):
+def _evidence(repository, row, value=None):
     """Historical deadline is not revocation of completed accepted evidence."""
     from .repository import CONTRACT, ProjectDispatchError, evidence_owner_matches
     if row['grant']['revoked']:
@@ -47,15 +48,17 @@ def _evidence(repository, row):
         return 'invalid', 'stopped', None, None
     try:
         repository.validate_grant_binding(row)
-        repository._live_request(row['request'], check_deadline=False)
+        repository._live_request(row['request'], check_deadline=False, value=value)
     except (ProjectDispatchError, PermissionError):
         return 'invalid', 'scope_changed', None, None
     association = row['execution']
     if association is None:
         return 'invalid', 'result_changed', None, None
     attempt = repository.get_attempt(association['attemptId'])
+    # Identity, actor and revision are the only Turn evidence used here; the
+    # metadata read is the same public normalization without the projection.
     turn = repository.turn_get(row['request']['recipientId'], association['turnId'],
-                               user_id=repository.owner)
+                               user_id=repository.owner, include_projection=False)
     if not isinstance(attempt, Mapping) or not isinstance(turn, Mapping):
         return 'unknown', 'evidence_unavailable', None, None
     if (attempt.get('attemptId') != association['attemptId']
@@ -68,8 +71,9 @@ def _evidence(repository, row):
             or type(turn.get('projectionRevision')) is not int
             or not all(evidence_owner_matches(item, repository.owner) for item in (turn, attempt))):
         return 'invalid', 'result_changed', None, None
-    if (any(item['phase'] == 'dispatch_intent' or not item['usage_complete']
-            for item in row['modelAttempts'])
+    # A settled call with a missing usage receipt is a recorded lower bound;
+    # an in-flight model call or unsettled tool effect leaves the result uncertain.
+    if (any(item['phase'] == 'dispatch_intent' for item in row['modelAttempts'])
             or any(item['phase'] not in CONTRACT['terminalToolPhases']
                    for item in row.get('toolAttempts', []))):
         return 'unknown', 'evidence_unavailable', None, None
@@ -180,7 +184,7 @@ def states(repository, assignment, value=None):
             if row['id'] not in reachable:
                 continue
             try:
-                evidence[row['id']] = _evidence(repository, row)
+                evidence[row['id']] = _evidence(repository, row, value)
             except Exception as diagnostic_error:
                 logger.debug('states failure handled: %s', type(diagnostic_error).__name__)
                 evidence[row['id']] = ('unknown', 'evidence_unavailable', None, None)

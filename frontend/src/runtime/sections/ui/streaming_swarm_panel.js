@@ -10,6 +10,7 @@
    Contents:
      _SW_SVG, _SW_FILE_WRITE_TOOLS,
      _swAgentModifiedCount, _SW_STATUS_SVG, _SW_STALE_MS, _swStatusIcon,
+     _swElapsedText, _swTokenText,
      _swarmResultsByAgent, _recoverSwarmAgents, _buildSwarmPanelHTML,
      _swarmRoundTaskId, _settleStuckSwarmRound,
      _reconcileStuckSwarmPanelsOnce, _tickSwarmTimers (+ typed scheduler).
@@ -22,9 +23,8 @@
 const _SW_SVG = {
   /* hub-and-spoke: one parent forking into parallel agents */
   hub: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.1"/><circle cx="5" cy="19" r="2.1"/><circle cx="19" cy="19" r="2.1"/><path d="M12 7.1v3.4M12 10.5L6 16.9M12 10.5l6 6.4"/></svg>',
-  hubSm: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.4"/><circle cx="5" cy="19" r="2.4"/><circle cx="19" cy="19" r="2.4"/><path d="M12 7.4v3M12 10.4L6 16.6M12 10.4l6 6.2"/></svg>',
-  /* tiny tool glyph (wrench) — fallback when a sub-agent tool has no icon */
-  tool: '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.2 5.2L3 18v3h3l6.5-6.5a4 4 0 0 0 5.2-5.2l-2.5 2.5-2.3-.6-.6-2.3z"/></svg>',
+  /* speech bubble — a message delivered into an agent's input */
+  message: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
   /* pencil — marks an agent that modified files on disk */
   pencil: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
   chevron: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
@@ -68,6 +68,15 @@ function _swStatusIcon(status) {
   if (status === 'failed' || status === 'error') return _SW_STATUS_SVG.failed;
   if (status === 'running' || status === 'thinking') return _SW_STATUS_SVG.running;
   return _SW_STATUS_SVG.pending;
+}
+/* One clock format for the run header, live agent rows and the 1Hz ticker. */
+function _swElapsedText(seconds) {
+  const sec = Math.max(0, seconds);
+  return sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${sec}s`;
+}
+function _swTokenText(tokens) {
+  return tokens >= 1000000 ? (tokens / 1000000).toFixed(1) + "m"
+    : tokens > 1000 ? (tokens / 1000).toFixed(1) + "k" : String(tokens);
 }
 
 /* After a page reload the live-only `_swarmAgents` array is gone (it is
@@ -232,6 +241,8 @@ function _recoverSwarmAgents(round, allRounds) {
         preview: a.preview || "",
         elapsed: (a.elapsed === 0 || a.elapsed) ? a.elapsed : "",
         tokens: (a.tokens === 0 || a.tokens) ? a.tokens : "",
+        /* Model rounds run so far; the background-agent row shows the count. */
+        round: a.round,
         modifiedFiles: typeof a.modifiedFiles === "number" ? a.modifiedFiles : 0,
         error: swarmFailureReason(a.error),
         failure: a.failure || a.error,
@@ -410,9 +421,7 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
   /* ── Elapsed timer ── */
   let elapsed = "";
   if (round._swarmStartTime && !isStale) {
-    const ms = (round._swarmEndTime || Date.now()) - round._swarmStartTime;
-    const sec = Math.floor(ms / 1000);
-    elapsed = sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${sec}s`;
+    elapsed = _swElapsedText(Math.floor(((round._swarmEndTime || Date.now()) - round._swarmStartTime) / 1000));
   }
   /* When the panel is still active, expose the start timestamp so a
    * 1Hz ticker can update the elapsed text in place without going
@@ -431,12 +440,9 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
     _swDemandReconciliation(_SW_RECONCILE_INTERVAL_MS);
   }
 
-  /* ── Header icon ── */
-  const headerIcon = isActive
-    ? `<span class="sw-header-icon" style="animation:swarmIconBounce 1.2s ease-in-out infinite">${_SW_SVG.hub}</span>`
-    : `<span class="sw-header-icon">${_SW_SVG.hub}</span>`;
-
-  /* ── Header subtitle counts ── */
+  /* ── Header counts: the run's only quantitative summary (zero buckets
+     omitted). The verdict chip and completion bar carry the rest, so no
+     other line restates progress, totals or elapsed time. ── */
   let headerSubtitle = "";
   if (total > 0) {
     const parts = [];
@@ -450,68 +456,77 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
     if (pending > 0 && isActive) parts.push(escapeHtml(t('bgActivity.summaryWaiting', { count: pending })));
     if (unknown > 0) parts.push(escapeHtml(t('swarm.summary.unknown', { count: unknown })));
     headerSubtitle = `<span class="sw-header-subtitle">${parts.join(" · ")}</span>`;
-  } else if (isActive) {
-    headerSubtitle = `<span class="sw-header-subtitle">Planning…</span>`;
   }
 
-  /* Async outranks Complete while background agents remain unresolved. */
+  /* ── Verdict: ONE chip for the whole run, as [tone, label, tooltip]. The
+     tone also tints the header glyph (data-sw-tone). Async outranks Complete
+     while background agents remain unresolved. ── */
   const stillRunningAsync = !isStale && !!round._asyncRunning && (running > 0 || pending > 0);
-  let statusPill;
+  let verdict;
   if (launchFailure) {
-    statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} ${escapeHtml(t('swarm.launchFailed'))}</span>`;
+    verdict = ["error", t('swarm.launchFailed')];
   } else if (failed > 0 && running === 0 && pending === 0 && finished === total) {
-    statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} ${escapeHtml(t(done === 0 ? 'swarm.phase.failed' : 'swarm.failure.mixed'))}</span>`;
+    verdict = ["error", t(done === 0 ? 'swarm.phase.failed' : 'swarm.failure.mixed')];
   } else if (interrupted > 0 && running === 0 && pending === 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-stale" title="${escapeHtml(t('swarm.restart.continueHint'))}">${_SW_STATUS_SVG.stale} ${escapeHtml(t('swarm.phase.interrupted'))}</span>`;
+    verdict = ["stale", t('swarm.phase.interrupted'), t('swarm.restart.continueHint')];
   } else if (isStale) {
-    statusPill = `<span class="sw-status-pill sw-pill-stale" title="This swarm panel never received its completion signal (likely a server restart or dropped connection). It will reconcile automatically when the server is reachable.">${_SW_STATUS_SVG.stale} Stale</span>`;
+    verdict = ["stale", t('swarm.status.stale'), t('swarm.status.staleHint')];
   } else if (total === 0 && isActive) {
-    statusPill = `<span class="sw-status-pill sw-pill-planning"><span class="sw-spinner" style="width:10px;height:10px;border-width:1.5px"></span>Planning</span>`;
+    verdict = ["planning", t('swarm.status.planning')];
   } else if (isActive && running === 0 && pending > 0 && unknown === 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-queued">${_SW_STATUS_SVG.pending} ${escapeHtml(t('swarm.phase.queued'))}</span>`;
+    verdict = ["queued", t('swarm.phase.queued')];
   } else if (isActive && running === 0 && unknown > 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-stale">${_SW_STATUS_SVG.stale} Unconfirmed</span>`;
+    verdict = ["stale", t('swarm.status.unconfirmed')];
   } else if (isActive) {
-    statusPill = `<span class="sw-status-pill sw-pill-running"><span class="sw-spinner" style="width:10px;height:10px;border-width:1.5px"></span>${escapeHtml(t('swarm.phase.running'))}</span>`;
+    verdict = ["running", t('swarm.phase.running')];
   } else if (stillRunningAsync) {
-    const n = running + pending;
-    statusPill = `<span class="sw-status-pill sw-pill-async" title="Sub-agents are still working in the background — updates arrive automatically as the conversation continues."><span class="sw-async-dot"></span>${n} running async</span>`;
+    verdict = ["async", t('swarm.status.background', { count: running + pending }), t('swarm.status.backgroundHint')];
   } else if (round._swarmError) {
     /* Explicit driver failure outranks inferred agent counts. */
-    statusPill = `<span class="sw-status-pill sw-pill-error" title="${escapeHtml(round._swarmError)}">${_SW_STATUS_SVG.failed} Failed</span>`;
+    verdict = ["error", t('swarm.phase.failed'), round._swarmError];
   } else if (aborted > 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} ${aborted === total ? "Aborted" : "Finished with interruptions"}</span>`;
+    verdict = ["error", t(aborted === total ? 'swarm.phase.aborted' : 'swarm.status.partlyCancelled')];
   } else if (stalled > 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-stale">${_SW_STATUS_SVG.stale} Stalled</span>`;
-  } else if (failed > 0 && done === 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} Failed</span>`;
+    verdict = ["stale", t('swarm.phase.stalled')];
   } else if (failed > 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} Completed with errors</span>`;
+    verdict = ["error", t(done === 0 ? 'swarm.phase.failed' : 'swarm.failure.mixed')];
   } else if (finished < total || (total === 0 && !round._swarmSnapshot?.settled)) {
     /* No terminal agent or settled snapshot is never Complete. Deliberately
        ignore `_swarmEndTime`: reconciliation freezes it even when truth for
        every agent remains unknown. */
     _swScheduleUnconfirmedProbe(round);
-    statusPill = `<span class="sw-status-pill sw-pill-stale" title="This panel was reloaded while its agents were still working and lost its live connection; no agent has reported a final result yet. It will reconcile automatically when the server is reachable.">${_SW_STATUS_SVG.stale} Unconfirmed</span>`;
+    verdict = ["stale", t('swarm.status.unconfirmed'), t('swarm.status.unconfirmedHint')];
   } else {
-    statusPill = `<span class="sw-status-pill sw-pill-done">${_SW_STATUS_SVG.done} Complete</span>`;
+    verdict = ["done", t('swarm.phase.complete')];
   }
+  const [tone, verdictLabel, verdictHint] = verdict;
+  const verdictGlyph = (tone === "running" || tone === "planning") ? '<span class="sw-spinner"></span>'
+    : tone === "async" ? '<span class="sw-async-dot"></span>'
+    : tone === "done" ? _SW_STATUS_SVG.done
+    : tone === "error" ? _SW_STATUS_SVG.failed
+    : tone === "queued" ? _SW_STATUS_SVG.pending
+    : _SW_STATUS_SVG.stale;
+  const statusPill = `<span class="sw-status-pill sw-pill-${tone}"`
+    + (verdictHint ? ` title="${escapeHtml(verdictHint)}"` : "")
+    + `>${verdictGlyph} ${escapeHtml(verdictLabel)}</span>`;
 
-  /* ── Progress bar (only when agents exist) ── */
+  /* ── Completion bar (only when agents exist) ── */
   let progressBar = "";
   if (total > 0) {
-    const pctDone = Math.round((done / total) * 100);
-    const pctFailed = Math.round(((failed + aborted) / total) * 100);
-    const pctRunning = Math.round((running / total) * 100);
-    const fillStyle = (failed > 0 && done > 0) ? ` style="--ok-pct:${pctDone}%"` : "";
-    const fillClass = failed > 0 && done > 0 ? " has-errors" : "";
-    progressBar = `<div class="sw-progress">` +
+    /* Completion matches the label, not admission: running and unresolved
+       agents contribute no fill. Do not round unfinished rosters to 100%.
+       The success color occupies its fraction of the finished portion.
+       The header counts are the visible summary; the bar names its exact
+       fraction to assistive technology instead of repeating it in text. */
+    const hasErrors = failed + aborted > 0;
+    const fillClass = hasErrors ? " has-errors" : "";
+    const fillStyle = `width:${(finished / total) * 100}%;` +
+      (hasErrors ? `--ok-pct:${(done / finished) * 100}%;` : "");
+    const progressLabel = escapeHtml(t('swarm.summary.finished', { finished, total }));
+    progressBar = `<div class="sw-progress" role="progressbar" aria-valuemin="0"` +
+      ` aria-valuemax="${total}" aria-valuenow="${finished}" aria-label="${progressLabel}">` +
       `<div class="sw-progress-track">` +
-        `<div class="sw-progress-fill${fillClass}" style="width:${pctDone + pctFailed + pctRunning}%"${fillStyle}></div>` +
-      `</div>` +
-      `<div class="sw-progress-label">` +
-        `<span>${finished}/${total} agents finished</span>` +
-        (elapsed ? `<span>${elapsed}</span>` : "") +
+        `<div class="sw-progress-fill${fillClass}" style="${fillStyle}"></div>` +
       `</div>` +
     `</div>`;
   }
@@ -523,7 +538,6 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
       const sIcon = _swStatusIcon(a.status);
       const taskNum = `#${i + 1}`;
       const objective = escapeHtml(a.objective || "");
-      const phase = a.phase || a.status || "";
       /* FULL answer — the panel is a debugging surface, so the sub-agent's
          result is never clipped. The durable snapshot carries the complete
          text and CSS owns the visual bounding (scroll), not a JS slice. */
@@ -542,7 +556,7 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
          parent default), resolved server-side and sent on spawn / start /
          complete events. */
       const modelChip = a.model
-        ? `<span class="sw-a-model" title="Model: ${escapeHtml(a.model)}">${escapeHtml(a.model)}</span>`
+        ? `<span class="sw-a-model" title="${escapeHtml(a.model)}">${escapeHtml(a.model)}</span>`
         : "";
 
       /* ── Status class ── */
@@ -554,96 +568,69 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
       else if (a.status === "running" || a.status === "thinking") sClass = "sw-a-running";
       else sClass = "sw-a-pending";
 
-      /* ── Phase pill label ── */
-      const phaseMap = {
-        thinking: t("swarm.phase.thinking"), tool_use: t("swarm.phase.tool_use"), writing: t("swarm.phase.writing"),
-        searching: t("swarm.phase.searching"), coding: t("swarm.phase.coding"), analyzing: t("swarm.phase.analyzing"),
-        done: t("swarm.phase.complete"), completed: t("swarm.phase.complete"), failed: t("swarm.phase.failed"), error: t("swarm.phase.error"),
-        pending: t("swarm.phase.queued"), running: t("swarm.phase.running"), waiting: t("swarm.phase.queued"), queued: t("swarm.phase.queued"),
-        retrying: t("swarm.phase.retrying"),
-        stalled: t("swarm.phase.stalled"),
-        unknown: t("swarm.phase.noResult"),
-        aborted: t('swarm.phase.aborted'), cancelled: t('swarm.phase.aborted'), canceled: t('swarm.phase.aborted'),
-      };
-      /* Status wins for a terminated agent: if status is done/failed but the
-         phase got stranded at a spawn-time value (e.g. "waiting" because the
-         per-agent events were routed to another panel), show the terminal
-         label rather than a contradictory "waiting"/"Queued" pill next to a
-         done checkmark (status/phase desync). */
-      let phaseLabel;
-      if (a.status === "done" || a.status === "completed") phaseLabel = t("swarm.phase.complete");
-      else if (a.status === "failed" || a.status === "error") phaseLabel = t("swarm.phase.failed");
-      else if (a.status === 'interrupted') phaseLabel = t('swarm.phase.interrupted');
-      else if (['aborted', 'cancelled', 'canceled'].includes(a.status)) phaseLabel = t('swarm.phase.aborted');
-      else if (a.status === "stalled") {
-        /* Verdict, not mystery: the backend judged this agent silent (see
-           master._stalled_agents). Show the measured silence so the card
-           answers "why" — the 无结果 bucket is for never-produced only. */
-        const sil = Number(a.stallSilentSeconds);
-        phaseLabel = Number.isFinite(sil) && sil > 0
-          ? t("swarm.phase.stalledSilent", { seconds: Math.round(sil) })
-          : t("swarm.phase.stalled");
-      }
-      else phaseLabel = swarmAgentWaitLabel(a, key => t(key)) || phaseMap[phase] || phase || t("swarm.phase.noResult");
+      /* ── Phase pill: one word per state, whichever event vocabulary
+         delivered it (policy in swarm-agent-presentation.ts). ── */
+      const phaseLabel = swarmAgentPhaseLabel(a, (key, _fallback, args) => t(key, args));
 
       /* ── Agent elapsed ── */
       let agentTimer = "";
       const aRunning = a.status === "running" || a.status === "thinking";
       if (aRunning && a._startedAt) {
         // Live-ticking timer driven by the 1Hz updater (data-sw-start).
-        const sec = Math.max(0, Math.floor((Date.now() - a._startedAt) / 1000));
-        const txt = sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${sec}s`;
+        const txt = _swElapsedText(Math.floor((Date.now() - a._startedAt) / 1000));
         agentTimer = `<span class="sw-a-timer" data-sw-start="${a._startedAt}">${txt}</span>`;
-      } else if (a.elapsed) {
-        agentTimer = `<span class="sw-a-timer">${a.elapsed}s</span>`;
+      } else if (Number(a.elapsed) > 0) {
+        agentTimer = `<span class="sw-a-timer">${_swElapsedText(Math.round(Number(a.elapsed)))}</span>`;
       }
 
-      /* ── Agent body: objective + tools + preview ── */
+      /* ── Agent body, in reading order: brief → work → result ── */
       let bodyContent = "";
 
-      // Objective — always show prominently
+      /* The brief stays one quiet line (its opening sentence) until the
+         reader opens it; the full instructions are never clipped. */
       if (objective) {
-        bodyContent += `<details class="sw-a-task"><summary>${escapeHtml(t('swarm.taskInstructions'))}</summary><div class="sw-a-objective">${objective}</div></details>`;
+        const brief = escapeHtml(swarmAgentBrief(a.objective));
+        bodyContent += `<details class="sw-a-task"><summary>` +
+          `<span class="sw-a-task-label">${escapeHtml(t('swarm.taskInstructions'))}</span>` +
+          `<span class="sw-a-task-brief">${brief}</span></summary>` +
+          `<div class="sw-a-objective">${objective}</div></details>`;
       }
 
-      // Dependency chain
+      /* Prerequisites use the same #N ordinals as the agent rows. */
       if (a.dependsOn && a.dependsOn.length > 0) {
         const depHTML = a.dependsOn.map(depId => {
-          const depAgent = agents.find(x => x.id === depId);
-          const depLabel = depAgent ? `Task ${agents.indexOf(depAgent) + 1}` : depId;
+          const depIndex = agents.findIndex(x => x.id === depId);
+          const depAgent = agents[depIndex];
+          const depLabel = depAgent ? `#${depIndex + 1}` : depId;
           const depDone = depAgent && (depAgent.status === "done" || depAgent.status === "completed");
-          return `<span class="sw-dep-tag ${depDone ? 'sw-dep-done' : ''}">${depDone ? _SW_STATUS_SVG.done + ' ' : ''}${escapeHtml(depLabel)}</span>`;
+          return `<span class="sw-dep-tag${depDone ? ' sw-dep-done' : ''}">${depDone ? _SW_STATUS_SVG.done + ' ' : ''}${escapeHtml(depLabel)}</span>`;
         }).join("");
-        bodyContent += `<div class="sw-a-deps"><span class="sw-a-deps-label">Waits for:</span>${depHTML}</div>`;
+        bodyContent += `<div class="sw-a-deps"><span class="sw-a-deps-label">${escapeHtml(t('swarm.dependsOn'))}</span>${depHTML}</div>`;
       }
 
-      // Tools used — compact inline
-      if (a.tools && a.tools.length > 0) {
-        const toolHTML = a.tools.slice(-6).map(t => {
-          const td = _TOOL_DISPLAY[t];
-          const icon = (td && td.icon) ? td.icon : _SW_SVG.tool;
-          const label = td ? (td.label || t) : t;
-          return `<span class="sw-a-tool-tag" title="${escapeHtml(t)}">${icon} ${label}</span>`;
+      /* Per-call timeline in the parent tool panel's glyph language: one
+         tool glyph per row, tinted by the call's state. Earlier calls fold
+         above the latest one, so the body reads chronologically. */
+      const projectedCalls = projectAgentTimeline(a, t);
+      const timelineCalls = projectedCalls.filter(call => call.entryKind !== 'message_receipt');
+      const messageCalls = projectedCalls.filter(call => call.entryKind === 'message_receipt');
+      const omittedToolCalls = Number(a._toolCallsOmitted || 0);
+
+      /* Tool names alone are evidence only when no per-call record exists. */
+      if (timelineCalls.length === 0 && omittedToolCalls === 0 && a.tools && a.tools.length > 0) {
+        const toolHTML = a.tools.slice(-6).map(name => {
+          const td = _TOOL_DISPLAY[name];
+          const label = td ? (td.label || name) : name;
+          return `<span class="sw-a-tool-tag" title="${escapeHtml(name)}">${toolRoundSvg({ toolName: name })}${escapeHtml(label)}</span>`;
         }).join("");
         const more = a.tools.length > 6 ? `<span class="sw-a-tool-tag">+${a.tools.length - 6}</span>` : "";
         bodyContent += `<div class="sw-a-tools">${toolHTML}${more}</div>`;
       }
 
-      // Per-tool-call execution timeline — same look as ptool-panel rows.
-      // Each row has a status dot, tool name, args brief, and elapsed.
-      // Click a row to expand its preview/error.
-      const projectedCalls = projectAgentTimeline(a, t);
-      const timelineCalls = projectedCalls.filter(call => call.entryKind !== 'message_receipt');
-      const messageCalls = projectedCalls.filter(call => call.entryKind === 'message_receipt');
-      const omittedToolCalls = Number(a._toolCallsOmitted || 0);
       if (timelineCalls.length > 0 || messageCalls.length > 0 || omittedToolCalls > 0) {
         const renderCall = (c, index) => {
-          const dot = c.entryKind === 'message_receipt' ? '<span class="sw-tl-dot"></span>'
-                    : c.status === "running" ? '<span class="sw-tl-dot sw-tl-running"></span>'
-                    : c.status === "failed"  ? `<span class="sw-tl-dot sw-tl-failed">${_SW_STATUS_SVG.failed}</span>`
-                    :                          `<span class="sw-tl-dot sw-tl-done">${_SW_STATUS_SVG.done}</span>`;
-          const td = _TOOL_DISPLAY[c.toolName];
-          const icon = (td && td.icon) ? td.icon : _SW_SVG.tool;
+          const glyph = c.entryKind === 'message_receipt'
+            ? _SW_SVG.message : toolRoundSvg({ toolName: c.toolName });
           const elapsedStr = (typeof c.elapsed === "number") ? `${c.elapsed.toFixed(1)}s` : "";
           const detailIsError = !!c.error || !!c.errorTruncated
             || Number(c.errorFullChars || 0) > 0;
@@ -663,8 +650,7 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
           const lineTag = toggle ? 'summary' : 'div';
           const row = `<${rowTag} class="sw-tl-row sw-tl-${escapeHtml(c.entryKind === 'message_receipt' ? 'receipt' : c.status || 'unknown')}${toggle ? ' sw-tl-expandable' : ''}" data-call-id="${escapeHtml(c.callId || '')}">` +
               `<${lineTag} class="sw-tl-line">` +
-                dot +
-                `<span class="sw-tl-icon">${icon}</span>` +
+                `<span class="sw-tl-icon">${glyph}</span>` +
                 `<span class="sw-tl-name">${escapeHtml(c.toolName || "?")}</span>` +
                 (c.argsBrief ? `<span class="sw-tl-args" title="${escapeHtml(c.argsBrief)}">${escapeHtml(c.argsBrief)}</span>` : "") +
                 (elapsedStr ? `<span class="sw-tl-elapsed">${elapsedStr}</span>` : "") +
@@ -684,8 +670,8 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
           : "";
         const latestHTML = rowsHTML.pop() || '';
         const historyHTML = rowsHTML.length || omittedToolCalls > 0
-          ? `<details class="sw-a-tool-history"><summary>${escapeHtml(t('swarm.recentTools', { count: rowsHTML.length }))}</summary>${omittedHTML}${rowsHTML.join('')}</details>` : '';
-        bodyContent += `<div class="sw-a-timeline">${latestHTML}${historyHTML}${messageHTML}</div>`;
+          ? `<details class="sw-a-tool-history"><summary>${escapeHtml(t('swarm.recentTools', { count: rowsHTML.length + omittedToolCalls }))}</summary>${omittedHTML}${rowsHTML.join('')}</details>` : '';
+        bodyContent += `<div class="sw-a-timeline">${historyHTML}${latestHTML}${messageHTML}</div>`;
       } else if (aRunning) {
         bodyContent += `<div class="sw-a-activity-empty">${escapeHtml(t('swarm.awaitingTools'))}</div>`;
       }
@@ -709,12 +695,9 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
         }
       }
 
-      // Meta line
-      if (a.tokens || a.elapsed) {
-        const metaParts = [];
-        if (a.elapsed) metaParts.push(`${a.elapsed}s`);
-        if (a.tokens) metaParts.push(`${a.tokens >= 1000000 ? (a.tokens/1000000).toFixed(1) + "m" : a.tokens > 1000 ? (a.tokens/1000).toFixed(1) + "k" : a.tokens} tok`);
-        bodyContent += `<div class="sw-a-meta">${metaParts.join(' · ')}</div>`;
+      /* Elapsed already sits on the agent row; only usage remains. */
+      if (a.tokens) {
+        bodyContent += `<div class="sw-a-meta">${_swTokenText(a.tokens)} tok</div>`;
       }
 
       /* Auto-open running agents, collapse done ones */
@@ -724,17 +707,16 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
          closer review, so mark them with a pencil pill + the edit count. */
       const editCount = _swAgentModifiedCount(a);
       const editPill = editCount > 0
-        ? `<span class="sw-a-edited" title="This agent modified ${editCount} file action(s) — review its changes">${_SW_SVG.pencil}${editCount}</span>`
+        ? `<span class="sw-a-edited" title="${escapeHtml(t('swarm.editedFiles', { count: editCount }))}">${_SW_SVG.pencil}${editCount}</span>`
         : "";
-      const editedClass = editCount > 0 ? " sw-a-has-edits" : "";
 
-      return `<div class="sw-agent ${sClass}${autoOpen}${editedClass}" data-agent-id="${escapeHtml(a.id || '')}" data-sw-agent-status="${escapeHtml(a.status || '')}">` +
+      return `<div class="sw-agent ${sClass}${autoOpen}" data-agent-id="${escapeHtml(a.id || '')}" data-sw-agent-status="${escapeHtml(a.status || '')}">` +
         `<div class="sw-a-header" data-tofu-action="_swarmToggleClass(this,'.sw-agent','sw-a-open')">` +
           `<span class="sw-a-status-icon">${sIcon}</span>` +
           `<span class="sw-a-num">${taskNum}</span>` +
-          `<span class="sw-a-role-tag" title="role">${roleLabel}</span>` +
-          idChip +
-          modelChip +
+          `<span class="sw-a-ident"><span class="sw-a-role-tag">${roleLabel}</span>` +
+            ((idChip || modelChip) ? `<span class="sw-a-ids">${idChip}${modelChip}</span>` : "") +
+          `</span>` +
           editPill +
           `<span class="sw-a-phase-pill">${escapeHtml(phaseLabel)}</span>` +
           agentTimer +
@@ -757,33 +739,31 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
       ? `<div class="sw-agent-grid"><div class="sw-a-err" role="note"><div class="sw-a-err-title">${escapeHtml(t('swarm.launchFailed'))}</div><div>${escapeHtml(t('swarm.launchFailedHint'))}</div><details class="sw-a-err-details"><summary>${escapeHtml(t('swarm.failure.details'))}</summary><pre class="sw-a-err-reason">${escapeHtml(launchFailure)}</pre></details></div></div>`
       : `<div class="sw-agent-grid"><div class="sw-empty">${escapeHtml(t("swarm.panelEmpty"))}</div></div>`;
   }
-  /* ── Stats footer ── */
+  /* ── Usage footer: run totals only (count and elapsed live in the header) ── */
   let statsFooter = "";
-  const footerParts = [];
-  if (total > 0) footerParts.push(`${_SW_SVG.hubSm} ${total} parallel task${total > 1 ? "s" : ""}`);
-  if (round._swarmStats) {
-    const s = round._swarmStats;
-    if (s.totalTokens) footerParts.push(`${s.totalTokens >= 1000000 ? (s.totalTokens/1000000).toFixed(1) + "m" : s.totalTokens > 1000 ? (s.totalTokens/1000).toFixed(1) + "k" : s.totalTokens} tokens`);
-    if (s.totalCostUsd) footerParts.push(`$${s.totalCostUsd.toFixed(4)}`);
-  }
-  if (elapsed) footerParts.push(`${elapsed}`);
-  if (footerParts.length > 0) {
+  const stats = round._swarmStats;
+  if (stats && (stats.totalTokens || stats.totalCostUsd)) {
+    const footerParts = [];
+    if (stats.totalTokens) footerParts.push(`${_swTokenText(stats.totalTokens)} tok`);
+    if (stats.totalCostUsd) footerParts.push(`$${stats.totalCostUsd.toFixed(4)}`);
     statsFooter = `<div class="sw-footer">${footerParts.join('<span class="sw-footer-sep">·</span>')}</div>`;
   }
 
-  return `<div class="sw-panel${isActive ? ' sw-active' : ' sw-complete'}">` +
+  return `<div class="sw-panel${isActive ? ' sw-active' : ' sw-complete'}" data-sw-tone="${tone}">` +
     `<div class="sw-header" data-tofu-action="_swarmToggleClass(this,'.sw-panel','sw-collapsed')">` +
       `<div class="sw-header-left">` +
-        headerIcon +
+        `<span class="sw-header-icon" aria-hidden="true">${_SW_SVG.hub}</span>` +
         `<div class="sw-header-info">` +
-          `<span class="sw-header-title">Parallel Execution</span>` +
+          `<span class="sw-header-title">${escapeHtml(t('swarm.title'))}</span>` +
           headerSubtitle +
         `</div>` +
       `</div>` +
       `<div class="sw-header-right">` +
+        /* The debug anchor leads the cluster: it is hover-only chrome in the
+           reading surface, so at rest it must not hold a gap before the caret. */
+        (inspectorAnchorHtml || "") +
         statusPill +
         (elapsed ? `<span class="sw-header-timer"${tickerAttr}>${elapsed}</span>` : "") +
-        (inspectorAnchorHtml || "") +
         `<span class="sw-chevron">${_SW_SVG.chevron}</span>` +
       `</div>` +
     `</div>` +
@@ -1232,8 +1212,7 @@ function _tickSwarmTimers() {
     if (!start) continue;
     /* Freeze zombie elapsed text at the same offline-staleness boundary. */
     if (now - start > _SW_STALE_MS) continue;
-    const sec = Math.max(0, Math.floor((now - start) / 1000));
-    const txt = sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${sec}s`;
+    const txt = _swElapsedText(Math.floor((now - start) / 1000));
     if (el.textContent !== txt) el.textContent = txt;
   }
 }

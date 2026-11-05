@@ -46,6 +46,31 @@ it.each([1, 32])('bounds transcript parsing/copying independently of %i receipts
     round._agentMessageReceipt.state === 'input_confirmed')).toBe(true);
 });
 
+it('shares every round and segment that presentation never writes', () => {
+  const state = receiptPressureState(4);
+  const reply = (id: string) => ({ turnId: id, actor: 'assistant', projectionRevision: 1, updatedAt: 1,
+    projection: { content: 'answer', segments: [{ type: 'thinking', blockId: `${id}-t`, text: 'x'.repeat(4096),
+      signature: 's'.repeat(8192) }], toolRounds: Array.from({ length: 50 }, (_, i) => ({
+      toolName: 'read_files', toolCallId: `${id}-${i}`, thinking: 'z'.repeat(4096),
+      toolContent: `file ${i}` })) } });
+  state.turnsById.plain = reply('plain');
+  state.laneOrder.main.push('plain');
+  const before = structuredClone(state);
+  const clone = vi.spyOn(globalThis, 'structuredClone');
+  const [plain, sender, launch] = swarmPresentationOverlay.selectCandidates('pressure', state, () => null);
+  const durable = state.turnsById;
+  // Plain history is read through, not copied: no clone, same round/segment identities.
+  expect(plain.projection.segments![0]).toBe(durable.plain.projection.segments[0]);
+  expect(plain.projection.toolRounds!.every((round, i) => round === durable.plain.projection.toolRounds[i])).toBe(true);
+  expect(launch.projection.toolRounds!.slice(1).every((round, i) =>
+    round === durable.launch.projection.toolRounds[i + 1])).toBe(true);
+  // Written rounds are private copies, at most one clone batch per Turn.
+  expect(launch.projection.toolRounds![0]).not.toBe(durable.launch.projection.toolRounds[0]);
+  expect(sender.projection.toolRounds!.every((round: any) => round._agentMessageReceipt)).toBe(true);
+  expect(clone.mock.calls.length).toBeLessThanOrEqual(2);
+  expect(state).toEqual(before);
+});
+
 it('applies mirrored receipts once instead of replaying their copies as new work', () => {
   const state = receiptPressureState(32);
   const projection = state.turnsById.sender.projection;

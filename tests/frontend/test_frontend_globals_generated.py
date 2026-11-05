@@ -86,7 +86,7 @@ def test_runtime_bridge_does_not_degrade_to_any_or_blanket_globals():
 def test_frontend_gate_runs_module_typecheck():
     package = json.loads(PACKAGE.read_text(encoding='utf-8'))
     scripts = package.get('scripts', {})
-    assert 'tsc -p tsconfig.vite.json --noEmit' in scripts.get('typecheck:modules', '')
+    assert scripts.get('typecheck:modules') == 'npm run typecheck'
     assert 'typecheck:modules' in scripts.get('check:frontend', ''), (
         'the frontend release gate must exercise the typed Vite module graph'
     )

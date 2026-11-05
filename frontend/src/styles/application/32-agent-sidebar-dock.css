@@ -5,31 +5,66 @@
 /* The existing rail extends beyond its short input host into the reply gutter.
  * Lift that host above later reply hit boxes, below all popup/overlay layers. */
 .conversation-turn.user-msg:has(> .turn-ctx .agent-dock:not([hidden])){z-index:var(--z-turn-context)}
-.agent-dock{min-width:0;margin-top:var(--space-2);padding-top:var(--space-2);border-top:var(--control-edge-inset) solid var(--border);color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui);font-weight:var(--weight-medium)}
+.agent-dock{min-width:0;margin-top:var(--space-2);padding-top:var(--space-2);border-top:var(--control-edge-inset) solid var(--border);color:var(--tctx-ink-soft);font:var(--font-size-sm)/1.45 var(--font-ui);font-weight:var(--weight-regular)}
+/* Inside the rail the dock is one more section: the rail's section gap
+ * separates it, and its heading speaks the rail's section-label voice. */
+.turn-ctx .agent-dock{margin-top:0;padding-top:0;border-top:0}
 .agent-dock[hidden],.agent-dock-history[hidden]{display:none}
-.agent-dock header{margin-bottom:var(--space-2)}
+.agent-dock header{margin-bottom:var(--tctx-stack-gap)}
 .agent-dock-heading{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-1) var(--space-2)}
-.agent-dock header strong{font-size:inherit;font-weight:var(--weight-medium);color:var(--text-tertiary)}
-.agent-dock-counts{color:var(--text-secondary);overflow-wrap:anywhere}
-.agent-dock-active,.agent-dock-history>div{display:flex;flex-direction:column;gap:var(--space-1)}
+.agent-dock header strong{font-size:var(--font-size-xs);font-weight:var(--weight-semibold);letter-spacing:.05em;text-transform:uppercase;color:var(--tctx-ink-faint)}
+.agent-dock-counts{color:var(--tctx-ink-soft);font-size:var(--font-size-xs);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+
+/* ── One row per agent: state glyph, what the agent does (two lines at most),
+ * then its state word, round count and quiet ID. The glyph carries state ink; the purpose
+ * of a live agent reads in primary ink like the checklist's live edge. The
+ * caret appears on hover/focus, and stays while the row is open. ── */
+.agent-dock-active,.agent-dock-history>div{display:flex;flex-direction:column;gap:var(--control-edge-inset)}
 .agent-dock-agent{min-width:0}
-.agent-dock-agent>summary{display:grid;grid-template-columns:var(--space-3) minmax(0,1fr);column-gap:var(--space-1);padding:var(--space-1) 0;cursor:pointer;list-style:none}
+.agent-dock-agent>summary{display:grid;grid-template-columns:var(--space-3) minmax(0,1fr) var(--space-2);grid-template-areas:"glyph purpose caret" ". meta caret";column-gap:var(--space-2);align-items:start;padding:var(--space-1);border-radius:var(--tctx-radius);cursor:pointer;list-style:none;transition:background var(--motion-fast) var(--ease-standard)}
 .agent-dock-agent>summary::-webkit-details-marker{display:none}
-.agent-dock-agent>summary::before{content:'›';grid-row:1 / span 2;color:var(--text-tertiary)}
-.agent-dock-agent[open]>summary::before{content:'⌄'}
-.agent-dock-agent>summary:focus-visible,.agent-dock-history>summary:focus-visible{outline:none;box-shadow:var(--focus-ring);border-radius:var(--radius-sm)}
-.agent-dock-name{min-width:0;overflow-wrap:anywhere;color:var(--text-secondary)}
-.agent-dock-status{grid-column:2;overflow-wrap:anywhere;color:var(--text-tertiary)}
-.agent-dock-agent[data-status="failed"] .agent-dock-status,.agent-dock-agent[data-status="error"] .agent-dock-status,.agent-dock-agent[data-status="interrupted"] .agent-dock-status,.agent-dock-agent[data-status="stalled"] .agent-dock-status{color:var(--error-text)}
-.agent-dock-detail{padding:var(--space-2) 0 var(--space-2) var(--space-3);overflow-wrap:anywhere;min-width:0}
+.agent-dock-agent>summary:hover{background:var(--tctx-fill)}
+.agent-dock-agent>summary::after{grid-area:caret;align-self:center;justify-self:center;width:var(--space-1);height:var(--space-1);border-inline-end:1.5px solid currentColor;border-block-end:1.5px solid currentColor;color:var(--tctx-ink-faint);content:'';opacity:0;transform:rotate(-45deg);transition:opacity var(--motion-fast) var(--ease-standard),transform var(--motion-fast) var(--ease-standard)}
+.agent-dock-agent>summary:is(:hover,:focus-visible)::after,.agent-dock-agent[open]>summary::after{opacity:1}
+.agent-dock-agent[open]>summary::after{transform:rotate(45deg)}
+@media (hover:none){.agent-dock-agent>summary::after{opacity:1}}
+
+.agent-dock-glyph{grid-area:glyph;display:inline-flex;align-items:center;justify-content:center;height:1.45em;color:var(--tctx-ink-faint)}
+.agent-dock-agent:is([data-tone="live"],[data-tone="queued"]) .agent-dock-glyph::before{box-sizing:border-box;width:7px;height:7px;border-radius:50%;content:''}
+.agent-dock-agent[data-tone="live"] .agent-dock-glyph{color:var(--tool-row-glyph-ink-live)}
+.agent-dock-agent[data-tone="live"] .agent-dock-glyph::before{background:currentColor;animation:agentPulse 1.5s ease-in-out infinite}
+.agent-dock-agent[data-tone="queued"] .agent-dock-glyph::before{border:1.5px solid currentColor}
+.agent-dock-agent[data-tone="ok"] .agent-dock-glyph{color:var(--tool-row-ok-ink)}
+.agent-dock-agent[data-tone="error"] .agent-dock-glyph{color:var(--error-text)}
+.agent-dock-agent[data-tone="attention"] .agent-dock-glyph{color:var(--tool-row-glyph-ink-attention)}
+@media (prefers-reduced-motion:reduce){.agent-dock-agent[data-tone="live"] .agent-dock-glyph::before{animation:none}}
+
+.agent-dock-purpose{grid-area:purpose;display:-webkit-box;min-width:0;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;color:var(--tctx-ink-soft);overflow-wrap:anywhere}
+.agent-dock-agent[data-tone="live"] .agent-dock-purpose,.agent-dock-agent>summary:hover .agent-dock-purpose{color:var(--tctx-ink)}
+.agent-dock-meta{grid-area:meta;display:flex;align-items:baseline;gap:var(--space-2);min-width:0;color:var(--tctx-ink-faint);font-size:var(--font-size-xs);white-space:nowrap}
+.agent-dock-status{flex:0 0 auto;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.agent-dock-rounds{flex:0 0 auto;font-variant-numeric:tabular-nums}
+.agent-dock-name{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;font-family:var(--font-mono)}
+.agent-dock-rounds[hidden],.agent-dock-name[hidden]{display:none}
+.agent-dock-agent[data-tone="error"] .agent-dock-status{color:var(--error-text)}
+.agent-dock-agent[data-tone="attention"] .agent-dock-status{color:var(--warning-text)}
+
+/* Opened execution detail hangs on the purpose column. */
+.agent-dock-agent>:not(summary){margin-inline-start:calc(var(--space-1) + var(--space-3) + var(--space-2))}
+.agent-dock-actions{display:flex;flex-wrap:wrap;gap:var(--space-1);margin-top:var(--space-1)}
+.agent-dock-detail{padding:var(--space-2) 0;overflow-wrap:anywhere;min-width:0}
 .agent-dock-detail .sw-a-body{display:block;padding:0;border:0}
-.agent-dock-evidence-note{font-size:inherit;color:var(--text-tertiary);margin:0 0 var(--space-2)}
 .agent-dock-detail pre{max-width:100%;overflow:auto}
 .agent-dock-history{margin-top:var(--space-2)}
-.agent-dock-history>summary{cursor:pointer;color:var(--text-tertiary);padding:var(--space-1) 0}
 
 .agent-dock-messages,.agent-dock-agent-messages{margin-top:var(--space-2);min-width:0}
 .agent-dock-messages[hidden],.agent-dock-agent-messages[hidden]{display:none}
-.agent-dock-messages>summary,.agent-dock-agent-messages>summary{cursor:pointer;padding-block:var(--space-1);color:var(--text-secondary);overflow-wrap:anywhere}
-.agent-dock-messages>summary:focus-visible,.agent-dock-agent-messages>summary:focus-visible{outline:var(--control-edge-inset) solid var(--focus-ring);outline-offset:var(--space-1)}
 .agent-dock-agent-messages .sw-messages>h4{display:none}
+
+/* Footer and message folds: quiet labels led by the same caret. */
+.agent-dock :is(.agent-dock-history,.agent-dock-messages,.agent-dock-agent-messages)>summary{display:flex;align-items:center;gap:var(--space-2);padding:var(--space-1);border-radius:var(--tctx-radius);color:var(--tctx-ink-faint);font-size:var(--font-size-xs);cursor:pointer;list-style:none;overflow-wrap:anywhere}
+.agent-dock :is(.agent-dock-history,.agent-dock-messages,.agent-dock-agent-messages)>summary::-webkit-details-marker{display:none}
+.agent-dock :is(.agent-dock-history,.agent-dock-messages,.agent-dock-agent-messages)>summary::before{flex:0 0 auto;width:var(--space-1);height:var(--space-1);border-inline-end:1.5px solid currentColor;border-block-end:1.5px solid currentColor;content:'';transform:rotate(-45deg);transition:transform var(--motion-fast) var(--ease-standard)}
+.agent-dock :is(.agent-dock-history,.agent-dock-messages,.agent-dock-agent-messages)[open]>summary::before{transform:rotate(45deg)}
+.agent-dock :is(.agent-dock-history,.agent-dock-messages,.agent-dock-agent-messages)>summary:hover{color:var(--tctx-ink-soft)}
+.agent-dock summary:focus-visible{outline:none;box-shadow:var(--focus-ring)}

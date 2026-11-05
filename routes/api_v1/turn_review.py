@@ -13,6 +13,7 @@ from lib.openapi import api_meta, schema_definition
 from lib.api_response import (api_ok, api_not_found, api_bad_request, api_conflict,
                               api_forbidden, api_payload_too_large)
 from lib.artifacts.core import ArtifactNotFoundError
+from lib.error_envelope import BadRequest
 from lib.turn_lifecycle import LifecycleNotFound
 from lib.request_parser import async_parse_body
 from .auth import request_principal, require_scope
@@ -61,5 +62,7 @@ async def update_turn_review_v1(conversation_id, turn_id):
         return api_conflict(str(exc))
     except PermissionError as exc:
         return api_forbidden(str(exc))
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        # Any other exception is a server fault for the global boundary: a
+        # logged, redacted 500, or the storage taxonomy for a StorageError.
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))

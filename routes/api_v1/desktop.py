@@ -23,7 +23,8 @@ from quart import Blueprint
 
 from lib.api_v4 import raw_success_response
 from lib.api_response import (
-    api_conflict, api_created, api_error, api_not_found, api_ok, api_payload,
+    api_bad_request, api_conflict, api_created, api_error, api_not_found, api_ok,
+    api_payload,
 )
 from lib.log import audit_log, get_logger
 from lib.logging_pkg.log_policy import stream_backup_count, stream_max_bytes
@@ -31,8 +32,9 @@ from lib.logging_pkg.log_record_values import text_value, sanitize_value
 from lib.logging_pkg.log_retention import append_bytes_locked, copytruncate_if_oversize
 from lib.openapi import media_responses, api_meta
 from lib.request_parser import BadRequest, async_parse_body, optional_str
+from lib.storage.errors import StorageError, is_transient_storage_error
 
-from .auth import require_auth
+from .auth import require_auth, require_scope
 
 logger = get_logger(__name__)
 
@@ -497,7 +499,8 @@ def _visitor_os() -> str:
     ),
     tags=['capabilities'],
 )
-async def desktop_status():
+def desktop_status():
+    """SYNC on purpose: artifact-store and credential reads block on I/O."""
     from quart import request
     from lib.desktop import (
         is_desktop_agent_connected,
@@ -625,9 +628,10 @@ def _build_attach_bundle(
     Local Control page, which pushes it to the unattached agent's loopback
     broker (``POST /api/v1/desktop/agent-attach-bundle`` below).
 
-    Returns ``(payload, '')`` or ``(None, 'credential_unavailable')``. A
-    device without a credential can never poll, so a package guaranteed to
-    fail must not leave this process.
+    Returns ``(payload, '')`` or ``(None, 'credential_unavailable')`` for a
+    transient credential-store outage; any other mint failure propagates to
+    the global boundary. A device without a credential can never poll, so a
+    package guaranteed to fail must not leave this process either way.
     """
     token = ''
     try:
@@ -639,6 +643,8 @@ def _build_attach_bundle(
         audit_log('desktop_agent_bundle_minted', key_id=row.get('id'),
                   owner_user_id=owner_user_id)
     except Exception as e:
+        if not is_transient_storage_error(e):
+            raise
         logger.warning('[Desktop] attach-bundle credential mint failed: %s', e)
         return None, 'credential_unavailable'
 
@@ -944,9 +950,9 @@ async def desktop_client_diag_list():
             if len(entries) >= _DIAG_LIST_LIMIT:
                 break
     except FileNotFoundError:
+        # Only absence is an empty inbox; any other read fault is a server
+        # error, never "nothing was pasted".
         logger.debug('[Desktop] client-diag file absent — nothing to list')
-    except OSError as e:
-        logger.warning('[Desktop] client-diag list failed: %s', e)
     return api_ok({'entries': entries})
 
 
@@ -996,6 +1002,72 @@ async def desktop_devices():
         'agents': _with_drift(list_agents(user_id=str(owner_user_id))),
         'tokens': tokens,
     })
+
+
+def _device_wait_failure(error: Exception):
+    from lib.storage import http_status_for_storage_error
+    if isinstance(error, StorageError):
+        return api_error(error, status=http_status_for_storage_error(error))
+    return api_bad_request(str(error))
+
+
+def _device_wait_parameters():
+    from lib.desktop.device_waits import query_parameters
+    return query_parameters('waitListQuery')
+
+
+@api_v1_desktop_bp.route('/api/v1/desktop/device-waits', methods=['GET'])
+@require_scope('conversations')
+@api_meta(
+    summary='Conversations waiting for one of the caller\'s devices to reconnect',
+    description=(
+        'Owner-scoped await_device registrations: the pending ones by device, '
+        'or with includeClosed=true every registration in registration order. '
+        'Shapes: contracts/device_waits_v1.schema.json (waitPage).'
+    ),
+    tags=['capabilities'], scope='conversations',
+    parameters=_device_wait_parameters(),
+)
+def desktop_device_waits():
+    """SYNC on purpose: owner-scoped record reads block on storage I/O."""
+    from quart import request
+    from lib.desktop.device_waits import DeviceWaits, validate
+    from .auth import request_principal
+    owner_user_id = request_principal().require_owner(context='device waits')
+    try:
+        query = {}
+        for name in request.args:
+            if len(request.args.getlist(name)) != 1:
+                raise ValueError('Repeated query field: ' + name)
+            query[name] = request.args[name]
+        validate(query, 'waitListQuery')
+        return api_ok(DeviceWaits(owner_user_id).page(
+            cursor=query.get('cursor'), include_closed=query.get('includeClosed') == 'true'))
+    except (StorageError, ValueError) as error:
+        return _device_wait_failure(error)
+
+
+@api_v1_desktop_bp.route('/api/v1/desktop/device-waits/<wait_id>/cancel', methods=['POST'])
+@require_scope('conversations')
+@api_meta(
+    summary='Cancel one of the caller\'s device waits',
+    description=(
+        'Idempotent: a delivered, failed or already cancelled wait is '
+        'returned unchanged. Another owner\'s wait is not found.'
+    ),
+    tags=['capabilities'], scope='conversations',
+)
+def desktop_device_wait_cancel(wait_id):
+    """SYNC on purpose: the CAS transition blocks on storage I/O."""
+    from lib.desktop.device_waits import DeviceWaitNotFound, DeviceWaits
+    from .auth import request_principal
+    owner_user_id = request_principal().require_owner(context='device wait cancel')
+    try:
+        return api_ok(DeviceWaits(owner_user_id).cancel(wait_id))
+    except DeviceWaitNotFound:
+        return api_not_found('not_found', message='device wait not found')
+    except (StorageError, ValueError) as error:
+        return _device_wait_failure(error)
 
 
 @api_v1_desktop_bp.route('/api/v1/desktop/pair-code', methods=['POST'])

@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from lib.conversation_sync.settled_rows import settle_or_none
 from lib.error_envelope import make_envelope
 from lib.llm.llm_errors import RequestScopedError
 from lib.log import get_logger
@@ -62,8 +63,6 @@ class ContinueResumeStateProtocolError(RequestScopedError):
 @dataclass(frozen=True)
 class _PreparedResumeState:
     content_prefix: str
-    thinking_prefix: str
-    resume_prefill: str
     checkpoint_tool_rounds: tuple[dict[str, Any], ...]
     checkpoint_messages: tuple[dict[str, Any], ...]
     checkpoint_todo_state: dict[str, Any] | None
@@ -402,8 +401,6 @@ def prepare_resume_state(cfg: Any) -> _PreparedResumeState:
 
     return _PreparedResumeState(
         content_prefix=_optional_text(cfg, 'contentPrefix'),
-        thinking_prefix=_optional_text(cfg, 'thinkingPrefix'),
-        resume_prefill=_optional_text(cfg, 'resumePrefill'),
         checkpoint_tool_rounds=checkpoint_rounds,
         checkpoint_messages=checkpoint_messages,
         checkpoint_todo_state=todo_state,
@@ -423,23 +420,21 @@ def apply_resume_state(
     task: dict[str, Any],
     cfg: dict[str, Any],
     messages: list[dict[str, Any]],
-    model: str,
     tid: str,
     prepared_state: _PreparedResumeState | None = None,
     round_state: Any = None,
 
     original_messages: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Atomically hydrate validated Continue state before provider dispatch."""
+    """Atomically hydrate validated Continue state before provider dispatch.
+
+    The model wire ends at the replayed checkpoint, a complete message
+    boundary; an interrupted prose tail is regenerated, never continued.
+    """
     prepared = (
         prepared_state
         if prepared_state is not None else prepare_resume_state(cfg)
     )
-
-    supports_prefill = False
-    if prepared.resume_prefill:
-        from lib.model_info import model_supports_assistant_prefill
-        supports_prefill = bool(model_supports_assistant_prefill(model))
 
     background_receipts = cfg.get('_resumeBackgroundReceipts')
     if background_receipts is not None:
@@ -458,18 +453,6 @@ def apply_resume_state(
         logger.debug(
             '[%s] conv=%s Applied contentPrefix (%d chars) from continue checkpoint',
             tid, task.get('convId', ''), len(prepared.content_prefix),
-        )
-
-    if prepared.thinking_prefix:
-        # Display continuity for a lossless continue: the reasoning lane keeps
-        # accumulating from the interrupted tail. New reasoning deltas append
-        # (delta coalescer), and round-base retry truncation restores this
-        # seed rather than blanking the lane.
-        with task['content_lock']:
-            task['thinking'] = prepared.thinking_prefix
-        logger.debug(
-            '[%s] conv=%s Applied thinkingPrefix (%d chars) from continue checkpoint',
-            tid, task.get('convId', ''), len(prepared.thinking_prefix),
         )
 
     # A checkpoint-resume excludes the interrupted assistant Turn from the
@@ -503,31 +486,10 @@ def apply_resume_state(
             messages.extend(copy.deepcopy(prepared.checkpoint_messages))
         logger.info(
             '[%s] conv=%s Replayed %d checkpoint message(s) from %d durable '
-            'tool round(s) before resume prefill',
+            'tool round(s)',
             tid, task.get('convId', ''), len(prepared.checkpoint_messages),
             len(prepared.checkpoint_tool_rounds),
         )
-
-    # ``contentPrefix`` remains display bookkeeping only. ``resumePrefill`` is
-    # the separately capability-gated trailing assistant continuation.
-    if prepared.resume_prefill:
-        if supports_prefill:
-            messages.append({
-                'role': 'assistant', 'content': prepared.resume_prefill})
-            task['_resumePrefill'] = prepared.resume_prefill
-            logger.info(
-                '[%s] conv=%s Injected resume prefill (%d chars) as trailing '
-                'assistant turn — model=%s will continue the same tokens',
-                tid, task.get('convId', ''),
-                len(prepared.resume_prefill), model,
-            )
-        else:
-            logger.info(
-                '[%s] conv=%s resumePrefill present but model=%s rejects prefill '
-                '— falling back to regenerate-from-checkpoint '
-                '(contentPrefix seed only)',
-                tid, task.get('convId', ''), model,
-            )
 
     # One logical Turn continues after the retained checkpoint. Only new
     # receipts enter this executor's list; persistence merges the two lists
@@ -539,8 +501,10 @@ def apply_resume_state(
         round_state.tool_call_happened = bool(
             round_state.tool_call_happened or prepared.checkpoint_messages)
     if prepared.checkpoint_tool_rounds:
+        # Retained rounds belong to settled earlier attempts: share them.
         task['_checkpointToolRounds'] = [
-            dict(item) for item in prepared.checkpoint_tool_rounds]
+            settle_or_none(item) or dict(item)
+            for item in prepared.checkpoint_tool_rounds]
         logger.debug(
             '[%s] conv=%s Stashed %d checkpoint toolRounds for DB merge',
             tid, task.get('convId', ''),
@@ -563,8 +527,17 @@ def apply_resume_state(
         task['_executionActualsComplete'] = False
         task['_checkpointUsageComplete'] = False
     if prepared.checkpoint_api_rounds:
-        task['_checkpointApiRounds'] = list(prepared.checkpoint_api_rounds)
-        task['apiRounds'] = copy.deepcopy(list(prepared.checkpoint_api_rounds))
+        # A settled paid round is immutable, so the ledger and its executor
+        # copy share it; only a round that cannot settle is copied.
+        retained_rounds = list(prepared.checkpoint_api_rounds)
+        settled_rounds = [settle_or_none(row) if isinstance(row, dict) else None
+                          for row in retained_rounds]
+        task['_checkpointApiRounds'] = [
+            settled if settled is not None else row
+            for settled, row in zip(settled_rounds, retained_rounds)]
+        task['apiRounds'] = [
+            settled if settled is not None else copy.deepcopy(row)
+            for settled, row in zip(settled_rounds, retained_rounds)]
     if prepared.checkpoint_modified_files is not None:
         task['_checkpointModifiedFiles'] = prepared.checkpoint_modified_files
     if prepared.checkpoint_modified_files_truncated:

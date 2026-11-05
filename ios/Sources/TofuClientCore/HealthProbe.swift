@@ -34,24 +34,18 @@ public struct HealthProbe: Sendable {
         guard let server = ServerUrl.parse(rawUrl) else {
             return Outcome(verdict: .unreachable, status: 0, detail: "invalid URL")
         }
-        // Request URL keeps the explicit port; the cookie lookup keys on the
-        // port-less origin (the jar is Domain-pinned to host alone).
-        var base = "\(server.scheme)://\(server.host)"
-        if let port = server.components.port { base += ":\(port)" }
-        base += server.path
-        while base.hasSuffix("/") { base.removeLast() }
-        let healthUrl = base + "/api/health"
+        let healthUrl = server.endpoint("api/health")
 
         var headers = [String: String]()
-        if let cookie = await cookies.cookieHeader(server.origin), !cookie.isEmpty {
+        if let cookie = await cookies.cookieHeader(healthUrl), !cookie.isEmpty {
             headers["Cookie"] = cookie
         }
         do {
-            // followRedirects: a 302-to-login lands on the login PAGE (200
-            // HTML, no bootId) and classifies notTofu — the honest reading.
+            // A gateway redirect remains visible; a probe never forwards its
+            // cookie header to a different origin.
             let resp = try await http.send(HTTPRequest(
                 url: healthUrl, method: "GET", headers: headers,
-                followRedirects: true
+                followRedirects: false
             ))
             return Outcome(
                 verdict: TofuProbe.classify(status: resp.status, body: resp.body),

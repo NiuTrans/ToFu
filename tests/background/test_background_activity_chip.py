@@ -7,22 +7,28 @@ suite and this retained composition test checks synchronous switch/disposal.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
 
 import pytest
 from tests._runtime_sections import ROOT, native_module_path, runtime_section
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
 HARNESS = r"""
 const fs=require('fs'),path=require('path'),assert=require('assert');
 const {JSDOM}=require(path.join(process.argv[3],'node_modules','jsdom'));
-const dom=new JSDOM('<body><main class="main"><div id="chatInner"><div class="conversation-surface" data-conversation-id="one"><div class="user-msg" data-lane-id="main" data-turn-id="human-one"><div data-conversation-part="turn-context-rail"></div></div></div></div></main><div id="convStatusStrip"><div id="turnNav"></div></div></body>',{url:'http://localhost/'});
+const dom=new JSDOM('<body><main class="main"><div id="chatInner"><div class="conversation-surface" data-conversation-id="one"><div class="conversation-turn" data-lane-id="main" data-turn-role="user" data-turn-id="autopilot"><div data-conversation-part="turn-context-rail"><div data-conversation-part="turn-context-card"></div></div></div></div></div></main><div id="convStatusStrip"><div id="turnNav"></div></div></body>',{url:'http://localhost/'});
 global.window=dom.window;global.document=window.document;
 Object.defineProperty(document,'hidden',{value:false,configurable:true});
-global.runtimeScope={};global.activeConvId='one';
+// Newest first: a swarm settlement opens a virtual-user round after the human input. The
+// surface mounts only the current round, so the human input is history outside the DOM.
+const mainTurns=[{turnId:'autopilot',actor:'virtual_user'},{turnId:'human-one',actor:'human'}];
+let candidateReads=0;
+global.runtimeScope={ConversationTurnRead:{latest:(id,predicate,lane)=>id==='one'&&lane==='main'?mainTurns.find(predicate):undefined},
+  ConversationSwarmPresentation:{candidates:()=>{candidateReads++;return[];}}};
+global.activeConvId='one';
 global.getConvById=id=>({id,title:'Task'});global.loadConversation=()=>{};
 let dispose;global.retainedCompositionLifecycle={add:fn=>{dispose=fn;}};
 let snapshot={swarms:[],backgroundCommands:[]},calls=0;
@@ -31,6 +37,9 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 eval(fs.readFileSync(process.argv[2],'utf8'));
 (async()=>{
   runtimeScope.updateBackgroundActivity();await sleep(70);
+  const readsBeforeCommit=candidateReads;
+  runtimeScope.renderBackgroundAgents();
+  assert.equal(candidateReads-readsBeforeCommit,1,'agent rows and messages share one projection read per commit');
   const chip=document.getElementById('bgActivityChip');
   assert.equal(chip.parentElement.id,'convStatusStrip');
   assert.equal(chip.nextElementSibling.id,'turnNav');assert.equal(chip.style.display,'none');
@@ -42,13 +51,15 @@ eval(fs.readFileSync(process.argv[2],'utf8'));
   assert.notEqual(chip.style.display,'none');
   assert.equal(chip.textContent,'1 background command running');
   assert.equal(document.querySelectorAll('.agent-dock-active .agent-dock-agent').length,2);
+  assert.equal(document.querySelector('.agent-dock').closest('[data-turn-id]').dataset.turnId,'autopilot');
   chip.click();const pop=document.getElementById('bgActivityPopover');
   assert.ok(pop.textContent.includes('Background commands'));assert.equal(pop.querySelectorAll('.bg-act-agent').length,0);
   let command=pop.querySelector('.bg-act-cmd');assert.equal(command.querySelectorAll('b').length,0);
   assert.ok(command.textContent.includes('<b>build</b>'));
   const agent=document.querySelector('.agent-dock-agent');agent.open=true;agent.dispatchEvent(new window.Event('toggle'));await sleep(0);
   assert.ok(agent.textContent.includes('<b>parser</b>'));assert.equal(agent.querySelectorAll('b').length,0);
-  assert.ok(agent.textContent.includes('not yet available'));
+  // Activity evidence is shown as-is; the detail narrates no availability notice.
+  assert.ok(!agent.textContent.includes('not yet available'));
   const originalAgent=agent;
 
   // A real summary click is an outside click for the command popover. Restore
@@ -58,6 +69,20 @@ eval(fs.readFileSync(process.argv[2],'utf8'));
   snapshot.backgroundCommands[0].elapsed_s=13;runtimeScope.refreshBackgroundActivity();await sleep(280);
   assert.strictEqual(document.querySelector('.agent-dock-agent'),originalAgent);assert.equal(originalAgent.open,true);
   assert.strictEqual(document.querySelector('.bg-act-cmd'),command);assert.equal(command.querySelector('.bg-act-elapsed').textContent,'13s');
+  // Rows disclose the whole command; a rebuild reopens them, a copy-drag keeps them open.
+  assert.equal(command.tagName,'DETAILS');assert.equal(command.open,false);
+  command.querySelector('summary.bg-act-cmd-head').click();assert.equal(command.open,true);
+  assert.ok(document.getElementById('bgActivityPopover'),'expanding a row is not an outside click');
+  snapshot.backgroundCommands.push({command_id:'c2',conv_id:'one',status:'running',command:'sleep 600',elapsed_s:1});
+  runtimeScope.refreshBackgroundActivity();await sleep(280);
+  const rows=new Map([...document.querySelectorAll('.bg-act-cmd')].map(row=>[row.dataset.commandId,row]));
+  assert.equal(rows.size,2);assert.notStrictEqual(rows.get('c1'),command);
+  assert.equal(rows.get('c1').open,true);assert.equal(rows.get('c2').open,false);
+  document.getSelection().selectAllChildren(rows.get('c1').querySelector('.bg-act-cmd-text'));
+  rows.get('c1').querySelector('summary').click();assert.equal(rows.get('c1').open,true,'selection keeps the row open');
+  document.getSelection().removeAllRanges();
+  rows.get('c1').querySelector('summary').click();assert.equal(rows.get('c1').open,false);
+  snapshot.backgroundCommands.pop();runtimeScope.refreshBackgroundActivity();await sleep(280);
   const before=calls;for(let i=0;i<100;i++)runtimeScope.refreshBackgroundActivity();await sleep(280);
   assert.ok(calls-before<=2,'semantic hints coalesce');
   let resolveOld;Api.activity.background=()=>new Promise(resolve=>{resolveOld=resolve;});
@@ -84,6 +109,7 @@ def _source():
 
 
 def _run(source, harness_source=HARNESS):
+    require_node_modules('jsdom')
     with tempfile.TemporaryDirectory(prefix='agent-dock-chip-', dir=ROOT) as directory:
         harness = os.path.join(directory, 'harness.js')
         section = os.path.join(directory, 'section.js')
@@ -94,14 +120,12 @@ def _run(source, harness_source=HARNESS):
         return subprocess.run(['node', harness, section, str(ROOT)], capture_output=True, text=True, timeout=30)
 
 
-@pytest.mark.skipif(not shutil.which('node') or not (ROOT / 'node_modules/jsdom').is_dir(), reason='node/jsdom unavailable')
 def test_command_chip_and_agent_dock_retained_composition():
     result = _run(_source())
     assert result.returncode == 0, result.stderr + result.stdout
     assert 'PASS command visibility' in result.stdout
 
 
-@pytest.mark.skipif(not shutil.which('node') or not (ROOT / 'node_modules/jsdom').is_dir(), reason='node/jsdom unavailable')
 def test_separation_assertion_is_load_bearing():
     source = _source()
     marker = 'swarms: [], agentsActive: 0, agentsRunning: 0, agentsQueued: 0'
@@ -164,8 +188,56 @@ eval(fs.readFileSync(process.argv[2],'utf8'));
 """
 
 
-@pytest.mark.skipif(not shutil.which('node') or not (ROOT / 'node_modules/jsdom').is_dir(), reason='node/jsdom unavailable')
 def test_background_activity_elapsed_and_lifecycle_budget():
     result = _run(_source(), LIFECYCLE_HARNESS)
     assert result.returncode == 0, result.stderr + result.stdout
     assert 'PASS lifecycle' in result.stdout
+
+
+STOP_HARNESS = r"""
+const fs=require('fs'),path=require('path'),assert=require('assert');
+const {JSDOM}=require(path.join(process.argv[3],'node_modules','jsdom'));
+const dom=new JSDOM('<body><main class="main"><div id="chatInner"><div class="conversation-surface" data-conversation-id="one"><div class="conversation-turn" data-lane-id="main" data-turn-role="user" data-turn-id="autopilot"><div data-conversation-part="turn-context-rail"><div data-conversation-part="turn-context-card"></div></div></div></div></div></main><div id="convStatusStrip"><div id="turnNav"></div></div></body>',{url:'http://localhost/'});
+global.window=dom.window;global.document=window.document;
+Object.defineProperty(document,'hidden',{value:false,configurable:true});
+global.runtimeScope={ConversationTurnRead:{latest:(id,predicate,lane)=>id==='one'&&lane==='main'?{turnId:'autopilot',actor:'virtual_user'}:undefined}};
+global.activeConvId='one';global.getConvById=id=>({id,title:'Task'});global.loadConversation=()=>{};
+let dispose;global.retainedCompositionLifecycle={add:fn=>{dispose=fn;}};
+const toasts=[];global.showToast=(message,kind)=>toasts.push([message,kind]);
+let reads=0,outcome;const stops=[];
+const snapshot={swarms:[{swarm_key:'s',swarm_id:'run-1',conv_id:'one',created_at:1,
+  agents:[{id:'a1',role:'coder',status:'running',objective:'Index the data islands'}]}],backgroundCommands:[]};
+global.Api={activity:{background:()=>{reads++;return Promise.resolve(snapshot);}},
+  swarm:{stopAgent:(run,agent)=>{stops.push([run,agent]);return outcome();}}};
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const failure=(status,code)=>Object.assign(new Error(`HTTP ${status} ${code}`),{status,code});
+eval(fs.readFileSync(process.argv[2],'utf8'));
+(async()=>{
+  runtimeScope.updateBackgroundActivity();await sleep(70);
+  const row=document.querySelector('.agent-dock-agent');row.open=true;row.dispatchEvent(new window.Event('toggle'));await sleep(0);
+  const stop=()=>row.querySelector('.agent-dock-actions button');
+  assert.ok(stop(),'a live running agent offers Stop');
+  // The route's own answers mean nothing was left to stop: re-arm quietly, reconcile.
+  for (const [status,code] of [[409,'swarm_agent_not_running'],[404,'swarm_agent_not_found']]) {
+    outcome=()=>Promise.reject(failure(status,code));
+    const before=reads;stop().click();await sleep(280);
+    assert.equal(stop().disabled,false);assert.equal(toasts.length,0,code);assert.ok(reads>before,'the snapshot is re-read');
+  }
+  // A server without the route is not an agent outcome; the owner must see it.
+  outcome=()=>Promise.reject(failure(404,'not_found'));stop().click();await sleep(280);
+  assert.equal(stop().disabled,false);assert.equal(toasts.length,1);assert.equal(toasts[0][1],'error');
+  outcome=()=>Promise.resolve({stopped:true});stop().click();await sleep(280);
+  assert.deepEqual(stops.at(-1),['run-1','a1']);
+  assert.equal(stop().disabled,true,'an accepted stop waits for the snapshot to settle the agent');
+  snapshot.swarms[0].agents[0].status='cancelled';runtimeScope.refreshBackgroundActivity();await sleep(280);
+  assert.equal(row.querySelector('.agent-dock-actions'),null);assert.equal(toasts.length,1);
+  dispose();
+  console.log('PASS dock stop bridge');
+})().catch(error=>{console.error(error);process.exitCode=1;}).finally(()=>process.exit(process.exitCode||0));
+"""
+
+
+def test_dock_stop_bridge_reports_only_failures_that_are_not_agent_outcomes():
+    result = _run(_source(), STOP_HARNESS)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert 'PASS dock stop bridge' in result.stdout

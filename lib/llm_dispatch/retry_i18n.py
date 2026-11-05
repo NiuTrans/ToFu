@@ -27,9 +27,6 @@ to run on every cycle; only duplicate UI/durable phase frames are sampled.
 
 from __future__ import annotations
 
-GATEWAY_PREFIXES = ('aws.', 'vertex.', 'gcp.', 'azure.', 'bedrock.')
-
-
 class RetryPhaseEventBudget:
     """Bound duplicate retry/wait phase frames without bounding the retry.
 
@@ -93,16 +90,6 @@ class RetryPhaseEventBudget:
         return True
 
 
-def display_model_name(model: str) -> str:
-    """Strip internal gateway/provider prefixes for a user-facing label."""
-    name = model or 'the model'
-    for prefix in GATEWAY_PREFIXES:
-        if name.startswith(prefix):
-            name = name[len(prefix):]
-            break
-    return name
-
-
 # Dispatcher retry-reason tokens → typed i18n keys (static/js/i18n.js
 # `stream.retryReason.*`). Unknown tokens fall back to the raw reason on the
 # frontend (same ruling as an unknown detailKey).
@@ -110,6 +97,11 @@ def display_model_name(model: str) -> str:
 # (raised ONLY with RateLimitError.is_gateway=True — see lib/llm/llm_errors.py
 # _GATEWAY_THROTTLE_STATUS and the vendor-transient 4xx escalations).
 GATEWAY_RETRY_TOKEN = 'Upstream error'
+# The dispatcher's reason for a gateway no-channel verdict
+# (ModelRouteUnavailableError, lib/llm_dispatch/_route_unavailable.py): this
+# prefix followed by the gateway's bounded message. Only the prefix is ours to
+# translate; the message is upstream data and rides verbatim.
+ROUTE_UNAVAILABLE_REASON_PREFIX = 'Model route unavailable: '
 RETRY_REASON_KEYS = {
     'Waiting for network recovery': 'stream.retryReason.networkRecovery',
     'Endpoint unreachable': 'stream.retryReason.endpointUnreachable',
@@ -166,8 +158,7 @@ def retry_phase_fields(*, model: str, attempt: int, reason: str = '',
     """Compute the structured i18n fields for a ``retrying`` PHASE event.
 
     Args:
-        model: Raw model id (gateway prefixes are stripped for the
-            user-facing ``detailArgs['model']`` label).
+        model: Request model id, shown verbatim as ``detailArgs['model']``.
         attempt: Dispatcher retry/cooldown cycle count.
         reason: Dispatcher reason token (may be '').
         status_code: HTTP status that triggered the cycle (0 = transport).
@@ -178,7 +169,7 @@ def retry_phase_fields(*, model: str, attempt: int, reason: str = '',
         ``{'detail', 'detailKey', 'detailArgs'}`` — detailArgs carries
         ``reasonKey`` only when the token is known.
     """
-    label = display_model_name(model)
+    label = model or 'the model'
     if reason == 'Network recovered':
         # Recovery is decided BEFORE the next POST is sent; claiming the
         # request already reached the model would be false on a subsequent
@@ -192,6 +183,13 @@ def retry_phase_fields(*, model: str, attempt: int, reason: str = '',
         # imminent-recovery 限流, so this reason must win over status_code.
         detail_key = 'stream.phase.subscriptionQuotaReached'
         detail_args = {'model': label, 'attempt': attempt}
+    elif reason.startswith(ROUTE_UNAVAILABLE_REASON_PREFIX):
+        # Dispatch already holds the route and tries other eligible routes,
+        # else re-probes on a fixed backoff; the copy says both.
+        detail_key = 'stream.phase.retryRouteUnavailable'
+        detail_args = {
+            'model': label, 'attempt': attempt,
+            'message': reason[len(ROUTE_UNAVAILABLE_REASON_PREFIX):]}
     elif status_code == 429:
         detail_key = 'stream.phase.retryRateLimited'
         detail_args = {'model': label, 'attempt': attempt}
@@ -225,7 +223,8 @@ def retry_phase_fields(*, model: str, attempt: int, reason: str = '',
             'detailArgs': detail_args}
 
 
-__all__ = ['GATEWAY_PREFIXES', 'RetryPhaseEventBudget',
-           'display_model_name', 'GATEWAY_RETRY_TOKEN', 'RETRY_REASON_KEYS',
+__all__ = ['RetryPhaseEventBudget',
+           'GATEWAY_RETRY_TOKEN', 'ROUTE_UNAVAILABLE_REASON_PREFIX',
+           'RETRY_REASON_KEYS',
            'COOLDOWN_WAIT_REASON_TOKENS', 'cooldown_wait_label',
            'retry_phase_fields']

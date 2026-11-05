@@ -243,7 +243,9 @@ def test_failed_sweep_worker_start_does_not_enter_run_or_suppress_sibling(store,
     original = threading.Thread.start
     failed = []
     def start(thread):
-        if thread.name.startswith('tofu-evolution-run') and not failed:
+        # The first run's start and its one startup recovery both fail
+        # (tests/agent_core/test_worker_start_recovery.py).
+        if thread.name.startswith('tofu-evolution-run') and len(failed) < 2:
             failed.append(thread.name)
             raise RuntimeError('synthetic worker start failure')
         return original(thread)
@@ -253,7 +255,7 @@ def test_failed_sweep_worker_start_does_not_enter_run_or_suppress_sibling(store,
                         seen.append(run_id) or {'status': 'needs_attention'})
     assert runs.sweep_stale_runs(user_id=USER, now=10000) == [
         {'run_id': 'run-b', 'from': 'executing', 'to': 'needs_attention'}]
-    assert seen == ['run-b']
+    assert seen == ['run-b'] and len(failed) == 2
     assert runs.get_run('run-a', user_id=USER)['status'] == 'executing'
     assert not any(thread.name.startswith('tofu-evolution-run') for thread in threading.enumerate())
 
@@ -278,3 +280,92 @@ def test_failed_storage_page_joins_accepted_workers_before_propagating(store, mo
         runs.sweep_stale_runs(user_id=USER, now=10000)
     assert sorted(seen) == ['run-0', 'run-1']
     assert not any(thread.name.startswith('tofu-evolution-run') for thread in threading.enumerate())
+    # An incomplete history pass never claims the work list is complete.
+    from lib.evolution import records
+    assert (records.NAMESPACE_RUN_SWEEP, f'{USER}:unsettled-index') not in store.rows
+
+
+def _list_namespaces(store, monkeypatch):
+    namespaces = []
+    query = store.query
+    def read(operation, payload):
+        if operation == 'record.list':
+            namespaces.append(payload['namespace'])
+        return query(operation, payload)
+    monkeypatch.setattr(store, 'query', read)
+    return namespaces
+
+
+def test_steady_state_sweep_reads_only_the_unsettled_work_list(store, monkeypatch):
+    from lib.evolution import records, runs
+    monkeypatch.setattr(runs, 'default_task_loader', lambda task_id, *, user_id: None)
+    for index in range(450):
+        _seed_run(store, f'run-history-{index:04d}', status='completed', updated_at=1)
+    _seed_run(store, 'run-stale', status='executing', updated_at=1)
+    namespaces = _list_namespaces(store, monkeypatch)
+    assert runs.sweep_stale_runs(user_id=USER, now=10000) == [
+        {'run_id': 'run-stale', 'from': 'executing', 'to': 'needs_attention'}]
+    # The one-time pass pages history and leaves only unsettled runs marked.
+    assert set(namespaces) == {records.NAMESPACE_RUNS}
+    assert not [key for key in store.rows if key[0] == records.NAMESPACE_UNSETTLED_RUNS]
+    namespaces.clear()
+    writes = store.writes
+    assert runs.sweep_stale_runs(user_id=USER, now=10000) == []
+    assert namespaces == [records.NAMESPACE_UNSETTLED_RUNS] and store.writes == writes
+    # A run saved into a sweepable state is marked by the save itself.
+    run, version = records.get_versioned_record(records.NAMESPACE_RUNS, f'{USER}:run-history-0001')
+    run['status'] = 'executing'
+    runs._save(run, version, USER)
+    namespaces.clear()
+    assert runs.sweep_stale_runs(user_id=USER, now=time.time() + 3600) == [
+        {'run_id': 'run-history-0001', 'from': 'executing', 'to': 'needs_attention'}]
+    assert set(namespaces) == {records.NAMESPACE_UNSETTLED_RUNS}
+    assert not [key for key in store.rows if key[0] == records.NAMESPACE_UNSETTLED_RUNS]
+
+
+def test_save_marks_before_its_run_write_and_sweep_keeps_unlanded_marks(store, monkeypatch):
+    from lib.evolution import records, runs
+    assert runs.sweep_stale_runs(user_id=USER, now=10000) == []
+    settled = _seed_run(store, 'run-reopened', status='completed', updated_at=100)
+    reopened = dict(settled, status='executing')
+    command = store.command
+    def refuse_run_write(operation, payload, command_id):
+        if payload['namespace'] == records.NAMESPACE_RUNS:
+            raise StorageError('database_timeout', 'run write outcome unknown')
+        return command(operation, payload, command_id)
+    monkeypatch.setattr(store, 'command', refuse_run_write)
+    with pytest.raises(StorageError):
+        runs._save(reopened, 1, USER)
+    monkeypatch.setattr(store, 'command', command)
+    marker_key = (records.NAMESPACE_UNSETTLED_RUNS, f'{USER}:run-reopened')
+    assert store.rows[marker_key]['marked_at'] > 100
+    # The settled record predates the mark: the save may still land, so the
+    # sweep keeps the marker rather than risk losing a due run.
+    monkeypatch.setattr(runs, 'advance_run', lambda *args, **kwargs: pytest.fail('settled run driven'))
+    assert runs.sweep_stale_runs(user_id=USER, now=time.time() + 3600) == []
+    assert marker_key in store.rows
+
+
+def test_sweep_keeps_a_marker_rewritten_during_its_visit(store, monkeypatch):
+    from lib.evolution import records, runs
+    assert runs.sweep_stale_runs(user_id=USER, now=10000) == []
+    run = _seed_run(store, 'run-raced', status='executing', updated_at=1)
+    runs._mark_unsettled(run, USER)
+    def settle_while_reopened(run_id, *, user_id):
+        # Another writer marks the run again before this visit finishes.
+        runs._mark_unsettled(dict(run, updated_at=5), user_id)
+        return {'status': 'needs_attention', 'updated_at': 10}
+    monkeypatch.setattr(runs, 'advance_run', settle_while_reopened)
+    assert runs.sweep_stale_runs(user_id=USER, now=10000) == [
+        {'run_id': 'run-raced', 'from': 'executing', 'to': 'needs_attention'}]
+    assert store.rows[(records.NAMESPACE_UNSETTLED_RUNS, f'{USER}:run-raced')]['marked_at'] == 5
+
+
+def test_history_backfill_never_lowers_a_marker_written_by_a_save(store, monkeypatch):
+    from lib.evolution import records, runs
+    stale = _seed_run(store, 'run-reopening', status='executing', updated_at=1)
+    # A concurrent save marked the run newer than the header the backfill lists.
+    runs._mark_unsettled(dict(stale, updated_at=500), USER)
+    monkeypatch.setattr(runs, 'advance_run', lambda *args, **kwargs: {'status': 'executing', 'updated_at': 2})
+    assert runs.sweep_stale_runs(user_id=USER, now=10000) == []
+    assert store.rows[(records.NAMESPACE_UNSETTLED_RUNS, f'{USER}:run-reopening')]['marked_at'] == 500

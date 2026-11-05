@@ -29,6 +29,7 @@ from lib.event_envelope import (
     EventFormatError,
     check_event_readable,
 )
+from lib.storage.deadline_policy import storage_write_deadline
 from lib.storage.storage_projection import (
     project_event_usage_for_storage,
 )
@@ -143,6 +144,10 @@ _RECLAIM_MIN_FREE_PAGES = _env_int(
 _RECLAIM_BUDGET_MS = _env_int(
     'TOFU_STORAGE_RECLAIM_BUDGET_MS', 250, 10, 60_000)
 
+#: This writer's cold-start budget for one durable event append: the batch
+#: confirmation wait, the flush barrier's wait and the fallback command's
+#: deadline. Each follows the authority's observed service time
+#: (``lib.storage.deadline_policy``), which only ever raises this floor.
 _PERSIST_TIMEOUT_S = 5.0
 _SIDECAR_BATCHER_LOCK = threading.Lock()
 _SIDECAR_BATCHER = None
@@ -268,6 +273,30 @@ def project_persistent_event(task_id, event):
     return projected
 
 
+# A refused diagnostic frame keeps only identity, routing and execution-clock
+# scalars: its sequence, Request Inspector round and clock spine survive while
+# the refused body is never resent.
+_DEGRADED_EVENT_FIELDS = (
+    'type', 'kind', 'model', 'roundNum', 'turn', 'inspectorRef', 'label',
+    'messageCount', 'agentId', 'agentRole', 'taskId', 'attemptId',
+    'requestId', 'conversationId', 'turnId',
+    'executionAtMs', 'executionOriginAtMs', 'executionClockId',
+)
+
+
+def degraded_persistent_event(event, reason):
+    """Durable stand-in for a diagnostic frame the storage authority refused.
+
+    Readers present ``degraded`` rows as incomplete evidence, never as the real
+    request, so the round stays visible and honest.
+    """
+    degraded = {key: event[key] for key in _DEGRADED_EVENT_FIELDS if key in event}
+    if 'messageCount' not in degraded and isinstance(event.get('messages'), list):
+        degraded['messageCount'] = len(event['messages'])
+    degraded.update(degraded=True, degradedReason=reason)
+    return degraded
+
+
 def reset_persistent_event_projection(task_id, event) -> None:
     """Forget a snapshot baseline after a durability failure.
 
@@ -319,7 +348,8 @@ def append_persistent_event(task_id, event_id, event, *,
             sequence=int(event_id),
             event=projected,
             wait=True,
-            timeout=_PERSIST_TIMEOUT_S,
+            timeout=storage_write_deadline(
+                'event.append_batch', floor_seconds=_PERSIST_TIMEOUT_S),
             require_attempts_live=require_live,
         ))
     except EventAttemptStaleError:
@@ -327,9 +357,11 @@ def append_persistent_event(task_id, event_id, event, *,
         # again, so do not fall through to the single-command path.
         raise
     except Exception:
-        # The batch command may fail for a connection-specific reason. One
-        # independent semantic command is safe because the natural event key
-        # deduplicates an ambiguous earlier commit.
+        # The batched attempt is settled (the batcher answers a dispatched row
+        # only with its batch outcome), so this command never races it. The
+        # failure may be connection-specific, and one independent semantic
+        # command is safe because the natural event key deduplicates an
+        # ambiguous earlier commit.
         try:
             from lib.storage import get_storage_client
             payload = {
@@ -340,8 +372,9 @@ def append_persistent_event(task_id, event_id, event, *,
             if require_live is not None:
                 payload['require_attempts_live'] = require_live
             result = get_storage_client(write=True).command(
-                'event.append', payload,
-                None, priority='event', deadline=_PERSIST_TIMEOUT_S)
+                'event.append', payload, None, priority='event',
+                deadline=storage_write_deadline(
+                    'event.append', floor_seconds=_PERSIST_TIMEOUT_S))
             _invalidate_event_read_caches(task_id)
             return _raise_if_stale(result)
         except EventAttemptStaleError:
@@ -359,7 +392,8 @@ def flush_pending(task_id=None) -> bool:
     if batcher is None:
         return True
     try:
-        return batcher.flush(timeout=_PERSIST_TIMEOUT_S)
+        return batcher.flush(timeout=storage_write_deadline(
+            'event.append_batch', floor_seconds=_PERSIST_TIMEOUT_S))
     except Exception as exc:
         raise EventDurabilityError(
             f'event flush failed for task {str(task_id or "")[:8]}') from exc

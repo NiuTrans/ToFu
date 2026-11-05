@@ -153,7 +153,7 @@ def try_pressure_l1(messages, task, *, target_tokens, total_tokens,
         from lib.tasks_pkg.compaction._constants import _AUTO_COMPACT_MIN_REDUCTION_RATIO
         accepted = ((total_tokens - after) / max(1, total_tokens)
                     >= _AUTO_COMPACT_MIN_REDUCTION_RATIO
-                    and (economics['cache_read_tokens'] <= 0 or payback <= horizon))
+                    and (economics['warm_prefix_tokens'] <= 0 or payback <= horizon))
     evidence = dict(round=int(round_num or 0), mandatory=bool(mandatory),
                     beforeTokens=int(total_tokens), candidateTokens=int(after),
                     targetTokens=int(target_tokens), accepted=bool(accepted))

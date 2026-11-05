@@ -332,34 +332,6 @@ def test_nested_cancellation_releases_ancestor_and_pending_child(repo, monkeypat
     clean()
 
 
-def test_batch_edit_uses_shared_checkout_order(repo, monkeypatch):
-    from contextlib import contextmanager
-    from lib.project_mod.write_tools import _ops
-    child = repo / 'aaa-child'
-    child.mkdir()
-    (child / '.git').mkdir()
-    targets = [str(child / 'a'), str(repo / 'z')]
-    observed = []
-
-    @contextmanager
-    def admitted(path, **kwargs):
-        observed.append(path)
-        yield
-
-    monkeypatch.setattr(leases, 'workspace_file_write_lease', admitted)
-    monkeypatch.setattr(_ops, '_enforce_not_readonly', lambda *args, **kwargs: None)
-    monkeypatch.setattr(_ops, '_resolve_base', lambda base, path, **kwargs: (base, path))
-
-    @_ops._with_workspace_writer
-    def operation(base, edits):
-        return 'done'
-
-    assert operation(str(repo), [{'path': target} for target in targets]) == 'done'
-    assert observed == sorted(targets, key=lambda path: leases.lease_claim_order(('file', path)))
-    assert observed == targets[::-1]
-    clean()
-
-
 @pytest.mark.parametrize('pointer', ['gitdir', 'commondir'])
 def test_file_lease_refuses_metadata_rebinding(repo, tmp_path, pointer):
     if pointer == 'gitdir':

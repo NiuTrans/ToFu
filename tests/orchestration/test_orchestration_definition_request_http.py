@@ -7,8 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 import routes.api_v1.orchestration_definition_request_http as request_http
+from lib.error_envelope import BadRequest
 from lib.orchestration.definition_selection_contract import (
     definition_selection_contract,
+)
+from lib.orchestration.definition_wire_projection import (
+    parse_definition_write_precondition,
 )
 
 
@@ -80,6 +84,26 @@ def test_definition_precondition_uses_contract_header_and_canonical_failure(
     )
     assert request_http.definition_precondition() == (None, sentinel)
     assert captured['message'] == 'If-Match is required'
+
+
+@pytest.mark.parametrize('raw', [None, '*', '12.5', '""', '"9007199254740992"'])
+def test_definition_precondition_rejections_are_typed_client_faults(raw):
+    with pytest.raises(BadRequest) as caught:
+        parse_definition_write_precondition(raw)
+    assert caught.value.field == 'If-Match'
+
+
+def test_definition_precondition_internal_fault_is_not_a_client_400(monkeypatch):
+    monkeypatch.setattr(
+        request_http, 'request', SimpleNamespace(headers={'If-Match': '"42"'}))
+
+    def broken(_raw):
+        raise ValueError('definition write contract is unreadable')
+
+    monkeypatch.setattr(
+        request_http, 'parse_definition_write_precondition', broken)
+    with pytest.raises(ValueError, match='contract is unreadable'):
+        request_http.definition_precondition()
 
 
 def test_definition_ingress_preserves_resolver_result_and_provenance():

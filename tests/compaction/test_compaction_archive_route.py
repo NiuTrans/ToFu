@@ -272,3 +272,65 @@ def test_post_download_preserves_owner_scoped_not_found(monkeypatch):
         assert seen == [('c', 'a', 1)]
 
     asyncio.run(run())
+
+
+def _storage_error(code):
+    from lib.storage.errors import StorageError
+    return StorageError(code, 'storage refused the read', retryable=True,
+                        retry_after_ms=2000)
+
+
+class _FailingArchiveStore:
+    def __init__(self, error):
+        self.error = error
+
+    def list_compaction_archives(self, conv_id, *, user_id):
+        raise self.error
+
+    def get_compaction_archive(self, conv_id, archive_id, *, user_id,
+                               include_messages=True,
+                               include_post_messages=False):
+        raise self.error
+
+
+async def _call_failing(monkeypatch, route_name, error):
+    import routes.conversations_compaction as route
+    from quart import g
+    from lib.api_keys import local_admin_context
+
+    monkeypatch.setattr(route, 'get_conversation_store',
+                        lambda: _FailingArchiveStore(error))
+    app = _make_app()
+    path = '/api/v4/conversations/c/compactions'
+    args = ('c',)
+    if route_name == 'get_compaction':
+        path += '/a'
+        args = ('c', 'a')
+    async with app.test_request_context(path):
+        g.auth_ctx = local_admin_context()
+        return await _body(await getattr(route, route_name)(*args))
+
+
+@pytest.mark.parametrize('route_name', ['list_compactions', 'get_compaction'])
+@pytest.mark.parametrize(('code', 'expected'), [
+    ('database_unavailable', 503),
+    ('database_busy', 503),
+    ('database_conflict', 409),
+    ('database_not_found', 404),
+])
+def test_storage_failure_keeps_the_storage_taxonomy(
+        monkeypatch, route_name, code, expected):
+    """A transient outage is a retryable 503 and a conflict a 409; the broad
+    archive handler must not flatten either into an internal 500."""
+    status, _body_json, _response = asyncio.run(
+        _call_failing(monkeypatch, route_name, _storage_error(code)))
+    assert status == expected
+
+
+@pytest.mark.parametrize('route_name', ['list_compactions', 'get_compaction'])
+def test_untyped_archive_failure_is_a_redacted_500(monkeypatch, route_name):
+    status, body, response = asyncio.run(_call_failing(
+        monkeypatch, route_name, RuntimeError('/srv/secret/archive.db locked')))
+    assert status == 500
+    assert body['status'] == 500
+    assert 'secret' not in json.dumps(body)

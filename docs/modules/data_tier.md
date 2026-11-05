@@ -4,6 +4,11 @@ The authoritative behavioural and operational contract is
 [`docs/STORAGE.md`](../STORAGE.md). This module note describes
 code ownership only and must not redefine backend authority.
 
+Storage optimization starts at the
+[SQLite reference and change-review map](../STORAGE_PERFORMANCE_CHARTER.md#sqlite-reference-and-change-review),
+which links deployment, lifecycle, query, cache, backup and failure-validation
+owners to the existing performance gates.
+
 ## Process ownership
 
 | Package | Runs in | Responsibility |
@@ -17,7 +22,7 @@ code ownership only and must not redefine backend authority.
 | `packages/tofu-db/` | Supervised Rust authority | CONTROL/WAL engine, owner-scoped semantic operations and resource-budgeted `storage.v2` serving; selection and certification are separate ([native contract](../STORAGE_TOFUDB.md)) |
 | `lib/storage/storage_metric_policy.py` | Shared dependency-light policy | Launch-probed recent latency sample window for application and Sidecar metrics |
 | `lib/storage/storage_event_policy.py` | Application process | Launch-derived event residency hints and independent Sidecar frame bounds; batcher uses RAM/file overflow, while task delivery owns its separate scheduling policy |
-| `lib/conversations/repository.py` | Application process | Owner-scoped conversation projections; metadata-first lazy transcript scans with recursive frame splitting; validated interval-count projection |
+| `lib/conversations/repository.py` | Application process | Owner-scoped conversation projections; metadata-first lazy transcript scans with recursive frame splitting and, given a time bound, newest-first message windows for one transcript no response can carry; validated interval-count projection |
 
 | `lib/conversations/diagnostic.py` | Application process | Strict owner/revision/rank/byte-cursor validation for bounded diagnostic reads; no projection hydration or physical storage knowledge |
 | `lib/storage_authority_sql/operations_pkg/_conversation_diagnostic.py`, `packages/tofu-db/src/conversation_diagnostic.rs` | Selected SQL / native authority | Read-only header/turn/chunk queries, byte slicing and integrity fences; behavioral contract in [diagnostic contract](../contracts/CONVERSATION_DIAGNOSTICS.md) |
@@ -78,6 +83,21 @@ echo; old clients and old Sidecars continue through the unguarded contract.
 Running diagnostics use a short maintenance-lane deadline, while task birth
 and terminal diagnostics retain bounded user-lane retries.
 
+Birth witness — Problem: the durable-at-birth row of every new chat task read
+`task_results.replay_get` before its checkpoint, one more storage round trip
+inside task registration, although `create_task` had just minted the uuid4 task
+id. Decision: a birth checkpoint for an id minted in this process
+(`fresh_birth`) expects version 0 without the witness read. Both authorities
+create version 1 only when no row exists and expect 0, and report
+`database_conflict` otherwise; the existing conflict handler then reads the
+witness (fences and abort tombstones included) and retries. The parent
+`conversation.get` stays until the guard is echoed, and a prepared (restorable)
+task id, which may already carry its durable birth, keeps the read.
+Alternatives rejected: skipping both compatibility queries before the guard echo
+(an unguarded Sidecar would then write under a deleted parent); a process-wide
+guard-capability cache (a rolled-back Sidecar would inherit a stale verdict).
+Spec: `tests/tasks_pkg/test_birth_checkpoint_witness.py`.
+
 An independent additive cache-settings-v1 echo may join the staged positive
 `cachePrefixHWM` and `lastTurnCacheRead` facts to that same guarded transaction.
 HWM merges by maximum. A new checkpoint applies last-read LWW, while an
@@ -108,15 +128,49 @@ or receive a connection object. Manifest row writes use version-witnessed
 `put`/`delete` or one bounded same-table `batch`; legacy import can only scan
 the exact identifiers declared in the manifest and remains read-only.
 
+## Storage contract generation
+
+Problem: the database contract generator mixed file reads, compatibility guards,
+native/Python/C projections and publication. Repeated reads within one invocation
+could make Python and Rust artifacts use different revisions of the same input.
+
+Decision: `scripts/tofudb_contract_codegen/` owns the authored generator.
+`ContractInputs` captures each JSON document on its first read and releases the
+per-invocation cache when generation ends. There is no process-wide cache or
+claim of an atomic snapshot across different files. `validation.py` composes
+the existing domain guards in order; their compatibility literals, rejection
+behavior and authority remain unchanged. Named native, search, paper and Python
+projections share those inputs. `generation.OUTPUT_PATHS` is the single output
+inventory. The CLI publishes only after the complete map has been built, retaining
+sequential writes and a read-only drift check.
+
+Alternatives considered: a global memoization cache could leak old contracts into
+later invocations; splitting the large functions without consolidating reads
+would preserve the revision mismatch. Generating through a generic schema engine
+would replace existing admission and formatting semantics without a need.
+
+`test_contract_generator_inputs.py` covers one-read consistency, fresh subsequent
+invocations, failure before publication and read-only drift checks.
+`test_native_search_volume_contract.py` covers cross-language search geometry.
+Run `python3 scripts/gen_tofudb_ir_contract.py` and its `--check` mode in an
+isolated checkout; refactoring must preserve all generated output bytes.
+
 ## Verification
 
 
 `scripts/tofudb_perf_compare.py` compares disposable authorities through their
-client contracts, not raw database primitives. Legacy engine startup is
+client contracts, not raw database primitives. Its `tofudb_workloads/` package
+owns the ordered workload definitions with explicit invocation inputs and
+execution ports; adapters and measurement/report policy remain in the script.
+Legacy engine startup is
 sequential and scopes PostgreSQL DSN-file and other launch environment overrides
 to the child launch, restoring the caller environment even on failure. SQLite
 must not inherit a PostgreSQL test DSN or attach through a caller connection file;
 each engine retains its own runtime/client without replacing the global runtime.
+Native daemon stderr logs live in one private temporary directory per engine:
+`stop()` deletes it after a clean run and keeps it, naming it on stderr, after a
+launch failure, an unclean daemon exit or a reported workload error
+(`retain_logs()`); it never globs or deletes logs it did not create.
 `tests/tofudb/test_tofudb_perf_compare.py` covers both engine orders, inherited settings,
 and failure cleanup offline; PostgreSQL measurements require an explicitly
 provisioned disposable database, never a production authority.

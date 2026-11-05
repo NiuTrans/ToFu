@@ -99,9 +99,9 @@ def test_full_epoch_default_is_uncapped_and_model_neutral():
     from lib.tools.gateway import tool_schema_tokens
 
     epoch = build_paper_full_tool_epoch(
-        owner_user_id=TEST_OWNER_USER_ID, model='kimi-k3')
+        owner_user_id=TEST_OWNER_USER_ID, model='kimi-k3', cfg={'plugins': []})
     other = build_paper_full_tool_epoch(
-        owner_user_id=TEST_OWNER_USER_ID, model='gpt-5.4')
+        owner_user_id=TEST_OWNER_USER_ID, model='gpt-5.4', cfg={'plugins': []})
     wire_names = set(_names(epoch.wire_schemas))
     authority_names = set(_names(epoch.executable_schemas))
 
@@ -118,7 +118,7 @@ def test_full_epoch_default_is_uncapped_and_model_neutral():
     assert telemetry['searchableToolCount'] == 0
     assert len(epoch.epoch_hash) == 64
     repeated = build_paper_full_tool_epoch(
-        owner_user_id=TEST_OWNER_USER_ID, model='kimi-k3')
+        owner_user_id=TEST_OWNER_USER_ID, model='kimi-k3', cfg={'plugins': []})
     assert repeated.epoch_hash == epoch.epoch_hash
     assert repeated.wire_schemas == epoch.wire_schemas
     assert {'web_search', 'fetch_url', 'read_files', 'inspect_image',
@@ -154,8 +154,6 @@ def test_explicit_budget_bounds_wire_but_preserves_searchable_authority():
 
     assert epoch.schema_budget_tokens == 4_000
     assert epoch.schema_tokens <= 4_000
-    from lib.tools.gateway import LOCAL_GATEWAY_MAX_TOKENS
-    assert epoch.gateway_schema_tokens <= LOCAL_GATEWAY_MAX_TOKENS
     assert {'web_search', 'fetch_url', 'read_files', 'inspect_image',
             'read_tool_artifact', 'search_tool_artifact',
             'search_tools', 'execute_tools'} <= wire_names
@@ -165,7 +163,7 @@ def test_explicit_budget_bounds_wire_but_preserves_searchable_authority():
                for name in authority_names - wire_names)
 
 
-def test_full_epoch_tokenizer_budget_drift_never_aborts(monkeypatch):
+def test_full_epoch_gateway_tokenizer_drift_never_aborts(monkeypatch):
     from lib.paper.tools import build_paper_full_tool_epoch
     import lib.tools.gateway as gateway
 
@@ -179,7 +177,7 @@ def test_full_epoch_tokenizer_budget_drift_never_aborts(monkeypatch):
         }
         measured = real_counter(values, model=model)
         if names and names <= gateway.GATEWAY_TOOL_NAMES:
-            return max(measured, gateway.LOCAL_GATEWAY_MAX_TOKENS + 1)
+            return measured * 10
         return measured
 
     monkeypatch.setattr(gateway, 'tool_schema_tokens',
@@ -189,7 +187,10 @@ def test_full_epoch_tokenizer_budget_drift_never_aborts(monkeypatch):
         owner_user_id=TEST_OWNER_USER_ID, model='kimi-k3',
         cfg={'tools': {'schemaBudgetTokens': 4_000}})
 
-    assert epoch.gateway_schema_tokens == gateway.LOCAL_GATEWAY_MAX_TOKENS + 1
+    gateway_schemas = [schema for schema in epoch.wire_schemas
+                       if schema['function']['name'] in gateway.GATEWAY_TOOL_NAMES]
+    assert epoch.gateway_schema_tokens == 10 * real_counter(
+        gateway_schemas, model='kimi-k3')
     assert {'search_tools', 'execute_tools'} <= set(
         _names(epoch.wire_schemas))
 
@@ -211,6 +212,20 @@ def test_full_epoch_contract_defect_degrades_to_text_only(monkeypatch):
     assert epoch.contract_documents_by_name == {}
     assert epoch.schema_tokens == 0
     assert epoch.gateway_schema_tokens == 0
+    assert epoch.telemetry()['degradedReason'] == (
+        'tool_epoch_assembly_failed:ValueError')
+
+
+def test_invalid_schema_budget_config_degrades_to_text_only():
+    import lib.paper.tools as paper_tools
+
+    epoch = paper_tools.build_paper_full_tool_epoch(
+        owner_user_id=TEST_OWNER_USER_ID, model='kimi-k3',
+        cfg={'tools': {'schemaBudgetTokens': 'not-a-number'}})
+
+    assert epoch.wire_schemas == ()
+    assert epoch.executable_schemas == ()
+    assert epoch.schema_budget_tokens == 0
     assert epoch.telemetry()['degradedReason'] == (
         'tool_epoch_assembly_failed:ValueError')
 
@@ -626,9 +641,22 @@ def test_write_partition_call_is_auto_approved_and_audited(
     import lib.log as _log
     import lib.memory.storage._dirs as _dirs
 
-    audits = []
-    monkeypatch.setattr(_log, 'audit_log',
-                        lambda kind, **kw: audits.append((kind, kw)))
+    # Read the audit file rather than patching ``lib.log.audit_log``: modules
+    # first imported during the test would bind a patched recorder for good
+    # (``from lib.log import audit_log``), and which events it saw would
+    # depend on import order.
+    audit_file = tmp_path / 'logs' / 'audit.log'
+    monkeypatch.setattr(_log, 'LOG_DIR', str(audit_file.parent))
+    monkeypatch.setattr(_log, 'AUDIT_LOG_FILE', str(audit_file))
+
+    def approvals():
+        if not audit_file.exists():
+            return []
+        rows = [json.loads(line) for line in
+                audit_file.read_text(encoding='utf-8').splitlines()]
+        return [row for row in rows
+                if row.get('event') == 'paper_tool_auto_approve']
+
     # Redirect the server-side global memory store into the tmp sandbox.
     monkeypatch.setattr(_dirs, '_server_global_memory_dir',
                         lambda: str(tmp_path))
@@ -646,19 +674,24 @@ def test_write_partition_call_is_auto_approved_and_audited(
         'create_memory', args, exec_shim=shim, round_entry=re_)
 
     assert 'Memory created' in content, f'write did not execute: {content[:300]!r}'
-    assert any(k == 'paper_tool_auto_approve' and kw.get('tool') == 'create_memory'
-               for k, kw in audits), \
-        f'auto-approval was NOT audited: {audits!r}'
-    # read-only tools must NOT trigger the write audit.
-    audits.clear()
-    execute_paper_tool('todo_write', '{"todos": []}',
-                         exec_shim=_shim(), round_entry=_round_entry('todo_write'))
-    assert not audits, f'read-only tool spuriously audited: {audits!r}'
+    assert any(row.get('tool') == 'create_memory' for row in approvals()), \
+        f'auto-approval was NOT audited: {approvals()!r}'
+    # A non-write tool must NOT trigger the approval audit. (Every settled
+    # call also emits a diagnostic ``tool_call_outcome``; that is not an
+    # approval record.)
+    approved_before = len(approvals())
+    todo_content, *_ = execute_paper_tool(
+        'todo_write', '{"todos": []}',
+        exec_shim=_shim(), round_entry=_round_entry('todo_write'))
+    assert 'Checklist updated' in todo_content, todo_content[:300]
+    spurious = approvals()[approved_before:]
+    assert not spurious, f'non-write tool spuriously approval-audited: {spurious!r}'
 
     # A write discovered behind the fixed gateway must keep the same explicit
     # paper approval trail; auditing only the outer execute_tools name would
     # make this path silently different from a direct call.
     gateway_shim = _shim('paper_gateway_write_audit')
+    approved_before = len(approvals())
     execute_paper_tool(
         'execute_tools', json.dumps({'calls': [{
             'name': 'create_memory',
@@ -672,10 +705,9 @@ def test_write_partition_call_is_auto_approved_and_audited(
         exec_shim=gateway_shim,
         round_entry=_round_entry('execute_tools', 'gateway_write_0'),
     )
-    assert any(
-        kind == 'paper_tool_auto_approve'
-        and detail.get('tool') == 'create_memory'
-        for kind, detail in audits), audits
+    gateway_approvals = approvals()[approved_before:]
+    assert any(row.get('tool') == 'create_memory'
+               for row in gateway_approvals), gateway_approvals
 
 
 # ─── 4. Honest V2 bounding + continuation ─────────────────────────────────
@@ -720,7 +752,7 @@ def test_cap_tool_result_store_failure_is_honest_and_has_no_path(monkeypatch):
     value = json.loads(out)
     assert value['truncated'] is True
     assert value['artifactRef'] == '' and value['cursor'] == ''
-    assert 'Full result unavailable' in value['summary']
+    assert value['summary'].endswith(_budget._UNAVAILABLE_RESULT_MARKER)
     assert '[Persisted to:' not in out and '/tmp/' not in out
 
 

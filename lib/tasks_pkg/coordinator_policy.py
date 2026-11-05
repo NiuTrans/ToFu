@@ -3,17 +3,27 @@
 The owner-scoped project binding selects the role, never a model/request flag.
 A selected turn remains restricted if the binding changes mid-turn. Independent
 worker conversations use ordinary task admission; Swarm children are not the
-Coordinator execution route.
+Coordinator execution route. The Global Router (docs/ROUTER.md) is the bound
+Coordinator of the owner's router home; coordinator_tool_ceiling widens only
+its ceiling to lib.router.policy.ROUTER_TOOLS through these same functions.
+The Router Watchdog (R7) is the bound Coordinator of the owner's watchdog path;
+its ceiling is the narrower lib.router.watchdog.policy.WATCHDOG_TOOLS.
 """
 from __future__ import annotations
 
+from lib.llm.llm_errors import AbortedError
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 COORDINATOR_TOOLS = frozenset({
     'ask_human', 'todo_write', 'list_conversations', 'get_conversation',
     'create_conversation', 'dispatch_project_assignment', 'get_project_assignment', 'report_to_user',
     'delegate_project_work', 'await_project_workers', 'review_project_work',
     'get_project_workers', 'cancel_project_work', 'finish_project_request',
-    'send_project_message', 'get_project_messages', 'consider_project_message',
+    'update_task_progress', 'send_project_message', 'get_project_messages', 'consider_project_message',
+    # Registers a device-online wake of this conversation; it executes nothing on the device.
+    'await_device',
     'search_tools', 'execute_tools',
 })
 
@@ -23,15 +33,19 @@ def coordinator_scope(task: dict, project_path: str | None = None) -> dict | Non
 
     Lookup errors deliberately propagate: callers must fail closed, not silently
     restore general-purpose tools. Child invocations are not independent worker
-    conversations and never inherit this conversational role.
+    conversations and never inherit this conversational role. A project-dispatch
+    task takes any role from its grant, so the grant is validated first; its
+    AbortedError (lost carrier, revoked grant, changed task identity) is the
+    dispatch authority verdict, not a role lookup failure.
     """
     from lib.tasks_pkg.invocation import is_child_invocation
     if (is_child_invocation(task) or task.get('_parentTaskId')
             or task.get('_transientRuntime') or task.get('_invocationStorageFree')
             or (task.get('config') or {}).get('_storageFreeRuntime')):
         return None
-    from lib.project_dispatch.admission import is_dispatch_task
+    from lib.project_dispatch.admission import is_dispatch_task, validate_task
     if is_dispatch_task(task):
+        validate_task(task, require_account=False)
         from lib.project_dispatch.continuation import current_continuation
         row = current_continuation(task)
         if row is None:
@@ -61,16 +75,74 @@ def coordinator_scope(task: dict, project_path: str | None = None) -> dict | Non
     return dict(result)
 
 
+def coordinator_tool_ceiling(scope: dict) -> frozenset:
+    """The tool names an active coordinator scope may use: one shared ceiling."""
+    from lib.router.policy import ROUTER_TOOLS, is_router_scope
+    if is_router_scope(scope):
+        return ROUTER_TOOLS
+    from lib.router.watchdog.binding import is_watchdog_scope
+    if is_watchdog_scope(scope):
+        from lib.router.watchdog.policy import WATCHDOG_TOOLS
+        return WATCHDOG_TOOLS
+    return COORDINATOR_TOOLS
+
+
+def coordinator_tool_settings(config: dict) -> dict:
+    """The request's tool settings under this role, which never runs programs."""
+    from lib.context_experiment_flags import normalize_context_experiment_flags
+    return {**normalize_context_experiment_flags(config)['tools'], 'programmaticCalling': 'off'}
+
+
+def pin_coordinator_request_policy(conversation_id: str, config: dict, owner_user_id: int) -> dict:
+    """Apply the role's tool settings before model replay pins the request policy.
+
+    Tool assembly enforces the same settings later. Applied only there, every
+    human Coordinator checkpoint recorded the submitted settings instead of the
+    ones the request ran under, unlike its continuations. Dispatch admission
+    already fixed a continuation's settings. A failed role lookup keeps the
+    submitted settings: replay stays conservative and tool assembly still
+    fails closed. Asking the human is intrinsic to the role (like Plan Mode
+    clarification), so ask_human never depends on the composer toggle.
+    """
+    from lib.project_dispatch.admission import KEY
+    if KEY in config:
+        return config
+    try:
+        active = coordinator_scope({'convId': conversation_id, 'config': config,
+                                    '_userId': owner_user_id})
+    except Exception:
+        logger.warning('[Coordinator] role lookup failed at request ingress; '
+                       'replay keeps the submitted tool settings', exc_info=True)
+        return config
+    if not active:
+        return config
+    return {**config, 'tools': coordinator_tool_settings(config), 'humanGuidanceEnabled': True}
+
+
 def coordinator_call_rejection(task: dict, name: str, arguments: dict,
                                project_path: str | None = None) -> str | None:
-    """Return a denial before approval, prefetch, hooks, or tool execution."""
+    """Return a denial before approval, prefetch, hooks, or tool execution.
+
+    A dispatch authority abort propagates and ends the task; any other role
+    lookup failure refuses only this call.
+    """
     try:
         active = coordinator_scope(task, project_path)
+    except AbortedError:
+        raise
     except Exception:
+        logger.warning('[Coordinator] policy lookup failed; refusing tool %s', name,
+                       exc_info=True)
         return 'Coordinator policy unavailable; tool execution refused (fail closed).'
     if not active:
         return None
-    if name in COORDINATOR_TOOLS:
+    try:
+        ceiling = coordinator_tool_ceiling(active)
+    except Exception:
+        logger.warning('[Coordinator] tool ceiling lookup failed; refusing tool %s', name,
+                       exc_info=True)
+        return 'Coordinator policy unavailable; tool execution refused (fail closed).'
+    if name in ceiling:
         # Batch transport is allowed, arbitrary program execution is not. Every
         # child still crosses the same pipeline/executor admission boundary.
         if name != 'execute_tools':
@@ -79,7 +151,7 @@ def coordinator_call_rejection(task: dict, name: str, arguments: dict,
         if (isinstance(calls, list) and calls and not arguments.get('program')
                 and all(isinstance(call, dict)
                         and call.get('name') not in {'execute_tools', 'search_tools'}
-                        and call.get('name') in COORDINATOR_TOOLS
+                        and call.get('name') in ceiling
                         for call in calls)):
             return None
     return (f'Coordinator dispatch-only policy: {name} is not allowed. '
@@ -95,10 +167,12 @@ def filter_coordinator_tools(task: dict, tools: list[dict] | None,
     """Project the same policy before provider discovery can expose tools."""
     if not tools:
         return tools
-    if not coordinator_scope(task, project_path):
+    scope = coordinator_scope(task, project_path)
+    if not scope:
         return tools
+    ceiling = coordinator_tool_ceiling(scope)
     return [tool for tool in tools
-            if (tool.get('function') or {}).get('name') in COORDINATOR_TOOLS]
+            if (tool.get('function') or {}).get('name') in ceiling]
 
 
 def prepare_coordinator_tool_surface(task: dict, cfg: dict, tools: list[dict] | None,
@@ -110,13 +184,15 @@ def prepare_coordinator_tool_surface(task: dict, cfg: dict, tools: list[dict] | 
     or restores a denied capability. Continuation grant filtering still runs
     afterward and every tool call retains its ordinary execution gates.
     """
-    if not coordinator_scope(task, project_path):
+    scope = coordinator_scope(task, project_path)
+    if not scope:
         return tools
+    ceiling = coordinator_tool_ceiling(scope)
     catalog = cfg.get('_executableToolCatalog')
     if not isinstance(catalog, list):
         catalog = tools or []
     admitted = [tool for tool in catalog
-                if (tool.get('function') or {}).get('name') in COORDINATOR_TOOLS]
+                if (tool.get('function') or {}).get('name') in ceiling]
     allowed = {tool['function']['name'] for tool in admitted}
     cfg['_executableToolCatalog'] = admitted
     for key in ('_toolContractDocumentsByName', '_executableToolNamespaceByName',

@@ -31,7 +31,6 @@ assertion is load-bearing.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
 
@@ -47,12 +46,6 @@ JS_DIR = os.path.join(ROOT, 'static', 'js')
 SOURCE_ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 ZH_CATALOG = os.path.join(
     SOURCE_ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 # argv: [node, harness, tool_rounds.js, tool_rounds_rich.js, zh.json, ROOT, mode]
@@ -175,8 +168,6 @@ def _run(mode: str):
         )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_predicate_poll_row_is_translated_and_kind_reflects_promotion():
     proc = _run('live')
     output = proc.stdout.strip()
@@ -186,8 +177,6 @@ def test_predicate_poll_row_is_translated_and_kind_reflects_promotion():
     assert output.count('PASS') >= 9, f'expected >=9 PASS lines, got:\n{output}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_neuter_raw_reason_leaks_dev_english():
     """NEUTER: display the raw reason verbatim → the dev-English note leaks
     back, proving _timerPollReasonText is what removes it."""
@@ -200,8 +189,6 @@ def test_neuter_raw_reason_leaks_dev_english():
         'NEUTER did not surface the leak — the normalizer is NOT load-bearing:\n' + output)
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_neuter_kind_ignores_promotion():
     """NEUTER: force isCodeTimer=false → the hybrid badge / LLM verifier row
     come back, proving the badge is driven by the promoted _timerConditionKind."""

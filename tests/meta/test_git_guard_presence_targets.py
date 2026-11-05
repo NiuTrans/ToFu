@@ -147,6 +147,54 @@ def test_other_checkout_peer_does_not_block_actual_solo_target(checkouts, harnes
     assert harness['receipts'] == ['agent_git_guard_solo']
 
 
+def _nested_linked_worktree(parent, name):
+    """Checkout metadata of ``git worktree add <parent>/.tofu/worktrees/<name>``."""
+    child = parent / '.tofu' / 'worktrees' / name
+    child.mkdir(parents=True)
+    metadata = parent / '.git' / 'worktrees' / name
+    metadata.mkdir(parents=True)
+    (metadata / 'commondir').write_text('../..')
+    (child / '.git').write_text('gitdir: ' + str(metadata))
+    return child
+
+
+def test_leading_cd_into_own_worktree_does_not_borrow_shared_checkout_presence(
+        checkouts, harness, monkeypatch):
+    """The command refused live on 2026-10-31 while peers worked in the parent.
+
+    Its first command enters the task's own linked worktree and cannot fail,
+    so the ``;``-separated ``git rm`` can only run there.
+    """
+    dispatch, _ = checkouts
+    worktree = _nested_linked_worktree(dispatch, 'grouped-turn-layout')
+    harness['peers_at'].add(str(dispatch))
+    monkeypatch.setattr(pipeline, '_handle_approval', lambda *args, **kwargs: (True, ''))
+    command = ('cd ' + shlex.quote(str(worktree))
+               + ' && grep -n "export function disclosureChevron" -A3'
+               ' frontend/src/conversation/ui/renderers/icons.ts;'
+               ' git rm -q frontend/src/conversation/ui/tool-panel-header.ts;'
+               ' git status --short | grep -v "^M " | head -20')
+    stopped, results, entry = _invoke(dispatch, command)
+    assert stopped is False
+    assert harness['roots'] == [str(worktree)]
+    assert harness['settles'] == []
+    assert 'call' not in results
+    assert 'rejection' not in entry
+
+
+@pytest.mark.parametrize('shape', ['true; cd {worktree}; git rm -q tracked',
+                                   'cd {worktree}/../own-task; git rm -q tracked'])
+def test_cd_that_may_fail_still_checks_shared_checkout_presence(checkouts, harness, shape):
+    dispatch, _ = checkouts
+    worktree = _nested_linked_worktree(dispatch, 'own-task')
+    harness['peers_at'].add(str(dispatch))
+    stopped, results, entry = _invoke(dispatch, shape.format(worktree=shlex.quote(str(worktree))))
+    assert stopped is True
+    assert set(harness['roots']) == {str(dispatch), str(worktree)}
+    assert f'Checkout root: {dispatch}' in results['call'][0]
+    assert entry['rejection']['kind'] == 'git_guard'
+
+
 def test_worktree_removal_checks_target_instead_of_invoking_project(checkouts, harness):
     dispatch, target = checkouts
     harness['peers_at'].add(str(dispatch))

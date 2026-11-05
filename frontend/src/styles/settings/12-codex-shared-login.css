@@ -29,4 +29,17 @@
 .codex-shared-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-block: var(--space-3); }
 .codex-shared-content .codex-shared-hint { color: var(--text-tertiary); margin-bottom: 0; }
 .codex-shared-login[data-state="connected"] .codex-shared-feedback { color: var(--success-text); }
+/* Once ChatGPT is connected the reuse offer has nothing left to explain:
+   only the one-line source note remains. */
+.codex-shared-login:is([data-state="connected"], [data-state="own"]) {
+  padding: 0;
+  margin-block: var(--space-2);
+  border: 0;
+  background: none;
+}
+.codex-shared-login:is([data-state="connected"], [data-state="own"])
+  :is(.codex-shared-icon, .codex-shared-heading, .codex-shared-description, .codex-shared-actions, .codex-shared-hint) {
+  display: none;
+}
+.codex-shared-login:is([data-state="connected"], [data-state="own"]) .codex-shared-feedback { margin: 0; }
 .codex-shared-login[data-state="error"] .codex-shared-feedback { color: var(--warning-text); }

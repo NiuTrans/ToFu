@@ -250,7 +250,7 @@
     }
 
     try {
-      const resp = await window.Api.trading.raw("/brain/stream", {
+      const resp = await F.apiRaw("/brain/stream", {
         method: "POST",
         body: JSON.stringify({ trigger: "manual", scan_candidates: true }),
       });

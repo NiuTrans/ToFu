@@ -37,11 +37,15 @@ import json
 import secrets
 import time
 from datetime import date, timedelta
+from importlib import import_module
 from urllib.parse import urlparse
 
 from tofu_search.config import get_config
-from tofu_search.search.vertical import _mcp, base
 from tofu_search.search.vertical.base import logger
+
+# Leaf imports, not via the package: see base.py.
+_mcp = import_module('tofu_search.search.vertical._mcp')
+base = import_module('tofu_search.search.vertical.base')
 
 # The bundled trial credential (see the module docstring) is intentionally
 # not carried in this source tree. Set FLYAI_API_KEY / FLYAI_SIGN_SECRET to

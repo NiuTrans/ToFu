@@ -38,6 +38,7 @@ import os
 import re
 import time
 import unicodedata
+from contextvars import ContextVar
 from functools import lru_cache
 from urllib.parse import quote
 
@@ -61,6 +62,7 @@ _MAX_AUTHORS = 8
 VERIFY_MAX_ENTRIES = 8
 VERIFY_BUDGET_SECONDS = 25.0
 _VERIFY_POLITE_DELAY_SECONDS = 0.15
+_verification_deadline: ContextVar[float | None] = ContextVar('citation_verification_deadline', default=None)
 _SIMILARITY_THRESHOLD = 0.85
 _YEAR_TOLERANCE = 1
 
@@ -180,9 +182,16 @@ def _bibtex_key_of(bibtex: str) -> str:
 def _get(url: str, *, params: dict | None = None, headers: dict | None = None,
          allow_404: bool = False):
     """Bounded GET through the pooled proxy-aware client; typed failures only."""
+    timeout = _HTTP_TIMEOUT_SECONDS
+    deadline = _verification_deadline.get()
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BuildError('citation_deadline', 'Citation verification deadline exhausted')
+        timeout = min(timeout, remaining)
     try:
         resp = http_get(url, params=params, headers=headers,
-                        timeout=_HTTP_TIMEOUT_SECONDS)
+                        timeout=timeout)
     except Exception as exc:
         raise BuildError(
             'citation_backend',
@@ -208,7 +217,9 @@ def _get_json(url: str, *, params: dict | None = None,
     except ValueError as exc:
         raise BuildError('citation_backend',
                          'Literature backend returned non-JSON payload') from exc
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        raise BuildError('citation_backend', 'Literature backend returned a non-object JSON payload')
+    return data
 
 
 # TODO(enterprise): this per-process cache is global; per-owner caches with
@@ -216,16 +227,24 @@ def _get_json(url: str, *, params: dict | None = None,
 # 256 entries so memory stays flat regardless of workload.
 @lru_cache(maxsize=256)
 def _cached_openalex_work(path: str) -> dict | None:
+    return _fetch_openalex_work(path)
+
+
+def _fetch_openalex_work(path: str) -> dict | None:
     return _get_json('%s/works/%s' % (_OPENALEX_API, path),
                      params={'mailto': _MAILTO}, allow_404=True)
 
 
 def _openalex_work_by_doi(doi: str) -> dict | None:
-    return _cached_openalex_work('doi:%s' % quote(doi.lower(), safe=''))
+    # Audits must refresh metadata/retraction status instead of trusting an old
+    # search/insert cache hit. The deadline is local to this verification call.
+    fetch = _fetch_openalex_work if _verification_deadline.get() is not None else _cached_openalex_work
+    return fetch('doi:%s' % quote(doi.lower(), safe=''))
 
 
 def _openalex_work_by_id(openalex_id: str) -> dict | None:
-    return _cached_openalex_work(quote(openalex_id, safe=''))
+    fetch = _fetch_openalex_work if _verification_deadline.get() is not None else _cached_openalex_work
+    return fetch(quote(openalex_id, safe=''))
 
 
 # ── Normalization ────────────────────────────────────────────────────
@@ -602,22 +621,28 @@ def verify_entries(entries: list[dict], *,
         key = str((entry or {}).get('key') or '')
         if index >= max_entries:
             rows.append({'key': key, 'status': 'skipped', 'evidence': {},
+                         'reason': 'entry_limit',
                          'note': 'beyond the %d-entry verification budget'
                          % max_entries})
             continue
         if time.monotonic() >= deadline:
             rows.append({'key': key, 'status': 'skipped', 'evidence': {},
+                         'reason': 'deadline',
                          'note': 'verification time budget exhausted'})
             continue
+        token = _verification_deadline.set(deadline)
         try:
             rows.append(_verify_one(entry or {}))
         except Exception as exc:  # backend down/odd payload — never crash
             logger.info('[citations] verify skipped for %s: %s', key, exc)
             rows.append({'key': key, 'status': 'skipped', 'evidence': {},
+                         'reason': 'backend_unavailable',
                          'note': 'backend unavailable: %s'
                          % exc.__class__.__name__})
+        finally:
+            _verification_deadline.reset(token)
         if index + 1 < min(len(entries), max_entries):
-            time.sleep(_VERIFY_POLITE_DELAY_SECONDS)
+            time.sleep(min(_VERIFY_POLITE_DELAY_SECONDS, max(0.0, deadline - time.monotonic())))
     return rows
 
 
@@ -636,35 +661,50 @@ def _safe_join(base: str, rel_path: str) -> str:
     return target
 
 
-def _read_text(base: str, rel_path: str, cap: int) -> str:
+def _read_source_bytes(base: str, rel_path: str, cap: int) -> bytes:
     target = _safe_join(base, rel_path)
     with open(target, 'rb') as handle:
         data = handle.read(cap + 1)
     if len(data) > cap:
         raise BuildError('source_limit', '%s exceeds the %d-byte read budget'
                          % (rel_path, cap))
-    return data.decode('utf-8', errors='replace')
+    return data
 
 
-def _walk_sources(base: str, suffixes: tuple[str, ...]) -> list[str]:
+def _read_text(base: str, rel_path: str, cap: int) -> str:
+    return _read_source_bytes(base, rel_path, cap).decode('utf-8', errors='replace')
+
+
+def _walk_sources(base: str, suffixes: tuple[str, ...], *, require_complete: bool = False) -> list[str]:
     """Relative source paths under base; skips hidden/vendor dirs, bounded."""
     root = os.path.realpath(base)
     found: list[str] = []
     try:
-        for current, dirs, files in os.walk(root):
+        def walk_error(error):
+            if require_complete:
+                raise error
+
+        for current, dirs, files in os.walk(root, onerror=walk_error):
             rel_dir = os.path.relpath(current, root)
             depth = 0 if rel_dir == '.' else rel_dir.count(os.sep) + 1
-            dirs[:] = sorted(
+            candidates = sorted(
                 d for d in dirs
                 if not d.startswith('.')
-                and d not in ('node_modules', '__pycache__', 'venv', '.venv')
-                and depth < _MAX_WALK_DEPTH)
+                and d not in ('node_modules', '__pycache__', 'venv', '.venv'))
+            if require_complete and candidates:
+                if depth >= _MAX_WALK_DEPTH:
+                    raise BuildError('source_limit', 'Citation source walk exceeds the depth budget')
+                if any(os.path.islink(os.path.join(current, d)) for d in candidates):
+                    raise BuildError('source_path', 'Citation source walk cannot certify symlinked directories')
+            dirs[:] = candidates if depth < _MAX_WALK_DEPTH else []
             for name in sorted(files):
                 if name.lower().endswith(suffixes):
                     rel = name if rel_dir == '.' else '%s/%s' % (
                         rel_dir.replace(os.sep, '/'), name)
                     found.append(rel)
-                    if len(found) >= _MAX_SOURCE_FILES:
+                    if require_complete and len(found) > _MAX_SOURCE_FILES:
+                        raise BuildError('source_limit', 'Citation source walk exceeds the file budget')
+                    if not require_complete and len(found) >= _MAX_SOURCE_FILES:
                         return found
     except OSError as exc:
         raise BuildError('source_path', 'Cannot walk document root: %s' % exc)
@@ -805,15 +845,23 @@ def default_bib_path(base: str, main_file: str = '') -> str:
 
 
 def bibliography_status(base: str, bib_rel: str) -> dict:
-    """Whether any .tex source wires this .bib in (\\bibliography/\\addbibresource)."""
+    """Whether a bounded set of TeX sources wires this bibliography in."""
+    def sources():
+        for tex_rel in _walk_sources(base, ('.tex', '.ltx'))[:64]:
+            try:
+                yield tex_rel, _read_text(base, tex_rel, _MAX_TEX_BYTES)
+            except (BuildError, OSError):
+                continue
+    return _bibliography_status_from_sources(sources(), bib_rel)
+
+
+def _bibliography_status_from_sources(sources, bib_rel: str) -> dict:
+    """Shared local wiring check; audit pages supply their complete snapshot."""
     stem = bib_rel[:-4] if bib_rel.lower().endswith('.bib') else bib_rel
     basename = stem.rsplit('/', 1)[-1]
     filename = bib_rel.rsplit('/', 1)[-1]
-    for tex_rel in _walk_sources(base, ('.tex', '.ltx'))[:64]:
-        try:
-            text = _STRIP_COMMENTS.sub('', _read_text(base, tex_rel, _MAX_TEX_BYTES))
-        except (BuildError, OSError):
-            continue
+    for tex_rel, source_text in sources:
+        text = _STRIP_COMMENTS.sub('', source_text)
         for match in _BIBLIOGRAPHY.finditer(text):
             stems = [part.strip() for part in match.group(1).split(',')]
             if stem in stems or basename in stems:
@@ -828,55 +876,7 @@ def bibliography_status(base: str, bib_rel: str) -> dict:
 
 
 def audit_document(base: str, *, main_file: str = '',
-                   max_entries: int = VERIFY_MAX_ENTRIES) -> dict:
-    """One-pass audit: OpenAlex verification + local cross-reference checks.
-
-    Returns {bib_files, tex_files, entries_total, verifications, duplicates,
-    undefined, unused, bibliography}. Network failures degrade verifications
-    to 'skipped' rows; local findings are always reported.
-    """
-    tex_files = _walk_sources(base, ('.tex', '.ltx'))
-    bib_files = _walk_sources(base, ('.bib',))
-    entries: list[dict] = []
-    duplicates: list[str] = []
-    bib_keys: set[str] = set()
-    total_bytes = 0
-    for bib_rel in bib_files:
-        try:
-            text = _read_text(base, bib_rel, MAX_BIB_BYTES)
-        except (BuildError, OSError):
-            continue
-        total_bytes += len(text.encode('utf-8'))
-        if total_bytes > _MAX_SOURCE_BYTES:
-            break
-        heads, repeated = parse_entries(text)
-        for entry in heads:
-            if entry.key in bib_keys and entry.key not in duplicates:
-                duplicates.append(entry.key)
-            bib_keys.add(entry.key)
-        for dup in repeated:
-            if dup not in duplicates:
-                duplicates.append(dup)
-        entries.extend(collect_entries(text, source_file=bib_rel))
-    cites: set[str] = set()
-    for tex_rel in tex_files:
-        try:
-            text = _STRIP_COMMENTS.sub('', _read_text(base, tex_rel, _MAX_TEX_BYTES))
-        except (BuildError, OSError):
-            continue
-        for match in _CITE.finditer(text):
-            for key in match.group(1).split(','):
-                key = key.strip()
-                if key and len(key) <= 256:
-                    cites.add(key)
-    undefined = sorted(key for key in cites
-                       if key not in bib_keys and key != '*')
-    unused = [] if '*' in cites else sorted(bib_keys - cites)
-    verifications = verify_entries(entries, max_entries=max_entries)
-    bibliography = (bibliography_status(base, bib_files[0]) if bib_files
-                    else {'referenced': False, 'via': None, 'file': '',
-                          'bib': ''})
-    return {'bib_files': bib_files, 'tex_files': tex_files,
-            'entries_total': len(entries), 'verifications': verifications,
-            'duplicates': sorted(duplicates), 'undefined': undefined,
-            'unused': unused, 'bibliography': bibliography}
+                   max_entries: int = VERIFY_MAX_ENTRIES, cursor: str = '') -> dict:
+    """Local citation checks and a source-bound, resumable verification page."""
+    from .citation_audit_pages import audit_document as audit_page
+    return audit_page(base, main_file=main_file, max_entries=max_entries, cursor=cursor)

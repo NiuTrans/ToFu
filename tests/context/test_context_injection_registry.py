@@ -54,18 +54,110 @@ def test_event_preserves_prefix_and_records_note_and_exact_provenance():
     assert task[INJECTED_NOTES_FIELD][-1]['reason'] == 'explicit_noop'
 
 
-def test_inbox_delivery_carrier_emits_no_duplicate_context_note():
-    """``inbox_delivery`` renders through the ``_inboxInjects`` chip (the
-    ``<swarm-update>`` card). Emitting a SECOND ``context-injection``
-    ``system_note`` with the same payload rendered the intervention twice —
-    the carrier carries no note_kind, so it stays note-silent."""
+def test_inbox_delivery_defaults_to_one_auditable_note():
     task = {'id': 'task', '_attemptId': 'attempt', 'model': ''}
     messages = [{'role': 'user', 'content': 'real request'}]
-    append_injection(messages, 'inbox_delivery', '<swarm-update>done</swarm-update>',
-                     task=task, round_num=2)
-    assert messages[-1]['role'] == 'user'
-    assert messages[-1]['_isInboxInject'] is True
+    payload = '<agent-message>private evidence</agent-message>'
+    carrier = append_injection(messages, 'inbox_delivery', payload, task=task, round_num=2)
+    assert carrier['role'] == 'user' and carrier['_isInboxInject'] is True
+    assert carrier['_containsHumanSteer'] is False
+    note, = task[INJECTED_NOTES_FIELD]
+    assert note['kind'] == 'context-injection' and note['reason'] == 'inbox_delivery'
+    assert note['text'] == payload
+    row, = task['_contextManifest']
+    assert row['displaySurface'] == 'system_note'
+    assert row['displayOwner'] == 'context-composer'
+    assert row['displayReason'] == 'registered_note_kind'
+    assert row['blockId'] == note['blockId'] == carrier['_contextInjection']['blockId']
+    assert payload not in json.dumps(row)
+    spec = injection_spec('inbox_delivery')
+    assert spec.group_context is False
+    assert spec.presentation.label_key == 'systemNote.reasonInboxDelivery'
+
+
+@pytest.mark.parametrize('owner', ['inbox-lanes', 'peer-lane'])
+@pytest.mark.parametrize('record_note', [True, False])
+def test_dedicated_inbox_owner_keeps_only_its_existing_ui(owner, record_note):
+    task, messages = {}, []
+    append_injection(messages, 'inbox_delivery', 'lane-owned payload', task=task,
+                     display_owner=owner, record_note=record_note)
     assert not task.get(INJECTED_NOTES_FIELD)
+    row, = task['_contextManifest']
+    assert row['displaySurface'] == 'sidecar' and row['displayOwner'] == owner
+    assert row['displayReason'] == 'dedicated_sidecar'
+    assert 'lane-owned payload' not in json.dumps(row)
+
+
+@pytest.mark.parametrize('injection_id,kwargs', [
+    ('inbox_delivery', {'record_note': False}),
+    ('worker_policy', {'record_note': False}),
+    ('inbox_delivery', {'display_owner': 'unknown-lane'}),
+    ('inbox_delivery', {'display_owner': 'inspector', 'record_note': False}),
+    ('tool_progress', {'display_owner': 'inbox-lanes', 'record_note': False}),
+])
+def test_note_suppression_requires_a_valid_explicit_display_owner(injection_id, kwargs):
+    task, messages = {}, []
+    with pytest.raises(ValueError, match='display_owner'):
+        append_injection(messages, injection_id, 'not silently hidden', task=task, **kwargs)
+    assert messages == [] and task == {}
+
+
+@pytest.mark.parametrize('lane', ['event', 'inbox'])
+def test_new_runtime_spec_without_note_kind_gets_fallback(monkeypatch, lane):
+    from dataclasses import replace
+    from lib.tasks_pkg.context_composer import injections
+    spec = replace(injection_spec('inbox_delivery'), id='new_runtime_source',
+                   lane=lane, note_kind='', presentation=None)
+    monkeypatch.setattr(injections, 'injection_spec', lambda name: spec)
+    task, messages = {}, []
+    append_injection(messages, spec.id, 'new source evidence', task=task, round_num=4)
+    note, = task[INJECTED_NOTES_FIELD]
+    assert note['kind'] == 'context-injection' and note['reason'] == spec.id
+    row, = task['_contextManifest']
+    assert row['displaySurface'] == 'system_note'
+    assert row['displayReason'] == 'fallback_note_kind'
+    assert row['blockId'] == note['blockId']
+
+
+def test_invalid_note_contract_cannot_silently_append():
+    task, messages = {}, []
+    with pytest.raises(ValueError, match='system_note'):
+        append_injection(messages, 'inbox_delivery', 'evidence', task=task, action='invalid')
+    assert not messages and not task.get('_contextManifest')
+
+
+@pytest.mark.parametrize('display_owner', ['', 'inbox-lanes'])
+@pytest.mark.parametrize('after_manifest_write', [False, True])
+def test_manifest_failure_rolls_back_carrier_note_and_receipt(monkeypatch, display_owner, after_manifest_write):
+    from lib.tasks_pkg.context_composer import injections
+
+    task, messages = {'id': 'task', '_attemptId': 'attempt'}, []
+    append_injection(messages, 'inbox_delivery', 'earlier evidence', task=task, round_num=1)
+    # Force receipt eviction too; rollback must restore the diagnostic counter.
+    monkeypatch.setattr(injections, 'MANIFEST_LIMIT', 1)
+    original_task, original_messages = copy.deepcopy(task), copy.deepcopy(messages)
+    original_notes = task[INJECTED_NOTES_FIELD]
+    original_manifest = task['_contextManifest']
+    record = injections.record_manifest_rows
+
+    def failed_manifest(*args, **kwargs):
+        if after_manifest_write:
+            record(*args, **kwargs)
+        raise RuntimeError('injected manifest failure')
+
+    monkeypatch.setattr(injections, 'record_manifest_rows', failed_manifest)
+    with pytest.raises(RuntimeError, match='manifest failure'):
+        append_injection(messages, 'inbox_delivery', 'new evidence', task=task,
+                         round_num=2, display_owner=display_owner)
+    assert messages == original_messages and task == original_task
+    assert task[INJECTED_NOTES_FIELD] is original_notes
+    assert task['_contextManifest'] is original_manifest
+    monkeypatch.setattr(injections, 'record_manifest_rows', record)
+    append_injection(messages, 'inbox_delivery', 'new evidence', task=task,
+                     round_num=2, display_owner=display_owner)
+    assert len(messages) == 2
+    assert task['_contextManifest'][-1]['delivery'] == 'appended_not_acknowledged'
+    assert len(task[INJECTED_NOTES_FIELD]) == (1 if display_owner else 2)
 
 
 def test_identical_event_after_history_rebuild_gets_new_receipt_identity():
@@ -79,8 +171,14 @@ def test_identical_event_after_history_rebuild_gets_new_receipt_identity():
 
 def test_bootstrap_policy_retains_authority_and_cannot_elevate_mid_dialogue():
     messages = [{'role': 'system', 'content': 'operator'}]
-    append_injection(messages, 'worker_policy', 'read-only worker')
+    task = {}
+    append_injection(messages, 'worker_policy', 'read-only worker', task=task)
     assert messages[-1]['role'] == 'system'
+    assert not task.get(INJECTED_NOTES_FIELD)
+    row, = task['_contextManifest']
+    assert row['displaySurface'] == row['displayOwner'] == 'inspector'
+    assert row['displayReason'] == 'bootstrap_policy'
+    assert 'blockId' not in row
     messages.append({'role': 'user', 'content': 'objective'})
     with pytest.raises(ValueError, match='precede dialogue'):
         append_injection(messages, 'worker_policy', 'late elevation')
@@ -336,6 +434,10 @@ def test_runtime_prompt_writers_cannot_bypass_shared_interface():
         'lib/tasks_pkg/orchestrator/_tool_loop_breaker.py',
         'lib/tasks_pkg/orchestrator/_swarm_inbox.py',
         'lib/tasks_pkg/orchestrator/_turn.py',
+
+        'lib/swarm/run_messages.py',
+        'lib/conversations/project_messages.py',
+        'lib/agent_inbox/__init__.py',
         'lib/tasks_pkg/orchestrator/_finalize.py',
         'lib/tasks_pkg/stream_handler/_analyse.py',
         'lib/tasks_pkg/stream_handler/_terminal_recovery.py',
@@ -352,3 +454,29 @@ def test_runtime_prompt_writers_cannot_bypass_shared_interface():
         violations.extend((relative, line) for line in _raw_prompt_writes(
             (root / relative).read_text(), allow_user_projection=True))
     assert not violations, violations
+
+
+def test_carrier_append_failure_cannot_create_a_ghost_display_note():
+    class RefusingHistory(list):
+        def append(self, item):
+            raise RuntimeError('history refused append')
+
+    task = {}
+    messages = RefusingHistory([{'role': 'user', 'content': 'Objective'}])
+    with pytest.raises(RuntimeError, match='history refused'):
+        append_injection(messages, 'inbox_delivery', 'new evidence', task=task)
+    assert messages == [{'role': 'user', 'content': 'Objective'}]
+    assert not task.get(INJECTED_NOTES_FIELD) and not task.get('_contextManifest')
+
+
+def test_note_recording_failure_rolls_back_only_the_new_carrier(monkeypatch):
+    def fail_note(*args, **kwargs):
+        raise RuntimeError('note refused')
+
+    monkeypatch.setattr('lib.tasks_pkg.segments.record_injected_note', fail_note)
+    task = {}
+    messages = [{'role': 'user', 'content': 'Objective'}]
+    with pytest.raises(RuntimeError, match='note refused'):
+        append_injection(messages, 'inbox_delivery', 'new evidence', task=task)
+    assert messages == [{'role': 'user', 'content': 'Objective'}]
+    assert not task.get(INJECTED_NOTES_FIELD) and not task.get('_contextManifest')

@@ -23,7 +23,9 @@ Three enforcement layers (defense in depth; dispatch is the final authority):
 The classifier starts with the per-task WRITE partition, adds the explicit
 extra bans below, restricts mixed-effect desktop tools by their arguments, and
 fails closed for unknown/caller-defined tools. MCP calls require an explicit
-``readOnlyHint: true`` safety declaration.
+``readOnlyHint: true`` safety declaration or a host-reviewed catalog read
+(``lib.mcp.registry.reviewed_read_only_tools``), both folded into the bridge's
+``read_only_hint``.
 """
 
 from __future__ import annotations
@@ -105,10 +107,11 @@ def normalize_interaction_mode_runtime_config(
 ) -> dict:
     """Return one executable config with exactly one loop owner.
 
-    This is the backend half of the Standard / Plan / Goal-mode (autopilot)
-    radio surface. Plan wins stale conflicts fail-closed; otherwise an
-    explicit Flow wins, then goal mode. The same precedence governs task
-    dispatch.
+    This is the backend half of the Standard / Delegate / Plan / Goal-mode
+    (autopilot) radio surface. Plan wins stale conflicts fail-closed;
+    otherwise an explicit Flow wins, then goal mode. Delegate is a policy of
+    the Standard loop, so any other owner clears it. The same precedence
+    governs task dispatch.
     """
     result = dict(cfg or {})
     # Retired loop flags are consumed at this request boundary and never
@@ -121,6 +124,7 @@ def normalize_interaction_mode_runtime_config(
         result['imageGenMode'] = False
         result['activeFlow'] = ''
         result['autopilotEnabled'] = False
+        result['delegateMode'] = False
         for key in ('flowDefinition', 'flowBuiltin', 'flowId'):
             result.pop(key, None)
         return result
@@ -129,8 +133,14 @@ def normalize_interaction_mode_runtime_config(
         result['autopilot'] = False
         result['autopilotEnabled'] = False
         result['imageGenMode'] = False
+        result['delegateMode'] = False
     elif (result.get('autopilot') is True
           or result.get('autopilotEnabled') is True):
+        result['imageGenMode'] = False
+        result['delegateMode'] = False
+    elif result.get('delegateMode') is True:
+        # Like every non-Standard agent mode, Delegate replaces direct image
+        # generation, which needs tools a delegating root does not hold.
         result['imageGenMode'] = False
     return result
 
@@ -158,13 +168,18 @@ def normalize_interaction_mode_conversation_settings(
         result['autopilotEnabled'] = False
         result['imageGenMode'] = False
         result['activeFlow'] = ''
+        result['delegateMode'] = False
         return result
 
     active_flow = result.get('activeFlow')
     if isinstance(active_flow, str) and active_flow.strip():
         result['autopilotEnabled'] = False
         result['imageGenMode'] = False
+        result['delegateMode'] = False
     elif result.get('autopilotEnabled') is True:
+        result['imageGenMode'] = False
+        result['delegateMode'] = False
+    elif result.get('delegateMode') is True:
         result['imageGenMode'] = False
     return result
 

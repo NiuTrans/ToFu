@@ -15,6 +15,7 @@ Shared DRY primitives live in ``_adapter.py`` (``simple_call``,
 # Order doesn't matter — each module registers independently.
 from lib.tasks_pkg.handlers import (  # noqa: F401
     browser,
+    channels,
     code_exec,
     local_serve,
     mcp,

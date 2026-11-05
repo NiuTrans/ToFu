@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
 
 from tests._runtime_sections import runtime_section_path
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -17,8 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_push_rpc_correlates_cancels_and_rejects_disconnects():
-    if not shutil.which('node'):
-        pytest.skip('node is required')
+    require_node_modules('vite')
     source = runtime_section_path('push.js')
     script = f"""
 const assert = require('assert');

@@ -112,6 +112,45 @@ def skip_or_fail(reason):
     pytest.skip(reason)
 
 
+def require_node_test_runner(*modules: str) -> None:
+    """Guard a ``node --test`` suite: the PATH ``node`` must provide the
+    built-in test runner and resolve ``modules`` from the repository root.
+
+    Probing the same ``node`` from ROOT names the actual gap (a checkout or
+    worktree without ``npm ci``, or a Node line older than the test runner)
+    instead of failing on the suite's TAP output.
+    """
+    _require_node_resolution(modules, 'this node --test suite', test_runner=True)
+
+
+def require_node_modules(*modules: str) -> None:
+    """Guard a suite that runs repository ``node_modules`` (the Vite test
+    bundler or preview server, TypeScript) through the PATH ``node``.
+
+    A fresh clone or git worktree has no ``node_modules`` until ``npm ci``;
+    the suite then names that gap instead of failing on a bundler exit.
+    """
+    _require_node_resolution(modules, 'this suite')
+
+
+def _require_node_resolution(modules, purpose: str, *, test_runner: bool = False) -> None:
+    node = shutil.which('node')
+    if node is None:
+        skip_or_fail('node not on PATH')
+    probe = 'process.stdout.write(process.version);' + (
+        'require("node:test");' if test_runner else '') + ''.join(
+        f'require.resolve({json.dumps(module)});' for module in modules)
+    result = subprocess.run([node, '-e', probe], cwd=ROOT, capture_output=True,
+                            text=True, timeout=60)
+    if result.returncode != 0:
+        lines = result.stderr.strip().splitlines()
+        detail = next((line for line in lines if line.startswith('Error')),
+                      lines[-1] if lines else f'exit {result.returncode}')
+        skip_or_fail(f'node {result.stdout.strip() or "(unknown version)"} cannot run '
+                     f'{purpose}: {detail} (run `npm ci` with the '
+                     'Node line in .node-version)')
+
+
 def shipped_graph_available() -> bool:
     """True when the built Vite delivery graph (static/vite) exists."""
     return os.path.isfile(os.path.join(ROOT, 'static', 'vite', 'manifest.json'))
@@ -194,7 +233,7 @@ def frontend_module_guard(*, need_jsdom=False, reason=''):
 
 
 def run_harness(target_js, body_js, *, extra_targets=None, min_pass=1,
-                expect_pass=None, timeout=60, label=''):
+                expect_pass=None, timeout=None, label=''):
     """Run a jsdom harness body and assert no failures + enough PASSes.
 
     Args:
@@ -205,7 +244,10 @@ def run_harness(target_js, body_js, *, extra_targets=None, min_pass=1,
         expect_pass: EXACT number of PASS assertions required. Preferred over
             ``min_pass`` for new suites (docs/TESTING_STRATEGY.md §6) — an
             accidentally dropped assertion can no longer pass silently.
-        timeout: node subprocess timeout (seconds).
+        timeout: Optional node subprocess deadline (seconds). By default the
+            per-test hang guard owns the deadline and kills a wedged node:
+            loading jsdom from ``node_modules`` takes as long as the host's
+            I/O needs, so a fixed harness deadline fails healthy runs.
         label: Optional prefix for failure messages.
 
     Skips (not fails) when node/jsdom are unavailable — unless

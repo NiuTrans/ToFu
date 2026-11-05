@@ -115,7 +115,7 @@ def test_shutdown_arms_deadline_before_clean_marker_io():
     assert calls == ['timer', ('marker', 'signal')]
 
 
-def test_memory_recycle_is_recorded_as_controlled_shutdown():
+def test_restart_request_is_recorded_as_controlled_shutdown():
     import server
 
     requested = threading.Event()
@@ -124,11 +124,11 @@ def test_memory_recycle_is_recorded_as_controlled_shutdown():
         requested,
         timer_starter=lambda _event, logger: object(),
         mark_clean_fn=reasons.append,
-        reason='memory_recycle',
+        reason='restart',
     )
 
     assert requested.is_set()
-    assert reasons == ['memory_recycle']
+    assert reasons == ['restart']
 
 
 def test_http_keep_alive_is_short_configurable_and_bounded(monkeypatch):

@@ -38,16 +38,52 @@ def is_compaction_handoff(message: dict) -> bool:
             and metadata['phase'] in {'pre_turn', 'mid_turn'})
 
 
-def make_compaction_handoff(summary: str, *, phase: str) -> dict:
-    """Render one bounded-by-summary-policy carrier without duplicating its body."""
+def _coverage_line(coverage: dict) -> str:
+    """Name the folded range and its exact-text recall call in one line."""
+    span = (f"Turns {coverage['firstTurnId']} through {coverage['lastTurnId']}"
+            + (' and its reply' if coverage.get('throughReply') else ''))
+    conversation = coverage['conversationId']
+    if isinstance(coverage.get('before'), int):
+        recall = (f'get_conversation(conversation_id="{conversation}", '
+                  f"before={coverage['before']}) ends at the last covered Turn; "
+                  'a smaller before pages to older Turns')
+    else:
+        recall = (f'get_conversation(conversation_id="{conversation}") pages '
+                  'this conversation with before=N')
+    return (f'Covered history: {span}. Their exact text stays in the durable '
+            f'transcript: {recall}.')
+
+
+def make_compaction_handoff(summary: str, *, phase: str, coverage: dict | None = None,
+                            scheduled_request_id: str = '') -> dict:
+    """Render one bounded-by-summary-policy carrier without duplicating its body.
+
+    The coverage line precedes the summary so receipt carry-forward, which
+    reads from the first summary heading, never copies a stale range.
+    ``scheduled_request_id`` proves an owner-scheduled compaction reached
+    this working view; settlement retires its marker only on that proof.
+    """
     if phase not in {'pre_turn', 'mid_turn'}:
         raise ValueError('Unknown compaction handoff phase')
+    metadata = {'version': HANDOFF_VERSION, 'phase': phase}
+    head = '<compaction_handoff>\n' + HANDOFF_GUIDANCE + '\n\n'
+    if coverage:
+        metadata['coverage'] = dict(coverage)
+        head += _coverage_line(coverage) + '\n\n'
+    if scheduled_request_id:
+        metadata['scheduledRequestId'] = scheduled_request_id
     return {
         'role': 'user', '_isMeta': True,
-        HANDOFF_FIELD: {'version': HANDOFF_VERSION, 'phase': phase},
-        'content': ('<compaction_handoff>\n' + HANDOFF_GUIDANCE + '\n\n'
-                    + summary + '\n</compaction_handoff>'),
+        HANDOFF_FIELD: metadata,
+        'content': head + summary + '\n</compaction_handoff>',
     }
+
+
+def handoff_scheduled_request_ids(messages: list[dict]) -> set[str]:
+    """Owner-scheduled compaction requests whose summary this view carries."""
+    return {message[HANDOFF_FIELD]['scheduledRequestId'] for message in messages
+            if is_compaction_handoff(message)
+            and isinstance(message[HANDOFF_FIELD].get('scheduledRequestId'), str)}
 
 
 def legacy_compaction_message_positions(messages: list[dict]) -> set[int]:

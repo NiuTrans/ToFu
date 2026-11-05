@@ -11,37 +11,41 @@ import html
 import json
 import os
 import posixpath
+from stat import S_ISDIR, S_ISREG
 import sys
 import threading
 import tempfile
-import time
 from urllib.parse import urlparse
 
 from lib.log import get_logger
+from lib.http_transport.ui_languages import UI_LANGUAGE_MANIFEST_PATH, UI_LANGUAGES
 
 
 logger = get_logger(__name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VITE_OUT_DIR = os.path.join(BASE_DIR, 'static', 'vite')
 VITE_MANIFEST = os.path.join(VITE_OUT_DIR, 'manifest.json')
-VITE_ENTRIES = {
-    'main': 'frontend/src/main.ts',
-    'admin': 'frontend/src/admin.ts',
-}
-# Compatibility name for callers that only need the primary entry key.
-VITE_ENTRY = VITE_ENTRIES['main']
 I18N_CATALOG_DIGEST_FIELD = 'tofuI18nCatalogSha256'
 VITE_AUTHORING_DIGEST_FIELD = 'tofuAuthoringSha256'
 VITE_AUTHORING_INPUTS_PATH = os.path.join(
     BASE_DIR, 'frontend', 'authoring-inputs.json')
 with open(VITE_AUTHORING_INPUTS_PATH, encoding='utf-8') as _authoring_file:
     _VITE_AUTHORING_INPUTS = json.load(_authoring_file)
-if (not isinstance(_VITE_AUTHORING_INPUTS.get('configPaths'), list)
+if (not isinstance(_VITE_AUTHORING_INPUTS.get('entries'), dict)
+        or not _VITE_AUTHORING_INPUTS['entries'].get('main')
+        or not all(isinstance(name, str) and isinstance(path, str) and path
+                   for name, path in _VITE_AUTHORING_INPUTS['entries'].items())
+        or not isinstance(_VITE_AUTHORING_INPUTS.get('configPaths'), list)
         or not isinstance(_VITE_AUTHORING_INPUTS.get('sourceSuffixes'), list)):
     raise RuntimeError('frontend/authoring-inputs.json has an invalid shape')
+VITE_ENTRIES = _VITE_AUTHORING_INPUTS['entries']
+VITE_ENTRY = VITE_ENTRIES['main']
+# The i18n digest frames the language manifest and then each locale source in
+# manifest order, exactly like scripts/gen_i18n_contract.mjs.
+I18N_LANGUAGE_MANIFEST_PATH = UI_LANGUAGE_MANIFEST_PATH
 I18N_LOCALE_PATHS = tuple(
     os.path.join(BASE_DIR, 'frontend', 'src', 'i18n', 'locales', f'{language}.json')
-    for language in ('zh', 'en')
+    for language in UI_LANGUAGES
 )
 VITE_AUTHORING_CONFIG_PATHS = tuple(
     os.path.join(BASE_DIR, *relative_path.split('/'))
@@ -49,16 +53,18 @@ VITE_AUTHORING_CONFIG_PATHS = tuple(
 )
 VITE_AUTHORING_SUFFIXES = frozenset(
     _VITE_AUTHORING_INPUTS['sourceSuffixes'])
-_CACHE_TTL_SECONDS = 5.0
+ManifestPublication = tuple[int, int, int]
 _cache_lock = threading.Lock()
-_cache: dict[tuple[object, ...], tuple[float, str]] = {}
+# Page tags per declared entry for the current manifest publication only.
+_cache: dict[tuple[str, ManifestPublication], str] = {}
 
 
 class ViteAssetError(RuntimeError):
     """The required Vite artifact cannot be resolved safely."""
 
 
-def _safe_asset_path(value: object, suffixes: tuple[str, ...] | None = None) -> str:
+def _lexical_asset_path(
+        value: object, suffixes: tuple[str, ...] | None = None) -> str:
     path = str(value or '')
     if ('\\' in path or not path.startswith('assets/')
             or posixpath.normpath(path) != path
@@ -67,19 +73,73 @@ def _safe_asset_path(value: object, suffixes: tuple[str, ...] | None = None) -> 
         return ''
     if suffixes is not None and not path.lower().endswith(suffixes):
         return ''
+    return path
+
+
+def _safe_asset_path(value: object, suffixes: tuple[str, ...] | None = None) -> str:
+    path = _lexical_asset_path(value, suffixes)
+    if not path:
+        return ''
+    root = os.path.realpath(VITE_OUT_DIR)
     resolved = os.path.realpath(os.path.join(VITE_OUT_DIR, *path.split('/')))
-    if os.path.commonpath((os.path.realpath(VITE_OUT_DIR), resolved)) != os.path.realpath(VITE_OUT_DIR):
+    if os.path.commonpath((root, resolved)) != root:
         return ''
     return path
 
 
-def _require_asset(value: object, suffixes: tuple[str, ...] | None = None) -> str:
+class _AssetFileProofs:
+    """Accept each distinct published file once within one graph resolution.
+
+    ``realpath`` lstat()s every ancestor component, and a manifest repeats the
+    same files across rows; on a network mount each call re-acquires the GIL
+    behind busy serving threads. With the output root resolved once, a single
+    ``lstat`` proves that a direct child of the real ``assets`` directory is a
+    regular file inside the root. Symlinks, nested names and absent files keep
+    the exact per-reference check in :func:`_require_asset`.
+    """
+
+    def __init__(self) -> None:
+        assets_dir = os.path.join(os.path.realpath(VITE_OUT_DIR), 'assets')
+        try:
+            is_real_directory = S_ISDIR(os.lstat(assets_dir).st_mode)
+        except OSError:
+            is_real_directory = False
+        self._assets_dir = assets_dir if is_real_directory else None
+        self._accepted: set[str] = set()
+
+    def proves(self, path: str) -> bool:
+        if path in self._accepted:
+            return True
+        name = path.removeprefix('assets/')
+        if self._assets_dir is None or '/' in name:
+            return False
+        try:
+            mode = os.lstat(os.path.join(self._assets_dir, name)).st_mode
+        except OSError:
+            return False
+        if not S_ISREG(mode):
+            return False
+        self._accepted.add(path)
+        return True
+
+    def record(self, path: str) -> None:
+        self._accepted.add(path)
+
+
+def _require_asset(
+        value: object, suffixes: tuple[str, ...] | None = None,
+        proofs: _AssetFileProofs | None = None) -> str:
+    path = _lexical_asset_path(value, suffixes)
+    if path and proofs is not None and proofs.proves(path):
+        return path
     path = _safe_asset_path(value, suffixes)
     if not path:
         raise ValueError(f'unsafe Vite asset path {value!r}')
     full_path = os.path.join(VITE_OUT_DIR, *path.split('/'))
     if not os.path.isfile(full_path):
         raise ValueError(f'Vite asset is missing: {path!r}')
+    if proofs is not None:
+        proofs.record(path)
     return path
 
 
@@ -93,10 +153,14 @@ def _row_references(row: dict) -> tuple[str, ...]:
     return tuple(references)
 
 
-def _validate_manifest(manifest: object, entries: tuple[str, ...]) -> dict:
+def _validate_manifest(
+        manifest: object, entries: tuple[str, ...],
+        proofs: _AssetFileProofs | None = None) -> dict:
     if not isinstance(manifest, dict):
         raise ValueError('Vite manifest root must be an object')
     keys = tuple(VITE_ENTRIES[name] for name in entries)
+    if proofs is None:
+        proofs = _AssetFileProofs()
     seen: set[str] = set()
 
     def visit(key: str) -> None:
@@ -106,11 +170,11 @@ def _validate_manifest(manifest: object, entries: tuple[str, ...]) -> dict:
         if not isinstance(row, dict):
             raise ValueError(f'Vite manifest reference {key!r} is missing')
         seen.add(key)
-        _require_asset(row.get('file'))
+        _require_asset(row.get('file'), proofs=proofs)
         for css in row.get('css') or ():
-            _require_asset(css, ('.css',))
+            _require_asset(css, ('.css',), proofs)
         for asset in row.get('assets') or ():
-            _require_asset(asset)
+            _require_asset(asset, proofs=proofs)
         for reference in _row_references(row):
             visit(reference)
 
@@ -129,8 +193,11 @@ def _validate_manifest(manifest: object, entries: tuple[str, ...]) -> dict:
 def _source_i18n_catalog_digest() -> str:
     """Hash locale source bytes with the same versioned framing as Node."""
     digest = hashlib.sha256()
-    digest.update(b'tofu-i18n-catalog-v1\0')
-    for language, path in zip(('zh', 'en'), I18N_LOCALE_PATHS):
+    digest.update(b'tofu-i18n-catalog-v2\0')
+    with open(I18N_LANGUAGE_MANIFEST_PATH, 'rb') as handle:
+        digest.update(handle.read())
+    digest.update(b'\0')
+    for language, path in zip(UI_LANGUAGES, I18N_LOCALE_PATHS):
         digest.update(language.encode('ascii'))
         digest.update(b'\0')
         with open(path, 'rb') as handle:
@@ -290,9 +357,10 @@ def _validate_vite_authoring_digest(
 
 
 def _load_manifest(
-        entries: tuple[str, ...], *, validate_authoring_sources: bool) -> dict:
+        entries: tuple[str, ...], *, validate_authoring_sources: bool,
+        proofs: _AssetFileProofs | None = None) -> dict:
     with open(VITE_MANIFEST, encoding='utf-8') as handle:
-        manifest = _validate_manifest(json.load(handle), entries)
+        manifest = _validate_manifest(json.load(handle), entries, proofs)
     _validate_i18n_catalog_digest(
         manifest, validate_authoring_sources=validate_authoring_sources)
     _validate_vite_authoring_digest(
@@ -426,9 +494,13 @@ def _font_preload_basename(asset: str) -> str:
     return base if dash else stem
 
 
-def _manifest_tags(manifest: dict, entry_name: str = 'main') -> str:
+def _manifest_tags(
+        manifest: dict, entry_name: str = 'main',
+        proofs: _AssetFileProofs | None = None) -> str:
     entry_key = VITE_ENTRIES[entry_name]
     entry = manifest[entry_key]
+    if proofs is None:
+        proofs = _AssetFileProofs()
     seen: set[str] = set()
     imports: list[str] = []
     styles: list[str] = []
@@ -442,18 +514,18 @@ def _manifest_tags(manifest: dict, entry_name: str = 'main') -> str:
         for imported in row.get('imports') or ():
             visit(imported)
         if key != entry_key:
-            asset = _require_asset(row.get('file'), ('.js', '.mjs'))
+            asset = _require_asset(row.get('file'), ('.js', '.mjs'), proofs)
             if asset not in imports:
                 imports.append(asset)
         for css in row.get('css') or ():
-            asset = _require_asset(css, ('.css',))
+            asset = _require_asset(css, ('.css',), proofs)
             if asset not in styles:
                 styles.append(asset)
         for bundled in row.get('assets') or ():
             # Every attached URL asset is part of the validated publication,
             # but only the small allowlist of first-paint fonts earns an HTML
             # preload. Data assets such as locale JSON remain fetch-on-demand.
-            asset = _require_asset(bundled)
+            asset = _require_asset(bundled, proofs=proofs)
             if posixpath.splitext(asset)[1].lower() not in _FONT_MIME_TYPES:
                 continue
             if _font_preload_basename(asset) not in _FONT_PRELOAD_BASENAMES:
@@ -462,7 +534,7 @@ def _manifest_tags(manifest: dict, entry_name: str = 'main') -> str:
                 fonts.append(asset)
 
     visit(entry_key)
-    source = _require_asset(entry.get('file'), ('.js', '.mjs'))
+    source = _require_asset(entry.get('file'), ('.js', '.mjs'), proofs)
     tags = []
     for font in fonts:
         mime = _FONT_MIME_TYPES[posixpath.splitext(font)[1].lower()]
@@ -482,8 +554,23 @@ def _manifest_tags(manifest: dict, entry_name: str = 'main') -> str:
     return '\n'.join(tags)
 
 
+def _manifest_publication(manifest_stat: os.stat_result) -> ManifestPublication:
+    """Identify one atomic manifest publication.
+
+    Publication renames a complete manifest into place, so the inode changes
+    even where a coarse-mtime filesystem repeats the mtime and size.
+    """
+    return (manifest_stat.st_ino, manifest_stat.st_mtime_ns,
+            manifest_stat.st_size)
+
+
 def get_vite_asset_tags(entry: str = 'main') -> str:
-    """Return safe tags for ``main`` or ``admin``, or fail closed."""
+    """Return safe tags for a declared frontend entry, or fail closed.
+
+    A publication's graph cannot change until the next atomic publication, so
+    its tags are validated once per entry and reused until the manifest is
+    replaced; elapsed time is not an invalidation signal.
+    """
     if entry not in VITE_ENTRIES:
         raise ViteAssetError(f'unknown Vite entry {entry!r}')
     server = _dev_server()
@@ -494,23 +581,32 @@ def get_vite_asset_tags(entry: str = 'main') -> str:
     except OSError as exc:
         raise ViteAssetError(
             f'required Vite manifest is unavailable: {VITE_MANIFEST}') from exc
-    key = (entry, stat.st_mtime_ns, stat.st_size)
-    now = time.monotonic()
+    publication = _manifest_publication(stat)
+    key = (entry, publication)
     cached = _cache.get(key)
-    if cached and now - cached[0] < _CACHE_TTL_SECONDS:
-        return cached[1]
+    if cached is not None:
+        return cached
     with _cache_lock:
         cached = _cache.get(key)
-        if cached and now - cached[0] < _CACHE_TTL_SECONDS:
-            return cached[1]
+        if cached is not None:
+            return cached
         try:
+            # One proof set spans validation and tag assembly, so each
+            # distinct file costs one metadata call per publication.
+            proofs = _AssetFileProofs()
             manifest = _load_manifest(
-                (entry,), validate_authoring_sources=False)
-            tags = _manifest_tags(manifest, entry)
+                (entry,), validate_authoring_sources=False, proofs=proofs)
+            tags = _manifest_tags(manifest, entry, proofs)
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             raise ViteAssetError(f'required Vite artifact is invalid: {exc}') from exc
-        _cache.clear()
-        _cache[key] = (now, tags)
+        # HTML and its first health/push probe must describe the same graph.
+        # Reuse this completed validation instead of serving new code while
+        # the in-memory build identity still asks that page to reload again.
+        _publish_vite_build_ids(manifest, manifest_key=publication)
+        for superseded in [cached_key for cached_key in _cache
+                           if cached_key[1] != publication]:
+            del _cache[superseded]
+        _cache[key] = tags
         return tags
 
 
@@ -530,12 +626,14 @@ def clear_vite_asset_cache() -> None:
 _build_id_state_lock = threading.Lock()
 _build_id_refresh_io_lock = threading.Lock()
 _build_ids: dict[str, str] = {}
-_build_id_manifest_key: tuple[int, int] | None = None
+_build_id_manifest_key: ManifestPublication | None = None
 _build_id_refresh_pending = False
+_UNCONDITIONAL_BUILD_ID_PUBLICATION = object()
 
 
 def _publish_vite_build_ids(
-        manifest: dict, *, manifest_key: tuple[int, int] | None = None) -> None:
+        manifest: dict, *, manifest_key: ManifestPublication | None = None,
+        expected_previous_key: object = _UNCONDITIONAL_BUILD_ID_PUBLICATION) -> None:
     published: dict[str, str] = {}
     for entry_name, manifest_entry in VITE_ENTRIES.items():
         row = manifest.get(manifest_entry)
@@ -545,9 +643,12 @@ def _publish_vite_build_ids(
         if build_id:
             published[entry_name] = build_id
     with _build_id_state_lock:
+        global _build_id_manifest_key
+        if (expected_previous_key is not _UNCONDITIONAL_BUILD_ID_PUBLICATION
+                and _build_id_manifest_key != expected_previous_key):
+            return  # A page published a newer validated graph during this read.
         _build_ids.clear()
         _build_ids.update(published)
-        global _build_id_manifest_key
         _build_id_manifest_key = manifest_key
 
 
@@ -579,14 +680,15 @@ def refresh_vite_build_ids() -> str:
         return ''
     with _build_id_refresh_io_lock:
         try:
-            stat = os.stat(VITE_MANIFEST)
-            key = (stat.st_mtime_ns, stat.st_size)
+            key = _manifest_publication(os.stat(VITE_MANIFEST))
             with _build_id_state_lock:
                 if key == _build_id_manifest_key and _build_ids:
                     return _build_ids.get('main', '')
+                previous_key = _build_id_manifest_key
             manifest = _load_manifest(
                 tuple(VITE_ENTRIES), validate_authoring_sources=False)
-            _publish_vite_build_ids(manifest, manifest_key=key)
+            _publish_vite_build_ids(
+                manifest, manifest_key=key, expected_previous_key=previous_key)
         except (OSError, ValueError, TypeError, json.JSONDecodeError,
                 KeyError) as exc:
             logger.debug('[Vite] background build-id refresh unavailable: %s', exc)
@@ -625,7 +727,8 @@ def request_vite_build_id_refresh() -> bool:
 
 
 __all__ = [
-    'I18N_CATALOG_DIGEST_FIELD', 'I18N_LOCALE_PATHS',
+    'I18N_CATALOG_DIGEST_FIELD',
+    'I18N_LANGUAGE_MANIFEST_PATH', 'I18N_LOCALE_PATHS',
     'VITE_AUTHORING_DIGEST_FIELD',
     'VITE_AUTHORING_CONFIG_PATHS', 'VITE_AUTHORING_SUFFIXES',
     'VITE_ENTRIES', 'VITE_ENTRY', 'VITE_MANIFEST', 'VITE_OUT_DIR',

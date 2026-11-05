@@ -22,7 +22,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from lib.llm._transport import post_headers_abortable  # noqa: E402
-from lib.llm.llm_errors import AbortedError  # noqa: E402
+from lib.llm.llm_errors import AbortedError, LocalRequestPreparationError  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -155,3 +155,61 @@ class TestStreamChatOnceHeaderWaitAbort:
             release.set()
         assert time.monotonic() - t0 < 5, (
             'Stop during the header wait must not wait for the upstream')
+
+
+class TestHostThreadRefusalBeforeSend:
+    """2026-11-03: a container pids limit refused transport threads before any
+    request left the process. Untyped, the RuntimeError charged 11-17
+    consecutive errors to healthy slots (300 s cooldowns) and the fallback
+    layer switched models. Typed, dispatch releases the slot neutrally and
+    surfaces it unchanged.
+    """
+
+    @staticmethod
+    def _refuse(monkeypatch, name):
+        real_start = threading.Thread.start
+
+        def start(thread):
+            if thread.name == name:
+                raise RuntimeError("can't start new thread")
+            return real_start(thread)
+
+        monkeypatch.setattr(threading.Thread, 'start', start)
+
+    def test_refused_post_worker_is_a_typed_local_failure(self, monkeypatch):
+        self._refuse(monkeypatch, 'llm-post-headers')
+        sent = []
+
+        with pytest.raises(LocalRequestPreparationError) as caught:
+            post_headers_abortable(lambda: sent.append(True),
+                                   is_aborted=lambda: False)
+
+        assert caught.value.stage == 'thread_start'
+        assert caught.value.provider_reached is False
+        assert isinstance(caught.value.__cause__, RuntimeError)
+        assert sent == []
+
+    @pytest.mark.parametrize('thread_name', ['stream-idle-watchdog', 'llm-post-headers'])
+    def test_stream_attempt_refused_before_send_sends_nothing(
+            self, monkeypatch, thread_name):
+        self._refuse(monkeypatch, thread_name)
+        posts = []
+
+        class _Session:
+            def post(self, *a, **k):
+                posts.append(True)
+                raise AssertionError('no request may be sent')
+
+        monkeypatch.setattr('lib.llm.stream.get_sync_session', lambda: _Session())
+        import lib.desktop.egress as _eg
+        monkeypatch.setattr(_eg, 'route_request', lambda url, **kw: 'direct')
+        from lib.llm.stream import _stream_chat_once
+
+        with pytest.raises(LocalRequestPreparationError) as caught:
+            _stream_chat_once(
+                {'model': 'm', 'messages': [{'role': 'user', 'content': 'hi'}]},
+                api_key='sk-x', base_url='http://fake.local/v1',
+                log_prefix='[t]', abort_check=lambda: False)
+
+        assert caught.value.stage == 'thread_start'
+        assert posts == []

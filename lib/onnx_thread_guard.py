@@ -36,8 +36,8 @@ after the first successful install. Safe to call when onnxruntime is not
 installed (returns ``False``).
 
 Environment:
-    TOFU_ONNX_THREADS — explicit worker-thread cap. Defaults to
-        ``min(8, allowed_cpu_count)``. Falls back to ``TOFU_DOCLING_THREADS``
+    TOFU_ONNX_THREADS — explicit worker-thread count. Defaults to every
+        allowed CPU (``allowed_cpu_count``). Falls back to ``TOFU_DOCLING_THREADS``
         for backwards compatibility with the previous _common.py knob.
 """
 
@@ -70,10 +70,10 @@ def allowed_cpu_count() -> int:
 
 
 def onnx_thread_count() -> int:
-    """Resolve the explicit onnxruntime thread cap.
+    """Resolve the explicit onnxruntime thread count.
 
     ``TOFU_ONNX_THREADS`` takes precedence, then the legacy
-    ``TOFU_DOCLING_THREADS`` knob, else ``min(8, allowed_cpu_count())``.
+    ``TOFU_DOCLING_THREADS`` knob, else every allowed CPU.
     """
     for var in ('TOFU_ONNX_THREADS', 'TOFU_DOCLING_THREADS'):
         raw = os.environ.get(var, '').strip()
@@ -84,7 +84,7 @@ def onnx_thread_count() -> int:
                     return n
             except ValueError as e:
                 logger.debug('[onnx-guard] invalid %s=%r: %s', var, raw, e)
-    return min(8, allowed_cpu_count())
+    return allowed_cpu_count()
 
 
 def install_onnx_thread_guard() -> bool:

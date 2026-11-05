@@ -63,7 +63,9 @@ def _cost(value):
     """Keep stamped amounts/provenance; never resolve today's prices."""
     if not isinstance(value, dict):
         return None
-    result = {key: value[key] for key in (*_COST_AMOUNTS, 'peakMultiplier')
+    # Per-call reconstruction evidence: the 1h write share is priced at its own
+    # rate, so dropping either the count or cacheWrite1hMul breaks recomputation.
+    result = {key: value[key] for key in (*_COST_AMOUNTS, 'cacheWrite1hTokens', 'peakMultiplier')
               if _number(value.get(key))}
     if not any(key in result for key in ('costUsd', 'costCny')):
         return None
@@ -81,7 +83,7 @@ def _cost(value):
         rates = snapshot.get('rates')
         if isinstance(rates, dict):
             clean['rates'] = {key: rates[key] for key in (
-                'input', 'output', 'cacheWriteMul', 'cacheReadMul')
+                'input', 'output', 'cacheWriteMul', 'cacheReadMul', 'cacheWrite1hMul')
                 if _number(rates.get(key))}
         result['pricingSnapshot'] = clean
     return result

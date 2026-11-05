@@ -217,6 +217,36 @@ def test_final_wire_projection_replaces_assembled_tool_count_honestly():
         _cleanup(tid)
 
 
+def test_wire_projection_carries_recorded_tool_name_bytes():
+    tid = f'ri-wire-names-{uuid.uuid4().hex[:8]}'
+    _seed(tid, [
+        ('messages_snapshot', _snap('request', 1, n_msgs=2, tools=54)),
+        ('tool_wire_projection', {
+            'roundNum': 1,
+            'model': 'kunlunbedrock.claude-opus-5.5-m17',
+            'backend': 'full',
+            'toolNames': ['read_files', 'mcp__xuecheng__update_doc_section'],
+            'toolCount': 2,
+            'schemaTokens': 900,
+            'schemaFingerprint': 'wire-schema-fingerprint-2',
+            'schemaBudgetTokens': 0,
+            'budgetDroppedNames': [],
+            'compactedNames': [],
+            'toolNameBytes': 628,
+            'toolNameBudgetBytes': 448,
+            'executableToolCount': 54,
+        }),
+    ])
+    try:
+        from lib.tasks_pkg.request_inspector import get_request_payload
+
+        projection = get_request_payload(tid, 1)['wireProjection']
+        assert projection['toolNameBytes'] == 628
+        assert projection['toolNameBudgetBytes'] == 448
+    finally:
+        _cleanup(tid)
+
+
 def test_attempts_join_multi_call_round(task_a):
     from lib.tasks_pkg.request_inspector import fold_request_log
     fold = fold_request_log(task_a)

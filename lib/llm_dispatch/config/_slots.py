@@ -110,9 +110,12 @@ DEFAULT_SLOT_CONFIGS = {
     'deepseek-flash':                {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 60,  'latency': 2000, 'cost': 0.0002},
     'deepseek-v4-pro':               {'caps': {'text', 'thinking', 'cheap'},      'rpm': 30,  'latency': 3000, 'cost': 0.001},
     'deepseek-v4-flash':             {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 60,  'latency': 2000, 'cost': 0.0002},
+    'deepseek-v4.1-flash':           {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 60,  'latency': 2000, 'cost': 0.0002},
+    'deepseek-v4.1-flash-1017':      {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 60,  'latency': 2000, 'cost': 0.0002},
     'deepseek-v4-flash-huawei':      {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.0002},
     'deepseek-v4-flash-tencent':     {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.0002},
     'deepseek-v4-flash-yourprovider':     {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.0002},
+    'deepseek-v4-flash-azure':       {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.0002},
     'deepseek-v4-pro-tencent':       {'caps': {'text', 'thinking', 'cheap'},      'rpm': 30,  'latency': 3000, 'cost': 0.001},
     # Dated GA pin of V4 Pro (2026-08-12) — same checkpoint the rolling alias serves.
     'deepseek-v4-pro-0813':          {'caps': {'text', 'thinking', 'cheap'},      'rpm': 30,  'latency': 3000, 'cost': 0.001},
@@ -242,6 +245,9 @@ DEFAULT_SLOT_CONFIGS = {
     # kimi-k3 (2026-07-17): native vision + native VIDEO understanding,
     # always-on thinking mode. See platform.kimi.com/docs/guide/use-kimi-vision-model.
     'kimi-k3':                       {'caps': {'text', 'vision', 'video', 'thinking', 'cheap'}, 'rpm': 60,  'latency': 3000, 'cost': 0.0083},
+    # kimi-k3.1-pro (2026-10-23): K3 post-train with the same image+video input
+    # and always-on thinking (platform.kimi.ai/docs/guide/kimi-k3-1-pro-quickstart).
+    'kimi-k3.1-pro':                 {'caps': {'text', 'vision', 'video', 'thinking', 'cheap'}, 'rpm': 60,  'latency': 3000, 'cost': 0.006},
     'kimi-k2.6':                     {'caps': {'text', 'cheap'},                   'rpm': 30,  'latency': 3000, 'cost': 0.003},
     'kimi-k2.5':                     {'caps': {'text', 'cheap'},                   'rpm': 30,  'latency': 3000, 'cost': 0.002},
     'minimax-m2.5':                  {'caps': {'text', 'cheap'},                   'rpm': 60,  'latency': 2000, 'cost': 0.001},

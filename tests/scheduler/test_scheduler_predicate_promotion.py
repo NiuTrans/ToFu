@@ -507,7 +507,7 @@ def test_malformed_once_schedule_does_not_wedge_sweep(monkeypatch):
     unguarded and escaped ``_check_and_run_due_tasks``."""
     from lib.scheduler.manager import ScheduledTaskManager
 
-    mgr = ScheduledTaskManager.__new__(ScheduledTaskManager)
+    mgr = ScheduledTaskManager()
     from lib.identity import PrincipalContext
     mgr._process_principal = PrincipalContext.system(
         subject_id='scheduler-predicate-test',
@@ -533,6 +533,7 @@ def test_malformed_once_schedule_does_not_wedge_sweep(monkeypatch):
 
     # Must not raise, and the 'good' due row must still run despite the bad one.
     mgr._check_and_run_due_tasks()
+    assert mgr.stop(timeout=5)  # joins the dispatched runs
     assert 'good' in ran, 'the valid due task must still run after a malformed once: row'
 
 
@@ -570,7 +571,7 @@ def test_ownerless_scheduler_runs_durable_rows_without_project_brain_work(
     from lib.scheduler.manager import ScheduledTaskManager
     import lib.scheduler.manager as manager_module
 
-    mgr = ScheduledTaskManager.__new__(ScheduledTaskManager)
+    mgr = ScheduledTaskManager()
     mgr._process_principal = PrincipalContext.system(
         subject_id='distributed-scheduler-test',
         scopes={'scheduler:run'},
@@ -592,6 +593,7 @@ def test_ownerless_scheduler_runs_durable_rows_without_project_brain_work(
     mgr.toggle_task = lambda *_args, **_kwargs: None
 
     mgr._check_and_run_due_tasks()
+    assert mgr.stop(timeout=5)  # joins the dispatched run
 
     assert ran == [('owner-23-durable-task', 23)]
 

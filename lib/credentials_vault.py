@@ -4,7 +4,10 @@ One sanctioned place for machine/release credentials (GitHub PAT, PyPI
 token, …) that previously lived scattered across ad-hoc files
 (``.secrets/github_token``, ``.secrets/pypirc``) or — worst — hardcoded in
 committable source. Owner directive 2026-08-05: a dedicated, secure place
-for user credentials; never committed, never shipped by export.
+for user credentials; never committed. Owner directive 2026-11-01 supersedes
+the export half: an INTERNAL export must work out of the box, so it carries
+the vault together with its key (encrypted at rest both here and there).
+Opensource exports and git publication still never carry it.
 
 Properties
 ----------
@@ -14,9 +17,10 @@ Properties
 * **Key separation** — the key lives in its own chmod-600 file
   (``.credentials_vault.key``) next to the store. A copied store file (a
   data/ backup, a stray ``cp -r``) is useless without the key file.
-* **Never in the repo, never exported** — both files live under
-  ``data/config/``, which ``.gitignore`` and ``export.py`` exclude
-  wholesale. A guard test pins that.
+* **Never in the repo, never open-sourced** — both files live under
+  ``data/config/``, which ``.gitignore`` and the bulk export exclusion cover
+  wholesale. The internal export's carried-config pass restores them for
+  INTERNAL exports only, mode 0600. A guard test pins the data-dir boundary.
 * **Redaction by default** — :func:`list_entries` returns metadata + a
   hint (``ghp_…3V8``), never the value. The plaintext leaves the process
   only through an explicit reveal call, which the API layer audit-logs.
@@ -43,6 +47,10 @@ credentials without ever seeing them):
 
   resolve_exec_env()   → {ENV_VAR: plaintext} for explicitly selected vault
                          entries on one run_command invocation
+  run_command_credential_revisions() / resolve_recorded_run_command_env()
+                       → opaque write revisions a durable background-command
+                         record keeps instead of values, and the values again
+                         (for redaction only) while those revisions still hold
   build_vault_index()  → the ``<credential_vault>`` system-prompt block
                          (NAMES + env vars + notes ONLY — never values),
                          spliced by the Context Composer so the model
@@ -51,6 +59,7 @@ credentials without ever seeing them):
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import threading
@@ -60,6 +69,7 @@ from typing import Optional
 
 from lib.config_dir import config_path
 from lib.json_store import locked_path, read_json, update_json_atomic
+from lib.error_envelope import BadRequest
 from lib.log import audit_log, get_logger
 
 logger = get_logger(__name__)
@@ -73,7 +83,11 @@ __all__ = [
     'bootstrap_from_legacy',
     'normalize_name',
     'env_var_name',
+    'is_channel_entry',
     'resolve_run_command_env',
+    'run_command_credential_revisions',
+    'RecordedCredentialUnavailable',
+    'resolve_recorded_run_command_env',
     'resolve_exec_env',
     'exec_env_overlay',
     'build_vault_index',
@@ -103,9 +117,9 @@ def normalize_name(name: str) -> str:
     """
     n = str(name or '').strip().lower()
     if not n:
-        raise ValueError('name is required')
+        raise BadRequest('name is required', field='name')
     if not _NAME_RE.match(n):
-        raise ValueError(
+        raise BadRequest(
             f'{n!r} is not a valid credential name — use lowercase letters, '
             'digits, dot/dash/underscore, 1-64 chars, starting alphanumeric.')
     return n
@@ -211,9 +225,9 @@ def set_entry(name: str, value: str, *, note: Optional[str] = None) -> dict:
     n = normalize_name(name)
     v = str(value or '').strip()
     if not v:
-        raise ValueError('value is required (empty credentials are not stored)')
+        raise BadRequest('value is required (empty credentials are not stored)', field='value')
     if len(v.encode('utf-8')) > _MAX_VALUE_BYTES:
-        raise ValueError(f'value exceeds {_MAX_VALUE_BYTES} bytes')
+        raise BadRequest(f'value exceeds {_MAX_VALUE_BYTES} bytes', field='value')
     ciphertext = _encrypt(v)
     now = time.time()
 
@@ -299,6 +313,28 @@ def get_entry(name: str) -> Optional[str]:
             return None
 
 
+def get_entries_with_prefixes(prefixes) -> dict[str, str]:
+    """PLAINTEXT of every entry whose name starts with one of ``prefixes``.
+
+    One store read serves the whole set, so a caller resolving many
+    bindings (the per-command skill env overlay) does not re-read and
+    re-parse the vault file once per binding under ``_lock``.
+    """
+    prefixes = tuple(prefixes)
+    out: dict[str, str] = {}
+    if not prefixes:
+        return out
+    with _lock:
+        for n, row in sorted(_read_store()['entries'].items()):
+            if not n.startswith(prefixes) or not row or not row.get('ct'):
+                continue
+            try:
+                out[n] = _decrypt(row['ct'])
+            except Exception as e:
+                logger.error('[Vault] decrypt failed for name=%s: %s', n, e)
+    return out
+
+
 def delete_entry(name: str) -> bool:
     """Remove an entry. Idempotent; returns True iff it existed."""
     try:
@@ -348,6 +384,16 @@ def list_entries() -> list[dict]:
 _ENV_VAR_SANITIZE_RE = re.compile(r'[^A-Z0-9]+')
 _WS_RE = re.compile(r'\s+')
 SKILL_ENTRY_PREFIX = 'skill.'
+# Channel tokens (``channel.u<owner>.<channel>.token``, lib.channels.github)
+# are read only by their channel adapter: an agent holding the owner's GitHub
+# token could post outside the channel outbox and its reply policy.
+CHANNEL_ENTRY_PREFIX = 'channel.'
+_RESERVED_ENTRY_PREFIXES = (SKILL_ENTRY_PREFIX, CHANNEL_ENTRY_PREFIX)
+
+
+def is_channel_entry(name) -> bool:
+    """True for a channel-owned entry name (canonical case/whitespace normalization)."""
+    return isinstance(name, str) and name.strip().lower().startswith(CHANNEL_ENTRY_PREFIX)
 
 
 def env_var_name(entry: str) -> str:
@@ -359,15 +405,10 @@ def env_var_name(entry: str) -> str:
 def _general_entry_names() -> list[str]:
     return [m.get('name') or '' for m in list_entries()
             if (m.get('name') or '')
-            and not (m.get('name') or '').startswith(SKILL_ENTRY_PREFIX)]
+            and not (m.get('name') or '').startswith(_RESERVED_ENTRY_PREFIXES)]
 
 
-def resolve_run_command_env(names) -> tuple[set[str], dict[str, str]]:
-    """Return ``(strip_vars, selected_overlay)`` from one strict snapshot.
-
-    Existing-store read/parse/shape failures raise, so the caller can reject
-    execution before spawning instead of inheriting a credential by accident.
-    """
+def _requested_run_command_names(names) -> list[str]:
     if names is None:
         names = []
     if not isinstance(names, (list, tuple)):
@@ -383,13 +424,25 @@ def resolve_run_command_env(names) -> tuple[set[str], dict[str, str]]:
         if name.startswith(SKILL_ENTRY_PREFIX):
             raise ValueError(
                 f'{name!r} is skill-scoped and cannot be requested by run_command')
+        if name.startswith(CHANNEL_ENTRY_PREFIX):
+            raise ValueError(
+                f'{name!r} is a channel credential and cannot be requested by run_command')
         if name not in requested:
             requested.append(name)
+    return requested
 
+
+def resolve_run_command_env(names) -> tuple[set[str], dict[str, str]]:
+    """Return ``(strip_vars, selected_overlay)`` from one strict snapshot.
+
+    Existing-store read/parse/shape failures raise, so the caller can reject
+    execution before spawning instead of inheriting a credential by accident.
+    """
+    requested = _requested_run_command_names(names)
     with _lock:
         entries = _read_store(strict=True)['entries']
         available = {name for name in entries
-                     if not name.startswith(SKILL_ENTRY_PREFIX)}
+                     if not name.startswith(_RESERVED_ENTRY_PREFIXES)}
         strip_vars = {env_var_name(name) for name in available
                       if env_var_name(name)}
         overlay: dict[str, str] = {}
@@ -421,6 +474,78 @@ def resolve_run_command_env(names) -> tuple[set[str], dict[str, str]]:
     return strip_vars, overlay
 
 
+def _entry_revision(row: dict) -> str:
+    # Every write encrypts under a fresh IV, so the ciphertext digest changes
+    # on each write (even of the same value) and reveals nothing about it.
+    return hashlib.sha256(str(row.get('ct') or '').encode('ascii')).hexdigest()
+
+
+def run_command_credential_revisions(names) -> dict[str, str]:
+    """``{entry: revision}`` for the entries one run_command selects.
+
+    A durable background-command record keeps these instead of values, so
+    its retained output can be redacted after the launching process is gone
+    (:func:`resolve_recorded_run_command_env`). Raises like
+    :func:`resolve_run_command_env` for invalid, skill-scoped or missing
+    entries and for an unreadable store.
+    """
+    requested = _requested_run_command_names(names)
+    if not requested:
+        return {}
+    with _lock:
+        entries = _read_store(strict=True)['entries']
+        revisions: dict[str, str] = {}
+        for name in requested:
+            row = entries.get(name) or {}
+            if not row.get('ct'):
+                raise ValueError(f'vault credential {name!r} does not exist')
+            revisions[name] = _entry_revision(row)
+    return revisions
+
+
+class RecordedCredentialUnavailable(ValueError):
+    """A recorded entry no longer provably holds the value its command received."""
+
+    def __init__(self, name: str, reason: str):
+        super().__init__(f'vault credential {name!r} {reason}')
+        self.name = name
+        self.reason = reason
+
+
+def resolve_recorded_run_command_env(revisions) -> dict[str, str]:
+    """``{ENV_VAR: value}`` for recorded entries still at their revision.
+
+    For redacting a recorded command's retained output only; nothing is
+    injected. An equal revision proves the entry was not written since the
+    record was made, before its command resolved the value. Raises
+    :class:`RecordedCredentialUnavailable` for an entry that was deleted,
+    changed or cannot be decrypted; a store read failure propagates so the
+    caller can retry instead of guessing.
+    """
+    # TODO(enterprise): the operator vault is the only vault; a per-owner
+    # vault must resolve with the record's owner.
+    if not isinstance(revisions, dict) or not revisions:
+        raise RecordedCredentialUnavailable('?', 'was not recorded')
+    overlay: dict[str, str] = {}
+    with _lock:
+        entries = _read_store(strict=True)['entries']
+        for name, revision in sorted(revisions.items()):
+            row = entries.get(name) or {}
+            if not row.get('ct'):
+                raise RecordedCredentialUnavailable(name, 'was deleted')
+            if revision != _entry_revision(row):
+                raise RecordedCredentialUnavailable(name, 'was changed')
+            try:
+                value = _decrypt(row['ct'])
+            except Exception as e:
+                logger.error('[Vault] decrypt failed for name=%s: %s', name, e)
+                raise RecordedCredentialUnavailable(
+                    name, 'could not be decrypted') from None
+            overlay[env_var_name(name)] = value
+    audit_log('credential_vault_redact', names=','.join(sorted(revisions)))
+    return overlay
+
+
 def resolve_exec_env(names) -> dict[str, str]:
     """Resolve selected entries for trusted callers needing only the overlay."""
     return resolve_run_command_env(names)[1]
@@ -450,7 +575,7 @@ def build_vault_index() -> str:
     caller then splices nothing."""
     try:
         rows = [m for m in list_entries()
-                if not (m.get('name') or '').startswith(SKILL_ENTRY_PREFIX)]
+                if not (m.get('name') or '').startswith(_RESERVED_ENTRY_PREFIXES)]
     except Exception as e:
         logger.warning('[Vault] index build failed: %s', e)
         return ''
@@ -463,9 +588,11 @@ def build_vault_index() -> str:
         'ONLY; the values are never shown to you. To use one, include its '
         'entry name in run_command\'s `credentials` array; only those selected '
         'values are injected into that child process under the variable named '
-        'after `→`. Reference the variable, never the value (e.g. '
-        '`curl -H "Authorization: Bearer $VAR" …`; tools like `gh`, `pip`, '
-        '`twine` read their standard variables natively).',
+        'after `→`. Reference the variable, never the value, and keep it out of '
+        'command arguments, which every local user can read with `ps`: pipe it '
+        'from a shell builtin instead (e.g. '
+        '`printf \'Authorization: Bearer %s\' "$VAR" | curl -H @- …`). Tools '
+        'like `gh`, `pip` and `twine` read their standard variables natively.',
         '',
     ]
     for m in rows:

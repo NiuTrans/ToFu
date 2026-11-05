@@ -7,7 +7,7 @@ import sys
 import pytest
 
 from evaluations.search_quality import worker
-from evaluations.search_quality.contracts import RESULTS, SNIPPET_CHARS, score, tasks
+from evaluations.search_quality.contracts import RESULTS, SNIPPET_CHARS, observed_sources, score, tasks
 from evaluations.search_quality.runner import execute_tool
 from tofu_search.search.orchestrator import SearchResultList
 
@@ -131,3 +131,67 @@ def test_raw_trace_is_opt_in_bounded_and_never_promotes_candidates(monkeypatch):
     assert trace['candidates']
     assert all(r['url'] in {x['url'] for x in raw} for r in trace['candidates'])
     assert 'password' not in json.dumps(trace)
+
+
+@pytest.mark.parametrize('uncertain_parent', [False, True])
+def test_native_related_listing_retains_discovery_without_quote_evidence(monkeypatch, uncertain_parent):
+    related = {'url': 'https://manual.example/appendix', 'title': 'Appendix',
+               'snippet': 'A distinct observed listing.', 'full_content': 'Not a fetched body.'}
+    parent = {'url': 'https://manual.example/guide', 'similar_snippets': [related]}
+    rows = SearchResultList([] if uncertain_parent else [parent])
+    rows._unverified_candidates = [parent] if uncertain_parent else []
+    output = search(monkeypatch, rows)
+    assert output['results'][-1] == {
+        'url': related['url'], 'title': related['title'], 'snippet': related['snippet'],
+        'evidence_status': 'unverified_candidate'}
+    calls = [{'name': 'custom__search', 'accepted': True, 'output': output}]
+    discovered, fetched_sources = observed_sources(calls)
+    assert related['url'] in discovered and fetched_sources == {}
+
+    class FetchWorker:
+        def call(self, *args, **kwargs):
+            return {'url': related['url'], 'text': 'Successfully fetched appendix.'}
+
+    fetched = execute_tool(FetchWorker(), 'tofu', tasks()[0], 'custom__fetch',
+                           {'url': related['url']}, calls, 10)
+    assert fetched['text'] == 'Successfully fetched appendix.'
+
+
+def test_related_listings_share_url_validation_bounds_and_never_recurse(monkeypatch):
+    main = 'https://manual.example/guide'
+    related = 'https://manual.example/appendix'
+    hidden = 'https://manual.example/unobserved-nesting'
+    invalid = ['', 'https://user:password@manual.example/',
+               'https://manual.example/' + 'x' * 4000]
+    parent = {'url': main, 'similar_snippets': [
+        {'url': main}, *({'url': url} for url in invalid),
+        {'url': related, 'title': 't' * 600, 'snippet': 's' * (SNIPPET_CHARS + 1),
+         'similar_snippets': [{'url': hidden}]}, {'url': related}]}
+    output = search(monkeypatch, SearchResultList([parent]))
+    assert [r['url'] for r in output['results']] == [main, related]
+    assert len(output['results'][1]['title']) == 500
+    assert len(output['results'][1]['snippet']) == SNIPPET_CHARS
+    assert output['search_diagnostic']['omitted_url_count'] == len(invalid)
+    assert hidden not in json.dumps(output) and 'password' not in json.dumps(output)
+
+
+def test_related_listings_use_only_remaining_slots_after_existing_candidates(monkeypatch):
+    main = {'url': 'https://manual.example/main', 'similar_snippets': [
+        {'url': f'https://manual.example/related-{i}'} for i in range(RESULTS)]}
+    rows = SearchResultList([main])
+    rows._unverified_candidates = [{'url': f'https://manual.example/followup-{i}'}
+                                   for i in range(RESULTS - 2)]
+    output = search(monkeypatch, rows)
+    assert len(output['results']) == RESULTS
+    assert [r['url'] for r in output['results'][:-1]] == [
+        main['url'], *(r['url'] for r in rows._unverified_candidates)]
+    assert output['results'][-1]['url'] == main['similar_snippets'][0]['url']
+
+
+def test_invalid_parent_and_external_provider_metadata_cannot_grant_related_authority(monkeypatch):
+    hidden = {'url': 'https://manual.example/unobserved'}
+    rows = SearchResultList([{'url': 'invalid', 'similar_snippets': [hidden]}])
+    assert search(monkeypatch, rows)['results'] == []
+    provider_rows = [{'href': 'https://manual.example/visible', 'similar_snippets': [hidden]}]
+    assert [r['url'] for r in search(monkeypatch, provider_rows, 'ddgs')['results']] == [
+        provider_rows[0]['href']]

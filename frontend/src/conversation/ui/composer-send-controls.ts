@@ -84,13 +84,20 @@ function queueBadge(queueCount: number): string {
   return count > 0 ? `<span class="queue-badge">${count}</span>` : '';
 }
 
+/* Every projected Turn change repaints these controls, several times a second
+ * while a reply streams; an unchanged state never rewrites an attribute. */
 function setAccessibleLabel(
   button: HTMLButtonElement,
   title: string,
   ariaLabel: string,
 ): void {
-  button.title = title;
-  button.setAttribute('aria-label', ariaLabel);
+  if (button.title !== title) button.title = title;
+  if (button.getAttribute('aria-label') !== ariaLabel) button.setAttribute('aria-label', ariaLabel);
+}
+
+function setButtonState(button: HTMLButtonElement, className: string, cursor: string): void {
+  if (button.className !== className) button.className = className;
+  if (button.style.cursor !== cursor) button.style.cursor = cursor;
 }
 
 function showSend(
@@ -98,8 +105,7 @@ function showSend(
   input: ComposerSendControlsInput,
 ): void {
   button.hidden = false;
-  button.className = 'send-btn';
-  button.style.cursor = '';
+  setButtonState(button, 'send-btn', '');
   button.removeAttribute('aria-busy');
   setAccessibleLabel(button, input.labels.sendTitle, input.labels.send);
   setButtonMarkup(button, SEND_ICON);
@@ -113,11 +119,12 @@ function showStop(
   const label = input.stopping ? input.labels.stopping : input.labels.stop;
   const separateClass = button.id === STOP_BUTTON_ID ? ' composer-stop-btn' : '';
   button.hidden = false;
-  button.className = input.stopping
+  setButtonState(button, input.stopping
     ? 'send-btn stop-btn is-stopping' + separateClass
-    : 'send-btn stop-btn' + separateClass;
-  button.style.cursor = input.stopping ? 'progress' : '';
-  button.setAttribute('aria-busy', String(input.stopping));
+    : 'send-btn stop-btn' + separateClass, input.stopping ? 'progress' : '');
+  if (button.getAttribute('aria-busy') !== String(input.stopping)) {
+    button.setAttribute('aria-busy', String(input.stopping));
+  }
   setAccessibleLabel(button, label, label);
   setButtonMarkup(
     button,
@@ -133,10 +140,11 @@ function hideSeparateStop(
 ): void {
   const stopButton = buttonById(document, STOP_BUTTON_ID);
   if (stopButton) {
-    stopButton.hidden = true;
+    if (!stopButton.hidden) stopButton.hidden = true;
     stopButton.onclick = null;
   }
-  sendButton.parentElement?.classList.remove(SPLIT_CLASS);
+  const actions = sendButton.parentElement;
+  if (actions?.classList.contains(SPLIT_CLASS)) actions.classList.remove(SPLIT_CLASS);
 }
 
 /** Project authoritative composer state onto its click and touch controls. */
@@ -158,7 +166,8 @@ export function updateComposerSendControls(
   if (busy) showStop(sendButton, input);
   else showSend(sendButton, input);
   // Keep Stop available for an existing turn; only new submissions are fenced.
-  sendButton.disabled = !busy && Boolean(input.sendBlocked);
+  const disabled = !busy && Boolean(input.sendBlocked);
+  if (sendButton.disabled !== disabled) sendButton.disabled = disabled;
   if (sendButton.disabled && input.blockedLabel) {
     setAccessibleLabel(sendButton, input.blockedLabel, input.blockedLabel);
   }

@@ -19,6 +19,8 @@ export class ConnectionHealthStore {
   private readonly states = new Map<string, ConnectionHealth>();
   private readonly listeners = new Map<string, Set<HealthListener>>();
   private readonly aggregateListeners = new Set<AggregateListener>();
+  private degradedCount = 0;
+  private emittedAggregate: AggregateConnectionHealth | null = null;
 
   get(conversationId: string): ConnectionHealth | undefined {
     return this.states.get(conversationId);
@@ -27,13 +29,20 @@ export class ConnectionHealthStore {
   set(conversationId: string, health: ConnectionHealth): void {
     const previous = this.states.get(conversationId);
     if (previous && previous.state === health.state
+        && previous.transport === health.transport
+        && previous.observedAt === health.observedAt
         && previous.generation === health.generation
         && previous.reason === health.reason
         && previous.lastFrameAt === health.lastFrameAt
         && previous.retryCount === health.retryCount) return;
     const published = Object.freeze({ ...health });
     this.states.set(conversationId, published);
+    this.degradedCount += Number(DEGRADED_STATES.has(published.state))
+      - Number(Boolean(previous && DEGRADED_STATES.has(previous.state)));
     for (const listener of [...this.listeners.get(conversationId) ?? []]) {
+      // A listener can synchronously replace/clear this record. Later listeners
+      // must not see older evidence after the nested publication completed.
+      if (this.states.get(conversationId) !== published) break;
       notifyObserver('connection-health', listener, published);
     }
     this.emitAggregate();
@@ -63,7 +72,10 @@ export class ConnectionHealthStore {
   }
 
   clear(conversationId: string): void {
-    if (!this.states.delete(conversationId)) return;
+    const previous = this.states.get(conversationId);
+    if (!previous) return;
+    this.states.delete(conversationId);
+    this.degradedCount -= Number(DEGRADED_STATES.has(previous.state));
     this.emitAggregate();
   }
 
@@ -80,8 +92,7 @@ export class ConnectionHealthStore {
   }
 
   aggregate(): AggregateConnectionHealth {
-    const count = Array.from(this.states.values())
-      .filter((health) => DEGRADED_STATES.has(health.state)).length;
+    const count = this.degradedCount;
     return { degraded: count > 0, count, at: Date.now() };
   }
 
@@ -92,8 +103,15 @@ export class ConnectionHealthStore {
   }
 
   private emitAggregate(): void {
-    const aggregate = this.aggregate();
+    // Commit the counter before callbacks, then derive from the current value:
+    // nested set/clear may have superseded the caller's original transition.
+    if ((this.emittedAggregate?.count ?? 0) === this.degradedCount) return;
+    const aggregate = Object.freeze(this.aggregate());
+    this.emittedAggregate = aggregate;
     for (const listener of [...this.aggregateListeners]) {
+      // Count can return to the same value during nested clear/set (ABA).
+      // Publication identity also fences older timestamps after that reentry.
+      if (this.emittedAggregate !== aggregate) break;
       notifyObserver('connection-health-aggregate', listener, aggregate);
     }
   }

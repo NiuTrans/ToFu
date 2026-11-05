@@ -42,14 +42,17 @@ logger = get_logger(__name__)
 
 
 def _with_workspace_writer(function):
-    """Lease before preimage reads; retain existing path/auth/result policy."""
+    """Serialize one call's read-modify-write per resolved file; take no lease.
+
+    The per-path mutex covers the preimage read, edit and publication of this
+    call only, so concurrent edits of one file cannot lose an update. Path,
+    authorization, freshness and result policy are unchanged.
+    """
     import functools
     import inspect
     from contextlib import ExitStack
+    from lib.project_mod import file_edit_mutex as edit_mutex
     from lib.project_mod.post_commit import defer_publication
-    from lib.project_mod.workspace_lease import (
-        WorkspaceBusyError, workspace_claims_lease,
-    )
 
     signature = inspect.signature(function)
 
@@ -58,15 +61,14 @@ def _with_workspace_writer(function):
         bound = signature.bind(*args, **kwargs).arguments
         base = bound.get('base', bound.get('base_path'))
         edits = bound.get('edits')
-        # An edit may take its file from the call-level `path`; the lease must
-        # claim the file this call will actually write.
+        # An edit may take its file from the call-level `path`; the mutex must
+        # cover the file this call will actually write.
         batch_path = bound.get('batch_path')
         paths = ([(edit.get('path') or batch_path)
                   for edit in edits if isinstance(edit, dict)]
                  if isinstance(edits, list) else [bound.get('rel_path')])
         targets = set()
         lexical_targets = {}
-
 
         def changed_precondition(kind, message):
             if edits is not None:
@@ -94,39 +96,29 @@ def _with_workspace_writer(function):
             targets.add(target)
             lexical_targets[lexical] = target
         with defer_publication(), ExitStack() as stack:
-            try:
-                from lib.project_mod.tool_admission import admission_timeout, cancellation
-                cancel = cancellation()
-                wait_timeout = admission_timeout()
-                with timing_phase('workspace_admission'):
-                    claims = [('file', target) for target in targets]
-                    stack.enter_context(workspace_claims_lease(claims,
-                        timeout=wait_timeout, cancel_event=cancel))
-                # Admission may have waited behind a real writer. Revalidate
-                # the exact previously-read content before reading a preimage.
-                for lexical, target in lexical_targets.items():
-                    if os.path.realpath(lexical) != target:
-                        return changed_precondition('workspace-target-changed',
-                            'File target changed during write admission; '
-                            're-resolve and re-read the target before retrying: ' + lexical)
-                from lib import write_freshness
-                # Only append consumes the current preimage rather than the
-                # caller's observed replacement version. Keep admission and
-                # target revalidation; skip just the stale-token precondition.
-                pure_append = (function.__name__ == 'tool_write_file'
-                               and bound.get('append') is True)
-                for target in targets:
-                    if (not pure_append and bound.get('conv_id') and os.path.isfile(target)
-                            and write_freshness.is_stale(bound['conv_id'], target)):
-                        return changed_precondition('write-freshness-stale',
-                            'File changed on disk; the observed content version differs; '
-                            're-read and reconcile before retrying (waiting alone will not '
-                            'refresh the read): ' + target)
-            except WorkspaceBusyError as error:
-                if edits is not None:
-                    return f'Error [workspace-busy]: {error}. No edits applied; retry after the writer finishes.'
-                return {'ok': False, 'error': str(error), 'error_kind': 'workspace-busy',
-                        'retryable': True, 'path': bound.get('rel_path', '')}
+            with timing_phase('file_edit_mutex'):
+                stack.enter_context(edit_mutex.file_edit_mutex(targets))
+            # A concurrent edit of the same file may have finished meanwhile.
+            # Revalidate the target and the observed version before the
+            # preimage read.
+            for lexical, target in lexical_targets.items():
+                if os.path.realpath(lexical) != target:
+                    return changed_precondition('workspace-target-changed',
+                        'File target changed before the edit started; '
+                        're-resolve and re-read the target before retrying: ' + lexical)
+            from lib import write_freshness
+            # Only append consumes the current preimage rather than the
+            # caller's observed replacement version. Keep target
+            # revalidation; skip just the stale-token precondition.
+            pure_append = (function.__name__ == 'tool_write_file'
+                           and bound.get('append') is True)
+            for target in targets:
+                if (not pure_append and bound.get('conv_id') and os.path.isfile(target)
+                        and write_freshness.is_stale(bound['conv_id'], target)):
+                    return changed_precondition('write-freshness-stale',
+                        'File changed on disk; the observed content version differs; '
+                        're-read and reconcile before retrying (waiting alone will not '
+                        'refresh the read): ' + target)
             return function(*args, **kwargs)
 
     return wrapped
@@ -813,7 +805,7 @@ def save_uploaded_file(base, rel_path, data, description='', conv_id=None,
 def _publish_uploaded_target(base, rel_path, data, *, original_path,
                              description, conv_id, task_id, is_abs,
                              renamed, on_conflict):
-    """Revalidate the actual upload name under its own canonical file lease."""
+    """Revalidate the actual upload name under its own file edit mutex."""
     target = rel_path
     if renamed and on_conflict == 'rename' and os.path.lexists(target):
         return {'ok': False, 'action': 'upload_file', 'path': target,
@@ -2218,8 +2210,8 @@ def _log_edit_efficiency(operation, anchor, content, *, ok):
 def _admit_edit_groups(groups, conv_id, stack):
     """Hold every tracked destination's existing journal admission before writes.
 
-    The enclosing workspace owner already leased the complete physical write
-    set. Sort journal sessions as a set, not per-file nested acquisitions, and
+    The enclosing writer already holds the file edit mutex of the complete
+    write set. Sort journal sessions as a set, not per-file nested acquisitions, and
     use the same recovery/cache authority as the individual writer. No new
     intents or user-file writes are prepared during this preflight.
     """
@@ -2252,6 +2244,7 @@ def _admit_edit_groups(groups, conv_id, stack):
                 if target not in session['targets']:
                     session['targets'].append(target)
         except Exception as error:
+            logger.debug('edit target admission failed for %s: %s', target, error)
             errors[target] = error
     for directory, session in sorted(sessions.items()):
         try:
@@ -2379,23 +2372,58 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
 
 
 def _execute_edit_file_plan(groups, strings, total, conv_id, task_id, *, atomic):
-    """Compute all file buffers under existing admissions, then publish/report."""
+    """Plan every file, publish under journal admission, then report.
+
+    Reads, matching and encoding need no project journal admission: this call
+    already holds the edit mutex of every target, and publication re-verifies
+    each original before replacing it. Admission covers only recovery, journal
+    validation and publication of a batch that will write, so an edit of
+    another file in the project never waits for this call's matching or
+    report-only checks, and a rejected batch never waits at all.
+    """
     from contextlib import ExitStack
 
-    with ExitStack() as stack:
-        options, admission_errors = _admit_edit_groups(groups, conv_id, stack)
-        return _preflight_and_commit_edits(
-            groups, strings, total, conv_id, task_id, atomic=atomic,
-            options=options, admission_errors=admission_errors)
+    plans, fail_count = _plan_edit_groups(groups, strings)
+    write_errors = {}
+    if (any(recs for *_plan, recs in plans)
+            and not _edit_preflight_rejected(plans, fail_count, atomic)):
+        with ExitStack() as stack:
+            options, admission_errors = _admit_edit_groups(
+                {target: ops for target, ops, *_rest, recs in plans if recs},
+                conv_id, stack)
+            plans = [_admitted_edit_plan(plan, admission_errors) for plan in plans]
+            if not _edit_preflight_rejected(plans, fail_count, atomic):
+                for target, _ops, _before, _after, _comps, recs in plans:
+                    if recs:
+                        write_errors[target] = _commit_edit_group(
+                            target, recs[0]['attribution_base'], recs, conv_id, task_id,
+                            write_options=options.get(target))
+    return _report_edit_plans(
+        plans, strings, total, fail_count, write_errors,
+        rejected=_edit_preflight_rejected(plans, fail_count, atomic))
 
 
-def _preflight_and_commit_edits(groups, strings, total, conv_id, task_id, *,
-                              atomic, options, admission_errors):
+def _edit_preflight_rejected(plans, fail_count, atomic):
+    return atomic and bool(fail_count or any(
+        comp is None for _target, _ops, _before, _after, comps, _recs in plans
+        for _p, comp, _err in comps))
+
+
+def _admitted_edit_plan(plan, admission_errors):
+    """An unavailable destination journal fails that file's edits before any write."""
+    target, ops, before_batch, current, comps, _recs = plan
+    if target not in admission_errors:
+        return plan
+    comps = [(p, None, err or _edit_group_failure(
+        p['operation'], p['resolved_rp'], admission_errors[target]))
+        for p, _comp, err in comps]
+    return target, ops, before_batch, current, comps, []
+
+
+def _plan_edit_groups(groups, strings):
+    """Read and compute every file's final buffer; no publication or receipt."""
     plans = []
     fail_count = len(strings)
-    ok_count = partial_count = skipped_count = 0
-
-    # No file publication, history, freshness or syntax-success receipt here.
     for target, ops in groups.items():
         if not os.path.isfile(target):
             for p in ops:
@@ -2454,24 +2482,15 @@ def _preflight_and_commit_edits(groups, strings, total, conv_id, task_id, *,
                     'error': f'Cannot encode planned UTF-8 content: {error}',
                 }) for p, _comp, err in comps]
                 recs = []
-        if target in admission_errors:
-            comps = [(p, None, err or _edit_group_failure(
-                p['operation'], p['resolved_rp'], admission_errors[target]))
-                for p, _comp, err in comps]
-            recs = []
         plans.append((target, ops, before_batch, current, comps, recs))
+    return plans, fail_count
 
-    rejected = atomic and (fail_count or any(
-        comp is None for _target, _ops, _before, _after, comps, _recs in plans
-        for _p, comp, _err in comps))
 
+def _report_edit_plans(plans, strings, total, fail_count, write_errors, *, rejected):
+    """Per-edit receipts in request order, after journal admission is released."""
+    ok_count = partial_count = skipped_count = 0
     for target, ops, before_batch, current, comps, recs in plans:
-        write_err = None
-        if recs and not rejected:
-            write_err = _commit_edit_group(
-                target, recs[0]['attribution_base'], recs, conv_id, task_id,
-                write_options=options.get(target))
-
+        write_err = write_errors.get(target)
         for p, comp, err_dict in comps:
             if comp is not None:
                 if rejected:

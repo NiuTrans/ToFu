@@ -5,7 +5,7 @@
    Turns a paper report into a short narrated MG video
    (docs/modules/ingest_media.md, P3). Server owns the task
    (POST /api/v4/paper/video/start → motion engine); this module
-   renders + polls, and hosts the per-scene preview/regen panel
+   renders and hosts the per-scene preview/regen panel
    (the backend rides /api/v4/motion/videos/* directly).
 
    States rendered into #paperVideoContent:
@@ -26,9 +26,6 @@ var _pvideo = {
   visual: 'authored',      // composition tier — NOT the render preset above
   quality_axis: null,      // {degraded, reason} from the server, or null
   taskId: '',
-  cursor: 0,
-  pollTimer: null,
-  pollBusy: false,
   status: 'idle',          // idle|loading|generating|done|report_required|lookup_failed|lost|interrupted|error
   errorText: '',
   progress: { done: 0, total: 0, phase: '' },
@@ -45,21 +42,16 @@ var _pvideo = {
   ttsAvailable: true,
   defaultVoice: '',
   // P-UX progress perception (docs/modules/ingest_media.md §3.4)
-  pollFails: 0,
   phases: [],
   phaseIndex: 0,
   genStartedAt: 0,
   lastEventAt: 0,
-  tickTimer: null,
   _rateFirstTick: 0,       // wall-clock of the first countable event (ETA)
   _rateFirstDone: 0,
   etaSec: 0,
   _gridLoaded: false,      // scenes skeleton already fetched this run
 };
 runtimeScope._pvideo = _pvideo;
-// Poll cadence — a var (not const) so the JSDOM harness can shrink it.
-var _PVIDEO_POLL_MS = 1500;
-var _PV_POLL_FAIL_LIMIT = 5;
 
 // Explicit retained presentation ports consumed by the lazy typed runtime.
 // These stay module-private: featureRegistry resolves them through runtimeScope.
@@ -83,9 +75,6 @@ function _pvEsc(s) {
     : String(s == null ? '' : s);
 }
 
-/* Stop the poll timer ONLY — see the note in podcast.js:_pcStopPoll: the 1s
- * activity ticker must survive _pvSchedulePoll()'s re-arm, or the elapsed /
- * last-activity stopwatch freezes at 0:00 on the first poll. */
 function _pvHeroIconSvg(kind) {
   if (kind === 'video') {
     return '<svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 4v16M17 4v16M2 9h5M2 15h5M17 9h5M17 15h5"/></svg>';
@@ -391,7 +380,7 @@ function _pvRender() {
     host.innerHTML = h;
     _pvRenderProgress();
     _pvRenderActivity();
-    startVideoTick();
+    videoTaskObserver.startActivity();
     _pvRenderSceneGrid(0);
     return;
   }

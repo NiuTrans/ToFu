@@ -19,7 +19,10 @@
    1. The chip node is CREATED ONCE in `_ensureChip()`; steady-state
       updates only set textContent / title / visibility.
    2. The popover list is rebuilt ONLY when its data signature changes —
-      a live poll must never collapse a row the user is reading.
+      a live poll must never collapse a row the user is reading. Command
+      rows are <details> disclosures (one ellipsized line → the whole
+      command, wrapped and selectable); a rebuild reopens the rows that
+      were expanded, keyed by command_id.
    3. ONE chained-setTimeout poll loop (never setInterval): ~3s while
       anything is active, ~10s idle, ticks skipped while the tab is
       hidden (no pending timeout), and an immediate tick on visibility return.
@@ -41,7 +44,9 @@ let backgroundConversationActivity = new Map();
   function _mountDock() {
     if (_disposed) return;
     const convId = typeof activeConvId !== 'undefined' ? activeConvId : '';
-    const input = runtimeScope.ConversationTurnRead?.latest?.(convId, turn => turn.actor === 'human', 'main');
+    const input = runtimeScope.ConversationTurnRead?.latest?.(
+      convId, turn => ['human', 'critic', 'virtual_user'].includes(turn.actor), 'main',
+    );
     const host = backgroundAgentContextHost(document.getElementById('chatInner'), convId, input?.turnId);
     if (!_dock && host) _dock = createAgentSidebarDock({ host, translate: _tt });
     _dock?.mount(host);
@@ -54,17 +59,33 @@ let backgroundConversationActivity = new Map();
     const convId = typeof activeConvId !== 'undefined' ? activeConvId : '';
     const conv = getConvById(convId);
     // Temporary retained rendering ports; remove when swarm cards migrate.
-    const messageTurns = conv ? runtimeScope.ConversationSwarmPresentation?.candidates(conv) || [] : [];
-    const messageSwarms = summarizeBackgroundActivity(_last, convId).swarms;
+    const turns = conv ? runtimeScope.ConversationSwarmPresentation?.candidates(conv) || [] : [];
+    const swarms = summarizeBackgroundActivity(_last, convId).swarms;
     _dock.update(convId || '', agentDockProjection({
-      turns: conv ? runtimeScope.ConversationSwarmPresentation?.candidates(conv) || [] : [],
-      swarms: summarizeBackgroundActivity(_last, convId).swarms,
+      turns,
+      swarms,
       recover: (...args) => _recoverSwarmAgents(...args),
       renderPanel: (...args) => _buildSwarmPanelHTML(...args),
       renderActivity: agent => renderBackgroundActivityAgent(document, agent, _tt),
       openConversation: loadConversation,
+      stopAgent: _stopAgent,
       translate: _tt,
-    }), swarmMessagesProjection(messageTurns, messageSwarms));
+    }), swarmMessagesProjection(turns, swarms));
+  }
+
+  // The route's own answers: the agent settled or its run left the registry, so
+  // nothing is left to stop and the refresh reconciles the row. Any other failure,
+  // including a server without the route, is reported.
+  const _STOP_SETTLED_CODES = ['swarm_agent_not_found', 'swarm_agent_not_running'];
+
+  function _stopAgent(swarmId, agentId) {
+    return Api.swarm.stopAgent(swarmId, agentId).then(() => true, error => {
+      if (!_STOP_SETTLED_CODES.includes(error?.code) && typeof showToast === 'function') {
+        showToast(_tt('agentDock.stopFailed', 'Could not stop the agent: {error}',
+          { error: error?.message || String(error) }), 'error');
+      }
+      return false;
+    }).finally(() => controller.refresh());
   }
 
   let _disposed = false;
@@ -136,7 +157,7 @@ let backgroundConversationActivity = new Map();
   function _chipTitle(sum) {
     const lines = [_tt('bgActivity.title', 'Background activity')];
     for (const c of sum.commands) {
-      lines.push('· $ ' + (c.command || ''));
+      lines.push('· $ ' + (c.command || '').slice(0, 200));
     }
     return lines.join('\n');
   }
@@ -254,6 +275,8 @@ let backgroundConversationActivity = new Map();
     _popover.commandClocks = [];
     _popover.sig = sig;
     const body = _popover.bodyNode;
+    const expanded = new Set(Array.from(body.querySelectorAll('.bg-act-cmd[open]'),
+      row => row.dataset.commandId));
     body.textContent = '';
 
     if (sum.commands.length) {
@@ -262,24 +285,38 @@ let backgroundConversationActivity = new Map();
       secTitle.textContent = _tt('bgActivity.sectionCommands', 'Background commands');
       body.appendChild(secTitle);
       for (const cmd of sum.commands) {
-        const row = _commandRow(cmd);
+        const row = _commandRow(cmd, expanded.has(cmd.command_id || ''));
         _popover.commandClocks.push(row.querySelector('.bg-act-elapsed'));
         body.appendChild(row);
       }
     }
   }
 
-  function _commandRow(cmd) {
-    const row = document.createElement('div');
+  function _keepSelectionOpen(e) {
+    // Drag-selecting the expanded command to copy it must not fold the row.
+    const selection = document.getSelection();
+    if (selection && !selection.isCollapsed && e.currentTarget.contains(selection.anchorNode)) {
+      e.preventDefault();
+    }
+  }
+
+  function _commandRow(cmd, expanded) {
+    const row = document.createElement('details');
     row.className = 'bg-act-cmd';
+    row.dataset.commandId = cmd.command_id || '';
+    row.open = expanded;
+    const head = document.createElement('summary');
+    head.className = 'bg-act-cmd-head';
+    head.addEventListener('click', _keepSelectionOpen);
     const text = document.createElement('code');
     text.className = 'bg-act-cmd-text';
     text.textContent = cmd.command || '';
-    row.appendChild(text);
+    head.appendChild(text);
     const elapsed = document.createElement('span');
     elapsed.className = 'bg-act-elapsed';
     elapsed.textContent = _fmtElapsed(cmd.elapsed_s);
-    row.appendChild(elapsed);
+    head.appendChild(elapsed);
+    row.appendChild(head);
     return row;
   }
 
@@ -344,7 +381,7 @@ let backgroundConversationActivity = new Map();
 
   runtimeScope.updateBackgroundActivity = updateBackgroundActivity;
 
-  // Render/mount only: commits and the existing rail follower never start reads.
+  // Render/mount only: commits and the rail track pass never start reads.
   runtimeScope.renderBackgroundAgents = _updateDock;
   runtimeScope.mountBackgroundAgents = _mountDock;
 

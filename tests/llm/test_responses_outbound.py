@@ -454,20 +454,46 @@ class TestRequestConversion:
                 f'tool_{index}': ('project' if index < 12 else 'automation')
                 for index in range(24)
             },
+            '_tool_discovery_policy_by_name': {
+                f'tool_{index}': ('eager' if index < 12 else 'searchable')
+                for index in range(24)
+            },
         })
         assert out['tools'][0] == {'type': 'tool_search'}
         direct = [tool for tool in out['tools']
                   if tool.get('type') == 'function']
-        assert {tool['name'] for tool in direct} == {'tool_0', 'tool_1'}
+        assert {tool['name'] for tool in direct} == {
+            f'tool_{index}' for index in range(12)}
         assert all('defer_loading' not in tool for tool in direct)
         namespaces = [tool for tool in out['tools']
                       if tool.get('type') == 'namespace']
         assert namespaces and all(len(ns['tools']) <= 10 for ns in namespaces)
         deferred = [tool for ns in namespaces for tool in ns['tools']]
-        assert len(deferred) == 22
+        assert len(deferred) == 12
         assert all(tool['defer_loading'] is True for tool in deferred)
         assert {tool['name'] for tool in direct + deferred} == {
             f'tool_{index}' for index in range(24)}
+
+    def test_long_searchable_name_uses_the_same_truncated_policy_identity(self):
+        name = 'custom__' + ('long_tool_name_' * 7)
+        tools = [{'type': 'function', 'function': {
+            'name': name if index == 0 else f'tool_{index}',
+            'parameters': {'type': 'object'},
+        }} for index in range(24)]
+        out, _ = openai_body_to_responses({
+            'model': 'gpt-5.6-sol', '_responses_feature_profile': 'openai',
+            'messages': [{'role': 'user', 'content': 'work'}],
+            'tools': tools, '_tool_search_mode': 'auto',
+            '_tool_discovery_policy_by_name': {
+                name: 'searchable',
+                **{f'tool_{index}': 'searchable' for index in range(1, 24)},
+            },
+        })
+        deferred = [tool for namespace in out['tools']
+                    if namespace.get('type') == 'namespace'
+                    for tool in namespace['tools']]
+        assert len(deferred[0]['name']) <= 64
+        assert deferred[0]['defer_loading'] is True
 
     def test_tool_choice_is_hoisted_out_of_tool_search(self):
         tools = [{
@@ -861,6 +887,43 @@ class TestSSETranslation:
         chunks = ResponsesSSETranslator().translate(json.dumps(event))
         assert chunks[0]['error']['type'] == 'server_error'
         assert chunks[0]['error']['http_code'] == '500'
+
+    def test_gateway_keepalive_is_a_known_no_op(self, caplog):
+        translator = ResponsesSSETranslator()
+        with caplog.at_level('WARNING', logger='lib.llm.responses_outbound._sse'):
+            assert translator.translate(json.dumps(
+                {'type': 'keepalive', 'sequence_number': 7})) == []
+        assert translator.unknown_event_types == set()
+        assert not [r for r in caplog.records if 'unhandled SSE event' in r.message]
+
+    # Observed on ChatGPT-backend (Codex) streams after response.in_progress:
+    # prompt-moderation flags, no generated output.
+    _METADATA_FRAME = {
+        'type': 'response.metadata', 'response_id': 'resp_1',
+        'sequence_number': 2, 'metadata': {
+            'openai_chatgpt_moderation_metadata': {
+                'prompt': {'omnimod': {'protection_type': 'omnimod'}}}}}
+
+    def test_response_metadata_frame_is_a_known_no_op(self, caplog):
+        translator = ResponsesSSETranslator()
+        acc = _acc(translator)
+        with caplog.at_level('WARNING', logger='lib.llm.responses_outbound._sse'):
+            _feed(acc, [
+                {'type': 'response.created', 'response': {'id': 'resp_1'}},
+                {'type': 'response.in_progress', 'response': {'id': 'resp_1'}},
+                self._METADATA_FRAME, _text('answer'), _completed()])
+        msg, finish, _usage = acc.finalize()
+        assert msg['content'] == 'answer' and finish == 'stop'
+        assert translator.unknown_event_types == set()
+        assert not [r for r in caplog.records if 'unhandled SSE event' in r.message]
+
+    def test_response_metadata_frame_never_masks_a_following_rejection(self):
+        translator = ResponsesSSETranslator()
+        assert translator.translate(json.dumps(self._METADATA_FRAME)) == []
+        chunks = translator.translate(json.dumps({
+            'type': 'error', 'code': 'server_is_overloaded',
+            'message': 'Our servers are currently overloaded.'}))
+        assert 'server_is_overloaded' in chunks[0]['error']['message']
 
     def test_failed_rate_limit_raises_typed_error(self):
         acc = _acc(ResponsesSSETranslator())

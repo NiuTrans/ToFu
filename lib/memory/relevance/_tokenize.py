@@ -90,6 +90,11 @@ def _build_memory_doc(mem: dict[str, Any], include_body: bool = False) -> list[s
         mem: Memory dict.
         include_body: If True, also tokenize the memory body for deeper matching.
     """
+    return _tokenize(_memory_document_text(mem, include_body=include_body))
+
+
+def _memory_document_text(mem: dict[str, Any], include_body: bool = False) -> str:
+    """Return the exact text :func:`_build_memory_doc` tokenizes."""
     parts = [
         mem.get('name', ''),
         mem.get('description', ''),
@@ -103,4 +108,4 @@ def _build_memory_doc(mem: dict[str, Any], include_body: bool = False) -> list[s
             # Search storage reads this same prefix lazily; keep one authority
             # for ranking semantics and the per-record tokenization ceiling.
             parts.append(body[:MEMORY_SEARCH_BODY_MAX_CHARS])
-    return _tokenize(' '.join(parts))
+    return ' '.join(parts)

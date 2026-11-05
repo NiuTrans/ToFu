@@ -656,11 +656,15 @@ class TestHandlerAudit:
                              'file': 'main.tex', 'bib': 'refs.bib'},
         }
         report.update(over)
+        report.update(source_digest='a' * 64, cursor='c1:' + 'a' * 64 + ':0',
+                      next_cursor=None, retry_cursor=None,
+                      coverage={'start': 0, 'end': len(report['verifications']),
+                                'remaining': 0, 'complete': True})
         return report
 
     def test_audit_verdict_counts(self, monkeypatch, discovery):
         monkeypatch.setattr(citations, 'audit_document',
-                            lambda base, *, main_file: self._report())
+                            lambda base, *, main_file, cursor='': self._report())
         _tc, content, _ = _invoke({}, fn_name='paper_citation_audit')
         assert '疑似幻觉 1' in content
         assert 'ghost2024' in content
@@ -669,7 +673,7 @@ class TestHandlerAudit:
 
     def test_audit_all_clear(self, monkeypatch, discovery):
         monkeypatch.setattr(citations, 'audit_document',
-                            lambda base, *, main_file: self._report(
+                            lambda base, *, main_file, cursor='': self._report(
                                 verifications=[{'key': 'good',
                                                 'status': 'verified',
                                                 'evidence': {}}],
@@ -679,7 +683,7 @@ class TestHandlerAudit:
 
     def test_audit_retracted_listed(self, monkeypatch, discovery):
         monkeypatch.setattr(citations, 'audit_document',
-                            lambda base, *, main_file: self._report(
+                            lambda base, *, main_file, cursor='': self._report(
                                 verifications=[{
                                     'key': 'bad', 'status': 'retracted',
                                     'evidence': {'matched_title': 'Bad Paper',

@@ -24,17 +24,19 @@ NoteTone = Literal['ok', 'warn', 'err', 'info']
 
 @dataclass(frozen=True)
 class NotePresentation:
-    """Human-facing rendering contract for one intervention reason.
+    """Human-facing rendering contract for one displayable note reason.
 
     This is the single source of truth for how a system note's cause reads in
     the conversation timeline. The frontend chip map is GENERATED from these
     declarations (scripts/gen_system_note_presentation.mjs); it must never be
     hand-duplicated. ``label_key`` is the i18n contract key; ``tone`` encodes
-    the category so the chip colour is scannable at a glance.
+    the category so the chip colour is scannable at a glance; ``glyph`` names
+    the shared frontend icon (frontend/src/icons.ts) a context row shows.
     """
     label_key: str
     tone: NoteTone = 'info'
     fallback: str = ''
+    glyph: str = ''
 
 
 @dataclass(frozen=True)
@@ -67,83 +69,103 @@ class InjectionSpec:
 _SPECS = (
     InjectionSpec('platform_static', 'system_prompt_base', 'required_contract',
                   'Platform contract unless operator supplied replace-mode system',
+                  presentation=NotePresentation('systemNote.reasonPlatformStatic', 'info', 'Platform contract', 'shield'),
                   authority='platform', stability='static', lifecycle='conversation',
                   priority=0, layer='objective_constraints', required=True,
                   placement='system'),
     InjectionSpec('role_directive', 'endpoint.role', 'required_contract',
                   'Explicit specialized role', stability='round', lifecycle='round',
+                  presentation=NotePresentation('systemNote.reasonRoleDirective', 'info', 'Role', 'bot'),
                   priority=0, max_tokens=5000, layer='objective_constraints', required=True),
     InjectionSpec('goal_objective', 'goal_runs.worker_context', 'required_contract',
                   'Chat Goal worker with a stamped durable objective',
+                  presentation=NotePresentation('systemNote.reasonGoalObjective', 'info', 'Goal objective', 'target'),
                   stability='round', lifecycle='round',
                   priority=1, max_tokens=8000, layer='objective_constraints',
                   required=True),
     InjectionSpec('project_rules', 'project.AGENTS_CLAUDE', 'required_contract',
                   'Attached enabled project; rules only, history is on demand',
+                  presentation=NotePresentation('systemNote.reasonProjectRules', 'info', 'Project rules', 'file'),
                   authority='project', stability='conversation', lifecycle='conversation',
                   priority=0, layer='objective_constraints', required=True),
     InjectionSpec('project_scoped_rules', 'project.path_guidance', 'required_contract',
-                  'Applicable rule files acquired for an accessed path; writes wait for full delivery',
-                  authority='project', stability='round', lifecycle='task',
+                  'One content-addressed block per applicable rule file of an accessed path; '
+                  'each text is delivered once while it stays in model-visible history',
+                  presentation=NotePresentation('systemNote.reasonProjectScopedRules', 'info', 'Folder rules', 'folder'),
+                  authority='project', stability='conversation', lifecycle='conversation',
                   priority=1, layer='objective_constraints', required=True),
     InjectionSpec('user_context', 'memory.user_context', 'user_preference',
                   'Preferences enabled and nonempty', authority='preference',
+                  presentation=NotePresentation('systemNote.reasonUserContext', 'info', 'My Context', 'user'),
                   stability='conversation', lifecycle='conversation', priority=20,
                   max_tokens=1000, layer='objective_constraints',
                   provenance_field='preferencesApplied'),
     InjectionSpec('memory_guidance', 'memory', 'capability_guidance',
                   'Memory enabled and real tools available', authority='ambient',
+                  presentation=NotePresentation('systemNote.reasonMemoryGuidance', 'info', 'Memory guidance', 'lightbulb'),
                   stability='conversation', lifecycle='conversation', priority=60,
                   max_tokens=180, layer='cold_history'),
     InjectionSpec('skills_index', 'skills.registry', 'capability_discovery',
                   'Real tools and enabled installed skills; frozen per task',
+                  presentation=NotePresentation('systemNote.reasonSkillsIndex', 'info', 'Skills', 'puzzle'),
                   stability='conversation', lifecycle='conversation', priority=40,
                   max_tokens=1400, layer='cold_history'),
     InjectionSpec('ui_nav_directory', 'ui.nav_targets', 'capability_discovery',
                   'Browser-frontend conversation turn; static contract-generated '
                   'directory of setting/page jump keys',
+                  presentation=NotePresentation('systemNote.reasonUiNavDirectory', 'info', 'UI shortcuts', 'compass'),
                   stability='static', lifecycle='conversation', priority=45,
                   max_tokens=1400, layer='cold_history', placement='system'),
     InjectionSpec('selected_skills', 'skills.activation', 'required_contract',
                   'Exact skill mentions in the current user request',
+                  presentation=NotePresentation('systemNote.reasonSelectedSkills', 'info', 'Selected skills', 'sparkles'),
                   authority='workflow', stability='turn', lifecycle='task',
                   priority=15, max_tokens=8000, layer='objective_constraints',
                   required=True),
     InjectionSpec('credential_vault', 'credentials_vault', 'capability_discovery',
                   'Real tools and nonempty name-only vault index', authority='user',
+                  presentation=NotePresentation('systemNote.reasonCredentialVault', 'info', 'Credential vault', 'key'),
                   stability='conversation', lifecycle='conversation', priority=30,
                   max_tokens=1000, layer='cold_history'),
     InjectionSpec('parallel_execution', 'swarm', 'capability_guidance',
                   'Enabled available multi-agent lane and independent task shape',
+                  presentation=NotePresentation('systemNote.reasonParallelExecution', 'info', 'Parallel agents', 'users'),
                   stability='static', lifecycle='conversation', priority=50,
-                  max_tokens=128, layer='cold_history'),
+                  max_tokens=128, layer='cold_history', placement='system'),
     InjectionSpec('programmatic_execution', 'tools.programmatic', 'capability_guidance',
                   'Enabled programmatic tool lane', stability='static', lifecycle='conversation',
+                  presentation=NotePresentation('systemNote.reasonProgrammaticExecution', 'info', 'Programmatic calls', 'fileCode'),
                   priority=55, max_tokens=128, layer='cold_history'),
     InjectionSpec('programmatic_inputs', 'tools.program_inputs', 'capability_discovery',
                   'Explicit context.programmaticInputs experiment, owner-scoped inputs and program action',
+                  presentation=NotePresentation('systemNote.reasonProgrammaticInputs', 'info', 'Program inputs', 'package'),
                   authority='ambient', stability='round', lifecycle='round',
                   priority=45, max_tokens=256, layer='hot_tail',
                   global_budget_policy='omit'),
     InjectionSpec('working_facts', 'memory.working_facts', 'task_state',
                   'Owned durable conversation facts refreshed before common round admission',
+                  presentation=NotePresentation('systemNote.reasonWorkingFacts', 'info', 'Working facts', 'clipboard'),
                   authority='evidence', stability='round', lifecycle='conversation',
                   priority=35, max_tokens=working_fact_limit('contextTokens'), layer='task_state',
                   global_budget_policy='omit'),
     InjectionSpec('project_coordinator', 'project.coordination', 'capability_guidance',
                   'Current owner/project-bound coordinator root task',
+                  presentation=NotePresentation('systemNote.reasonProjectCoordinator', 'info', 'Coordinator', 'gitMerge'),
                   authority='workflow', stability='turn', lifecycle='task',
-                  max_tokens=600, layer='objective_constraints', global_budget_policy='omit',
+                  # Holds the longest role whole (the Global Router's); role tests pin the fit.
+                  max_tokens=900, layer='objective_constraints', global_budget_policy='omit',
                   silent_absence_reasons=('inactive', 'provider_unavailable', 'over_block_budget')),
     InjectionSpec('project_context', 'project.brain', 'coordination_evidence',
                   'Available owner/project-bound coordinator with unseen narrative; '
                   'ordinary workers use scoped inbox and overlap advisories',
+                  presentation=NotePresentation('systemNote.reasonProjectContext', 'info', 'Project updates', 'inbox'),
                   authority='project', max_tokens=1800, layer='evidence',
                   global_budget_policy='omit',
                   silent_absence_reasons=('empty', 'project_disabled', 'disabled',
                                           'provider_unavailable', 'over_block_budget')),
     InjectionSpec('project_presence', 'project.presence', 'task_state',
                   'Live same-project worker status for the bound Coordinator',
+                  presentation=NotePresentation('systemNote.reasonProjectPresence', 'info', 'Teammates', 'users'),
                   authority='project', max_tokens=1500, layer='evidence',
                   stability='round', lifecycle='round',
                   global_budget_policy='omit',
@@ -151,51 +173,65 @@ _SPECS = (
                                           'provider_unavailable', 'over_block_budget')),
     InjectionSpec('turn_requirements', 'acceptance.turns', 'required_contract',
                   'Current owner requirements for the bound ordinary assistant Turn',
+                  presentation=NotePresentation('systemNote.reasonTurnRequirements', 'info', 'Turn requirements', 'target'),
                   authority='user', stability='round', lifecycle='task', priority=1,
                   layer='objective_constraints', required=True),
     InjectionSpec('active_checklist', 'task.todo_state', 'required_continuity',
                   'Accepted current checklist missing from visible context',
                   priority=5, layer='task_state', required=True,
                   group_context=False,
-                  presentation=NotePresentation('systemNote.reasonActiveChecklist', 'ok', 'Active checklist')),
+                  presentation=NotePresentation('systemNote.reasonActiveChecklist', 'ok', 'Active checklist', 'checkCircle')),
     InjectionSpec('task_state_v1', 'task.events.projection', 'required_continuity',
                   'Explicit global context plan enabled', priority=5, max_tokens=2400,
+                  presentation=NotePresentation('systemNote.reasonTaskState', 'info', 'Task state', 'checkCircle'),
                   layer='task_state', required=True),
     InjectionSpec('relevant_memories', 'memory.prefetch', 'retrieved_evidence',
                   'High-confidence owner-scoped prefetch matches', authority='evidence',
+                  presentation=NotePresentation('systemNote.reasonRelevantMemories', 'info', 'Relevant memories', 'brain'),
                   priority=70, max_tokens=1500, layer='evidence',
                   provenance_field='memoryPrefetch',
                   silent_absence_reasons=('no_high_confidence_matches',)),
     InjectionSpec('plan_mode', 'plan_mode.contract', 'required_contract',
                   'Plan mode explicitly enabled', priority=15, max_tokens=900,
+                  presentation=NotePresentation('systemNote.reasonPlanMode', 'info', 'Plan mode', 'mapPin'),
                   layer='objective_constraints', required=True),
+    InjectionSpec('delegate_mode', 'delegate_mode.contract', 'required_contract',
+                  'Delegate mode enabled and the root narrowed to orchestration tools',
+                  presentation=NotePresentation('systemNote.reasonDelegateMode', 'info', 'Delegate mode', 'gitBranch'),
+                  priority=15, max_tokens=900, layer='objective_constraints',
+                  required=True, placement='system'),
     InjectionSpec('environment', 'platform.environment', 'required_routing',
                   'Current execution environment and owner-scoped browser capability unless explicitly disabled',
+                  presentation=NotePresentation('systemNote.reasonEnvironment', 'info', 'Environment', 'terminal'),
                   authority='platform', priority=80, max_tokens=400, required=True),
     InjectionSpec('project_path_change', 'platform.environment.transition', 'required_routing',
                   'Observed path transition, never first sight or steady state',
+                  presentation=NotePresentation('systemNote.reasonPathChange', 'info', 'Path change', 'folder'),
                   authority='platform', priority=79, max_tokens=160, required=True,
                   provenance_field='projectPathChange'),
     InjectionSpec('mcp_tools_delta', 'mcp.catalog', 'capability_discovery',
                   'Reachable MCP names absent from frozen wire and schema discovery available',
+                  presentation=NotePresentation('systemNote.reasonMcpTools', 'info', 'MCP tools', 'plug'),
                   priority=40, max_tokens=700, layer='evidence',
                   provenance_field='mcpToolsDelta'),
     InjectionSpec('disclosed_tools', 'tools.disclosure', 'capability_recovery',
                   'Previously disclosed deferred names remain executable',
+                  presentation=NotePresentation('systemNote.reasonDisclosedTools', 'info', 'Disclosed tools', 'wrench'),
                   priority=40, max_tokens=700, layer='evidence'),
     InjectionSpec('current_date', 'clock', 'ambient_fact',
                   'Current day absent from trusted model-visible context or changed',
+                  presentation=NotePresentation('systemNote.reasonCurrentDate', 'info', 'Current date', 'calendar'),
                   authority='ambient', priority=90, max_tokens=80),
     InjectionSpec('modified_files', 'orchestrator.attachments', 'state_reminder',
                   'Journal shows files changed outside this conversation since turn start; '
                   'file-set signature changed', authority='ambient',
                   stability='round', lifecycle='round', max_tokens=1600,
                   group_context=False,
-                  presentation=NotePresentation('systemNote.reasonModifiedFiles', 'warn', 'Modified files')),
+                  presentation=NotePresentation('systemNote.reasonModifiedFiles', 'warn', 'Modified files', 'edit')),
     InjectionSpec('tool_progress', 'orchestrator.tool_loop_breaker', 'safety_recovery',
                   'Verified identical outcome, explicit no-op, redundant read or unresolved artifact',
                   lane='event', required=True, note_kind='system-intervention',
-                  presentation=NotePresentation('systemNote.reasonToolProgress', 'warn', 'No progress')),
+                  presentation=NotePresentation('systemNote.reasonToolProgress', 'warn', 'No progress', 'refresh')),
     InjectionSpec('execution_allowance', 'agent_core.execution_budget', 'required_contract',
                   'Finite invocation allowance at first safe dispatch, lower-water '
                   'milestones or observed unknown consumption',
@@ -204,89 +240,102 @@ _SPECS = (
                   # permanent bare _isMeta message that stacks until compaction.
                   required=True, stability='round', lifecycle='round',
                   priority=5, max_tokens=350, note_kind='context-injection',
-                  presentation=NotePresentation('systemNote.reasonExecutionAllowance', 'info', 'Execution budget')),
+                  presentation=NotePresentation('systemNote.reasonExecutionAllowance', 'info', 'Execution budget', 'hourglass')),
     InjectionSpec('tool_stagnation', 'orchestrator.tool_loop_breaker', 'safety_recovery',
                   'Persistent identical failure or identical successful polling; bounded correction',
                   lane='event', required=True, note_kind='system-intervention',
-                  presentation=NotePresentation('systemNote.reasonToolStagnation', 'err', 'Stagnation')),
+                  presentation=NotePresentation('systemNote.reasonToolStagnation', 'err', 'Stagnation', 'alertTriangle')),
     InjectionSpec('tool_repeat_reminder', 'orchestrator.tool_loop_breaker', 'safety_recovery',
                   'Early consecutive exact-repeat notice before the corrective nudge; never vetoes',
                   lane='event', required=True, note_kind='system-intervention',
-                  presentation=NotePresentation('systemNote.reasonToolRepeat', 'warn', 'Repeated call')),
+                  presentation=NotePresentation('systemNote.reasonToolRepeat', 'warn', 'Repeated call', 'refreshCw')),
     InjectionSpec('partial_stream_retry', 'stream_handler.analyse', 'protocol_recovery',
-                  'Partial transport cut on a provider without assistant prefill',
+                  'Historical partial-stream continuation receipts only; a cut reply now rewinds and resends',
                   lane='event', required=True, note_kind='system-intervention',
-                  presentation=NotePresentation('systemNote.reasonStreamRetry', 'info', 'Stream retry')),
+                  presentation=NotePresentation('systemNote.reasonStreamRetry', 'info', 'Stream retry', 'refreshCw')),
     InjectionSpec('terminal_recovery', 'stream_handler.terminal_recovery', 'protocol_recovery',
                   'Empty terminal response or unexecuted tool packet; at most two retries',
                   lane='event', required=True, note_kind='system-intervention',
-                  presentation=NotePresentation('systemNote.reasonTerminalRecovery', 'info', 'Terminal recovery')),
+                  presentation=NotePresentation('systemNote.reasonTerminalRecovery', 'info', 'Terminal recovery', 'refreshCw')),
     InjectionSpec('intermediate_response', 'stream_handler.analyse', 'protocol_recovery',
                   'Provider explicitly marks a commentary-only response; bounded retries',
                   lane='event', required=True, note_kind='system-intervention',
-                  presentation=NotePresentation('systemNote.reasonIntermediate', 'info', 'Intermediate reply')),
+                  presentation=NotePresentation('systemNote.reasonIntermediate', 'info', 'Intermediate reply', 'messageCircle')),
+    InjectionSpec('output_contract', 'stream_handler.analyse', 'protocol_recovery',
+                  'Delegated worker final answer violates its output_schema; once per worker',
+                  presentation=NotePresentation('systemNote.reasonOutputContract', 'warn', 'Output contract', 'alertTriangle'),
+                  lane='event', required=True),
     InjectionSpec('todo_incomplete', 'stream_handler.analyse', 'required_continuity',
                   'Historical checklist-continuation receipts only; no new execution emits this',
                   lane='event', required=True, note_kind='todo-continuation',
-                  presentation=NotePresentation('systemNote.reasonTodoIncomplete', 'ok', 'Checklist continuation')),
+                  presentation=NotePresentation('systemNote.reasonTodoIncomplete', 'ok', 'Checklist continuation', 'checkCircle')),
     InjectionSpec('intent_stall', 'stream_handler.intent_stall', 'safety_recovery',
                   'Retryable tool failure followed by prose-only stop, no human handoff; once per task',
                   lane='event', required=True, note_kind='intent-stall',
-                  presentation=NotePresentation('systemNote.reasonIntentStall', 'warn', 'Stalled intent')),
+                  presentation=NotePresentation('systemNote.reasonIntentStall', 'warn', 'Stalled intent', 'alertTriangle')),
     InjectionSpec('fallback_synthesis', 'orchestrator.finalize', 'result_recovery',
                   'Fetched evidence but no final answer', lane='event', authority='evidence', required=True,
-                  presentation=NotePresentation('systemNote.reasonFallback', 'info', 'Fallback synthesis')),
+                  presentation=NotePresentation('systemNote.reasonFallback', 'info', 'Fallback synthesis', 'sparkles')),
     InjectionSpec('evolution_guidance', 'evolution.guidance', 'retrieved_evidence',
                   'Owner-bound executor with learned strategies and current plan',
+                  presentation=NotePresentation('systemNote.reasonEvolutionGuidance', 'info', 'Evolution guidance', 'rocket'),
                   authority='evidence', max_tokens=800, layer='evidence'),
     InjectionSpec('evolution_updates', 'evolution.coordination', 'external_delivery',
                   'Live owner-bound goal updates at a closed tool boundary; explicit decisions remain separate',
                   lane='inbox', authority='evidence', required=True, note_kind='context-injection',
-                  presentation=NotePresentation('systemNote.reasonEvolution', 'info', 'Goal update')),
+                  presentation=NotePresentation('systemNote.reasonEvolution', 'info', 'Goal update', 'rocket')),
     InjectionSpec('inbox_delivery', 'orchestrator.inbox', 'external_delivery',
                   'Pending swarm/peer/human/background/overlap payload at closed tool boundary; ACK stays with producer',
-                  lane='inbox', authority='evidence', required=True),
+                  lane='inbox', authority='evidence', required=True,
+                  note_kind='context-injection', group_context=False,
+                  presentation=NotePresentation('systemNote.reasonInboxDelivery', 'info', 'Inbox delivery', 'inbox')),
     InjectionSpec('url_prefetch', 'message_builder.prefetch', 'retrieved_evidence',
                   'Successful prefetch of user-provided URL', lane='event', authority='evidence',
                   note_kind='context-injection',
-                  presentation=NotePresentation('systemNote.reasonUrlPrefetch', 'info', 'URL prefetch')),
+                  presentation=NotePresentation('systemNote.reasonUrlPrefetch', 'info', 'URL prefetch', 'download')),
     InjectionSpec('lifecycle_recovery', 'conv_message_builder.load', 'required_safety',
                   'Interrupted lifecycle command has unknown outcome; do not blindly refire',
                   lane='event', required=True, note_kind='context-injection',
-                  presentation=NotePresentation('systemNote.reasonLifecycle', 'warn', 'Lifecycle recovery')),
+                  presentation=NotePresentation('systemNote.reasonLifecycle', 'warn', 'Lifecycle recovery', 'alertTriangle')),
     InjectionSpec('branch_context', 'conv_message_builder.load', 'user_projection',
                   'Explicit branch title/selection', lane='event', authority='user', required=True,
                   note_kind='context-injection',
-                  presentation=NotePresentation('systemNote.reasonBranch', 'info', 'Branch context')),
+                  presentation=NotePresentation('systemNote.reasonBranch', 'info', 'Branch context', 'gitBranch')),
     InjectionSpec('paper_tool_guidance', 'paper.tools', 'capability_guidance',
-                  'Paper schema discovery and execution gateways both available', lane='event'),
+                  'Paper schema discovery and execution gateways both available', lane='event',
+                  presentation=NotePresentation('systemNote.reasonPaperTools', 'info', 'Paper tools', 'file')),
     InjectionSpec('worker_policy', 'swarm.agent', 'required_contract',
                   'Scoped worker role/tool/read-only/shared-workspace policy before dialogue',
                   lane='bootstrap', authority='platform', required=True),
+    InjectionSpec('worker_team', 'swarm.team_messages', 'required_contract',
+                  'Retired per-run identity carrier; only checkpoints written before the identity '
+                  'moved back into worker_policy carry it, and rebuild drops them',
+                  presentation=NotePresentation('systemNote.reasonWorkerTeam', 'info', 'Team identity', 'users'),
+                  lane='event', authority='platform', required=True),
     InjectionSpec('worker_artifacts', 'swarm.agent', 'capability_discovery',
                   'Shared artifact store available; names only, bounded', lane='event', authority='evidence',
                   note_kind='context-injection',
-                  presentation=NotePresentation('systemNote.reasonWorkerArtifacts', 'info', 'Worker artifacts')),
+                  presentation=NotePresentation('systemNote.reasonWorkerArtifacts', 'info', 'Worker artifacts', 'package')),
     InjectionSpec('worker_dependencies', 'swarm.scheduler', 'delegated_evidence',
                   'Explicit prerequisite completed', lane='event', authority='evidence', required=True,
                   note_kind='context-injection',
-                  presentation=NotePresentation('systemNote.reasonWorkerDeps', 'info', 'Dependency ready')),
+                  presentation=NotePresentation('systemNote.reasonWorkerDeps', 'info', 'Dependency ready', 'check')),
     InjectionSpec('worker_wrapup', 'swarm.agent', 'result_recovery',
                   'Worker halted without final answer; tool-less honest partial report', lane='event', required=True,
                   note_kind='context-injection',
-                  presentation=NotePresentation('systemNote.reasonWorkerWrapup', 'warn', 'Worker wrap-up')),
+                  presentation=NotePresentation('systemNote.reasonWorkerWrapup', 'warn', 'Worker wrap-up', 'archive')),
     InjectionSpec('goal_worker_directive', 'goal_runs.worker_context', 'required_contract',
                   'Pending engine directive for the continuing Goal worker',
                   lane='event', required=True, note_kind='context-injection',
-                  presentation=NotePresentation('systemNote.reasonGoalDirective', 'info', 'Goal directive')),
+                  presentation=NotePresentation('systemNote.reasonGoalDirective', 'info', 'Goal directive', 'target')),
     InjectionSpec('goal_worker_review', 'goal_runs.worker_context', 'review_evidence',
                   'Completed virtual-user review, never new human authority',
                   lane='event', authority='evidence', required=True, note_kind='context-injection',
-                  presentation=NotePresentation('systemNote.reasonGoalReview', 'info', 'Goal review')),
+                  presentation=NotePresentation('systemNote.reasonGoalReview', 'info', 'Goal review', 'eye')),
     InjectionSpec('virtual_user_directive', 'autopilot', 'required_contract',
                   'Explicit autopilot simulated-user turn; pinned objective and role only',
                   lane='event', required=True, note_kind='context-injection',
-                  presentation=NotePresentation('systemNote.reasonVirtualUser', 'info', 'Virtual user')),
+                  presentation=NotePresentation('systemNote.reasonVirtualUser', 'info', 'Virtual user', 'bot')),
     InjectionSpec('context_budget', 'compaction.pipeline', 'telemetry_only',
                   'Working-message estimate crosses diagnostic threshold; compaction owns capacity', lane='telemetry'),
 )
@@ -325,25 +374,36 @@ def block_spec(block_id: str) -> InjectionSpec | None:
     spec = INJECTION_REGISTRY.get(block_id)
     if spec:
         return spec
-    for prefix in ('project_path_change', 'modified_files'):
+    for prefix in ('project_path_change', 'modified_files', 'project_scoped_rules'):
         if block_id.startswith(prefix + '_'):
             return INJECTION_REGISTRY[prefix]
     return None
 
 
+# The composer's aggregate witness of committed system-placed blocks has no
+# spec of its own (see note_display_policies), so its label lives here.
+_SESSION_CONTEXT_PRESENTATION = NotePresentation(
+    'systemNote.reasonSessionContext', 'info', 'Session context', 'layers')
+
+
 def _validate_presentations() -> None:
     """Fail closed on a malformed presentation contract at import time."""
-    for spec in _SPECS:
-        presentation = spec.presentation
+    declared = [(spec.id, spec.presentation) for spec in _SPECS]
+    declared.append(('session_context_committed', _SESSION_CONTEXT_PRESENTATION))
+    for reason, presentation in declared:
         if presentation is None:
             continue
         if presentation.tone not in NOTE_TONES:
             raise ValueError(
-                f'{spec.id}: presentation tone {presentation.tone!r} not in {NOTE_TONES}')
+                f'{reason}: presentation tone {presentation.tone!r} not in {NOTE_TONES}')
         if not presentation.label_key.startswith('systemNote.reason'):
             raise ValueError(
-                f'{spec.id}: presentation label_key {presentation.label_key!r} '
+                f'{reason}: presentation label_key {presentation.label_key!r} '
                 'must be a systemNote.reason* i18n key')
+        if not (presentation.glyph.isidentifier() and presentation.glyph[:1].islower()):
+            raise ValueError(
+                f'{reason}: presentation glyph {presentation.glyph!r} must name a '
+                'shared frontend icon')
 
 
 _validate_presentations()
@@ -352,12 +412,14 @@ _validate_presentations()
 def note_presentations() -> dict[str, NotePresentation]:
     """Read-only reason-id -> presentation map for the contract generator.
 
-    Only specs with a model-visible intervention reason carry one; snapshot
-    blocks with no timeline note and telemetry stay absent (the frontend then
-    falls back to its neutral unknown-reason chip). Keys are registry ids.
+    Every reason with a display policy declares one, so a timeline row never
+    shows a raw registry id for a known reason; telemetry and bootstrap lanes
+    render no note and stay absent. Keys are registry ids.
     """
-    return {spec.id: spec.presentation for spec in _SPECS
-            if spec.presentation is not None}
+    presentations = {spec.id: spec.presentation for spec in _SPECS
+                     if spec.presentation is not None}
+    presentations['session_context_committed'] = _SESSION_CONTEXT_PRESENTATION
+    return presentations
 
 
 def note_display_policies() -> dict[str, dict]:
@@ -369,15 +431,16 @@ def note_display_policies() -> dict[str, dict]:
     """
     policies = {
         spec.id: {
-            'noteKind': spec.note_kind or (
-                'context-injection' if spec.lane == 'block' else 'system-intervention'),
+            'noteKind': spec.note_kind or 'context-injection',
             'groupContext': spec.group_context,
             'provenanceField': spec.provenance_field,
+            'authority': spec.authority,
         }
         for spec in _SPECS if spec.lane not in {'telemetry', 'bootstrap'}
     }
     # The composer owns this aggregate witness, not a separate prompt source.
     policies['session_context_committed'] = {
         'noteKind': 'session-context', 'groupContext': True, 'provenanceField': '',
+        'authority': 'platform',
     }
     return policies

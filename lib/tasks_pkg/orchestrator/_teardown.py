@@ -81,4 +81,20 @@ def finalize_task_lane(task: dict[str, Any], tid: str) -> None:
     except BaseException as _ca_err:
         logger.debug('[Task:%s] clear_conv_affinity failed: %s', tid, _ca_err)
 
+    # ── A Codex sticky-routing token is valid for this turn only. ──
+    try:
+        from lib.oauth.codex_turn_state import release_turn_state
+        release_turn_state(task.get('id'))
+    except BaseException as _ts_err:
+        logger.debug('[Task:%s] release_turn_state failed: %s', tid, _ts_err)
+
+    # ── Close this worker thread's Responses sockets for the task (an
+    #    aborted or failed loop never reached its terminal-response close). ──
+    try:
+        from lib.llm.responses_websocket import release_task_websockets
+        release_task_websockets(str(task.get('id') or ''))
+    except BaseException as _ws_err:
+        logger.debug('[Task:%s] release_task_websockets failed: %s',
+                     tid, _ws_err)
+
 __all__ = ['finalize_task_lane']

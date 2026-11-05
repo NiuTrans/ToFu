@@ -300,8 +300,8 @@ function _applyResolvedTitle(resolvedTitle, paperId) {
     _updatePaperTitles();
   }
   runtimeScope._renderPaperLibrary();
-  // Server healed the durable title; sync only lightweight client metadata.
-  if (pid === runtimeScope._activePaperId) runtimeScope._saveActivePaperState('metadata');
+  // The server already healed the durable title. Project that fact locally;
+  // replaying this browser's other library fields could overwrite newer edits.
 }
 
 function _updatePaperTitles() {
@@ -535,16 +535,10 @@ function _formatPaperBytes(n) {
 function _renderArxivFetchProgress(state) {
   var viewer = document.getElementById('paperPdfViewer');
   if (!viewer) return;
-  var isZh = (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh');
-  var labels = isZh
-    ? { resolving: '解析 arXiv 链接…', downloading: '下载 PDF…',
-        parsing: '解析 PDF 文本…', parsingImages: '提取图表…',
-        pageOf: '第 {done} / {total} 页',
-        cached: '已从缓存加载', pages: '页', chars: '字符' }
-    : { resolving: 'Resolving arXiv link…', downloading: 'Downloading PDF…',
-        parsing: 'Extracting PDF text…', parsingImages: 'Extracting figures…',
-        pageOf: 'page {done} / {total}',
-        cached: 'Loaded from cache', pages: 'pages', chars: 'chars' };
+  var labels = {
+    resolving: t('paper.arxivResolving'), downloading: t('paper.arxivDownloading'),
+    parsing: t('paper.arxivParsing'), parsingImages: t('paper.arxivParsingImages'),
+    cached: t('paper.arxivCached') };
 
   var title;
   if (state.stage === 'resolve') title = labels.resolving;
@@ -577,15 +571,16 @@ function _renderArxivFetchProgress(state) {
     var total = state.total_pages || 0;
     if (total > 0) {
       pct = Math.min(100, Math.round(done * 100 / total));
-      detail = labels.pageOf.replace('{done}', done).replace('{total}', total);
+      detail = t('paper.arxivPageOf', { done: done, total: total });
     } else {
       pct = -1;
       detail = '';
     }
   } else if (state.stage === 'parse_done') {
     pct = 100;
-    detail = (state.total_pages || 0) + ' ' + labels.pages +
-             ' · ' + (state.text_length || 0).toLocaleString() + ' ' + labels.chars;
+    detail = t('paper.arxivParsedSummary', {
+      pages: state.total_pages || 0,
+      chars: (state.text_length || 0).toLocaleString(document.documentElement.lang || undefined) });
   }
 
   var barStyle = (pct < 0)

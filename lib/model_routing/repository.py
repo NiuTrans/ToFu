@@ -450,6 +450,12 @@ class InMemoryModelRoutingRepository:
 
     def delete_secret(self, boundary: OwnerBoundary, secret_reference: str) -> bool:
         with self._lock:
+            authority = self._authorities.get(boundary)
+            if authority is not None and any(
+                row.get("secret_reference") == secret_reference
+                for row in authority.document["credentials"]
+            ):
+                return False
             return self._secrets.pop((boundary, secret_reference), None) is not None
 
     def migration_receipt(self, boundary: OwnerBoundary) -> dict[str, Any] | None:

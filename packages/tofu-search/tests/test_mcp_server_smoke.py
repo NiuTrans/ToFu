@@ -16,6 +16,7 @@ import queue
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +24,17 @@ pytest.importorskip('mcp', reason='MCP SDK not installed (pip install "tofu-sear
 
 LEGACY_PROTOCOL_VERSION = '2025-11-25'
 CURRENT_PROTOCOL_VERSION = '2026-07-28'
+
+
+def test_server_smoke_ignores_a_foreign_caller_checkout(monkeypatch, tmp_path):
+    foreign = tmp_path / 'tofu_search'
+    foreign.mkdir()
+    (foreign / '__init__.py').write_text("raise RuntimeError('foreign search package imported')\n")
+    monkeypatch.chdir(tmp_path)
+    responses, _ = _run_server({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}})
+    tools = responses[2]['result']['tools']
+    fetch = next(tool for tool in tools if tool['name'] == 'fetch_page')
+    assert 'Browser rendering is optional' in fetch['description']
 
 
 def _frame(payload: dict) -> str:
@@ -56,6 +68,7 @@ def _run_server(*requests: dict):
     """
     proc = subprocess.Popen(
         [sys.executable, '-m', 'tofu_search.mcp_server', '--transport', 'stdio'],
+        cwd=Path(__file__).resolve().parents[1],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -243,6 +256,8 @@ def test_fetch_description_states_optional_browser_and_access_limits(handshake):
     description = tool['description'].lower()
     assert 'browser rendering is optional' in description
     assert 'access challenges may still prevent reading' in description
+    assert 'text pdf extraction is included locally' in description
+    assert 'require ocr' in description
 
 
 def test_every_tool_has_a_substantial_description(handshake):

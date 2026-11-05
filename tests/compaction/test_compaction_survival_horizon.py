@@ -92,7 +92,8 @@ def test_longer_observed_compaction_window_invalidates_stale_economic_veto(
     monkeypatch.setattr(
         tokens, '_count_tokens_authoritative', authoritative_count)
     monkeypatch.setattr(
-        cache_evidence, 'current_cache_read', lambda *args, **kwargs: 120_000)
+        cache_evidence, 'current_warm_prefix_tokens',
+        lambda *args, **kwargs: 120_000)
 
     def task() -> dict:
         return {
@@ -103,7 +104,7 @@ def test_longer_observed_compaction_window_invalidates_stale_economic_veto(
             '_autoCompactRetryAfterTokens': 250_000,
             '_autoCompactRetryWitness': {
                 'reason': 'cache_negative',
-                'cacheReadTokens': 120_000,
+                'warmPrefixTokens': 120_000,
                 'paybackLimitRounds': 1.0,
             },
         }
@@ -160,6 +161,7 @@ def test_three_round_candidate_requires_observed_three_round_window(
     ):
         return {
             'cache_read_tokens': 100_000,
+            'warm_prefix_tokens': 100_000,
             'cache_rewrite_tokens': candidate_tokens,
             'dropped_tokens': max(1, tokens_before - candidate_tokens),
             'cache_write_mul': 1.0,
@@ -245,6 +247,9 @@ def test_cache_economics_resolves_before_and_after_pricing_tiers(monkeypatch):
 
     monkeypatch.setattr(
         cache_evidence, 'current_cache_read',
+        lambda *args, **kwargs: 280_000)
+    monkeypatch.setattr(
+        cache_evidence, 'current_warm_prefix_tokens',
         lambda *args, **kwargs: 280_000)
     set_provider_pricing('econ-provider', 'econ-model', {
         'contextTiers': [

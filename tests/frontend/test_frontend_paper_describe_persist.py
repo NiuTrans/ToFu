@@ -29,6 +29,7 @@ import shutil
 import subprocess
 
 import pytest
+from tests._jsdom import require_node_modules
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PAPER_JS = os.path.join(
@@ -111,6 +112,7 @@ console.log(JSON.stringify(out));
 
 
 def _run_harness():
+    require_node_modules('jsdom')
     import tempfile
     with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False, dir=ROOT) as f:
         harness = f.name
@@ -129,8 +131,6 @@ def _run_harness():
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_describe_draft_persists_across_reentry():
     out = _run_harness()
     assert out['fresh_empty'], 'fresh landing should render an empty describe textarea'

@@ -67,7 +67,7 @@ def replay_phase_messages(message: dict) -> list[dict]:
     if message.get('role') != 'assistant':
         return []
     items = capture_phase_messages(message.get('_responses_items'))
-    content = message.get('content')
+    content = message.get('_anthropic_content_blocks') or message.get('content')
     if not items or not isinstance(content, str):
         return []
     parts = [part.get('text', part.get('refusal', ''))

@@ -63,6 +63,7 @@ from __future__ import annotations
 from lib.log import get_logger
 from lib.orchestration.message_compat import is_flow_event_type
 from lib.tasks_pkg.snapshot_delta import DELTA_MARKER, shared_prefix_len
+from lib.task_replay.generated_request_inspector_projection import PROJECTION as _LIST_PROJECTION
 
 logger = get_logger(__name__)
 
@@ -90,7 +91,7 @@ def _event_read_bound(events, task_id):
     return dict(bound, taskId=task_id) if bound else None
 
 
-def _read_events(task_id: str, rebuild: bool = True) -> tuple[list, bool]:
+def _read_events(task_id: str, rebuild: bool = True, *, payload_projection='full') -> tuple[list, bool]:
     """Return ([{event_id, type, payload, ts_ms}] ordered by event_id, ok).
 
     ``ok`` is False when the storage read itself FAILED — callers must not
@@ -100,12 +101,12 @@ def _read_events(task_id: str, rebuild: bool = True) -> tuple[list, bool]:
     Separate from ``event_log.read_events`` (which omits ``ts_ms`` — the
     request-row schema carries ``ts``). Read-only; never throws.
 
-    ``rebuild`` selects the view: the FOLD only needs per-row metadata
-    (counts ride the delta markers) plus the new-message tails, so it reads
-    ``rebuild=False`` and never pays the full-payload reconstruction; the
-    per-round endpoint asks the verified index for only its selected snapshots.
-    shares original message tails and prefix digests; only selected payloads
-    materialize. It derives from the same fresh raw read, with no second RPC.
+    ``rebuild`` selects reconstruction. The FOLD requests the declared storage
+    metadata view: counts and tool-name declarations suffice for delta rows.
+    Detail reads retain complete event payloads and their verified snapshot
+    index. Metadata never supplies reconstruction; a full cached read may
+    supply either view. Entirely legacy pages are unchanged by projection and
+    still share that full read. All views use the same byte-bounded cache.
 
     CACHED (short TTL): the drawer's natural usage is "fold the task, then
     open round after round", and every ``get_request_payload`` call used to
@@ -131,29 +132,44 @@ def _read_events(task_id: str, rebuild: bool = True) -> tuple[list, bool]:
     """
     if not task_id:
         return [], True
+    if payload_projection not in ('full', _LIST_PROJECTION) or (rebuild and payload_projection != 'full'):
+        raise ValueError('Snapshot reconstruction requires the full event payload')
     if rebuild:
         replay, ok = _read_snapshot_replay(task_id)
         return (replay.event_rows(), True) if ok else ([], False)
     import time
     now = time.time()
+    key = (task_id, False if payload_projection == 'full' else payload_projection)
     with _EVENTS_CACHE_LOCK:
-        hit = _EVENTS_CACHE.get((task_id, False))
+        hit = _EVENTS_CACHE.get(key)
         if hit is not None and now - hit[0] < hit[3]:
             return hit[1], hit[2]
+        if payload_projection != 'full':
+            raw = _EVENTS_CACHE.get((task_id, False))
+            if raw is not None and now - raw[0] < raw[3]:
+                return raw[1], raw[2]
         derived = _EVENTS_CACHE.get((task_id, True))
         if (derived and now - derived[0] < derived[3]
                 and isinstance(derived[1], _SnapshotEventReplay)):
             return derived[1].events, True
     ttl = (_EVENTS_CACHE_TTL_S if _task_may_append(task_id)
            else _EVENTS_CACHE_TTL_SETTLED_S)
-    reading = (task_id, 'reading')
+    reading = (task_id, 'reading', payload_projection)
     witness = _cache_store(reading, object(), now, ttl)
     try:
-        rows, ok = _read_events_uncached(task_id, rebuild=False)
+        options = {} if payload_projection == 'full' else {'payload_projection': payload_projection}
+        rows, ok = _read_events_uncached(task_id, rebuild=False, **options)
         if not ok:
             return [], False
         if witness is not None:
-            _cache_store((task_id, False), rows, now, ttl, source=(reading, witness))
+            # The declared projection returns legacy snapshots unchanged.
+            # An entirely legacy read can still serve details without another
+            # RPC; any delta row keeps the metadata/full caches separate.
+            stored_key = ((task_id, False)
+                          if payload_projection != 'full' and all(
+                              row['type'] != _SNAPSHOT or DELTA_MARKER not in row['payload']
+                              for row in rows) else key)
+            _cache_store(stored_key, rows, now, ttl, source=(reading, witness))
         return rows, True
     finally:
         with _EVENTS_CACHE_LOCK:
@@ -161,7 +177,7 @@ def _read_events(task_id: str, rebuild: bool = True) -> tuple[list, bool]:
                 _EVENTS_CACHE.pop(reading, None)
 
 
-# (task_id, rebuild) → (epoch, compact rows/replay index, read_ok, ttl, estimated bytes)
+# (task_id, view) → (epoch, compact rows/replay index, read_ok, ttl, estimated bytes)
 _EVENTS_CACHE: dict[tuple, tuple] = {}
 _EVENTS_CACHE_LOCK = __import__('threading').RLock()
 _EVENTS_CACHE_TTL_S = 3.0
@@ -448,7 +464,7 @@ def invalidate_task_cache(task_id: str) -> None:
                     _EVENTS_CACHE.pop(key, None)
 
 
-def _read_events_uncached(task_id: str, *, rebuild: bool) -> tuple[list, bool]:
+def _read_events_uncached(task_id: str, *, rebuild: bool, payload_projection='full') -> tuple[list, bool]:
     """Uncached read (+ optional rebuild — see :func:`_read_events`).
 
     Reads ONLY the structural slice the inspector renders (snapshots, round
@@ -479,6 +495,8 @@ def _read_events_uncached(task_id: str, *, rebuild: bool) -> tuple[list, bool]:
             'types': sorted(STRUCTURAL_EVENT_TYPES),
             'type_prefixes': list(FLOW_EVENT_PREFIXES),
         }
+        if payload_projection != 'full':
+            type_filter['payload_projection'] = payload_projection
         while True:
             try:
                 rows = client.query(
@@ -779,6 +797,11 @@ def _wire_projection_payload(payload: dict) -> dict:
         'compactedNames': list(payload.get('compactedNames') or []),
         'executableToolCount': int(payload.get('executableToolCount') or 0),
     }
+    # Events recorded before these fields existed carry no measurement; an
+    # absent field stays absent rather than reading as zero bytes.
+    for key in ('toolNameBytes', 'toolNameBudgetBytes'):
+        if isinstance(payload.get(key), int) and not isinstance(payload[key], bool):
+            out[key] = payload[key]
     if payload.get('parentSpanId'):
         out['requestSpanId'] = str(payload['parentSpanId'])[:160]
     if isinstance(payload.get('dispatchSeq'), int):
@@ -942,14 +965,14 @@ def fold_request_log(task_id: str) -> dict:
     place, and the per-round payload fetch addresses the child's own
     event log. Child rows keep their own ``turn``/``agentId`` badges.
     """
-    events, read_ok = _read_events(task_id, rebuild=False)
+    events, read_ok = _read_events(task_id, rebuild=False, payload_projection=_LIST_PROJECTION)
     read_bounds = [_event_read_bound(events, task_id)]
     requests, flow_seen = _fold_event_rows(events)
     events_available = bool(events)
     child_ids, discovery_ok, child_limit_reached = _child_snapshot_sources(task_id)
     read_ok = read_ok and discovery_ok
     for child_id in child_ids:
-        child_events, child_ok = _read_events(child_id, rebuild=False)
+        child_events, child_ok = _read_events(child_id, rebuild=False, payload_projection=_LIST_PROJECTION)
         read_bounds.append(_event_read_bound(child_events, child_id))
         read_ok = read_ok and child_ok
         if child_events:
@@ -1130,20 +1153,40 @@ def get_request_payload(task_id: str, round_num, turn: str = '',
 
 def get_raw_archive_chunk(task_id: str, archive_id: str, part: str, *,
                           user_id: int, offset: int = 0,
-                          limit: int = 256 * 1024) -> dict | None:
-    """Read one bounded owner/task-scoped request or response archive chunk."""
+                          limit: int = 256 * 1024) -> dict:
+    """Read one bounded owner/task-scoped request or response archive chunk.
+
+    ``state`` is ``retained`` or ``expired``. Raw archives are reconstructible
+    evidence the authority reclaims oldest-first, while references to them
+    (``rawArchiveRef``, earlier payloads) outlive the capture; an archive the
+    owner's accessible task no longer retains is therefore an explicit empty
+    ``expired`` chunk rather than an error (docs/LOGGING.md).
+    """
     from lib.storage import get_storage_client
 
+    offset = max(0, int(offset))
     result = get_storage_client().query(
         'raw_archive.read', {
             'user_id': int(user_id),
             'task_id': task_id,
             'archive_id': archive_id,
             'part': part,
-            'offset': max(0, int(offset)),
+            'offset': offset,
             'limit': max(1, min(1024 * 1024, int(limit))),
         }, deadline=30)
-    return dict(result) if isinstance(result, dict) else None
+    if isinstance(result, dict):
+        return {**result, 'archiveId': archive_id, 'state': 'retained'}
+    return {
+        'archive': None,
+        'archiveId': archive_id,
+        'part': part,
+        'state': 'expired',
+        'offset': offset,
+        'nextOffset': offset,
+        'hasMore': False,
+        'availableBytes': 0,
+        'dataBase64': '',
+    }
 
 
 # ── Flat conversation wire feed (2026-09-22 owner directive) ─────────

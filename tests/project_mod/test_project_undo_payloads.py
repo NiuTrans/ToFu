@@ -172,6 +172,61 @@ def test_cold_cleanup_never_deletes_referenced_or_young_contents(project):
     for rows in (keep, orphan):
         path = directory / (rows[0]['originalContent']['pack'] + '.pack')
         os.utime(path, (old, old))
-    assert payloads.reclaim_orphans(session, keep, max_entries=100) == 1
+    assert payloads.reclaim_orphans(session, keep) == 1
     assert payloads.hydrate_record(session, keep[0])['originalContent'] == 'keep'
     assert payloads.hydrate_record(session, young[0])['originalContent'] == 'young'
+
+
+def test_crash_artifact_sweep_is_one_complete_pass(tmp_path):
+    import os
+    import time
+    session = str(tmp_path)
+    keep = payloads.compact_records(session, [{'originalContent': 'keep'}])
+    for index in range(40):
+        payloads.compact_records(session, [{'originalContent': f'orphan-{index}'}])
+    directory = tmp_path / 'undo-payloads-v1'
+    (directory / ('.payload-' + 'a' * 32)).write_bytes(b'interrupted stage')
+    old = time.time() - 120
+    for path in directory.iterdir():
+        os.utime(path, (old, old))
+    assert payloads.reclaim_orphans(session, keep) == 41
+    assert [path.name for path in directory.iterdir()] == [keep[0]['originalContent']['pack'] + '.pack']
+
+
+def test_crash_artifacts_are_swept_once_per_process_and_on_crash_evidence(project, monkeypatch):
+    import os
+    import time
+    monkeypatch.setattr(mods, '_PAYLOADS_SWEPT', set(), raising=False)
+    sweeps = []
+    reclaim = payloads.reclaim_orphans
+    monkeypatch.setattr(payloads, 'reclaim_orphans',
+                        lambda *args, **kwargs: (sweeps.append(args[0]), reclaim(*args, **kwargs))[1])
+    (project / 'file').write_text('old')
+    assert _ops.tool_write_file(str(project), 'file', 'new', conv_id='conv', task_id='first')['ok']
+    session = mods._get_session_dir(str(project))
+    assert sweeps == [session], 'the first admitted history load sweeps the payload directory'
+    directory = Path(session) / 'undo-payloads-v1'
+    old = time.time() - 120
+
+    def orphan(text):
+        pack = payloads.compact_records(session, [{'originalContent': text}])[0]['originalContent']['pack']
+        path = directory / (pack + '.pack')
+        os.utime(path, (old, old))
+        return path
+
+    artifact = orphan('crashed commit')
+    mods._invalidate_cache(session)
+    assert [row['originalContent'] for row in mods.get_modifications(str(project))] == ['old']
+    assert _ops.tool_write_file(str(project), 'file', 'newer', conv_id='conv', task_id='second')['ok']
+    assert sweeps == [session], 'cold reads and writes must not rescan the payload directory'
+    assert artifact.exists()
+    with monkeypatch.context() as patch:
+        patch.setattr(_ops, '_record_modification', lambda *args, **kwargs: False)
+        result = _ops.tool_write_file(str(project), 'file', 'crash', conv_id='conv', task_id='third')
+    assert result['ok'] is False and result['mutationApplied'] is True
+    rows = mods.get_modifications(str(project), include_content=False)
+    assert [row['taskId'] for row in rows] == ['first', 'second', 'third']
+    assert sweeps == [session, session], 'reconciling crash evidence sweeps again'
+    assert not artifact.exists()
+    assert mods.undo_task_modifications(str(project), 'third')['undone'] == 1
+    assert (project / 'file').read_text() == 'newer'

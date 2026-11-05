@@ -16,6 +16,12 @@ import { installApplicationInteractions, installViewportHeightGuard } from '../a
 // Temporary receipt ports; remove with retained tool dispatch.
 import { renderChecklistCard } from '../conversation/ui/checklist-card';
 import { renderTimerCard } from '../conversation/ui/timer-card';
+// Context rail bridge (info-rail.js); remove when the Surface port takes the rail host directly.
+import {
+  renderTurnContextRailHtml,
+  renderTurnContextRootBranchHtml,
+  renderTurnContextChecklistRowHtml,
+} from '../conversation/ui/turn-context-rail';
 import { refreshTimerCountdowns, toggleTimerWatcher, toggleTimerInstruction, toggleTimerPoll } from '../conversation/ui/timer-card/interactions';
 
 // Temporary multimedia receipt port; remove with retained tool dispatch.
@@ -28,13 +34,14 @@ import { resolvePath as resolveWorkUnitResourceUrl } from '../api/transport';
 import { inspectorReference } from '../features/inspector-evidence';
 
 import { isContextInjectionNote, contextNoteDisplayKind, sameContextNoteScope } from '../conversation/presentation/context-note-grouping';
+import { contextNoteFacet, contextNoteTextRuns } from '../conversation/presentation/context-note-presentation';
 
 // Temporary lexical port; remove with the retained finish-info renderer.
 import { normalizeTokenUsage } from '../token-usage';
 import { createPaperPreviewChanges } from '../features/paper/preview-changes';
 import { featureRegistry } from '../feature-registry';
 /* Generated once during the classic-to-ESM migration. Vite owns this module. */
-import { _applyI18n, _i18nLang, _onLanguageChange, _syncLangPicker, setLanguage, t } from '../i18n';
+import { _applyI18n, _i18nLang, _onLanguageChange, setLanguage, t } from '../i18n';
 import { iconHtml, statusDotIconHtml, welcomePillsHtml } from '../icons';
 import { escapeHtml, raw, safeHtml } from '../html-safety';
 import { createDialogServices } from '../lazy-dialog-controller';
@@ -54,6 +61,9 @@ import { createBackendAvailabilityMonitor } from '../backend-availability-monito
 import { createAvailabilityHealthProbeCoordinator } from '../availability-health-probe';
 import { createFeatureFlagsLoader } from '../core/feature-flags-loader';
 import { createModelPickerStartup } from '../features/model-catalog/model-picker-startup';
+// Temporary voice boot/action ports; remove with retained application composition.
+import { initVoiceInput, toggleVoiceInput, destroyVoiceInput } from '../features/voice-input';
+import { audioCapabilities } from '../features/voice/audio-capabilities';
 import { createImageViewerActionsController } from '../image-viewer-actions';
 
 import { showAttachmentPreview, closeAttachmentPreview } from '../attachment-preview-lifecycle';
@@ -92,6 +102,7 @@ import {
 import { createCompactionHistoryState } from '../core/compaction-history-state';
 import { HTTP_RESULT } from '../core/http-result';
 import { createCurrentUserIdentityController } from '../core/current-user';
+import { createConversationCatalogAvailability } from '../conversation/application/conversation-catalog-availability';
 import {
   frameBelongsToOwner,
   narrowConvCatalogFrame,
@@ -136,6 +147,10 @@ import { createSendPreparationOverlayController } from '../conversation/applicat
 import { createComposerTranslationStatus } from '../conversation/application/composer-translation-status';
 import { createPreferenceActionsController } from '../features/memory/preference-actions';
 import { createProjectCoordinationSurface } from '../features/project-coordination-surface';
+import { createGlobalRouterEntry } from '../features/global-router';
+import { createRouterWatchdogEntry } from '../features/router-watchdog';
+import { createSameTaskReadJoin } from '../features/project-coordination-read-join';
+import { createCoordinatorConversationGroups } from '../features/coordinator-conversation-group';
 
 import { createProjectConversationNavigation } from '../features/project-conversation-navigation';
 
@@ -164,13 +179,14 @@ import { createFolderPresetMutations, folderPresetWorkspace } from '../conversat
 
 import { openFolderSettings, openFolderDeleteConfirmation } from '../conversation/ui/folder-settings';
 import { createAutomationManagementClient } from '../api/automations';
-import { renderComposerModelNotice } from '../conversation/ui/composer-model-notice';
+import { holdComposerModelNotice, renderComposerModelNotice } from '../conversation/ui/composer-model-notice';
 
 // Temporary shell badge port; remove with the retained new-chat presentation.
 import { paintNewChatFolderBadges } from '../conversation/ui/new-chat-folder-badges';
 import { paintOptionalProjectAttachment } from '../conversation/ui/optional-project-attachment';
 import { createTurnReviewPresentation } from '../features/turn-review/presentation';
 import { createConversationSurfaceController } from '../conversation/application/conversation-surface-controller';
+import { createAnimationFrameScheduler } from '../conversation/ui/animation-frame-scheduler';
 import { entityRecordValues, entityRecordKeys } from '../core/entity-record';
 import { createConversationStartup } from '../conversation/application/conversation-startup';
 import {
@@ -182,6 +198,9 @@ import { createThinkingDepthSlider, projectReasoningControl, THINKING_DEPTH_LABE
 
 import { createProjectContext } from '../features/conversation-bar/project-context';
 import { createContextMeter } from '../features/conversation-bar/context-meter';
+import {
+  cancelledCompactionNotice, createScheduledCompactions, readCancelledCompaction, scheduledCompactionNotice,
+} from '../features/conversation-bar/scheduled-compaction';
 import { createTurnNavigation } from '../features/conversation-bar/turn-navigation';
 import { createConversationModelController, captureComposerModel, commitComposerModel } from '../conversation/application/conversation-model';
 import { createBranchComposerSession } from '../conversation/application/branch-composer';
@@ -194,6 +213,7 @@ import {
 import {
   activeConversationAttemptIds,
   activeMainConversationAttemptId,
+  conversationCompactionArchiveIds,
   conversationHasActor,
   latestConversationTurn,
   orderedConversationTurns,
@@ -211,7 +231,7 @@ import {
 import {
   mergeSwarmAgent, mergeSwarmAgentCards, normalizeSwarmAgent,
   swarmRoundAgentIds, swarmStatusAgents, swarmFrameMatchesExecution, swarmFrameExecutionTaskId,
-  swarmLaunchSelection, swarmLaunchFailure, swarmRoundRunId, swarmAgentLogId, swarmAgentWaitLabel,
+  swarmLaunchSelection, swarmLaunchFailure, swarmRoundRunId, swarmAgentLogId, swarmAgentPhaseLabel, swarmAgentBrief,
   swarmRoundIsActive, swarmRoundNeedsRecovery, swarmStatusFingerprint,
 } from '../conversation/presentation/swarm-agent-presentation';
 import {
@@ -337,13 +357,15 @@ import {
   createWriteGateRefusalPresentation,
 } from '../conversation/presentation/write-gate-refusal';
 import {
-  conversationDisplayTitle as _conversationDisplayTitle,
+  conversationDisplayTitle,
   conversationTimestampLabels,
   stripNoTranslateTags,
 } from '../conversation/presentation/shell-localization';
 import { mountFolderConfigControls, installFolderConfigInteractions, makeFolderContextMenuAccessible } from '../conversation/ui/folder-config-control';
 import { createPlanDecisionBar } from '../conversation/ui/plan-decision-bar';
-import { createSendStartupLease, createComposerSubmissionGate, awaitSendPreparation } from '../core/send-startup';
+import {
+  createSendStartupLease, createComposerSubmissionGate, awaitSendPreparation, retryTransientSendStartup,
+} from '../core/send-startup';
 import { sendFailureToastDetail } from '../conversation/presentation/send-failure-message';
 import {
   DOMPurify, canEnsureHljsLanguage, ensureHljsLanguage, hljs, loadHtml2Canvas, loadKatex, marked,
@@ -361,6 +383,8 @@ installMarkdownPolicy(marked);
 // Temporary lexical names consumed by retained sections. The typed icon owner
 // remains module-private; only `Icon` is injected into declared lazy features.
 const Icon = iconHtml;
+const _conversationDisplayTitle = (title, localizedDefaultTitle) =>
+  conversationDisplayTitle(title, localizedDefaultTitle, t);
 const turnProvenancePresentation = createTurnProvenancePresentation({
   translate: t,
   iconHtml,
@@ -369,7 +393,7 @@ const {
   inlineMarkdown: _tpInlineMd,
   renderMcpLoginHintHtml,
   renderTurnProvenanceHtml,
-
+  contextProvenanceFacts,
   renderContextProvenanceHtml,
   renderPreferenceLearnedHtml,
 } = turnProvenancePresentation;
@@ -465,6 +489,59 @@ const humanGuidancePresentation = Object.freeze({
   clearConversation: (conversationId) =>
     humanGuidancePresentationState.clearConversation(conversationId),
 });
+/* A non-blocking question is answered by an ordinary quoted chat message.
+ * It leaves at once only from an idle ordinary composer; otherwise the
+ * quote and answer join the user's unsent draft and wait for them. */
+async function replyToGuidanceInChat({ conversationId, quote, responseText }) {
+  const conversation = typeof getActiveConv === 'function'
+    ? getActiveConv()
+    : null;
+  const input = document.getElementById('userInput');
+  if (
+    !conversation
+    || conversation.id !== conversationId
+    || !input
+    || typeof _addReplyQuote !== 'function'
+    || typeof getPendingReplyQuotes !== 'function'
+    || typeof sendMessage !== 'function'
+  ) {
+    throw new Error('Conversation is not active.');
+  }
+  const pendingQuotes = () => getPendingReplyQuotes() || [];
+  const composerEmpty = !input.value.trim()
+    && (typeof pendingImages === 'undefined' || pendingImages.length === 0)
+    && (typeof pendingPdfTexts === 'undefined' || pendingPdfTexts.length === 0)
+    && (typeof pendingVideos === 'undefined' || pendingVideos.length === 0)
+    && pendingQuotes().length === 0
+    && !(typeof getPendingConvRefs === 'function'
+      && (getPendingConvRefs() || []).length > 0)
+    // Branch and image-generation composers would reroute the answer.
+    && !(typeof isBranchModeActive === 'function' && isBranchModeActive())
+    && !(typeof imageGenMode !== 'undefined' && imageGenMode);
+  _addReplyQuote(quote);
+  const announceInput = () => {
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  if (composerEmpty) {
+    input.value = responseText;
+    announceInput();
+    await sendMessage();
+    /* An accepted send consumes the composer draft; a cancelled delivery
+     * choice or a failed send leaves the quoted answer drafted. */
+    const drafted = quote
+      ? pendingQuotes().includes(quote)
+      : input.value.trim() === responseText.trim();
+    if (!drafted) return 'sent';
+    input.focus();
+    return 'drafted';
+  }
+  input.value = input.value.trim()
+    ? `${input.value}\n\n${responseText}`
+    : responseText;
+  announceInput();
+  input.focus();
+  return 'drafted';
+}
 const humanGuidanceActions = createHumanGuidanceActions({
   translate: t,
   activeConversation: () => {
@@ -504,6 +581,7 @@ const humanGuidanceActions = createHumanGuidanceActions({
       responseText,
     );
   },
+  replyInChat: (request) => replyToGuidanceInChat(request),
   markSubmitted: (conversationId, guidanceId, originalResponse) => {
     humanGuidancePresentation.patch(
       conversationId,
@@ -1352,7 +1430,7 @@ let _igSelectedResolution = '1K';
 let _igSelectedCount = 1;
 let fetchEnabled = true,
   codeExecEnabled = false,
-  browserEnabled = false,
+  browserEnabled = true,   // always on — no toggle; a connected extension gates the tools
   desktopEnabled = false,
   memoryEnabled = true,
   schedulerEnabled = false,
@@ -1375,6 +1453,9 @@ let fetchEnabled = true,
    * case. Backend authority: lib/tasks_pkg/plan_mode.py (assembly wire
    * filter + dispatch rejection lane + prompt contract). */
   planMode = false,
+  /* Delegate Mode — the root agent only orchestrates; spawn_agents workers do
+   * all tool work. Backend authority: lib/tasks_pkg/delegate_mode.py. */
+  delegateMode = false,
   debugVisible = false,
   sidebarSearchQuery = "";
 Object.defineProperty(runtimeScope, 'memoryEnabled', {
@@ -1597,6 +1678,9 @@ function _rehydrateInjectRows(msg, base) {
       inboxCount: s.count || 0,
       inboxAgentIds: Array.isArray(s.agentIds) ? s.agentIds.filter(Boolean) : [],
       inboxPreviews: Array.isArray(s.previews) ? s.previews : [],
+
+      taskId: s.taskId ?? s._taskId,
+      attemptId: s.attemptId ?? s._attemptId,
     }, rnd - 1);
   }
   for (const p of peer) {
@@ -1610,6 +1694,9 @@ function _rehydrateInjectRows(msg, base) {
       peerRound: rnd,
       peerCount: p.count || 0,
       peerPreviews: Array.isArray(p.previews) ? p.previews : [],
+
+      taskId: p.taskId ?? p._taskId,
+      attemptId: p.attemptId ?? p._attemptId,
     }, rnd - 1);
   }
   for (const s of steer) {
@@ -2471,11 +2558,15 @@ const brandLogoImgAttrs = runtimeScope.brandLogoImgAttrs;
  * conv_apply_settings.js — settings-column → conversation adoption.
  *
  * This pure adapter is the one frontend boundary from the settings envelope
- * to the in-memory catalog row. Add fields here and to the backend contract
- * together.
+ * to the in-memory catalog row. contracts/conversation_settings_v1.json
+ * declares every key read here; change the contract first.
+ *
+ * `projection` names the source: 'full' snapshot settings are authoritative
+ * for every key, while 'partial' sources (catalog rows, local command echoes)
+ * never clear state they do not carry.
  */
 
-function _applySettingsToConv(conv, settings) {
+function _applySettingsToConv(conv, settings, projection = 'partial') {
   if (!settings) return;
 
   settings = protectHydratingProjectSettings(conv, settings);
@@ -2517,6 +2608,11 @@ function _applySettingsToConv(conv, settings) {
     conv.humanGuidanceEnabled = settings.humanGuidanceEnabled;
   if (settings.planMode !== undefined)
     conv.planMode = settings.planMode === true;
+  if (settings.delegateMode !== undefined)
+    conv.delegateMode = settings.delegateMode === true;
+  /* Per-conversation write approval: only an explicit false means Manual. */
+  if (settings.autoApply !== undefined)
+    conv.autoApply = settings.autoApply !== false;
   if (settings.imageGenModel)
     conv.imageGenModel = settings.imageGenModel;
   if (settings.imageGenProviderId !== undefined)
@@ -2527,8 +2623,6 @@ function _applySettingsToConv(conv, settings) {
     conv.imageGenAspect = settings.imageGenAspect;
   if (settings.imageGenResolution)
     conv.imageGenResolution = settings.imageGenResolution;
-  if (settings.projectSummary !== undefined)
-    conv.projectSummary = settings.projectSummary;
   if (settings.projectPath !== undefined)
     conv.projectPath = settings.projectPath;
 
@@ -2538,7 +2632,8 @@ function _applySettingsToConv(conv, settings) {
       && settings._coordinatorSource.length <= 256 ? settings._coordinatorSource : null;
   if (settings.projectPaths !== undefined)
     conv.projectPaths = settings.projectPaths;
-  conv.paperDocument = settings.paperDocument || null;
+  if (projection === 'full' || settings.paperDocument !== undefined)
+    conv.paperDocument = settings.paperDocument || null;
   if (settings.readOnlyPaths !== undefined)
     conv.readOnlyPaths = settings.readOnlyPaths;
   if (settings.autoTranslate !== undefined)
@@ -2548,20 +2643,11 @@ function _applySettingsToConv(conv, settings) {
   if (settings.folderId !== undefined) conv.folderId = settings.folderId;
   if (settings.source) conv.source = settings.source;
   if (settings.clonedFrom) conv.clonedFrom = settings.clonedFrom;
-  if (settings.feishuUser) conv.feishuUser = settings.feishuUser;
   /* Autopilot run summaries — human-only sidecar (runId → {content,
    * translatedContent?, ts}). Not Turns; rendered as the run fold's
    * read-only report panel. Round-trips via the settings column. */
   if (settings.autopilotSummaries !== undefined)
     conv.autopilotSummaries = settings.autopilotSummaries;
-  /* Persist last-Turn catalog facts for metadata-only shells. */
-  if (settings.lastMsgRole) conv.lastMsgRole = settings.lastMsgRole;
-  if (settings.lastMsgTimestamp) conv.lastMsgTimestamp = settings.lastMsgTimestamp;
-  /* Settled-Turn facts for sidebar status before TurnStore hydration. Raw
-   * facts only; _convStatusFlags classifies them. */
-  if (settings.lastFinishReason !== undefined) conv.lastFinishReason = settings.lastFinishReason;
-  if (settings.lastMsgError !== undefined) conv.lastMsgError = settings.lastMsgError;
-  if (settings.lastMsgHasOutput !== undefined) conv.lastMsgHasOutput = settings.lastMsgHasOutput;
 }
 /* ===== migrated source: core/conversation_catalog.js ===== */
 /* Conversation catalog and metadata persistence.
@@ -2577,8 +2663,8 @@ function _applySettingsToConv(conv, settings) {
  */
 
 const _conversationSettingsResolution = createConversationSettingsResolution({
-  resolveConfig: (inputs) => Api.conversations.resolveConfig(inputs),
-  resolveSettings: (inputs) => Api.conversations.resolveSettings(inputs),
+  resolveConfig: (inputs, options) => Api.conversations.resolveConfig(inputs, options),
+  resolveSettings: (inputs, options) => Api.conversations.resolveSettings(inputs, options),
   patchResolvedSettings: (id, inputs) => (
     Api.conversations.patchResolvedSettings(id, inputs)
   ),
@@ -2830,6 +2916,7 @@ const _conversationCatalogLoader = createConversationCatalogLoader({
       ? ConvCache.putSidebarList(rows) : Promise.resolve(0)
   ),
   warn: (message) => debugLog(`[conversation-catalog] ${message}`, 'warn'),
+  onSettled: (succeeded) => runtimeScope.conversationCatalogAvailability?.settled(succeeded),
 });
 retainedCompositionLifecycle.add(() => _conversationCatalogLoader.destroy());
 
@@ -2854,7 +2941,9 @@ async function hydrateConversationRuntime(convId) {
   }
   await withProjectHydration(conv, () => turnStore.hydrateConversation(conv));
   conv._turnSnapshotRequired = false;
-  conv._serverTurnCount = runtimeScope.ConversationTurnRead?.ordered?.(conv)?.length || 0;
+  /* _serverTurnCount stays the TurnRuntime projection of the lane total. The
+   * loaded tail window is smaller, so recording it made every later catalog
+   * row look changed and re-downloaded the whole window on the next visit. */
   if (typeof runtimeScope.loadCompactionHistory === 'function') {
     void runtimeScope.loadCompactionHistory(convId).catch((error) =>
       console.debug('[compaction] history hydrate failed:', error));
@@ -3197,7 +3286,6 @@ const _push = (() => {
   // transport owns an explicit HTTP fallback instead.
   let _rpcPending = new Map();
   let _rpcSequence = 0;
-  const RPC_PENDING_MAX = 32;
   const RPC_TIMEOUT_MS = 10000;
   // Connection must hold this long before we trust it as "healthy" and
   // reset the reconnect attempt counter. See onclose.
@@ -3236,7 +3324,8 @@ const _push = (() => {
   }
   let _pingTimer = null;
   let _pingTimeoutTimer = null;    // per-ping watchdog emits before the next tick
-  let _lastPingSentAt = 0;         // client timestamp of the outstanding ping
+  let _lastPingSentAt = 0;         // outstanding proof-of-life watchdog timestamp
+  let _pendingRttSentAt = 0;       // latest socket-local RTT correlation, even after data
   let _lastInboundAt = 0;          // last time ANY frame arrived (proof-of-life ledger)
   let _latencyMs = null;           // last measured RTT; null = unknown
   let _latencyState = 'unknown';   // unknown | good | ok | poor | timeout | offline
@@ -3257,7 +3346,7 @@ const _push = (() => {
 
   function _emitLatency() {
     // Stamp each reading for diagnostics and late-subscriber presentation.
-    const reading = { ms: _latencyMs, state: _latencyState, connected: _connected, at: Date.now() };
+    const reading = getLatency();
     for (const fn of _latencyListeners) {
       try { fn(reading); }
       catch (e) { console.error('[Push] latency listener error:', e); }
@@ -3342,11 +3431,6 @@ const _push = (() => {
       return Promise.reject(_rpcError(
         'Control socket is unavailable', 'rpc_unavailable'));
     }
-    if (_rpcPending.size >= RPC_PENDING_MAX) {
-      return Promise.reject(_rpcError(
-        'Control request queue is full', 'rpc_overloaded'));
-    }
-
     const id = (_wsRid || 'socket') + '-rpc' + (++_rpcSequence);
     const timeoutMs = Math.max(
       1, Number(opts.timeout == null ? RPC_TIMEOUT_MS : opts.timeout) || RPC_TIMEOUT_MS);
@@ -3388,16 +3472,12 @@ const _push = (() => {
     // the outstanding probe — see onmessage): the socket is HALF-OPEN —
     // TCP-dead but readyState still OPEN, so _ws.send() won't throw and no
     // onclose fires on its own. Push frames would silently stop forever with
-    // no reconnect. Surface the timeout AND force-close so onclose →
-    // _scheduleReconnect re-establishes the socket.
+    // no reconnect. Retire the failed transport and recover independently
+    // of whether its TCP closing handshake ever finishes.
     if (_lastPingSentAt && Date.now() - _lastPingSentAt > _pingTimeoutMs()) {
-      _latencyMs = null;
-      _latencyState = 'timeout';
-      _emitLatency();
       console.warn('[Push] ping timeout (%dms) — closing half-open socket to force reconnect',
         Date.now() - _lastPingSentAt);
-      try { _ws.close(); }
-      catch (e) { console.debug('[Push] force-close after ping timeout failed:', e); }
+      _recoverSilentSocket();
       return;   // do NOT probe again on a socket we've just declared dead
     }
     // Keep only ONE outstanding ping at a time. Re-sending (and overwriting
@@ -3407,6 +3487,7 @@ const _push = (() => {
     // clear _lastPingSentAt before starting a fresh probe.
     if (_lastPingSentAt) return;
     _lastPingSentAt = Date.now();
+    _pendingRttSentAt = _lastPingSentAt;
     const ping = { action: 'ping', t: _lastPingSentAt };
     const shouldProbeBuild = !_lastBuildProbeAt ||
       _lastPingSentAt - _lastBuildProbeAt >= BUILD_PROBE_INTERVAL_MS;
@@ -3424,8 +3505,8 @@ const _push = (() => {
 
   // Fired by the per-ping watchdog when a pong has not returned within
   // PING_TIMEOUT_MS. Emits the timeout state IMMEDIATELY (so the signal badge
-  // stops showing a stale green reading) and force-closes the half-open socket
-  // so onclose → _scheduleReconnect re-establishes it. Mirrors the interval
+  // stops showing a stale green reading) and retires the half-open socket
+  // before requesting a replacement. Mirrors the interval
   // backstop branch in _sendPing but fires seconds sooner.
   function _firePingTimeout() {
     _pingTimeoutTimer = null;
@@ -3433,14 +3514,38 @@ const _push = (() => {
      * _lastPingSentAt — so reaching the verdict below means total inbound
      * silence for the whole window: a genuinely half-open socket. */
     if (!_lastPingSentAt) return;   // a frame already cleared the outstanding ping
-    _latencyMs = null;
-    _latencyState = 'timeout';
-    _emitLatency();
     console.warn('[Push] ping timeout (watchdog) — closing half-open socket to force reconnect');
-    if (_ws) {
-      try { _ws.close(); }
-      catch (e) { console.debug('[Push] force-close after ping-timeout watchdog failed:', e); }
+    _recoverSilentSocket();
+  }
+
+  function _retireSocket(socket, latencyState = 'offline') {
+    if (!socket || _ws !== socket) return false;
+    // Retire logical ownership before publishing or waiting for TCP close.
+    // Late callbacks cannot mutate a replacement or settle its RPC requests.
+    if (_connectedAt && Date.now() - _connectedAt >= MIN_UPTIME_MS) {
+      _reconnectAttempt = 0;
     }
+    _connected = false;
+    _connectedAt = 0;
+    _ws = null;
+    _stopPinging();
+    _lastInboundAt = 0;
+    _latencyMs = null;
+    _latencyState = latencyState;
+    _rejectPendingRpc(_rpcError(
+      'Control socket disconnected', 'rpc_disconnected'));
+    _emitLatency();
+    return true;
+  }
+
+  function _recoverSilentSocket() {
+    const socket = _ws;
+    if (!_retireSocket(socket, 'timeout')) return;
+    try { socket.close(); }
+    catch (e) { console.debug('[Push] force-close after ping timeout failed:', e); }
+    // A dead transport may never complete its closing handshake, or report
+    // normal closure after our explicit close. Neither cancels recovery.
+    if (!_ws) _scheduleReconnect();
   }
 
   function _startPinging() {
@@ -3471,14 +3576,16 @@ const _push = (() => {
     if (_pingTimer) { clearInterval(_pingTimer); _pingTimer = null; }
     if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }
     _lastPingSentAt = 0;
+    _pendingRttSentAt = 0;
     _lastBuildProbeAt = 0;
   }
 
   function _onPong(t) {
-    if (!t || t !== _lastPingSentAt) return;   // stale / mismatched pong
+    if (!t || t !== _pendingRttSentAt) return;   // stale / mismatched pong
     _latencyMs = Date.now() - t;
     _latencyState = _classify(_latencyMs);
     _lastPingSentAt = 0;
+    _pendingRttSentAt = 0;
     if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }
     _emitLatency();
   }
@@ -3537,14 +3644,19 @@ const _push = (() => {
       return;
     }
 
+    // Explicit demand consumes an already-scheduled retry. Leaving it alive
+    // can reconnect again after this attempt receives a terminal 1008 close.
+    if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
     const url = _buildUrl();
     // A CLOSING/CLOSED socket may not have delivered onclose yet. Clear its
     // logical ownership before constructing the replacement so senders queue
     // behind the new CONNECTING socket instead of calling send() on it under
     // the stale `_connected=true` bit.
-    _connected = false;
-    _connectedAt = 0;
-    _stopPinging();
+    if (_ws) {
+      _retireSocket(_ws);
+      // A latency observer may synchronously establish the replacement.
+      if (_ws) return;
+    }
     let socket;
     try {
       socket = new WebSocket(url);
@@ -3601,6 +3713,12 @@ const _push = (() => {
        * definition of a NOT-half-open socket. Stamp the ledger BEFORE parsing
        * so even a malformed frame counts. */
       _lastInboundAt = Date.now();
+      // Silence detection and RTT correlation are separate. Any inbound
+      // bytes disarm the former; only the matching pong settles the latter.
+      // Do this before parsing/dispatch so server heartbeats, stale pongs and
+      // malformed frames cannot falsely close a communicating transport.
+      _lastPingSentAt = 0;
+      if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }
       let frame;
       try { frame = JSON.parse(event.data); }
       catch (e) { console.debug('[Push] dropped malformed frame:', e && e.message); return; }
@@ -3614,19 +3732,6 @@ const _push = (() => {
         return;
       }
       if (frame.type === 'ping') return;
-
-      /* A DATA frame restarts the probe cycle: a server busy streaming large
-       * event frames can have its pong queued behind the data (the pong has
-       * a server-side priority lane, but the client verdict must not depend
-       * on it), and the watchdog used to only clear on a matching pong — so
-       * heavy server→client traffic (the sign of a HEALTHY socket) could end
-       * in a force-close. Clear the outstanding ping + watchdog on any frame;
-       * the next interval tick re-arms a fresh probe. The skipped RTT sample
-       * is acceptable (a late pong is ignored by _onPong's t-match). */
-      if (_lastPingSentAt) {
-        _lastPingSentAt = 0;
-        if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }
-      }
 
       if (frame.jsonrpc === '2.0') {
         _onRpcResponse(frame);
@@ -3665,34 +3770,22 @@ const _push = (() => {
     socket.onclose = (e) => {
       // connect() is allowed to replace a CLOSING socket before its delayed
       // close event arrives. That old event cannot clear the new connection.
-      if (_ws !== socket) return;
       // Reset attempt counter only when the connection actually held long
       // enough to be useful. Without this, a connection that opens then
       // closes within milliseconds would keep _reconnectAttempt=0 and
       // burn CPU reconnecting in a tight loop — onopen alone is not a
       // sufficient signal that the server is healthy.
-      if (_connectedAt && Date.now() - _connectedAt >= MIN_UPTIME_MS) {
-        _reconnectAttempt = 0;
-      }
-      _connected = false;
-      _connectedAt = 0;
-      _ws = null;
-      _stopPinging();
-      _lastInboundAt = 0;
-      _latencyMs = null;
-      _latencyState = 'offline';
-      _rejectPendingRpc(_rpcError(
-        'Control socket disconnected', 'rpc_disconnected'));
-      _emitLatency();
+      if (!_retireSocket(socket)) return;
       if (e.code === 1000) return;                  // normal close
-      // Permanent close codes — the server is telling us not to come back.
-      // Reconnecting just generates noise in the server log and risks IP
-      // throttling. 1008=policy violation, 1011=internal error during open.
-      if (e.code === 1008 || e.code === 1011) {
+      // Policy refusal is terminal. RFC 6455's 1011 is an unexpected server
+      // condition, not an authorization denial; it must recover like 1006.
+      if (e.code === 1008) {
         console.warn(`[Push] Server closed with permanent code ${e.code} — not reconnecting`);
         return;
       }
-      _scheduleReconnect();
+      // A latency observer may already own a replacement. The retired
+      // lifetime cannot schedule a retry behind that connection's verdict.
+      if (!_ws) _scheduleReconnect();
     };
   }
 
@@ -3932,10 +4025,10 @@ const _FEATURE_ENTRY_POINTS = [
   'openProjectBrain', 'toggleProjectBrain',
   '_wireConvSyncPush',
   'openDailyReport', 'closeDailyReport', '_mydayTriggerGenerate',
-  'openKnowledgeBase', 'closeKnowledgeBase',
+  'openKnowledgeBase',
   'openProjectModal', 'closeProjectModal',
   'openLocalControlModal', 'closeLocalControlModal',
-  'toggleBrowserFromLocalModal', 'toggleDesktopFromLocalModal',
+  'toggleDesktopFromLocalModal',
   'toggleDebug', 'closeDebug', 'copyDebugContent',
   'openRequestInspectorForTask', 'openToolDebugPanel',
   'openCompactionViewer', 'openSlidesEditor',
@@ -5497,7 +5590,9 @@ import { mountArtifactReview } from '../rich-response/artifact-review';
     const epoch = (_hydrateEpoch.get(conv) || 0) + 1;
     _hydrateEpoch.set(conv, epoch);
     _artifactHints.set(conv, hasArtifacts);
-    if (!runtimeScope.ConversationSurfacePresentation?.ownsConversation?.(conv.id)) return;
+    // A mounted host is enough for bounded presentation reads. It need not
+    // have acknowledged its in-progress canonical DOM commit yet.
+    if (!runtimeScope.ConversationSurfacePresentation?.isMounted?.(conv.id)) return;
     if (hasArtifacts === false) {
       runtimeScope.ConversationSurfacePresentation?.setArtifacts?.(
         conv.id, new Map(),
@@ -5738,9 +5833,10 @@ window.addEventListener('tofu:language-change', function () {
   if (typeof paperMode === 'undefined' || !paperMode) {
     const active = conversations.find(item => item.id === activeConvId);
     const topbar = document.getElementById('topbarTitle');
-    if (topbar && active?.title === 'New Chat') {
-      topbar.textContent = _conversationDisplayTitle(
-        active.title, t('chat.newConversation'));
+    const shown = active ? _conversationDisplayTitle(active.title, t('chat.newConversation')) : '';
+    // The default sentinel and server role titles are shown through a localized label.
+    if (topbar && active && shown !== active.title) {
+      topbar.textContent = shown;
     } else if (topbar && !activeConvId
         && !topbar.querySelector('.topbar-folder-badge')) {
       topbar.textContent = _conversationDisplayTitle(
@@ -5860,7 +5956,10 @@ function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
   const folderIds = new Set(safeFolders.map(f => f.id));
   const countMap = {};
   let uncategorizedCount = 0;
+  // Router chats open from the main coordinator's card, never as rows; a count must match the rows.
+  const routerIds = new Set(runtimeScope.routerConversationIds?.() || []);
   for (const c of safeConvs) {
+    if (routerIds.has(c.id)) continue;
     if (c.folderId && folderIds.has(c.folderId)) {
       countMap[c.folderId] = (countMap[c.folderId] || 0) + 1;
     } else {
@@ -6248,7 +6347,8 @@ function renderConversationList() {
 
     _sidebarSearchController.clear();
     _lastRenderedSearchQuery = "";   // reset when exiting search mode
-    statsEl.classList.remove("visible");
+    // Runs on every projected Turn change of any conversation.
+    if (statsEl.classList.contains("visible")) statsEl.classList.remove("visible");
     const all = conversations.filter((c) =>
       (runtimeScope.ConversationTurnRead?.ordered?.(c)?.length || 0) > 0
       || (c._serverTurnCount || 0) > 0 || c._turnSnapshotRequired || Number.isInteger(c._serverRev));
@@ -6287,8 +6387,18 @@ function renderConversationList() {
     }
     // else: folders loaded and empty — show everything (no folders exist)
 
+    /* Coordinators and the conversations they started render in their groups:
+     * the pinned entry, or a replaced Coordinator's row above the list. */
     const coordinatorId = document.querySelector('#projectCoordinatorEntry [data-coordinator-id]')?.dataset.coordinatorId;
-    if (coordinatorId) filtered = filtered.filter(c => c.id !== coordinatorId);
+    // Router chats open from the main coordinator's card, never as rows.
+    const routerIds = new Set(runtimeScope.routerConversationIds?.() || []);
+    if (routerIds.size) filtered = filtered.filter(c => !routerIds.has(c.id));
+    const coordinatorGroups = runtimeScope.coordinatorConversationGroups;
+    coordinatorGroups?.refresh(filtered);
+    /* A view whose conversations all sit in Coordinator groups is not empty. */
+    const viewHasConversations = filtered.length > 0;
+    filtered = filtered.filter(c => c.id !== coordinatorId && !c._coordinatorSource
+      && !coordinatorGroups?.hasHistoryRow(c.id));
 
     /* ── Split hash: struct (row identity/order/title/date/folder) vs status
      *    (active / streaming / translating / memory-prefetch / awaiting-human).
@@ -6300,7 +6410,7 @@ function renderConversationList() {
      * by _buildConvItemHTML under the debug flag — include it in the struct
      * hash or toggling debug mode in Settings early-returns here and the
      * buttons only appear on the next full page load. */
-    const _structHash = `AF${_activeFolderId||''}|FL${foldersReady?1:0}|DBG${(typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode)?1:0}|CG${[..._collapsedConvGroups].sort().join('.')}|F${folderHash}|` +
+    const _structHash = `AF${_activeFolderId||''}|FL${foldersReady?1:0}|DBG${(typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode)?1:0}|CG${[..._collapsedConvGroups].sort().join('.')}|VC${viewHasConversations?1:0}|F${folderHash}|` +
       filtered.map(c => `${c.id}|${c.title}|${c.updatedAt||""}|${c.folderId||""}|${(c.projectSummary && c.projectSummary.text) ? "S" : ""}`).join("\n");
     const _statusHash = filtered.map(c => {
       const f = _convStatusFlags(c);
@@ -6337,7 +6447,7 @@ function renderConversationList() {
     let listHtml = null;  // non-null only for the empty / special states below
 
     /* ── Empty state ── */
-    if (filtered.length === 0 && (_activeFolderId || folders.length > 0)) {
+    if (filtered.length === 0 && !viewHasConversations && (_activeFolderId || folders.length > 0)) {
       const isUncategorized = !_activeFolderId;
       const emptyIcon = isUncategorized
         ? `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;margin-bottom:8px"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>`
@@ -6410,7 +6520,7 @@ function _renderSearchResults(results, query, listEl, statsEl, isPartial) {
     return;
   }
   const items = results.map(
-    ({ conv: c, matchField, matchSnippet, matchRole }) => {
+    ({ conv: c, matchField, matchSnippet, matchRole, matchTurnId, matchTurnOrdinal }) => {
       const tHtml =
         matchField === "title"
           ? highlightMatch(_conversationDisplayTitle(
@@ -6428,7 +6538,11 @@ function _renderSearchResults(results, query, listEl, statsEl, isPartial) {
           snip = `<div class="conv-item-snippet">${ico} ${rl}: ${highlightMatch(matchSnippet, query)}</div>`;
         }
       }
-      return _buildConvItemHTML(c, tHtml, snip);
+      /* A body hit names its live Turn: activating the row opens it there. */
+      const matchTurn = typeof matchTurnId === "string" && matchTurnId
+        && Number.isSafeInteger(matchTurnOrdinal) && matchTurnOrdinal >= 0
+        ? { turnId: matchTurnId, ordinal: matchTurnOrdinal } : null;
+      return _buildConvItemHTML(c, tHtml, snip, matchTurn);
     },
   );
   const newHtml = items.join("");
@@ -6443,6 +6557,7 @@ function _renderSearchResults(results, query, listEl, statsEl, isPartial) {
 const _CONV_DEL_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>`;
 const _CONV_CP_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
 const _CONV_DUP_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="14" height="14" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>`;
+const _CONV_EXPORT_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
 const _CONV_FOLDER_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
 const _CONV_RENAME_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>`;
 
@@ -6529,7 +6644,7 @@ function _convStatusHtml(f) {
     statusTag = `<span class="conv-status-tag conv-status-memprefetch">${t('sidebar.memoryPrefetchTag')}</span>`;
   } else if (f.streaming) {
     statusTag = f.unconfirmed
-      ? `<span class="conv-status-tag conv-status-streaming conv-state-unconfirmed" title="${t('sidebar.stateUnconfirmed')}">${t('sidebar.answering')}?</span>`
+      ? `<span class="conv-status-tag conv-state-unconfirmed" title="${t('sidebar.stateUnconfirmed')}">${t('sidebar.syncingTag')}</span>`
       : f.rateLimited
         ? `<span class="conv-status-tag conv-status-ratelimit" title="${t('sidebar.rateLimited')}">${t('sidebar.rateLimitedTag')}</span>`
         : `<span class="conv-status-tag conv-status-streaming">${t('sidebar.answering')}</span>`;
@@ -6598,30 +6713,40 @@ function refreshBackgroundConversationStatuses(conversationIds) {
   }
 }
 
-function _buildConvItemHTML(c, titleHtml, snippetHtml) {
+function _buildConvItemHTML(c, titleHtml, snippetHtml, matchTurn = null) {
   const f = _convStatusFlags(c);
   const { dotHtml, statusTag } = _convStatusHtml(f);
   const eid = escapeHtml(c.id);
+  const turnAttrs = matchTurn
+    ? ` data-match-turn-id="${escapeHtml(matchTurn.turnId)}" data-match-turn-ordinal="${matchTurn.ordinal}"`
+    : '';
   const isActive = c.id === activeConvId ? " active" : "";
   const feishuBadge = c.source === 'feishu' ? `<span class="conv-feishu-badge" title="${t('sidebar.feishuConv')}">Feishu</span>` : '';
   const copyBadge = c.clonedFrom ? `<span class="conv-copy-badge" title="${t('sidebar.copyBadgeTip')}">${t('sidebar.copyBadge')}</span>` : '';
+  const coordinatorBadge = c._coordinatorSource ? `<span class="conv-coordinator-badge">${t('projectCoordination.coordinator')}</span>` : '';
   // Sidebar conversation summaries are paused: backend generation is disabled,
   // so the row intentionally has no dormant presentation/action surface.
   const summaryBadge = '';
   const _isDebug = typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode;
   const copyIdBtn = _isDebug ? `<button class="conv-action-btn conv-copy-id" data-conv-id="${eid}" title="${t('sidebar.copyConvId')}">${_CONV_CP_SVG}</button>` : '';
   const folderClass = c.folderId ? ' in-folder' : '';
-  return `<div class="conv-item${isActive}${folderClass}" data-conv-id="${eid}" draggable="true" title="ID: ${eid}">${dotHtml}<div class="conv-text"><div class="conv-title">${feishuBadge}${summaryBadge}${titleHtml}</div>${snippetHtml || ""}<div class="conv-date">${formatConvTime(c.updatedAt || c.createdAt)}${copyBadge}${statusTag}</div></div><div class="conv-actions">${copyIdBtn}<button class="conv-action-btn conv-rename" data-conv-id="${eid}" title="${t('sidebar.renameConv')}">${_CONV_RENAME_SVG}</button><button class="conv-action-btn conv-ref" data-conv-id="${eid}" data-conv-title="${escapeHtml(c.title || 'Untitled')}" title="${t('sidebar.refConv')}">@</button><button class="conv-action-btn conv-folder-assign" data-conv-id="${eid}" title="${t('sidebar.moveToFolder')}">${_CONV_FOLDER_SVG}</button><button class="conv-action-btn conv-dup" data-conv-id="${eid}" title="${t('sidebar.duplicate')}">${_CONV_DUP_SVG}</button><button class="conv-action-btn conv-delete" data-conv-id="${eid}" title="${t('sidebar.deleteConv')}">${_CONV_DEL_SVG}</button></div></div>`;
+  return `<div class="conv-item${isActive}${folderClass}" data-conv-id="${eid}"${turnAttrs} draggable="true" title="ID: ${eid}">${dotHtml}<div class="conv-text"><div class="conv-title">${feishuBadge}${summaryBadge}${titleHtml}</div>${snippetHtml || ""}<div class="conv-date">${formatConvTime(c.updatedAt || c.createdAt)}${copyBadge}${coordinatorBadge}${statusTag}</div></div><div class="conv-actions">${copyIdBtn}<button class="conv-action-btn conv-rename" data-conv-id="${eid}" title="${t('sidebar.renameConv')}">${_CONV_RENAME_SVG}</button><button class="conv-action-btn conv-ref" data-conv-id="${eid}" data-conv-title="${escapeHtml(c.title || 'Untitled')}" title="${t('sidebar.refConv')}">@</button><button class="conv-action-btn conv-folder-assign" data-conv-id="${eid}" title="${t('sidebar.moveToFolder')}">${_CONV_FOLDER_SVG}</button><button class="conv-action-btn conv-export" data-conv-id="${eid}" title="${t('sidebar.exportTranscript')}">${_CONV_EXPORT_SVG}</button><button class="conv-action-btn conv-dup" data-conv-id="${eid}" title="${t('sidebar.duplicate')}">${_CONV_DUP_SVG}</button><button class="conv-action-btn conv-delete" data-conv-id="${eid}" title="${t('sidebar.deleteConv')}">${_CONV_DEL_SVG}</button></div></div>`;
 }
 
 function highlightMatch(text, query) {
   if (!query) return escapeHtml(text);
-  const e = escapeHtml(text);
-  const q = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return e.replace(
-    new RegExp(`(${q})`, "gi"),
-    '<span class="sidebar-search-highlight">$1</span>',
-  );
+  // Match the raw text, then escape each piece: matching escaped text would
+  // split entities ("amp" inside &amp;) and never find "<" or "&".
+  const raw = text ? String(text) : "";
+  const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+  let html = "";
+  let last = 0;
+  for (const match of raw.matchAll(pattern)) {
+    html += escapeHtml(raw.slice(last, match.index));
+    html += `<span class="sidebar-search-highlight">${escapeHtml(match[0])}</span>`;
+    last = match.index + match[0].length;
+  }
+  return html + escapeHtml(raw.slice(last));
 }
 
 /* ── Two-tier search: instant title match (local) + async content search (server) ── */
@@ -6761,7 +6886,7 @@ function _applyAutopilotRunConcluded(conv, rec, runId) {
   const incomingIsBareStop = (rec.reason === 'stopped') && !rec.content;
   if (priorIsCleanReport && incomingIsBareStop) return false;
   const _reason = rec.reason || (prior && prior.reason) || 'task_done';
-  conv.autopilotSummaries[runId] = {
+  const conclusion = {
     runId,
     status: rec.status || 'concluded',
     reason: _reason,
@@ -6788,6 +6913,9 @@ function _applyAutopilotRunConcluded(conv, rec, runId) {
     unsent: (_reason !== 'task_done')
       && !!(rec.unsent || (prior && prior.unsent)),
   };
+  // Publish one immutable snapshot per receipt. The Surface selector compares
+  // this map by identity; mutating an entry leaves an idle concluded run stale.
+  conv.autopilotSummaries = { ...conv.autopilotSummaries, [runId]: conclusion };
   return true;
 }
 
@@ -7195,8 +7323,20 @@ const _CACHE_CAUSE_PHRASES = [
   ['prefix bytes unchanged', '前缀字节未变'],
   ['breakpoint advancement', '缓存断点前移'],
   ['server-side eviction', '服务端缓存被驱逐'],
+  // ── Prefix-mutation verdict. Its billing clause comes from the round's
+  //    provider usage (_policy.py:_resolve_break_cause), so token counts sit
+  //    BETWEEN these fragments. The fixed "whole body" sentence first is the
+  //    wording of rounds persisted before that change. ──
   ['cached prefix bytes changed between turns (non-idempotent history edit) — the whole body was re-billed uncached',
    '两轮之间缓存前缀的字节被改写（历史被非幂等编辑）——整段上下文按未命中重新计费'],
+  ['cached prefix bytes changed between turns (non-idempotent history edit) — ',
+   '两轮之间缓存前缀的字节被改写（历史被非幂等编辑）——'],
+  ['the whole prompt was re-billed uncached', '整段提示按未命中重新计费'],
+  [' tokens were still read from cache; the rest of the prompt was billed as uncached input (no cache write reported)',
+   ' 个 token 仍从缓存读取；其余提示按未缓存输入计费（未报告缓存写入）'],
+  [' tokens were still read from cache and ', ' 个 token 仍从缓存读取，'],
+  [' tokens from the last cache point before the change onward were written to cache',
+   ' 个 token（自改动前最后一个缓存点起）被写入缓存'],
   ['cached prefix bytes changed between turns', '两轮之间缓存前缀字节被改写'],
   ['non-idempotent history edit', '历史被非幂等编辑'],
   ['the whole body was re-billed uncached', '整段上下文按未命中重新计费'],
@@ -7456,25 +7596,46 @@ function _quotaUsageTokens(usage) {
 
 /** Latest account-wide Codex quota snapshot + observed deltas for this turn.
  *
- * Every apiRound carries the upstream response-header snapshot.  Summing the
- * adjacent-snapshot differences gives the best available per-turn signal, but
- * it remains account-wide (concurrent conversations may move the same
- * counter), so the UI explicitly calls it "observed" rather than exact cost.
+ * Only calls whose upstream returned quota headers carry a snapshot, and one
+ * turn can mix routes: a metered API-key main model plus an internal
+ * compaction call on a ChatGPT subscription. Tokens are therefore summed over
+ * snapshot-bearing calls only; when other token-bearing calls exist the turn
+ * is mixed and `sources` names the calls behind the readings. A snapshot kept
+ * only on the turn usage cannot be split by call, so it keeps the whole-turn
+ * total. Summed adjacent-snapshot differences remain account-wide (concurrent
+ * conversations may move the same counter), so the UI calls them "observed"
+ * rather than exact cost.
  */
 function _subscriptionQuotaForMessage(msg) {
+  const rounds = msg.apiRounds || [];
   const snapshots = [];
+  const sources = [];
   let turnTokens = 0;
-  for (const rd of (msg.apiRounds || [])) {
-    turnTokens += _quotaUsageTokens(rd && rd.usage);
+  let otherCalls = 0;
+  for (const rd of rounds) {
+    const tokens = _quotaUsageTokens(rd && rd.usage);
     const q = rd && rd.usage && rd.usage._subscription_quota;
-    if (q) snapshots.push(q);
+    if (!q) {
+      if (tokens > 0) otherCalls += 1;
+      continue;
+    }
+    snapshots.push(q);
+    turnTokens += tokens;
+    const model = String(rd.usage._dispatch?.model || rd.model || '').trim()
+      || t('finishInfo.unknownValue');
+    const source = rd.kind === 'compaction'
+      ? t('finishInfo.quotaSourceCompaction', { model }) : model;
+    if (!sources.includes(source)) sources.push(source);
   }
-  if (!(msg.apiRounds || []).length) turnTokens = _quotaUsageTokens(msg.usage);
-  if (!snapshots.length && msg.usage && msg.usage._subscription_quota) {
+  const quotaCalls = snapshots.length;
+  if (!quotaCalls) {
+    if (!(msg.usage && msg.usage._subscription_quota)) return null;
     snapshots.push(msg.usage._subscription_quota);
-    if (!turnTokens) turnTokens = _quotaUsageTokens(msg.usage);
+    turnTokens = rounds.reduce(
+      (sum, rd) => sum + _quotaUsageTokens(rd && rd.usage), 0,
+    ) || _quotaUsageTokens(msg.usage);
+    otherCalls = 0;
   }
-  if (!snapshots.length) return null;
   const latest = snapshots[snapshots.length - 1];
   const deltas = { primary: 0, secondary: 0 };
   const baselines = { primary: false, secondary: false };
@@ -7487,7 +7648,9 @@ function _subscriptionQuotaForMessage(msg) {
       if (Number.isFinite(delta) && delta > 0) deltas[name] += delta;
     }
   }
-  return { latest, deltas, baselines, turnTokens };
+  return {
+    latest, deltas, baselines, turnTokens, quotaCalls, otherCalls, sources,
+  };
 }
 
 /** Wall-clock turn duration: 8.4s → "8.4s", 65s → "1m05s", 75m → "1h15m". */
@@ -7694,7 +7857,8 @@ function renderFinishInfo(msg, turnId) {
   } else if (_turnStatus === 'failed' || _terminalError) {
     const _failedTone = (_terminalEnv?.severity === 'warning'
       || _presentation?.tone === 'warning') ? 'warn' : 'err';
-    const _failedLabel = _kindLabel || t('finishInfo.reasonFailed');
+    const _failedLabel = (_presentation?.label === 'Refused' ? t('finishInfo.reasonRefused') : '')
+      || _kindLabel || t('finishInfo.reasonFailed');
     const _failedTip = _detailText || t('finishInfo.reasonFailedTip');
     const _failedIcon = _failedTone === 'warn'
       ? Icon('alertTriangle', 12) : Icon('x', 12);
@@ -7702,7 +7866,9 @@ function renderFinishInfo(msg, turnId) {
       ? ` data-error-kind="${escapeHtml(_terminalEnv.kind)}"` : '';
     parts.push(`<span class="finish-tag ${_failedTone} terminal-failure"${_kindAttr} title="${escapeHtml(_failedTip)}">${_failedIcon}${escapeHtml(_failedLabel)}</span>`);
   } else {
-    parts.push(`<span class="finish-tag warn" title="${escapeHtml(_detailText)}">${escapeHtml(_presentation?.label || _turnStatus)}</span>`);
+    const _warnLabel = _presentation?.label === 'Refused'
+      ? t('finishInfo.reasonRefused') : (_presentation?.label || _turnStatus);
+    parts.push(`<span class="finish-tag warn" title="${escapeHtml(_detailText)}">${escapeHtml(_warnLabel)}</span>`);
   }
   /* The typed presenter selects the server's proven execution duration. */
   const _timing = typeof presentTurnExecutionTiming === 'function'
@@ -7791,11 +7957,23 @@ function renderFinishInfo(msg, turnId) {
           observed = t('finishInfo.quotaObservedNoTick');
           _tips.push(observed);
         }
-        const exactTokens = _quota.turnTokens > 0
-          ? t('finishInfo.quotaTurnTokens', { tokens: fmt(_quota.turnTokens) }) : '';
-        if (exactTokens) _tips.push(t('finishInfo.quotaTurnTokensDetail', {
-          tokens: fmt(_quota.turnTokens),
-        }));
+        const _mixedTurn = _quota.otherCalls > 0;
+        const _sources = _quota.sources.join(t('finishInfo.listSepDot'));
+        let exactTokens = '';
+        if (_quota.turnTokens > 0) {
+          exactTokens = _mixedTurn
+            ? t('finishInfo.quotaSubscriptionTokens', { tokens: fmt(_quota.turnTokens) })
+            : t('finishInfo.quotaTurnTokens', { tokens: fmt(_quota.turnTokens) });
+        }
+        if (_mixedTurn) {
+          _tips.unshift(t('finishInfo.quotaMixedTurnDetail', {
+            calls: _quota.quotaCalls, other: _quota.otherCalls, source: _sources,
+          }));
+        } else if (exactTokens) {
+          _tips.push(t('finishInfo.quotaTurnTokensDetail', {
+            tokens: fmt(_quota.turnTokens),
+          }));
+        }
         _tips.push(t('finishInfo.quotaCaveat'));
         /* One flex item per fact, never one monolithic joined blob: the
          * finish row's flex-wrap can only break BETWEEN items, and every
@@ -7808,7 +7986,10 @@ function renderFinishInfo(msg, turnId) {
         const _facts = _labels.slice();
         if (exactTokens) _facts.push(exactTokens);
         if (observed) _facts.push(observed);
-        _facts[0] = `${t('finishInfo.quotaPrefix')} · ${_facts[0]}`;
+        const _prefix = _mixedTurn
+          ? t('finishInfo.quotaPrefixWithSource', { source: _sources })
+          : t('finishInfo.quotaPrefix');
+        _facts[0] = `${_prefix} · ${_facts[0]}`;
         const _quotaTip = escapeHtml(_tips.join('\n'));
         for (const _fact of _facts) {
           parts.push(`<span class="subscription-quota-tag" title="${_quotaTip}">${escapeHtml(_fact)}</span>`);
@@ -8289,6 +8470,9 @@ function _renderUnifiedToolLine(round, isSearching) {
   const errorHtml = _renderErrorRow(round, ctx);
   if (errorHtml) return errorHtml;
 
+  const queuedHtml = _renderQueuedRow(round, ctx);
+  if (queuedHtml) return queuedHtml;
+
   const searchingHtml = _renderSearchingRow(round, ctx);
   if (searchingHtml) return searchingHtml;
 
@@ -8747,6 +8931,21 @@ async function _cmdInterruptClick(btn, ev) {
   }
 }
 
+// Announced while the model streams but not executing yet: no spinner, and no
+// command timer or interrupt control, until the backend enters its handler.
+function _renderQueuedRow(round, ctx) {
+  const { svg, q, rootPill, repairedBadge } = ctx;
+  if (round.status !== "queued") return "";
+  const label = escapeHtml(t('toolPanel.queued'));
+  return `<div class="ptool-line ptool-queued" data-rn="${round.roundNum}">
+         <span class="ptool-icon">${svg}</span>
+         ${rootPill}
+         <span class="ptool-text">${q}</span>
+         ${repairedBadge}
+         <span class="ptool-badge ptool-badge-queued">${label}</span>
+       </div>`;
+}
+
 // In-flight ("searching") states: running command with live output, search
 // orbit animation, or the generic active row.
 function _renderSearchingRow(round, ctx) {
@@ -8855,6 +9054,8 @@ function _cmdOutputOpenToggle(el, ev) {
   const open = !block.classList.contains('output-open');
   block.classList.toggle('output-open', open);
   if (el.setAttribute) el.setAttribute('aria-expanded', String(open));
+  const lazyOutput = block.querySelector(':scope > details[data-lazy-tool-result]');
+  if (lazyOutput) lazyOutput.open = open;
   const key = block.getAttribute('data-output-key') || '';
   if (key) {
     if (open) _cmdOutputExpanded.add(key);
@@ -9004,26 +9205,60 @@ const _SEG_NOTE_REASON_INTERVENTIONS = { active_checklist: true, modified_files:
 const _SEG_NOTE_REASON_CHIP = {
   active_checklist: { labelKey: 'systemNote.reasonActiveChecklist', tone: 'ok' },
   branch_context: { labelKey: 'systemNote.reasonBranch', tone: 'info' },
+  credential_vault: { labelKey: 'systemNote.reasonCredentialVault', tone: 'info' },
+  current_date: { labelKey: 'systemNote.reasonCurrentDate', tone: 'info' },
+  delegate_mode: { labelKey: 'systemNote.reasonDelegateMode', tone: 'info' },
+  disclosed_tools: { labelKey: 'systemNote.reasonDisclosedTools', tone: 'info' },
+  environment: { labelKey: 'systemNote.reasonEnvironment', tone: 'info' },
+  evolution_guidance: { labelKey: 'systemNote.reasonEvolutionGuidance', tone: 'info' },
   evolution_updates: { labelKey: 'systemNote.reasonEvolution', tone: 'info' },
   execution_allowance: { labelKey: 'systemNote.reasonExecutionAllowance', tone: 'info' },
   fallback_synthesis: { labelKey: 'systemNote.reasonFallback', tone: 'info' },
+  goal_objective: { labelKey: 'systemNote.reasonGoalObjective', tone: 'info' },
   goal_worker_directive: { labelKey: 'systemNote.reasonGoalDirective', tone: 'info' },
   goal_worker_review: { labelKey: 'systemNote.reasonGoalReview', tone: 'info' },
+  inbox_delivery: { labelKey: 'systemNote.reasonInboxDelivery', tone: 'info' },
   intent_stall: { labelKey: 'systemNote.reasonIntentStall', tone: 'warn' },
   intermediate_response: { labelKey: 'systemNote.reasonIntermediate', tone: 'info' },
   lifecycle_recovery: { labelKey: 'systemNote.reasonLifecycle', tone: 'warn' },
+  mcp_tools_delta: { labelKey: 'systemNote.reasonMcpTools', tone: 'info' },
+  memory_guidance: { labelKey: 'systemNote.reasonMemoryGuidance', tone: 'info' },
   modified_files: { labelKey: 'systemNote.reasonModifiedFiles', tone: 'warn' },
+  output_contract: { labelKey: 'systemNote.reasonOutputContract', tone: 'warn' },
+  paper_tool_guidance: { labelKey: 'systemNote.reasonPaperTools', tone: 'info' },
+  parallel_execution: { labelKey: 'systemNote.reasonParallelExecution', tone: 'info' },
   partial_stream_retry: { labelKey: 'systemNote.reasonStreamRetry', tone: 'info' },
+  plan_mode: { labelKey: 'systemNote.reasonPlanMode', tone: 'info' },
+  platform_static: { labelKey: 'systemNote.reasonPlatformStatic', tone: 'info' },
+  programmatic_execution: { labelKey: 'systemNote.reasonProgrammaticExecution', tone: 'info' },
+  programmatic_inputs: { labelKey: 'systemNote.reasonProgrammaticInputs', tone: 'info' },
+  project_context: { labelKey: 'systemNote.reasonProjectContext', tone: 'info' },
+  project_coordinator: { labelKey: 'systemNote.reasonProjectCoordinator', tone: 'info' },
+  project_path_change: { labelKey: 'systemNote.reasonPathChange', tone: 'info' },
+  project_presence: { labelKey: 'systemNote.reasonProjectPresence', tone: 'info' },
+  project_rules: { labelKey: 'systemNote.reasonProjectRules', tone: 'info' },
+  project_scoped_rules: { labelKey: 'systemNote.reasonProjectScopedRules', tone: 'info' },
+  relevant_memories: { labelKey: 'systemNote.reasonRelevantMemories', tone: 'info' },
+  role_directive: { labelKey: 'systemNote.reasonRoleDirective', tone: 'info' },
+  selected_skills: { labelKey: 'systemNote.reasonSelectedSkills', tone: 'info' },
+  session_context_committed: { labelKey: 'systemNote.reasonSessionContext', tone: 'info' },
+  skills_index: { labelKey: 'systemNote.reasonSkillsIndex', tone: 'info' },
+  task_state_v1: { labelKey: 'systemNote.reasonTaskState', tone: 'info' },
   terminal_recovery: { labelKey: 'systemNote.reasonTerminalRecovery', tone: 'info' },
   todo_incomplete: { labelKey: 'systemNote.reasonTodoIncomplete', tone: 'ok' },
   tool_progress: { labelKey: 'systemNote.reasonToolProgress', tone: 'warn' },
   tool_repeat_reminder: { labelKey: 'systemNote.reasonToolRepeat', tone: 'warn' },
   tool_stagnation: { labelKey: 'systemNote.reasonToolStagnation', tone: 'err' },
+  turn_requirements: { labelKey: 'systemNote.reasonTurnRequirements', tone: 'info' },
+  ui_nav_directory: { labelKey: 'systemNote.reasonUiNavDirectory', tone: 'info' },
   url_prefetch: { labelKey: 'systemNote.reasonUrlPrefetch', tone: 'info' },
+  user_context: { labelKey: 'systemNote.reasonUserContext', tone: 'info' },
   virtual_user_directive: { labelKey: 'systemNote.reasonVirtualUser', tone: 'info' },
   worker_artifacts: { labelKey: 'systemNote.reasonWorkerArtifacts', tone: 'info' },
   worker_dependencies: { labelKey: 'systemNote.reasonWorkerDeps', tone: 'info' },
+  worker_team: { labelKey: 'systemNote.reasonWorkerTeam', tone: 'info' },
   worker_wrapup: { labelKey: 'systemNote.reasonWorkerWrapup', tone: 'warn' },
+  working_facts: { labelKey: 'systemNote.reasonWorkingFacts', tone: 'info' },
 };
 /* END GENERATED */
 function _segNoteReasonChipHtml(reason) {
@@ -9047,6 +9282,7 @@ const _SEG_NOTE_ACTION_BADGE_KEY = {
  * is the verbatim text the model was sent (escaped, never markdown) so the
  * render cannot drift from the wire. */
 function _renderSegSystemNoteHTML(s) {
+  if (isContextInjectionNote(s)) return _renderSegContextNoteHTML(s);
   const noteKind = contextNoteDisplayKind(s);
   const reason = (typeof s.reason === 'string') ? s.reason : '';
   const presentation = (Object.prototype.hasOwnProperty.call(_SEG_NOTE_REASON_PRESENTATION, reason) && _SEG_NOTE_REASON_PRESENTATION[reason])
@@ -9068,45 +9304,73 @@ function _renderSegSystemNoteHTML(s) {
     `<div class="sw-card sw-stall-card-item"><div class="sw-card-head"><span class="sw-card-role">${escapeHtml(t('systemNote.detailsLabel'))}</span></div><pre class="sw-card-raw-pre">${escapeHtml(text)}</pre></div>` +
     `</div></details>`;
 }
-/* One note inside a merged group: a labelled header (its own reason /
- * noteKind title + action badge) above the same verbatim body card the solo
- * row uses. The inner details is purely visual (header row, not a second
- * disclosure), so the group's single disclosure governs expand/collapse. */
-function _renderSegSystemNoteItemHTML(s) {
+/* Context notes, parity with the typed surface (system-note-blocks.ts): one
+ * row per note — an authority-tinted glyph sticker, the registry label, a
+ * quiet line count and a one-line glimpse — instead of a repeated kind title,
+ * raw reason id and "appended" badge. The verbatim text keeps its exact bytes;
+ * only whole-line wrapper tags and headings are wrapped for styling. */
+function _segContextNoteLabel(facet) {
+  return facet.labelKey ? t(facet.labelKey) : facet.fallbackLabel;
+}
+function _segContextNoteTextHtml(text, inline) {
+  const runs = contextNoteTextRuns(text).map(run => (run.kind === 'text'
+    ? escapeHtml(run.text)
+    : `<span class="sw-note-text-${run.kind}">${escapeHtml(run.text)}</span>`)).join('');
+  return `<pre class="sw-note-text${inline ? ' sw-note-text--inline' : ''}">${runs}</pre>`;
+}
+function _segContextSummaryHTML(names, count) {
+  return `<summary class="ptool-line sw-inbox-row-header">` +
+    `<span class="ptool-icon">${Icon('layers', 14)}</span>` +
+    `<span class="ptool-text">${escapeHtml(t('systemNote.groupLabel'))}</span>` +
+    `<span class="sw-note-group-names">${escapeHtml(names.join(' · '))}</span>` +
+    (count === null ? '' : `<span class="sw-note-group-count">${escapeHtml(t('systemNote.groupItemsTitle', { n: count }))}</span>`) +
+    `</summary>`;
+}
+/* One note row. Multi-line text opens in place when `collapsible`; a single
+ * line is shown whole and needs no disclosure. */
+function _renderSegSystemNoteItemHTML(s, collapsible) {
+  const facet = contextNoteFacet(s);
   const noteKind = contextNoteDisplayKind(s);
-  const reason = (typeof s.reason === 'string') ? s.reason : '';
-  const presentation = (Object.prototype.hasOwnProperty.call(_SEG_NOTE_REASON_PRESENTATION, reason) && _SEG_NOTE_REASON_PRESENTATION[reason])
-    || (Object.prototype.hasOwnProperty.call(_SEG_NOTE_KIND_PRESENTATION, noteKind) && _SEG_NOTE_KIND_PRESENTATION[noteKind])
-    || _SEG_NOTE_KIND_PRESENTATION['system-intervention'];
-  const action = (typeof s.action === 'string') ? s.action : 'prompt';
-  const badgeKey = Object.prototype.hasOwnProperty.call(_SEG_NOTE_ACTION_BADGE_KEY, action)
-    ? _SEG_NOTE_ACTION_BADGE_KEY[action] : _SEG_NOTE_ACTION_BADGE_KEY.prompt;
   const text = (typeof s.text === 'string') ? s.text : '';
-  const reasonChip = _segNoteReasonChipHtml(reason);
-  return `<div class="sw-card sw-stall-card-item sw-note-group-item" data-note-kind="${escapeHtml(noteKind)}"${reason ? ` data-reason="${escapeHtml(reason)}"` : ''}>` +
-    `<div class="sw-note-group-item-head">` +
-    `<span class="ptool-icon">${presentation.icon}</span>` +
-    `<span class="ptool-text">${escapeHtml(t(presentation.labelKey))}</span>` +
-    reasonChip +
-    `<span class="ptool-badge ptool-badge-info">${escapeHtml(t(badgeKey))}</span>` +
-    `</div>` +
-    `<pre class="sw-card-raw-pre">${escapeHtml(text)}</pre>` +
-    `</div>`;
+  const multiline = facet.readableLines > 1;
+  const disclosure = multiline && collapsible;
+  const tag = disclosure ? 'details' : 'div';
+  const head = disclosure ? 'summary' : 'div';
+  const title = facet.reason
+    ? ` title="${escapeHtml(t('systemNote.reasonLabel'))}: ${escapeHtml(facet.reason)}"` : '';
+  const body = multiline
+    ? `<div class="sw-note-item-body">${_segContextNoteTextHtml(text, false)}</div>` : '';
+  return `<${tag} class="sw-note-group-item" data-note-kind="${escapeHtml(noteKind)}" data-glyph="${escapeHtml(facet.glyph)}"` +
+    (facet.reason ? ` data-reason="${escapeHtml(facet.reason)}"` : '') +
+    (facet.authority ? ` data-authority="${escapeHtml(facet.authority)}"` : '') + '>' +
+    `<${head} class="sw-note-item-head">` +
+    `<span class="sw-note-sticker" data-glyph="${escapeHtml(facet.glyph)}" aria-hidden="true">${Icon(facet.glyph, 14)}</span>` +
+    `<span class="sw-note-item-title"${title}>${escapeHtml(_segContextNoteLabel(facet))}</span>` +
+    (multiline ? `<span class="sw-note-item-meta">${escapeHtml(t('systemNote.lineCount', { n: facet.readableLines }))}</span>` : '') +
+    (disclosure && facet.peek ? `<span class="sw-note-item-peek">${escapeHtml(facet.peek)}</span>` : '') +
+    (!multiline && text ? _segContextNoteTextHtml(text, true) : '') +
+    `</${head}>` + body + `</${tag}>`;
+}
+/* A lone context note keeps the context fold's summary; its one row is
+ * already open inside it, so one click reads the text. */
+function _renderSegContextNoteHTML(s) {
+  const reason = (typeof s.reason === 'string') ? s.reason : '';
+  return `<details class="sw-inbox-row sw-system-note-row sw-note-solo" data-note-kind="${escapeHtml(contextNoteDisplayKind(s))}" data-context-note="true"${reason ? ` data-reason="${escapeHtml(reason)}"` : ''}>` +
+    _segContextSummaryHTML([_segContextNoteLabel(contextNoteFacet(s))], null) +
+    `<div class="sw-inbox-row-body sw-note-group-body"><div class="sw-note-list">${_renderSegSystemNoteItemHTML(s, false)}</div></div>` +
+    `</details>`;
 }
 /* A maximal run of adjacent context-injection notes (the session-start
  * context stack, or several injected together mid-turn) merged into ONE
- * disclosure row with a per-item list inside. Positions are unchanged — the
- * group still sits at the exact wire slot of its first note; only the count
- * of sibling rows shrinks. */
+ * disclosure row whose summary names what was injected, with a per-item list
+ * inside. Positions are unchanged — the group still sits at the exact wire
+ * slot of its first note; only the count of sibling rows shrinks. */
 function _renderSegSystemNoteGroupHTML(notes) {
-  const items = notes.map(_renderSegSystemNoteItemHTML).join('');
+  const items = notes.map(s => _renderSegSystemNoteItemHTML(s, true)).join('');
+  const names = notes.map(s => _segContextNoteLabel(contextNoteFacet(s)));
   return `<details class="sw-inbox-row sw-system-note-row sw-note-group" data-note-group="context-injection">` +
-    `<summary class="ptool-line sw-inbox-row-header">` +
-    `<span class="ptool-icon">${_NOTE_CONTEXT_ICON_SVG}</span>` +
-    `<span class="ptool-text">${escapeHtml(t('systemNote.groupLabel'))}</span>` +
-    `<span class="sw-note-group-count">${escapeHtml(t('systemNote.groupItemsTitle', { n: notes.length }))}</span>` +
-    `</summary>` +
-    `<div class="sw-inbox-row-body sw-note-group-body">${items}</div>` +
+    _segContextSummaryHTML(names, notes.length) +
+    `<div class="sw-inbox-row-body sw-note-group-body"><div class="sw-note-list">${items}</div></div>` +
     `</details>`;
 }
 /* Display-only regrouping of one batch's segments: merge each maximal run of
@@ -9437,46 +9701,54 @@ runtimeScope.TofuComposerPrefill = _wuFillComposer;
 /* TurnStore/Surface bridge only; compact UI is owned by turn-navigation.ts. */
 let _turnNavigation = null;
 let _turnNavigationHost = null;
-
-function _scrollTurnNode(turnId) {
-  const inner = document.getElementById('chatInner');
-  const node = inner && Array.from(inner.querySelectorAll('[data-turn-id]'))
-    .find((item) => item.dataset.turnId === turnId);
-  if (!node) return false;
-  node.scrollIntoView({
-    behavior: typeof prefersReducedMotion === 'function' && prefersReducedMotion()
-      ? 'auto' : 'smooth',
-    block: 'start',
-  });
-  return true;
-}
+let _turnNavigationConvId = '';
+let _turnJumpEpoch = 0;
 
 function scrollToTurn(turnId) {
   const stableTurnId = typeof turnId === 'string' ? turnId : '';
   if (!stableTurnId) return;
-  const conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
-  if (!conv) return;
-  // Surface, not a DOM search or nav shadow window, owns revealing older Turns.
+  const epoch = ++_turnJumpEpoch;
+  const conversationId = typeof getActiveConv === 'function' ? getActiveConv()?.id : '';
+  if (typeof conversationId !== 'string' || !conversationId) return;
   const reveal = runtimeScope.ConversationSurfacePresentation?.revealTurn;
-  if (typeof reveal === 'function' && reveal(conv.id, stableTurnId)) {
-    _scrollTurnNode(stableTurnId);
-    return;
-  }
-  if (_scrollTurnNode(stableTurnId)) return;
-  runtimeScope.requestAuthoritativeConversationRender(conv.id, { forceScroll: false });
+  if (reveal?.(conversationId, stableTurnId)) return;
+  runtimeScope.requestAuthoritativeConversationRender(conversationId, { forceScroll: false });
   if (typeof requestAnimationFrame === 'function') {
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (typeof getActiveConv === 'function' && getActiveConv()?.id !== conv.id) return;
-      runtimeScope.ConversationSurfacePresentation?.revealTurn?.(conv.id, stableTurnId);
-      if (!_scrollTurnNode(stableTurnId)) {
+      if (epoch !== _turnJumpEpoch || typeof getActiveConv !== 'function'
+        || getActiveConv()?.id !== conversationId) return;
+      if (!runtimeScope.ConversationSurfacePresentation?.revealTurn?.(conversationId, stableTurnId)) {
         console.warn('[turnNav] Turn node unavailable after convergence:', stableTurnId);
       }
     }));
   }
 }
 
+/* Open a conversation at one Turn (a sidebar search body hit): select it,
+ * page the Turn in by its lane ordinal, then reveal it. A Turn that no longer
+ * exists leaves the conversation open at its ordinary position. */
+async function openConversationAtTurn(conversationId, turn) {
+  const epoch = ++_turnJumpEpoch;
+  await loadConversation(conversationId);
+  const active = () => (epoch === _turnJumpEpoch && typeof getActiveConv === 'function'
+    && getActiveConv()?.id === conversationId ? getActiveConv() : null);
+  const conv = active();
+  if (!conv) return;
+  try {
+    await runtimeScope.ConversationTurnStore.hydrateConversationRound(
+      conv, 'main', { turnId: turn.turnId, ordinal: turn.ordinal });
+  } catch (error) {
+    console.warn('[turnNav] search match Turn unavailable:', error?.message || error);
+    return;
+  }
+  if (active()) scrollToTurn(turn.turnId);
+}
+
 function buildTurnNav(conv) {
   const nav = document.getElementById('turnNav');
+  const conversationId = conv?._localOnly ? '' : conv?.id || '';
+  if (conversationId !== _turnNavigationConvId || nav !== _turnNavigationHost) _turnJumpEpoch++;
+  _turnNavigationConvId = conversationId;
   if (nav !== _turnNavigationHost) {
     _turnNavigation?.destroy();
     _turnNavigationHost = nav;
@@ -9503,7 +9775,6 @@ function buildTurnNav(conv) {
       },
     }) : null;
   }
-  const conversationId = conv?._localOnly ? '' : conv?.id || '';
   const state = conversationId
     ? runtimeScope.ConversationTurnStore?.ensureRuntimeStore?.(conversationId)?.getState?.()
     : null;
@@ -9991,8 +10262,16 @@ function _stopTranslation(conv) {
     console.warn('[stop] translation abort marker failed:', error));
   conv._translateAborted = true;
   conv._translating = false;
-  conv._translateAbortCtrl?.abort();
+  const controller = conv._translateAbortCtrl;
   conv._translateAbortCtrl = null;
+  // Send-time translation runs inside the generation-start lease. Ending it
+  // ends that startup too; a live startup Stop would invite repeat clicks that
+  // each re-send the conversation abort while the send recovers.
+  if (controller && controller === conv._genStartCtrl) {
+    conv._genStartStop = controller;
+    conv._genStartCtrl = null;
+  }
+  controller?.abort();
   updateSendButton();
   renderConversationList();
 }
@@ -10772,14 +11051,42 @@ async function _runTranslationPipeline(conv, turnId, options) {
   }
 }
 
-/* Page/tab activation only resumes tasks initiated in this browser lifetime.
- * Durable results converge independently through Conversation Sync v3. */
+/* Running-turn previews are pushed once per block and stay task-local until
+ * the Turn settles, so a reload, a reconnect or frames that arrived while the
+ * page showed something else would leave already translated blocks in the
+ * source language until the turn ends. Re-read the completed previews of
+ * running turns; later push frames keep extending the same index. */
+async function _rehydrateRunningTurnPreviews(convId) {
+  if (!runtimeScope.ConversationTurnRead?.activeAttemptIds?.(convId)?.length) return;
+  try {
+    const previews = await Api.translate.previews(convId);
+    for (const preview of Array.isArray(previews) ? previews : []) {
+      if (preview?.turnId) {
+        _setTranslationActivity(
+          convId, preview.turnId, _translationPendingActivity(preview),
+        );
+      }
+    }
+  } catch (error) {
+    console.debug(
+      '[Translate] preview rehydration failed:', error?.message || error,
+    );
+  }
+}
+
+/* Page/tab activation resumes tasks initiated in this browser lifetime and
+ * re-reads live previews of running turns. Durable results converge
+ * independently through Conversation Sync v3. */
 async function _resumePendingTranslations(convId) {
   const conv = conversations.find((item) => item?.id === convId);
   if (!conv) return;
+  const previews = _rehydrateRunningTurnPreviews(convId);
   const pending = [..._translationTasksByTurn.entries()]
     .filter(([key]) => key.startsWith(String(convId) + ':'));
-  if (!pending.length) return;
+  if (!pending.length) {
+    await previews;
+    return;
+  }
   const results = await _pollTranslateTaskBatch(
     pending.map(([, task]) => task.taskId),
   );
@@ -10802,6 +11109,7 @@ async function _resumePendingTranslations(convId) {
       );
     }
   }
+  await previews;
 }
 
 (function wireServerTranslationProjection() {
@@ -10863,6 +11171,14 @@ async function _resumePendingTranslations(convId) {
       );
     }
   });
+  if (typeof pushOnReconnect === 'function') {
+    // Frames published while the socket was down are not replayed.
+    pushOnReconnect(() => {
+      if (typeof activeConvId !== 'undefined' && activeConvId) {
+        void _rehydrateRunningTurnPreviews(activeConvId);
+      }
+    });
+  }
 })();
 /* ===== migrated source: upload.js ===== */
 /* ═══════════════════════════════════════════
@@ -10890,7 +11206,11 @@ var _VLM_STORAGE_KEY = 'tofu_vlm_pending';
 /** Save current pendingPdfTexts + VLM task state to sessionStorage. */
 function _vlmSaveState() {
   try {
-    var items = pendingPdfTexts.map(function(p) {
+    // An in-flight upload cannot resume after reload (its File is gone), and an
+    // archive chip is only a label for an already-mounted project root.
+    var items = pendingPdfTexts.filter(function(p) {
+      return p && p.method !== 'parsing' && !p._archive;
+    }).map(function(p) {
       return {
         name: p.name, text: p.text, pages: p.pages,
         textLength: p.textLength, isScanned: p.isScanned,
@@ -11360,7 +11680,9 @@ async function handlePDFUpload(file) {
       "[PDF] Backend parse failed for '%s':",
       file.name, err.message, err,
     );
-    // Remove this PDF's placeholder entry on failure
+    // Remove this PDF's placeholder entry on failure; a send that captured it
+    // stops waiting and drops it.
+    pdfObj.method = "failed";
     const failIdx = pendingPdfTexts.indexOf(pdfObj);
     if (failIdx >= 0) pendingPdfTexts.splice(failIdx, 1);
     renderImagePreviews();
@@ -11476,13 +11798,12 @@ function _looksLikeVideo(f) {
   return _VIDEO_EXTS.has(_getFileExt(f.name || ''));
 }
 
-// ── Project-archive drop (ChatGPT-style: drop a .zip/.tar.gz of source) ──
-// An archive is a FOLDER, not a file: its value is the tree (\\input{chapters/…},
-// figure paths), so it is extracted server-side into a managed workspace and
-// mounted as a project root — never flattened into an attachment blob. Extraction
-// reuses the hardened lib.paper.archive (zip-slip/link defense, 512-file/64-MiB
-// budget); the mount reuses the tested set_paths path. This is what lets a
-// dropped Overleaf/arXiv TeX export go straight to a COMPILABLE project.
+// ── Archive drop (ChatGPT-style: drop a .zip/.tar.gz on the composer) ──
+// The archive is stored verbatim in a fresh managed workspace directory that
+// is then mounted as a project root; nothing is extracted. The model unpacks
+// it with its own workspace tools when the task needs the contents, so an
+// upload is one sequential write whatever its member count. The mount reuses
+// the tested set_paths path.
 var _ARCHIVE_EXTS = new Set([
   '.zip', '.tar', '.tgz', '.tbz2', '.txz', '.gz', '.bz2', '.xz',
 ]);
@@ -11497,6 +11818,20 @@ function _isArchiveFile(f) {
     || n.endsWith('.tar.bz2') || n.endsWith('.tar.xz');
 }
 
+var _ARCHIVE_MIME_EXTS = {
+  'application/zip': '.zip', 'application/x-zip-compressed': '.zip',
+  'application/x-tar': '.tar', 'application/gzip': '.gz',
+  'application/x-gzip': '.gz', 'application/x-bzip2': '.bz2',
+  'application/x-xz': '.xz',
+};
+/** The server keys the stored archive on its suffix; restore one from MIME. */
+function _archiveUploadName(f) {
+  const name = f.name || 'archive';
+  const lowered = name.toLowerCase();
+  if (_ARCHIVE_EXTS.has(_getFileExt(lowered))) return name;
+  return name + (_ARCHIVE_MIME_EXTS[(f.type || '').toLowerCase()] || '.zip');
+}
+
 /** Format an approximate byte count for the chip meta line. */
 function _fmtBytes(b) {
   b = Math.max(0, Math.round(b || 0));
@@ -11506,63 +11841,72 @@ function _fmtBytes(b) {
 }
 
 /**
- * Drop / pick a source archive on the composer. Shows a chip immediately,
- * extracts server-side into a managed workspace, then mounts the extracted
- * folder as a project root (reusing _addDropDirAsRoot → set_paths) and — when
- * the archive holds a TeX main document — fires the paper-preview discovery
- * hint so the panel can offer a compile immediately.
+ * Drop / pick an archive on the composer. Shows a chip immediately, stores the
+ * archive unextracted in a managed workspace directory, then mounts that
+ * directory as a project root (reusing _addDropDirAsRoot → set_paths). The
+ * chip stays `parsing` until the mount settles: a send waits for it because
+ * the turn captures project roots before submission.
  */
 async function handleArchiveUpload(f) {
+  const uploadName = _archiveUploadName(f);
+  const controller = new AbortController();
   const chip = {
-    name: f.name || 'archive.zip',
-    text: '', pages: 0, textLength: 0, isScanned: false,
-    method: 'parsing',               // drives the shared progress bar text
+    name: uploadName,
+    text: '', pages: 0, textLength: f.size || 0, isScanned: false,
+    method: 'parsing',
     kind: 'archive', _archive: true,
     _docIcon: Icon('archive', 22),
+    _uploadAbort: controller,
   };
   pendingPdfTexts.push(chip);
   renderImagePreviews();
   const fd = new FormData();
-  fd.append('file', f, f.name || 'archive.zip');
+  fd.append('file', f, uploadName);
   let data;
   try {
-    data = await Api.media.expandArchive(fd);
+    data = await Api.media.storeArchive(fd, { signal: controller.signal });
     if (!data || data.ok === false || !data.path)
-      throw new Error((data && (data.error || data.message)) || 'extraction failed');
+      throw new Error((data && (data.error || data.message)) || 'upload failed');
   } catch (e) {
+    chip.method = 'failed';
+    delete chip._uploadAbort;
     const idx = pendingPdfTexts.indexOf(chip);
     if (idx >= 0) pendingPdfTexts.splice(idx, 1);
     renderImagePreviews();
+    if (chip._removed) return;
     const msg = String((e && e.message) || e);
     if (typeof showToast === 'function') showToast(t('archive.failed'), 'error', chip.name + ': ' + msg, 6000);
-    else debugLog('Archive extract failed: ' + chip.name + ' — ' + msg, 'error');
+    else debugLog('Archive upload failed: ' + chip.name + ' — ' + msg, 'error');
     return;
   }
-  const texCount = (data.texMainCandidates || []).length;
+  delete chip._uploadAbort;
   Object.assign(chip, {
-    method: 'archive',
-    textLength: data.bytes || 0,
-    pages: data.files || 0,
-    _fileCount: data.files || 0,
-    _texCount: texCount,
+    textLength: data.bytes || chip.textLength,
+    name: data.archiveName || chip.name,
     _path: data.path,
-    name: data.directory || chip.name,
+    _archivePath: data.archivePath,
   });
+  if (!chip._removed) {
+    // Primary root if none yet, else an extra root; existing roots are kept.
+    try {
+      if (typeof _addDropDirAsRoot === 'function') await _addDropDirAsRoot(data.path);
+      debugLog(t('archive.stored', { name: chip.name }), 'success');
+    } catch (e) {
+      debugLog('Archive stored but project mount failed: ' + ((e && e.message) || e), 'warn');
+    }
+  }
+  chip.method = 'archive';
   renderImagePreviews();
-  // Mount the extracted folder as a project root (primary if none yet, else an
-  // extra root) so the model can actually read/compile the tree. Reuses the
-  // tested set_paths apply path and preserves existing roots.
-  try {
-    if (typeof _addDropDirAsRoot === 'function') await _addDropDirAsRoot(data.path);
-  } catch (e) {
-    debugLog('Archive extracted but project mount failed: ' + ((e && e.message) || e), 'warn');
+}
+
+// Send gate: the turn captures project roots before submission, so an archive
+// still uploading or mounting would be invisible to the model in this turn.
+async function _waitForPendingArchives() {
+  const deadline = Date.now() + 2 * 60 * 1000;
+  while (pendingPdfTexts.some(p => p && p._archive && p.method === 'parsing')) {
+    if (Date.now() > deadline) break;
+    await new Promise(r => setTimeout(r, 100));
   }
-  // An extracted TeX project feeds the paper-preview cold-start hint.
-  if (texCount && typeof runtimeScope !== 'undefined'
-      && runtimeScope._paperPreviewDiscover && runtimeScope.activeConvId) {
-    try { runtimeScope._paperPreviewDiscover(runtimeScope.activeConvId, { path: data.path }); } catch (_e) { /* hint only */ }
-  }
-  debugLog(t('archive.extracted', { n: data.files || 0 }) + (texCount ? ' · ' + t('archive.texFound', { n: texCount }) : ''), 'success');
 }
 
 function _fmtVideoDur(s) {
@@ -11705,6 +12049,9 @@ async function _waitForPendingVideos() {
 }
 
 // ── Document upload (Word, Excel, PPT, plain text) → server-side parse ──
+// Optimistic like PDFs: the chip appears at once in the `parsing` state (a send
+// waits for it), removing the chip aborts the request, and a failure removes
+// the chip with a visible reason. Indexing a large text can take a long time.
 async function handleDocUpload(file) {
   const pEl = document.getElementById("pdfProgress"),
     pText = document.getElementById("pdfProgressText"),
@@ -11722,26 +12069,41 @@ async function handleDocUpload(file) {
                    '.csv':Icon('fileSheet',22), '.json':Icon('fileCode',22), '.xml':Icon('fileCode',22), '.py':Icon('fileCode',22), '.js':Icon('fileCode',22),
                    '.html':Icon('fileCode',22), '.yaml':Icon('cog',22), '.yml':Icon('cog',22)};
   const icon = iconMap[ext] || Icon('file',22);
+  const controller = new AbortController();
+  const docObj = {
+    name: file.name || uploadName, text: "", pages: 0, textLength: 0,
+    isScanned: false, method: "parsing", _docIcon: icon,
+    _uploadAbort: controller,
+  };
+  pendingPdfTexts.push(docObj);
+  renderImagePreviews();
 
   try {
     const formData = new FormData();
     formData.append("file", file, uploadName);
-    const data = await Api.media.upload(formData);
+    const data = await Api.media.upload(formData, { signal: controller.signal });
     const attachment = data && data.attachment;
     if (!attachment || !attachment.attachmentId)
       throw new Error((data && data.error) || "Attachment indexing failed");
-
-    const docObj = {
-      ...attachment,
-      name: attachment.name || file.name,
+    delete docObj._uploadAbort;
+    if (docObj._removed) {
+      // Removed while the response was already in flight: release the copy.
+      docObj.method = "failed";
+      void Api.media.remove(attachment.attachmentId).catch((error) => {
+        debugLog('Document attachment cleanup failed: ' + error.message, 'warn');
+      });
+      pEl.style.display = "none";
+      return;
+    }
+    // Mutate in place: a send that captured the chip mid-upload holds this object.
+    Object.assign(docObj, attachment, {
+      name: attachment.name || docObj.name,
       text: "",
       pages: attachment.pages || 1,
       textLength: attachment.textChars || 0,
       isScanned: false,
       method: attachment.method || ext,
-      _docIcon: icon,
-    };
-    pendingPdfTexts.push(docObj);
+    });
     renderImagePreviews();
     _vlmSaveState();  // Persist doc upload for refresh recovery
 
@@ -11754,6 +12116,15 @@ async function handleDocUpload(file) {
     debugLog(`Doc parsed: ${file.name} — ${sizeStr}, method: ${data.method}`, "success");
     setTimeout(() => { pEl.style.display = "none"; }, 2500);
   } catch (err) {
+    delete docObj._uploadAbort;
+    docObj.method = "failed";
+    const failIdx = pendingPdfTexts.indexOf(docObj);
+    if (failIdx >= 0) pendingPdfTexts.splice(failIdx, 1);
+    renderImagePreviews();
+    if (docObj._removed) {
+      pEl.style.display = "none";
+      return;
+    }
     console.warn("[Doc] Parse failed:", err.message);
     pText.textContent = `⚠️ Failed to parse "${file.name}": ${err.message}`;
     pFill.style.width = "0%";
@@ -11783,14 +12154,14 @@ function renderImagePreviews() {
               : "";
       const methodLabel = pdf.method === "vlm" ? "VLM" : (pdf._archive ? "ZIP" : "TEXT");
       const docIcon = pdf._docIcon || Icon('file',22);
-      // An archive chip reports the extracted tree (files + size) and any TeX
-      // mains found, not a text parse; while extracting it carries the shared
-      // parsing spinner via the global progress bar.
+      // An archive chip reports its stored size, not a text parse.
       const archiveMeta = pdf._archive
         ? (pdf.method === 'parsing'
-            ? t('archive.extracting')
-            : `${pdf._fileCount || 0} ${t('archive.files')} · ${sizeStr}${pdf._texCount ? ' · ' + t('archive.texBadge', { n: pdf._texCount }) : ''}`)
-        : `${pdf.pages}p · ${sizeStr}${badge}`;
+            ? t('archive.uploading')
+            : `${sizeStr} · ${t('archive.notExtracted')}`)
+        : (pdf.method === 'parsing'
+            ? t('upload.processing')
+            : `${pdf.pages}p · ${sizeStr}${badge}`);
       return `<div class="img-preview pdf-text-card${pdf._archive ? ' archive-card' : ''}" data-tofu-action="previewPendingPdfText(${i})"><div class="pdf-text-card-inner"><div class="pdf-text-icon">${docIcon}</div><div class="pdf-text-info"><div class="pdf-text-name" title="${escapeHtml(pdf.name)}">${escapeHtml(pdf.name.length > 20 ? pdf.name.slice(0, 18) + "…" : pdf.name)}</div><div class="pdf-text-meta">${archiveMeta}</div>${vlmBadge}</div></div><button class="remove-img" data-tofu-action="event.stopPropagation();removePdfText(${i})">✕</button><div class="img-size">${methodLabel}</div></div>`;
     })
     .join("");
@@ -11957,7 +12328,11 @@ document.addEventListener('drop', (e) => {
 }, true);  // capture: run before the full-page file-drop handler
 function removePdfText(i) {
   const entry = pendingPdfTexts[i];
-  if (entry) entry._vlmAlive = false; // Kill VLM polling for this entry
+  if (entry) {
+    entry._vlmAlive = false; // Kill VLM polling for this entry
+    entry._removed = true;
+    entry._uploadAbort?.abort();
+  }
   if (entry?._vlmTaskId && Api.pdf?.vlmCancel) {
     void Api.pdf.vlmCancel(entry._vlmTaskId).catch((error) => {
       debugLog('VLM task cancellation failed: ' + error.message, 'warn');
@@ -12153,22 +12528,88 @@ async function previewPendingPdfText(i) {
   }
   openTextPreview(title, meta, text);
 }
+
+/* The overlay is a viewer, not a poster. Fitting the whole bitmap into the
+ * viewport made a tall page render SMALLER than the same image in the message
+ * body, so "enlarge" read as a zoom-out and there was no way back to 1:1. Two
+ * explicit modes now exist:
+ *   natural — as wide as the viewport allows, never upscaled above 1:1; a
+ *             taller-than-viewport bitmap scrolls instead of shrinking.
+ *   whole   — the entire bitmap inside the viewport, for an overview.
+ * Click/Enter toggles between them, so the clicked image is always at least
+ * as large as the inline render and 1:1 is always reachable. */
+function _previewImageViewport() {
+  return {
+    width: Math.max(120, Math.round((window.innerWidth || 1200) * 0.92)),
+    height: Math.max(120, Math.round((window.innerHeight || 900) * 0.86)),
+  };
+}
+function _previewImageResize(image, scale) {
+  image.style.width = `${Math.round((image.naturalWidth || 0) * scale)}px`;
+  image.style.height = `${Math.round((image.naturalHeight || 0) * scale)}px`;
+}
+function _previewImageNatural(image) {
+  const naturalWidth = image.naturalWidth || 0;
+  if (!naturalWidth || !(image.naturalHeight || 0)) return;
+  const viewport = _previewImageViewport();
+  _previewImageResize(image, Math.min(1, viewport.width / naturalWidth));
+  image.classList.remove("preview-image--whole");
+}
+function _previewImageWhole(image) {
+  const naturalWidth = image.naturalWidth || 0;
+  const naturalHeight = image.naturalHeight || 0;
+  if (!naturalWidth || !naturalHeight) return;
+  const viewport = _previewImageViewport();
+  _previewImageResize(image, Math.min(
+    1, viewport.width / naturalWidth, viewport.height / naturalHeight,
+  ));
+  image.classList.add("preview-image--whole");
+}
+function togglePreviewImageZoom(image) {
+  if (image.classList.contains("preview-image--whole")) _previewImageNatural(image);
+  else _previewImageWhole(image);
+}
 function openImagePreview(src) {
   if (!src) return;
   const body = document.getElementById("previewBody");
   const modal = document.getElementById("previewModal");
   if (!body || !modal) return;
-  const close = document.createElement("button");
-  close.type = "button";
-  close.className = "preview-close-btn";
-  close.dataset.tofuAction = "closePreview()";
-  close.setAttribute("aria-label", typeof t === 'function' ? t('common.close') : 'Close');
-  close.textContent = "✕";
+  /* Reuse the close button across opens. Rebuilding it would remove the
+   * currently focused node, and the browser's focus fixup then lands on the
+   * now-focusable preview image instead of on the close control. */
+  let close = body.querySelector(".preview-close-btn");
+  if (!close) {
+    close = document.createElement("button");
+    close.type = "button";
+    close.className = "preview-close-btn";
+    close.dataset.tofuAction = "closePreview()";
+    close.setAttribute("aria-label", typeof t === 'function' ? t('common.close') : 'Close');
+    close.textContent = "✕";
+  }
   const image = document.createElement("img");
   image.src = String(src);
   image.alt = "Preview";
   image.className = "preview-image";
-  body.replaceChildren(close, image);
+  image.tabIndex = 0;
+  image.setAttribute("role", "button");
+  image.title = typeof t === 'function' ? t('markdown.previewImage') : 'Enlarge image';
+  _previewImageNatural(image);
+  image.addEventListener("load", () => {
+    if (image.isConnected && !image.classList.contains("preview-image--whole")) {
+      _previewImageNatural(image);
+    }
+  }, { once: true });
+  image.addEventListener("click", () => togglePreviewImageZoom(image));
+  image.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    togglePreviewImageZoom(image);
+  });
+  for (const child of Array.from(body.children)) {
+    if (child !== close) child.remove();
+  }
+  if (close.parentElement !== body) body.prepend(close);
+  body.append(image);
   showAttachmentPreview(document, typeof t === 'function' ? t('markdown.previewTitle') : 'Attachment preview');
 }
 function openTextPreview(title, meta, text) {
@@ -12230,450 +12671,11 @@ document.addEventListener('click', function(e) {
   trunc.remove();
 });
 /* ===== migrated source: voice.js ===== */
-/* ═══════════════════════════════════════════════════════════════════
-   voice.js — Voice input (speech-to-text) for the chat composer.
-
-   The "typeless" front door: click the mic → record (getUserMedia +
-   MediaRecorder, webm/opus) → click again to stop → the recording is
-   transcoded to WAV in the browser (the inline audio-chat path accepts only
-   wav/mp3, never webm) → POSTed to /api/v4/audio/transcribe (via
-   Api.audio.transcribe) → the returned text is injected at the #userInput
-   cursor. It NEVER auto-sends — the user reviews /
-   edits, exactly like _wrapSelectionNoTranslate.
-
-   Graceful disable: on boot we probe Api.audio.capabilities(); the mic button
-   stays hidden unless a transcription model is configured (available:true) AND
-   the browser can record. So a deployment with no transcription slot never
-   shows a dead affordance (CLAUDE.md §3.5).
-
-   Bundled by Vite's module graph (the migrated module graph). Symbols share window scope;
-   the <script> tag in index.html is the dev-mode fallback.
-   ═══════════════════════════════════════════════════════════════════ */
-
-(function (global) {
-  'use strict';
-
-  // Recording state machine: 'idle' | 'recording' | 'transcribing'.
-  var _state = 'idle';
-  var _recorder = null;      // active MediaRecorder
-  var _chunks = [];          // collected Blob chunks
-  var _stream = null;        // active MediaStream (mic tracks)
-  var _available = false;    // backend reported a transcription model
-  var _models = [];          // configured transcription slots [{model, mode}]
-  // Shared AudioContext, PRE-WARMED at record start so its (non-trivial)
-  // construction cost is paid during the live user gesture, NOT on the
-  // post-stop critical path before the transcription POST. Owned by the
-  // record→idle lifecycle: created in _startRecording, reused by _encodeToWav,
-  // closed on the idle transition (_applyState). A direct _encodeToWav call
-  // with no prewarm (e.g. tests / programmatic use) creates+closes a transient
-  // context per call, preserving the original self-contained behavior.
-  var _audioCtx = null;
-
-  function _t(key, fallback) {
-    if (!key) return fallback;   // null key → use the literal fallback message
-    try {
-      if (typeof t === 'function') { var s = t(key); if (s && s !== key) return s; }
-    } catch (e) { /* i18n not ready — use fallback */ }
-    return fallback;
-  }
-
-  function _toast(kind, key, fallback) {
-    try {
-      if (typeof showToast === 'function') showToast(_t(key, fallback), kind);
-    } catch (e) {
-      if (typeof console !== 'undefined') console.warn('[Voice] toast failed:', e);
-    }
-  }
-
-  /** True when the browser exposes mic capture + MediaRecorder. */
-  function _browserCanRecord() {
-    return !!(global.navigator && global.navigator.mediaDevices &&
-              typeof global.navigator.mediaDevices.getUserMedia === 'function' &&
-              typeof global.MediaRecorder !== 'undefined');
-  }
-
-  function _micBtn() { return document.getElementById('micBtn'); }
-
-  /** Reflect the current state on the mic button (class + tooltip + disabled). */
-  function _applyState(next) {
-    _state = next;
-    // The interaction is over — release the prewarmed AudioContext (decode has
-    // already run by the time we reach 'transcribing'→'idle'). Done before the
-    // btn guard so the context is freed even if the button is detached.
-    if (next === 'idle') _closeAudioCtx();
-    var btn = _micBtn();
-    if (!btn) return;
-    btn.classList.toggle('recording', next === 'recording');
-    btn.classList.toggle('transcribing', next === 'transcribing');
-    btn.disabled = (next === 'transcribing');
-    // Honest indeterminate indicator: the CSS spin ring (.transcribing::after)
-    // is a genuine indeterminate spinner (no fake progress — the gateway
-    // buffers the transcript so there is nothing to stream). aria-busy makes
-    // that state announceable to assistive tech.
-    btn.setAttribute('aria-busy', next === 'transcribing' ? 'true' : 'false');
-    var tip = next === 'recording' ? _t('voice.recording', 'Recording · click to stop')
-            : next === 'transcribing' ? _t('voice.transcribing', 'Transcribing…')
-            : _t('voice.tooltip', 'Voice input');
-    btn.setAttribute('title', tip);
-  }
-
-  /**
-   * Inject transcript text at the #userInput cursor and fire an `input` event
-   * so auto-resize / send-button state update. Mirrors _wrapSelectionNoTranslate;
-   * deliberately does NOT send. Inserts a leading space when joining onto
-   * existing non-whitespace text so words don't glue together.
-   */
-  function _injectText(text) {
-    var ta = document.getElementById('userInput');
-    if (!ta || !text) return;
-    var start = ta.selectionStart != null ? ta.selectionStart : ta.value.length;
-    var end = ta.selectionEnd != null ? ta.selectionEnd : ta.value.length;
-    var before = ta.value.substring(0, start);
-    var after = ta.value.substring(end);
-    var insert = text;
-    if (before && !/\s$/.test(before) && !/^\s/.test(insert)) insert = ' ' + insert;
-    ta.value = before + insert + after;
-    var caret = before.length + insert.length;
-    try { ta.selectionStart = ta.selectionEnd = caret; } catch (e) { /* detached node */ }
-    ta.focus();
-    ta.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-
-  /**
-   * Return the shared AudioContext, creating it on first use. Called at record
-   * START (during the user gesture) so first-use construction cost stays off
-   * the post-stop critical path, and again by _encodeToWav (which reuses it).
-   * Resumes a suspended context best-effort. Returns null when WebAudio is
-   * unavailable (older Android WebView) — callers then fall back to the raw blob.
-   */
-  function _acquireAudioCtx() {
-    var AC = global.AudioContext || global.webkitAudioContext;
-    if (!AC) return null;
-    if (!_audioCtx) {
-      try { _audioCtx = new AC(); }
-      catch (e) {
-        if (typeof console !== 'undefined') console.warn('[Voice] AudioContext create failed:', e);
-        _audioCtx = null;
-        return null;
-      }
-    }
-    if (_audioCtx.state === 'suspended' && typeof _audioCtx.resume === 'function') {
-      try { _audioCtx.resume(); } catch (e) { /* best-effort — decode still works */ }
-    }
-    return _audioCtx;
-  }
-
-  function _closeAudioCtx() {
-    if (_audioCtx && typeof _audioCtx.close === 'function') {
-      try { _audioCtx.close(); } catch (e) { /* already closed */ }
-    }
-    _audioCtx = null;
-  }
-
-  /**
-   * Whether the recording must be transcoded to WAV before upload.
-   *
-   * The inline audio_chat path needs WAV (the gateway rejects webm); the
-   * dedicated /audio/transcriptions endpoint (Whisper) accepts webm directly.
-   * The backend tries slots in preference order and may fall back to ANY of
-   * them, so we can only skip the WAV transcode when EVERY configured slot is
-   * an 'endpoint' slot — if a single 'chat' slot exists it would 400 on a raw
-   * webm. Unknown / empty model list → transcode (fail safe).
-   */
-  function _needsTranscode() {
-    if (!_models.length) return true;
-    return _models.some(function (m) { return (m && m.mode) !== 'endpoint'; });
-  }
-
-  function _releaseStream() {
-    if (_stream) {
-      try { _stream.getTracks().forEach(function (tr) { tr.stop(); }); }
-      catch (e) { /* already stopped */ }
-      _stream = null;
-    }
-  }
-
-  /**
-   * Extract a human-readable reason from a failure. The backend
-   * (routes/api_v1/audio.py) sends a descriptive string in `error`
-   * (envelope `.message` or a plain string) plus the HTTP status on an
-   * ApiError — surface that instead of a blank "Transcription failed" so
-   * the user knows WHY (no model configured, too large, upstream 5xx, …).
-   */
-  function _reason(src) {
-    if (!src) return '';
-    var err = src.body && src.body.error !== undefined ? src.body.error : src.error;
-    if (err == null) err = src.message;
-    if (err && typeof err === 'object') err = err.message || err.detail || err.error || '';
-    return (typeof err === 'string' ? err : '').trim();
-  }
-
-  /** Toast a failure, appending the backend's reason when we have one. */
-  function _failToast(reason) {
-    var base = _t('voice.failed', 'Transcription failed');
-    _toast('error', null, reason ? base + ': ' + reason : base);
-  }
-
-  // Map an audio MIME to the filename extension the backend allow-list keys on.
-  var _EXT_FOR_TYPE = {
-    'audio/wav': 'wav', 'audio/webm': 'webm', 'audio/ogg': 'ogg',
-    'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/flac': 'flac',
-  };
-  function _extForType(type) {
-    return _EXT_FOR_TYPE[(type || '').split(';')[0].trim()] || 'webm';
-  }
-
-  /**
-   * Transcode a recorded blob to 16 kHz mono 16-bit WAV via WebAudio.
-   *
-   * WHY: browser MediaRecorder only emits webm/ogg (opus), but the inline
-   * audio-chat transcription path (omni chat models, e.g. Gemini) accepts only
-   * a narrow format set — wav/mp3, never webm — so a raw webm upload 400s at
-   * the gateway. WAV/PCM is universally accepted (omni chat, Whisper endpoints,
-   * the backend allow-list) and lets the server read the duration from the WAV
-   * header. 16 kHz mono is the ASR-standard rate and keeps the payload small.
-   * Falls back to the original blob when WebAudio is unavailable or decode
-   * fails — endpoint/Whisper slots accept webm, so that is no regression.
-   *
-   * Reuses the AudioContext prewarmed at record start (so its construction
-   * cost is off the post-stop critical path); a direct call with no prewarm
-   * creates+closes a transient context, preserving the original behavior.
-   */
-  /**
-   * True when post-stop transcode timing should be logged. Zero-cost in prod:
-   * off unless the private `__VOICE_DEBUG` service is truthy or localStorage
-   * `tofu.voice.debug` is set — flip it in the WebView console to capture the
-   * on-device split (arrayBuffer / acquireCtx / decodeAudioData / resample)
-   * that decides whether a PCM-capture rewrite is ever justified.
-   */
-  function _timingOn() {
-    if (runtimeScope.__VOICE_DEBUG) return true;
-    try { return !!(global.localStorage && global.localStorage.getItem('tofu.voice.debug')); }
-    catch (e) { return false; }
-  }
-  function _now() {
-    try { return (global.performance && global.performance.now) ? global.performance.now() : Date.now(); }
-    catch (e) { return Date.now(); }
-  }
-
-  async function _encodeToWav(blob) {
-    if (!blob || typeof blob.arrayBuffer !== 'function') return blob;
-    // Reuse the context prewarmed by _startRecording when present; otherwise
-    // create a transient one for this call (and close it in `finally`).
-    var shared = !!_audioCtx;
-    var dbg = _timingOn();
-    var t0 = dbg ? _now() : 0, tBuf = 0, tCtx = 0, tDecode = 0, tPcm = 0;
-    var ctx = _acquireAudioCtx();
-    if (dbg) tCtx = _now();
-    if (!ctx) return blob;
-    try {
-      var buf = await blob.arrayBuffer();
-      if (dbg) tBuf = _now();
-      var decoded = await ctx.decodeAudioData(buf);
-      if (dbg) tDecode = _now();
-      var wav = _audioBufferToWav(decoded, 16000);
-      if (dbg) {
-        tPcm = _now();
-        // Note: acquireCtx≈0 when prewarmed (that's the point of prewarming).
-        console.info('[Voice][timing] size=%dB shared=%s acquireCtx=%.1fms ' +
-          'arrayBuffer=%.1fms decodeAudioData=%.1fms resample=%.1fms total=%.1fms',
-          (blob.size || 0), shared, (tCtx - t0), (tBuf - tCtx),
-          (tDecode - tBuf), (tPcm - tDecode), (tPcm - t0));
-      }
-      return new Blob([wav], { type: 'audio/wav' });
-    } catch (e) {
-      if (typeof console !== 'undefined') console.warn('[Voice] WAV encode failed, sending original:', e);
-      return blob;
-    } finally {
-      // A prewarmed shared context is owned by the record→idle lifecycle and
-      // closed on the idle transition; only close one WE created transiently.
-      if (!shared) _closeAudioCtx();
-    }
-  }
-
-  /**
-   * Downmix an AudioBuffer to mono, linearly resample to targetRate, and encode
-   * it as a 16-bit PCM WAV. Returns an ArrayBuffer.
-   */
-  function _audioBufferToWav(audioBuffer, targetRate) {
-    var srcRate = audioBuffer.sampleRate;
-    var chans = audioBuffer.numberOfChannels || 1;
-    var srcLen = audioBuffer.length;
-    var mono = new Float32Array(srcLen);
-    for (var c = 0; c < chans; c++) {
-      var data = audioBuffer.getChannelData(c);
-      for (var i = 0; i < srcLen; i++) mono[i] += data[i] / chans;
-    }
-    var rate = targetRate || srcRate;
-    var outLen = Math.max(1, Math.round(srcLen * rate / srcRate));
-    var samples = new Float32Array(outLen);
-    if (outLen === srcLen) {
-      samples.set(mono);
-    } else {
-      var ratio = srcLen / outLen;
-      for (var j = 0; j < outLen; j++) {
-        var pos = j * ratio;
-        var idx = Math.floor(pos);
-        var frac = pos - idx;
-        var a = mono[idx] || 0;
-        var b = mono[idx + 1] != null ? mono[idx + 1] : a;
-        samples[j] = a + (b - a) * frac;
-      }
-    }
-    var bytesPerSample = 2;
-    var blockAlign = bytesPerSample;      // mono
-    var byteRate = rate * blockAlign;
-    var dataSize = samples.length * bytesPerSample;
-    var buffer = new ArrayBuffer(44 + dataSize);
-    var view = new DataView(buffer);
-    var writeStr = function (off, s) { for (var k = 0; k < s.length; k++) view.setUint8(off + k, s.charCodeAt(k)); };
-    writeStr(0, 'RIFF');
-    view.setUint32(4, 36 + dataSize, true);
-    writeStr(8, 'WAVE');
-    writeStr(12, 'fmt ');
-    view.setUint32(16, 16, true);         // fmt chunk size
-    view.setUint16(20, 1, true);          // PCM
-    view.setUint16(22, 1, true);          // mono
-    view.setUint32(24, rate, true);
-    view.setUint32(28, byteRate, true);
-    view.setUint16(32, blockAlign, true);
-    view.setUint16(34, 8 * bytesPerSample, true);
-    writeStr(36, 'data');
-    view.setUint32(40, dataSize, true);
-    var off = 44;
-    for (var m = 0; m < samples.length; m++) {
-      var s = Math.max(-1, Math.min(1, samples[m]));
-      view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-      off += 2;
-    }
-    return buffer;
-  }
-
-  /** POST the recorded blob to the backend and inject the transcript. */
-  async function _transcribe(blob) {
-    _applyState('transcribing');
-    try {
-      var fd = new FormData();
-      // Filename extension drives the backend MIME allow-list.
-      fd.append('file', blob, 'recording.' + _extForType(blob && blob.type));
-      var data = await Api.audio.transcribe(fd);
-      var text = data && data.ok ? (data.text || '') : '';
-      if (!data || !data.ok) {
-        _failToast(_reason(data));
-      } else if (!text.trim()) {
-        _toast('info', 'voice.empty', 'No speech detected');
-      } else {
-        _injectText(text.trim());
-      }
-    } catch (e) {
-      if (typeof console !== 'undefined') console.warn('[Voice] transcribe failed:', e);
-      _failToast(_reason(e));
-    } finally {
-      _applyState('idle');
-    }
-  }
-
-  async function _startRecording() {
-    if (!_browserCanRecord()) {
-      _toast('error', 'voice.noMic', 'Recording is not supported in this browser');
-      return;
-    }
-    try {
-      _stream = await global.navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (e) {
-      if (typeof console !== 'undefined') console.warn('[Voice] getUserMedia denied:', e);
-      _toast('error', 'voice.micDenied', 'Microphone access denied');
-      return;
-    }
-    // Pre-warm the AudioContext now, during the live user gesture, so its
-    // construction cost is not paid on the post-stop critical path before the
-    // transcription POST. Best-effort — recording proceeds even if it fails,
-    // and _encodeToWav will lazily create one if this was skipped.
-    if (_needsTranscode()) _acquireAudioCtx();
-    _chunks = [];
-    try {
-      _recorder = new global.MediaRecorder(_stream);
-    } catch (e) {
-      if (typeof console !== 'undefined') console.warn('[Voice] MediaRecorder failed:', e);
-      _releaseStream();
-      _closeAudioCtx();   // release the just-prewarmed context — no idle transition will run
-      _toast('error', 'voice.noMic', 'Recording is not supported in this browser');
-      return;
-    }
-    _recorder.ondataavailable = function (ev) {
-      if (ev && ev.data && ev.data.size > 0) _chunks.push(ev.data);
-    };
-    _recorder.onstop = function () {
-      _releaseStream();
-      var type = (_recorder && _recorder.mimeType) || 'audio/webm';
-      var blob = new Blob(_chunks, { type: type });
-      _chunks = [];
-      if (blob.size > 0) {
-        _applyState('transcribing');
-        if (_needsTranscode()) {
-          _encodeToWav(blob).then(function (out) { _transcribe(out); });
-        } else {
-          // Every configured slot is an endpoint (Whisper) slot that accepts
-          // webm directly — skip the decode+resample entirely.
-          _transcribe(blob);
-        }
-      } else _applyState('idle');
-    };
-    _recorder.start();
-    _applyState('recording');
-  }
-
-  function _stopRecording() {
-    if (_recorder && _recorder.state !== 'inactive') {
-      try { _recorder.stop(); } catch (e) { _releaseStream(); _applyState('idle'); }
-    } else {
-      _releaseStream();
-      _applyState('idle');
-    }
-  }
-
-  /** Public toggle — wired to the mic button's onclick in index.html. */
-  function toggleVoiceInput() {
-    if (_state === 'transcribing') return;       // busy — ignore clicks
-    if (_state === 'recording') _stopRecording();
-    else _startRecording();
-  }
-
-  /**
-   * Probe backend capability + browser support and show/hide the mic button.
-   * Called once on boot. Fail-closed: any error leaves the button hidden.
-   */
-  async function initVoiceInput() {
-    var btn = _micBtn();
-    if (!btn) return;
-    if (!_browserCanRecord()) { btn.style.display = 'none'; return; }
-    try {
-      var caps = await Api.audio.capabilities();
-      _available = !!(caps && caps.available);
-      _models = (caps && Array.isArray(caps.models)) ? caps.models : [];
-    } catch (e) {
-      if (typeof console !== 'undefined') console.warn('[Voice] capabilities probe failed:', e);
-      _available = false;
-    }
-    btn.style.display = _available ? '' : 'none';
-    if (_available) _applyState('idle');
-  }
-
-  runtimeScope.toggleVoiceInput = toggleVoiceInput;
-  runtimeScope.initVoiceInput = initVoiceInput;
-  // Testability seam (jsdom): expose internals without a behavior change.
-  runtimeScope.Voice = {
-    _applyState: _applyState,
-    _injectText: _injectText,
-    _transcribe: _transcribe,
-    _encodeToWav: _encodeToWav,
-    _needsTranscode: _needsTranscode,
-    _browserCanRecord: _browserCanRecord,
-    get state() { return _state; },
-    get available() { return _available; },
-  };
-})(typeof window !== 'undefined' ? window : this);
-
+/* Voice boot/action bridge. Behavior and disposal live in features/voice-input.
+ * Delete this section when retained boot/action composition migrates. */
+runtimeScope.initVoiceInput = initVoiceInput;
+runtimeScope.toggleVoiceInput = toggleVoiceInput;
+retainedCompositionLifecycle.add(destroyVoiceInput);
 /* ===== migrated source: project_state.js ===== */
 /* project_state.js — the project STATE subset (CORE bundle), split out of
  * project.js 2026-08-01 (Epic-E  sub-7).
@@ -13077,11 +13079,11 @@ function _nativeRegenerateInputOptions(resolved, inputEdit) {
   let inputProjection = inputTurn.projection || {};
   let shouldUpdateInput = false;
   if (inputEdit) {
-    if (inputEdit.images?.length) {
-      inputProjection = {
-        ...inputProjection,
-        images: [...(inputProjection.images || []), ...inputEdit.images],
-      };
+    /* The editor reports the message's images AFTER its edits. Replace rather
+     * than append: a kept image is already in the projection, and removal
+     * would be impossible if the reported list were merged back in. */
+    if (inputEdit.images) {
+      inputProjection = { ...inputProjection, images: [...inputEdit.images] };
     }
     inputProjection = _nativeTurnEditProjection(
       inputProjection, String(inputEdit.content ?? ''),
@@ -13310,6 +13312,12 @@ async function _editNativeTurn(conv, turnId) {
       allowEmpty: hasAttachments,
       canResend: resolved.turn.actor === 'human'
         && Boolean(_nextGeneratedNativeTurn(resolved.state, resolved.turn)),
+      /* Submitted images seed the editor's attachment strip so they stay
+       * visible — and removable — while the message is being edited. */
+      existingImages: (projection.images || []).map((image) => ({
+        payload: image,
+        preview: typeof image?.preview === 'string' ? image.preview : '',
+      })),
       findTurnNode: _findRenderedNativeTurnNode,
       translate: (key) => (typeof t === 'function' ? t(key) : key),
       /* Paste-to-attach inside the edit session: reuse the composer's shared
@@ -13348,8 +13356,10 @@ async function _editNativeTurn(conv, turnId) {
           }
           return false;
         }
-        const nextProjection = images?.length
-          ? { ...projection, images: [...(projection.images || []), ...images] }
+        /* Same replace semantics as resend: the strip is the message's full
+         * image list, so dropped images must disappear from the projection. */
+        const nextProjection = images
+          ? { ...projection, images: [...images] }
           : projection;
         return _commitNativeTurnEdit(conv, turnId, nextProjection, text);
       },
@@ -13786,6 +13796,7 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
       conversationId, turnId,
       commandId: createTurnCommandId,
       text: (key, fallback) => { const value = typeof t === 'function' ? t(key) : ''; return value && value !== key ? value : fallback; },
+      replyInChat: (request) => replyToGuidanceInChat(request),
     });
   },
   inspectToolEffect(reference, signal) {
@@ -13957,6 +13968,7 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
     return finish?.classList.contains('message-finish') ? finish.innerHTML : html;
   },
   renderContextProvenanceHtml,
+  contextProvenanceFacts,
   renderProvenanceBlockHtml(block) {
     const value = block.value || {};
     const passive = { ...value };
@@ -13973,6 +13985,12 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
   resolveMediaUrl(url) {
     return typeof apiUrl === 'function' && String(url || '').startsWith('/')
       ? apiUrl(url) : String(url || '');
+  },
+  /* Rich-response figures own their bitmap as an object URL, so they cannot
+   * reach the Markdown lightbox through source markup. Same opener, same
+   * zoom behavior. */
+  previewImage(source) {
+    if (typeof openImagePreview === 'function') openImagePreview(source);
   },
   localizedText(key, fallback, values) {
     const localizedValues = values && typeof values === 'object'
@@ -14187,15 +14205,7 @@ const _conversationSurfaceController = createConversationSurfaceController({
   getContainer() {
     return document.getElementById('chatInner');
   },
-  schedule(render) {
-    if (typeof requestAnimationFrame === 'function') {
-      const handle = requestAnimationFrame(render);
-      return () => cancelAnimationFrame(handle);
-    }
-    let cancelled = false;
-    queueMicrotask(() => { if (!cancelled) render(); });
-    return () => { cancelled = true; };
-  },
+  schedule: createAnimationFrameScheduler(globalThis).schedule,
   nativeRenderers: {
     ..._nativeTurnRenderers,
     renderPlanDecision(node, decision, context) {
@@ -14481,12 +14491,18 @@ const _conversationSurfaceController = createConversationSurfaceController({
       runtimeScope.ConversationTurnRead.ordered(conv),
       mountedTurnIds)) renderConversationList();
     runtimeScope.renderBackgroundAgents?.();
-    renderComposerModelNotice(document.getElementById('composerModelNotice'), viewModel, {
-      localizedText: (key, fallback, values) => {
-        const label = t(key, values);
-        return label && label !== key ? label : undefined;
-      },
-    });
+    /* A cold selection commits its empty state before the snapshot lands.
+     * Its served model is still unknown there, so the notice the selection
+     * held keeps the composer still until a commit with Turns replaces it. */
+    const awaitingSnapshot = conv._turnSnapshotRequired && !viewModel?.mainLane?.turns?.length;
+    if (!awaitingSnapshot) {
+      renderComposerModelNotice(document.getElementById('composerModelNotice'), viewModel, {
+        localizedText: (key, fallback, values) => {
+          const label = t(key, values);
+          return label && label !== key ? label : undefined;
+        },
+      });
+    }
 
     runtimeScope.ConversationTurnStore?.notifyRenderedState?.(
       conv.id, state,
@@ -14508,6 +14524,9 @@ const _conversationTransientTurnOverlay = createTransientTurnOverlay();
 runtimeScope.ConversationSurfacePresentation = Object.freeze({
   activateConversation(conversationId) {
     _turnReviewPresentation.activate(conversationId || null);
+  },
+  isMounted(conversationId) {
+    return _conversationSurfaceController.isMounted(conversationId);
   },
   ownsConversation(conversationId) {
     return _conversationSurfaceController.ownsConversation(conversationId);
@@ -14574,6 +14593,11 @@ const _backgroundActivityEvidenceChanged = createBackgroundActivityEvidenceObser
 function _renderConversationSurfaceState(conv, state, repaint) {
 
   if (_backgroundActivityEvidenceChanged(state)) runtimeScope.refreshBackgroundActivity?.();
+  if (conv && !conv._localOnly) {
+    runtimeScope.CompactionHistoryState?.observe?.(
+      conv.id, conversationCompactionArchiveIds(state),
+    );
+  }
   const transientState = _conversationTransientTurnOverlay.compose(state);
   const presentationState = runtimeScope.ConversationSwarmPresentation?.compose?.(
     conv, state, transientState,
@@ -14709,9 +14733,9 @@ runtimeScope.requestAuthoritativeConversationRender = function (
       return typeof activeConvId !== 'undefined' && activeConvId === conv.id
         && !_conversationSurfaceController.ownsConversation(conv.id);
     },
-    applySettings(conv, settings) {
+    applySettings(conv, settings, projection) {
       const previousPaper = JSON.stringify(conv.paperDocument || null);
-      if (typeof _applySettingsToConv === 'function') _applySettingsToConv(conv, settings);
+      if (typeof _applySettingsToConv === 'function') _applySettingsToConv(conv, settings, projection);
       if (activeConvId === conv.id && previousPaper !== JSON.stringify(conv.paperDocument || null)) {
         runtimeScope._paperPreviewDiscover(conv.id);
       }
@@ -14785,9 +14809,7 @@ runtimeScope.requestAuthoritativeConversationRender = function (
       console.warn('[ConversationSync] snapshot recovery failed for turn',
                    turnId, error?.message || error);
     },
-    onHealth(conversationId, health) {
-      const conv = conversations.find(item => item?.id === conversationId);
-      if (conv) conv._conversationSyncHealth = health;
+    onHealth(conversationId) {
       if (typeof renderConversationList === 'function') renderConversationList();
       if (conversationId === activeConvId) {
         runtimeScope.requestAuthoritativeConversationRender?.(
@@ -14983,7 +15005,7 @@ function loadConversation(id) {
   runtimeScope.ConversationSurfacePresentation?.activateConversation?.(id);
 
   composerTranslationStatus.refresh();
-  renderComposerModelNotice(document.getElementById('composerModelNotice'), null);
+  holdComposerModelNotice(document.getElementById('composerModelNotice'));
   const draftOwner = getActiveConv();
   if (draftOwner?._unsentComposerDraft) {
     const draft = draftOwner._unsentComposerDraft;
@@ -15048,6 +15070,9 @@ function loadConversation(id) {
         c._turnSnapshotRequired = true;
         console.error('[loadConversation] authoritative hydration failed:',
                       error?.message || error);
+        if (activeConvId === id) {
+          renderComposerModelNotice(document.getElementById('composerModelNotice'), null);
+        }
         if (activeConvId === id && typeof showToast === 'function') {
           showToast(_conversationLoadFailureText(error), 'error');
         }
@@ -15237,6 +15262,75 @@ function _showUndoDeleteToast(deletedConv, origIndex, wasActive) {
 // ══════════════════════════════════════════════════════
 // Duplicate (copy) a conversation as a completely independent new conversation
 // ══════════════════════════════════════════════════════
+/**
+ * Pick the message that names the actual clone failure.
+ *
+ * The clone route reports a live source as 409 `conversation_active` and a
+ * storage refusal as 503 whose problem detail carries the storage code. One
+ * generic "unavailable or still generating" line was shown for all of them,
+ * so a storage or size failure sent the user waiting for a generation that
+ * had already finished.
+ */
+function _conversationCloneFailureKey(error) {
+  const status = Number(error && error.status) || 0;
+  const detail = String(
+    (error && error.problem && error.problem.detail)
+    || (error && error.body && error.body.detail)
+    || '',
+  );
+  if (status === 404) return 'convLifecycle.copyFailedMissing';
+  if (status === 409) {
+    return detail === 'conversation_active'
+      ? 'convLifecycle.copyFailedGenerating'
+      : 'convLifecycle.copyFailedBody';
+  }
+  if (status === 502 || status === 503 || status === 504
+      || detail.startsWith('database_')) {
+    return 'convLifecycle.copyFailedStorage';
+  }
+  return 'convLifecycle.copyFailedBody';
+}
+
+/**
+ * Save the complete transcript as a Markdown file.
+ *
+ * This is the recovery path when the atomic clone cannot produce a copy: the
+ * clone is one bounded transaction, while an export is a read the user can
+ * always keep. It is deliberately not a silent fallback inside the copy path —
+ * a copy must copy or say why it could not.
+ */
+async function _downloadConversationTranscript(id) {
+  const conv = conversations.find((item) => item.id === id);
+  const label = (conv && conv.title) || id;
+  try {
+    if (typeof Api === 'undefined' || !Api.conversations
+        || typeof Api.conversations.exportMarkdown !== 'function') {
+      throw new Error('transcript export is unavailable in this client');
+    }
+    const text = await Api.conversations.exportMarkdown(id);
+    if (typeof text !== 'string' || !text) {
+      throw new Error('the server returned an empty transcript');
+    }
+    const slug = String(label).replace(/[^\w\u4e00-\u9fff.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${slug || id}.md`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 500);
+    if (typeof showToast === "function") {
+      showToast("", t('convLifecycle.exported'), t('convLifecycle.exportedBody', { title: label }), 3000);
+    }
+  } catch (error) {
+    debugLog(`[exportConv] transcript export failed: ${error?.message || error}`, 'warn');
+    if (typeof showToast === "function") {
+      showToast("", t('convLifecycle.exportFailed'), t('convLifecycle.exportFailedBody'), 4000);
+    }
+  }
+}
+
 const _conversationCloneFlights = new Set();
 async function duplicateConversation(id, e) {
   if (e && e.stopPropagation) e.stopPropagation();
@@ -15272,7 +15366,10 @@ async function duplicateConversation(id, e) {
   } catch (error) {
     debugLog(`[duplicateConv] authoritative clone failed: ${error?.message || error}`, 'warn');
     if (typeof showToast === "function") {
-      showToast("", t('convLifecycle.copyFailed'), t('convLifecycle.copyFailedBody'), 4000);
+      // The failure text names what happened; the export hint is the way out.
+      // A copy the server cannot make is still a conversation the user can keep.
+      const message = t(_conversationCloneFailureKey(error));
+      showToast("", t('convLifecycle.copyFailed'), `${message} ${t('convLifecycle.copyFailedExportHint')}`, 6000);
     }
   } finally {
     _conversationCloneFlights.delete(id);
@@ -15535,7 +15632,7 @@ async function _buildConvSettings(conv) {
   );
 }
 
-async function _buildConvSubmission(conv, workspace = captureConversationProject(conv)) {
+async function _buildConvSubmission(conv, workspace = captureConversationProject(conv), options = {}) {
   // Freeze roots for this command, not a later project choice during parsing.
   const submissionConv = { ...conv, ...workspace };
   const configInputs = _buildConvConfigInputs(submissionConv);
@@ -15544,6 +15641,7 @@ async function _buildConvSubmission(conv, workspace = captureConversationProject
   return _conversationSettingsResolution.resolveSubmission(
     configInputs,
     _buildConvSettingsInputs(submissionConv, configInputs.overrides),
+    options,
   );
 }
 /* ===== migrated source: main/main_send_pipeline.js ===== */
@@ -15567,6 +15665,10 @@ async function _buildConvSubmission(conv, workspace = captureConversationProject
  * @returns {Promise<'steer'|'queue'|'cancel'>}
  */
 async function _promptInjectMode(convId) {
+  /* Talking to a bound Coordinator (a project's, the Global Router or the
+   * Watchdog) is chat: steer into its live reply without asking (the server
+   * queues the message once that window closed). */
+  if (runtimeScope.isCoordinatorConversation?.(convId)) return 'steer';
   if (typeof showChoice !== 'function') return 'cancel';
   const _tt = (k, d) => (typeof t === 'function' ? (t(k) !== k ? t(k) : d) : d);
   // Inline SVGs (§3.4 — no emoji). steer = pen-to-line (interject into the
@@ -15954,6 +16056,14 @@ async function _submitComposerDraft() {
     await awaitSendPreparation(_waitForImageProcessing(), t('send.preparationTimeout'));
   }
   if (activeConvId !== selectionBeforePreparation) return;
+  // The project roots are captured below; an archive mounts its root only
+  // after its upload, so let it settle first.
+  if (pendingPdfTexts.some((entry) => entry?._archive && entry.method === 'parsing')
+      && typeof _waitForPendingArchives === 'function') {
+    await awaitSendPreparation(_waitForPendingArchives(), t('send.preparationTimeout'),
+      undefined, 2 * 60 * 1000);
+  }
+  if (activeConvId !== selectionBeforePreparation) return;
   const finalText = input.value.trim();
   if (!finalText && pendingImages.length === 0 && pendingPdfTexts.length === 0
       && pendingVideos.length === 0) {
@@ -16090,7 +16200,11 @@ async function _submitComposerDraft() {
   if (msgPayload.videos) draftProjection.videos = msgPayload.videos;
   if (turnContext) draftProjection._ctx = turnContext;
 
-  const sendStart = createSendStartupLease(conv, { timeoutMs: 90000 });
+  /* The lease is only the stop button's cancellation scope. Deadlines belong
+   * to each attempt inside retryTransientSendStartup: a whole-send timer
+   * shorter than the resolver's own recovery window abandoned sends that
+   * were about to succeed and made the user resend by hand. */
+  const sendStart = createSendStartupLease(conv, { timeoutMs: 0 });
   let willTranslate = false;
 
   let translationWait = null;
@@ -16137,6 +16251,11 @@ async function _submitComposerDraft() {
       _renderTranslatingBubble(label);
     }
   };
+  const announceAutomaticRetry = ({ retry, error }) => {
+    debugLog('Send retry #' + retry + ' after a transient failure: '
+      + (error?.message || String(error)), 'warn');
+    showSendPreparation('connecting', t('send.retrying', { n: retry }));
+  };
   showOptimisticEcho(injectMode);
   if (activeConvId === convId) {
     const welcome = document.getElementById('welcome');
@@ -16150,16 +16269,46 @@ async function _submitComposerDraft() {
     await _waitForVlmParsing(draftProjection, convId, sendStart.signal);
     if (sendStart.signal.aborted) throw _sendAbortError();
     if (draftProjection.pdfTexts) {
-      msgPayload.pdfTexts = draftProjection.pdfTexts;
+      /* A document still uploading at capture settled during the wait. One
+       * that now has a server reference joins the attachment lane (the same
+       * rule as capture); one that failed or never finished is dropped rather
+       * than reaching the model as an empty document. */
+      const settledReferences = draftProjection.pdfTexts.filter(
+        (documentAttachment) => documentAttachment?.attachmentId,
+      );
+      const legacy = draftProjection.pdfTexts.filter(
+        (documentAttachment) => documentAttachment
+          && !documentAttachment.attachmentId
+          && documentAttachment.method !== 'failed'
+          && documentAttachment.method !== 'parsing',
+      );
+      if (settledReferences.length > 0) {
+        msgPayload.attachments = [
+          ...(msgPayload.attachments || []),
+          ...settledReferences.map((documentAttachment) =>
+            typeof _documentPayloadForSend === 'function'
+              ? _documentPayloadForSend(documentAttachment) : documentAttachment),
+        ];
+      }
+      if (legacy.length > 0) msgPayload.pdfTexts = legacy;
+      else delete msgPayload.pdfTexts;
+      if (legacy.length + settledReferences.length < draftProjection.pdfTexts.length) {
+        const skipped = t('upload.documentSkipped');
+        if (typeof showToast === 'function') showToast(skipped, 'warning');
+        else debugLog(skipped, 'warn');
+      }
     }
 
     const {
       config: sendConfig,
       settings: sendSettings,
-    } = await awaitSendPreparation(_buildConvSubmission(conv, {
-      ...projectAtSend, folderId: folderAtSend,
-    }),
-      t('send.preparationTimeout'), sendStart.signal);
+    } = await retryTransientSendStartup({
+      signal: sendStart.signal,
+      run: (signal) => _buildConvSubmission(conv, {
+        ...projectAtSend, folderId: folderAtSend,
+      }, { signal }),
+      onRetry: announceAutomaticRetry,
+    });
     draft.submittedModelId = sendConfig.model;
     sendConfig.assistantMsgId = (typeof _newClientMsgId === 'function')
       ? _newClientMsgId()
@@ -16190,16 +16339,21 @@ async function _submitComposerDraft() {
     let acknowledgement;
     let selectedInjectMode = injectMode;
     for (let submissionAttempt = 0; submissionAttempt < 2; submissionAttempt += 1) {
-      const turnExtra = buildTurnSubmissionExtra({
-        commandId: draft.commandId,
-        settings: sendSettings,
-        config: sendConfig,
-        signal: sendStart.signal,
-        injectMode: selectedInjectMode,
-      });
       try {
-        acknowledgement = await runtimeScope.ConversationTurnStore
-          .submitConversation(conv, msgPayload, sendConfig, turnExtra);
+        /* Every repeat sends the same frozen request and command identity,
+         * so a commit whose ACK was lost replays instead of duplicating. */
+        acknowledgement = await retryTransientSendStartup({
+          signal: sendStart.signal,
+          run: (signal) => runtimeScope.ConversationTurnStore.submitConversation(
+            conv, msgPayload, sendConfig, buildTurnSubmissionExtra({
+              commandId: draft.commandId,
+              settings: sendSettings,
+              config: sendConfig,
+              signal,
+              injectMode: selectedInjectMode,
+            })),
+          onRetry: announceAutomaticRetry,
+        });
         break;
       } catch (submissionError) {
         if (submissionAttempt > 0 || selectedInjectMode
@@ -16364,8 +16518,9 @@ async function _submitComposerDraft() {
     updateSendButton();
   }
   /* The outer serializer may drain one send intent received while this
-   * command was in flight. A user stop or uncertain/non-committed failure is
-   * a hard boundary: leave the restored draft for an explicit retry. */
+   * command was in flight. Transient failures never reach this point; a user
+   * stop or definitive failure is a hard boundary that leaves the restored
+   * draft with the user. */
   return accepted && !userStopped;
 }
 
@@ -16655,20 +16810,21 @@ if (typeof window !== 'undefined') runtimeScope.onProjectCleared = onProjectClea
 
 
 // ══════════════════════════════════════════════════════
-// Agent interaction mode — Standard / Plan / Autopilot
+// Agent interaction mode — Standard / Delegate / Plan / Autopilot
 //
-// One radio surface projects the established planMode / autopilotEnabled
+// One radio surface projects the planMode / autopilotEnabled / delegateMode
 // wire flags. Optional project attachment is a separate workspace action.
 // ══════════════════════════════════════════════════════
 
 const _AGENT_MODE_LABEL_KEYS = Object.freeze({
   standard: 'toolbar.standardMode',
+  delegate: 'toolbar.delegateMode',
   plan: 'toolbar.planMode',
   autopilot: 'toolbar.autopilot',
 });
 
 function _paintAgentModeUI() {
-  const mode = resolveAgentMode(planMode, autopilotEnabled);
+  const mode = resolveAgentMode(planMode, autopilotEnabled, delegateMode);
   const workflowSelected = !!activeFlow;
   const trigger = document.getElementById('agentModeToggle');
   if (trigger) {
@@ -16700,6 +16856,7 @@ function _applyAgentModeUI(mode) {
   const flags = agentModeFlags(mode);
   planMode = flags.planMode;
   autopilotEnabled = flags.autopilotEnabled;
+  delegateMode = flags.delegateMode;
   const autopilotBadge = document.getElementById('autopilotBadge');
   if (autopilotBadge) autopilotBadge.style.display = autopilotEnabled ? '' : 'none';
   _paintAgentModeUI();
@@ -16710,7 +16867,7 @@ if (typeof window !== 'undefined') runtimeScope._applyAgentModeUI = _applyAgentM
  * setAgentMode(), which also owns persistence and Autopilot disarm. */
 function _applyPlanModeUI(on) {
   _applyAgentModeUI(on ? 'plan'
-    : resolveAgentMode(false, autopilotEnabled));
+    : resolveAgentMode(false, autopilotEnabled, delegateMode));
 }
 if (typeof window !== 'undefined') runtimeScope._applyPlanModeUI = _applyPlanModeUI;
 
@@ -16733,10 +16890,15 @@ if (typeof window !== 'undefined') {
 function _setAgentModeLocked(on) {
   const locked = !!on;
   const trigger = document.getElementById('agentModeToggle');
+  /* Every projected Turn change re-applies the lock, several times a second
+   * while a reply streams; an unchanged state never rewrites an attribute. */
+  const ariaDisabled = locked ? 'true' : 'false';
   [trigger, document.getElementById('flowToggle')].forEach((control) => {
     if (!control) return;
-    control.disabled = locked;
-    control.setAttribute('aria-disabled', locked ? 'true' : 'false');
+    if (control.disabled !== locked) control.disabled = locked;
+    if (control.getAttribute('aria-disabled') !== ariaDisabled) {
+      control.setAttribute('aria-disabled', ariaDisabled);
+    }
   });
   /* A disabled trigger swallows the click outright — swap the tooltip so the
    * locked state explains itself instead of reading as a dead button. Ride
@@ -16745,19 +16907,25 @@ function _setAgentModeLocked(on) {
   if (trigger) {
     const titleKey = locked
       ? 'toolbar.agentModeLockedTooltip' : 'toolbar.agentModeTooltip';
-    trigger.setAttribute('data-i18n-title', titleKey);
-    if (typeof t === 'function') trigger.title = t(titleKey);
+    if (trigger.getAttribute('data-i18n-title') !== titleKey) {
+      trigger.setAttribute('data-i18n-title', titleKey);
+    }
+    const title = typeof t === 'function' ? t(titleKey) : trigger.title;
+    if (trigger.title !== title) trigger.title = title;
   }
   document.querySelectorAll(
     '#agentModeMenu button, .mobile-agent-mode-item, #mobileFlow, '
       + '#flowMenuList button',
   )
-    .forEach((item) => { item.disabled = locked; });
+    .forEach((item) => { if (item.disabled !== locked) item.disabled = locked; });
   if (locked) {
     const submenu = document.getElementById('submenuAgentMode');
-    submenu?.classList.remove('open');
-    submenu?.querySelector('.submenu-trigger')?.classList.remove('open');
-    trigger?.setAttribute('aria-expanded', 'false');
+    const submenuTrigger = submenu?.querySelector('.submenu-trigger');
+    if (submenu?.classList.contains('open')) submenu.classList.remove('open');
+    if (submenuTrigger?.classList.contains('open')) submenuTrigger.classList.remove('open');
+    if (trigger && trigger.getAttribute('aria-expanded') !== 'false') {
+      trigger.setAttribute('aria-expanded', 'false');
+    }
     _flowMenuRenderGeneration++;
   }
 }
@@ -16866,10 +17034,16 @@ function _loadServerConfigAndPopulate() {
 function _refreshServerConfigAfterSave() {
   return _modelPickerStartup.refreshConfig();
 }
+/* Temporary bridge while Settings and composer still share the retained
+ * shell. Remove with that shell; projection/lifecycle stay in the typed owner. */
+function _adoptModelRoutingResponse(response) {
+  return _modelPickerStartup.adoptRouting(response);
+}
 let _modelPickerLastRouting = null;
 const _modelPickerStartup = createModelPickerStartup({
   loadConfig: signal => Api.serverConfig.get({ signal, timeout: 15000 }),
   loadRouting: signal => Api.modelRouting.get({ signal, timeout: 15000 }),
+  routingRevision: response => response?.revision ?? response?.model_routing?.revision,
   onBootReady: callback => {
     window.addEventListener('tofu:boot-ready', callback);
     return () => window.removeEventListener('tofu:boot-ready', callback);
@@ -16969,6 +17143,8 @@ const _modelPickerStartup = createModelPickerStartup({
 
         if (!routingDocument) throw new Error('Model routing unavailable');
         _modelPickerLastRouting = routingDocument;
+        // Accepted routing is a wake hint; the audio API owns callability.
+        void audioCapabilities.routingAccepted(routingResponse.revision ?? routingDocument.revision);
         _reasoningControls = Array.isArray(routingResponse?.reasoning_controls)
           ? routingResponse.reasoning_controls : undefined;
         const v2Models = _modelRoutingDropdownModels(
@@ -17234,17 +17410,18 @@ function updateSubmenuCounts() {
   _applyImageGenAvailability();
 
   // Extras drawer count = every orthogonal capability the user turned on.
-  // (Scheduler + Swarm are default tools — no toggles — so they don't count.)
+  // (Scheduler, Swarm and Browser are default tools — no toggles — so they
+  // don't count.)
   const extrasCount = (autoTranslate ? 1 : 0) + (humanGuidanceEnabled ? 1 : 0)
-    + (browserEnabled ? 1 : 0) + (desktopEnabled ? 1 : 0)
-    + (imageGenEnabled ? 1 : 0);
+    + (desktopEnabled ? 1 : 0) + (imageGenEnabled ? 1 : 0);
   _setCount(document.getElementById("submenuExtrasCount"), extrasCount);
   const extrasTrigger = document.querySelector("#submenuExtras .submenu-trigger");
   if (extrasTrigger) extrasTrigger.classList.toggle("has-active", extrasCount > 0);
 
   /* Browser + desktop share ONE merged row (#localControlToggle); its summary
-   * badge counts both. Repaint here so the row reflects state restored from a
-   * conversation, not just state changed through the modal's switches. */
+   * badge counts the desktop switch (the browser has none). Repaint here so
+   * the row reflects state restored from a conversation, not just state
+   * changed through the modal's switch. */
   if (typeof _lcUpdateBadge === "function") _lcUpdateBadge();
 
   /* A pill appeared/disappeared → toolbar's intrinsic width shifted by the
@@ -17735,6 +17912,9 @@ function _folderSettingsPorts(assignConvId) {
       return folder;
     },
     browse: (path, showHidden, signal) => Api.project.browse(path, showHidden, { onError: 'throw', signal }),
+    mkdir: (parent, name) => Api.project.mkdir(parent, name),
+    rmdir: path => Api.project.rmdir(path),
+    browseStorage: () => window.sessionStorage,
     recent: () => Api.project.recentList(),
     remove: async id => {
       const result = await deleteFolder(id);
@@ -18038,7 +18218,7 @@ function closeMobileSheet() {
 function updateMobileSheet() {
   paintOptionalProjectAttachment(document, t);
 
-  const agentMode = resolveAgentMode(planMode, autopilotEnabled);
+  const agentMode = resolveAgentMode(planMode, autopilotEnabled, delegateMode);
   document.querySelectorAll('.mobile-agent-mode-item').forEach((item) => {
     const selected = !activeFlow && item.dataset.mode === agentMode;
     item.classList.toggle('active', selected);
@@ -18101,16 +18281,17 @@ function updateMobileContext() {
   const summary = (typeof runtimeScope.contextUsageSummary === "function")
     ? runtimeScope.contextUsageSummary() : null;
 
-  /* "Compact now" — disabled while a task is live (can't rewrite mid-turn). */
+  /* "Compact now" — while a task is live the server schedules it for the
+   * running reply's next model call instead of rewriting mid-turn. */
   const compactItem = document.getElementById("mobileCompactNow");
   const desc = document.getElementById("mobileCompactDesc");
   const busy = Boolean(conv && typeof convIsBusy === 'function' && convIsBusy(conv));
   if (compactItem) {
-    compactItem.classList.toggle("disabled", busy || !conv);
+    compactItem.classList.toggle("disabled", !conv);
     if (desc) {
       if (busy) {
         desc.textContent = (typeof t === "function")
-          ? t("compactNow.busy") : "A task is running — cannot compact";
+          ? t("compactNow.schedule") : "Compact at the next model call";
       } else if (summary && summary.hasUsage) {
         /* Show the live percentage so the user sees WHY they'd compact. */
         desc.textContent = (typeof t === "function")
@@ -18508,6 +18689,10 @@ function selectTheme(theme) {
   applyTheme(theme);
 }
 
+function _syncRangeOutput(input, outputId, suffix) {
+  const output = document.getElementById(outputId);
+  if (output) output.textContent = String(input && input.value || '') + String(suffix || '');
+}
 
 /* Cost dashboard aliases — moved to myday.js */
 
@@ -19267,18 +19452,7 @@ function _applyCodeExecUI(enabled) {
     ?.classList.toggle("visible", codeExecEnabled);
 }
 function _applyBrowserUI(enabled) {
-  browserEnabled = !!enabled;
-  document
-    .getElementById("browserToggle")
-    ?.classList.toggle("active", browserEnabled);
-  const badge = document.getElementById("browserBadge");
-  if (badge) {
-    badge.classList.toggle("visible", browserEnabled);
-  }
-  /* The browser bridge now shares ONE toolbar entry with the desktop agent
-   * (#localControlToggle). Its summary badge counts both capabilities, so it
-   * is repainted here rather than toggled per-flag. */
-  if (typeof _lcUpdateBadge === "function") _lcUpdateBadge();
+  browserEnabled = true; // always on — no longer toggleable
 }
 function _applyMemoryUI(enabled) {
   memoryEnabled = !!enabled;
@@ -19398,6 +19572,7 @@ function captureActiveConversationSettings() {
   conv.humanGuidanceEnabled = !!humanGuidanceEnabled;
   conv.chatMode = chatMode || 'chat';
   conv.planMode = !!planMode;
+  conv.delegateMode = !!delegateMode;
   /* Tool/settings capture is not a project selection. A draft may deliberately
    * carry a different composer project across conversation navigation. */
   /* Do not overwrite autoTranslate on a conversation with an active Turn.
@@ -19469,7 +19644,7 @@ function restoreConversationSettingsToComposer(conv, modelEligible) {
   _applySearchModeUI(conv.searchMode || "multi");
   _applyFetchEnabledUI(true);  // always on
   _applyCodeExecUI(!!conv.codeExecEnabled);
-  _applyBrowserUI(!!conv.browserEnabled);
+  _applyBrowserUI(true);  // always on
   _applyDesktopUI(!!conv.desktopEnabled);
   _applyMemoryUI(conv.memoryEnabled !== undefined ? !!conv.memoryEnabled : true);
   _applyAgentModeUI(_restoredInteraction.agentMode);
@@ -19535,7 +19710,7 @@ function _resetToolsToDefaults() {
   _applySearchModeUI("multi");
   _applyFetchEnabledUI(true);
   _applyCodeExecUI(false);
-  _applyBrowserUI(false);
+  _applyBrowserUI(true);
   /* Desktop was the ONE tool flag this function never reset, so a new chat
    * silently inherited computer control from whatever conversation came
    * before — `restoreConversationSettingsToComposer` sets it per conversation,
@@ -19679,12 +19854,6 @@ function _startBuildWatch() {
     .getElementById("codeExecBadge")
     ?.classList.toggle("visible", codeExecEnabled);
   document
-    .getElementById("browserToggle")
-    ?.classList.toggle("active", browserEnabled);
-  document
-    .getElementById("browserBadge")
-    ?.classList.toggle("visible", browserEnabled);
-  document
     .getElementById("memoryToggle")
     ?.classList.toggle("active", memoryEnabled);
   document
@@ -19706,8 +19875,10 @@ function _startBuildWatch() {
     },
     initializeFolders: () => { _initFolderDragDrop(); _initFolderTabs(); },
     sidebar: {
-      activate: loadConversation, copy: _safeClipboardWrite,
+      activate: (id, turn) => (turn ? openConversationAtTurn(id, turn) : loadConversation(id)),
+      copy: _safeClipboardWrite,
       duplicate: duplicateConversation, delete: deleteConversation,
+      exportTranscript: (id) => _downloadConversationTranscript(id),
       rename: _promptRenameConversation, reference: addConvRef, assignFolder: _showFolderPicker,
       reportFailure: reportInteractionFailure,
     },
@@ -20015,6 +20186,11 @@ function _startBuildWatch() {
     if (b) b.remove();
   }
 
+  runtimeScope.conversationCatalogAvailability = createConversationCatalogAvailability({
+    show: _showBootReconnectBanner,
+    clear: _clearBootReconnectBanner,
+  });
+
   async function _bootReconnectWithBackoff() {
     /* Idempotent: the boot promise's .then(!ok) and .catch both call this, and
      *   though a promise settles once (so a single boot can't double-fire), we
@@ -20026,7 +20202,7 @@ function _startBuildWatch() {
       return;
     }
     runtimeScope._bootReconnectStarted = true;
-    _showBootReconnectBanner();
+    runtimeScope.conversationCatalogAvailability?.retryStarted();
     const _delays = [2000, 4000, 8000, 15000, 30000];
     try {
       for (let i = 0; i < _delays.length; i++) {
@@ -20049,7 +20225,6 @@ function _startBuildWatch() {
           /* The call swallows errors + resolves, so success is the observable
            *   flag, not the absence of a throw. */
           if (typeof serverLoadOk !== 'function' || serverLoadOk()) {
-            _clearBootReconnectBanner();
             /* Converge folders immediately when the catalog reconnects instead
              *   of waiting for the folder owner's bounded retry timer. The
              *   single-flight loader shares this request with any retry/push
@@ -20338,11 +20513,10 @@ function loadCompactionHistory(conversationId) {
     return [...(runtimeScope.getCompactionHistory?.(conv.id) || [])];
   }
 
+  /* Listed archive count, or null while no listing has settled. */
   function _countCompactions(conv) {
-    if (!conv) return 0;
-    const count = runtimeScope.CompactionHistoryState?.count?.(conv.id);
-    return Number.isFinite(count)
-      ? Math.max(0, count) : _collectCompactions(conv).length;
+    const count = conv ? runtimeScope.CompactionHistoryState?.count?.(conv.id) : null;
+    return Number.isFinite(count) ? Math.max(0, count) : null;
   }
 
   let _state = null;
@@ -20350,6 +20524,14 @@ function loadCompactionHistory(conversationId) {
   // One manual request per page. It may finish offscreen, but only its own
   // conversation can display progress; repeated clicks never duplicate POSTs.
   let _manualCompactionId = null;
+  // Protected or busy conversations answer with a server-held working-view
+  // request; at most one cancellation is in flight per page.
+  const _scheduledCompactions = createScheduledCompactions();
+  let _cancellingCompactionId = null;
+
+  function _turnCount(conv) {
+    return conv ? (runtimeScope.ConversationTurnRead?.ordered?.(conv) || []).length : 0;
+  }
 
   function _tt(key, fallback, vars) {
     return (typeof t === 'function') ? t(key, vars) : fallback;
@@ -20361,9 +20543,16 @@ function loadCompactionHistory(conversationId) {
 
   function _meterSnapshot() {
     const conv = _activeConv();
+    const busy = _convHasLiveTask(conv);
+    const convId = conv ? conv.id : null;
+    const scheduled = _scheduledCompactions.pending(convId, { busy, turns: _turnCount(conv) });
+    const request = scheduled ? _scheduledCompactions.current(convId) : null;
     return Object.assign({}, contextUsageSummary(), {
-      convId: conv ? conv.id : null,
-      busy: _convHasLiveTask(conv),
+      convId,
+      busy,
+      compactionScheduled: scheduled,
+      compactionAppliesAt: request ? request.appliesAt : null,
+      compactionCancelPending: !!convId && _cancellingCompactionId === convId,
 
       compacting: !!_manualCompactionId && _manualCompactionId === conv?.id,
       compactionPending: !!_manualCompactionId,
@@ -20381,6 +20570,7 @@ function loadCompactionHistory(conversationId) {
       translate: _tt,
       read: _meterSnapshot,
       onCompact: _runManualCompaction,
+      onCancelScheduled: _cancelScheduledCompaction,
       onHistory: (convId) => runtimeScope.openCompactionViewer?.(convId),
       workingFacts: {
         load: (id, signal) => Api.conversations.workingFacts(id, signal),
@@ -20421,13 +20611,8 @@ function loadCompactionHistory(conversationId) {
    * "正在压缩" and "无需压缩" can never appear together. */
   async function _runManualCompaction(convId) {
     if (!convId || _manualCompactionId) return;
-    const conv = getConvById(convId);
-    if (conv && _convHasLiveTask(conv)) {
-      if (typeof showToast === 'function') {
-        showToast(_tt('compactNow.busy', '任务进行中，无法压缩'), 'warning');
-      }
-      return;
-    }
+    /* A running task never blocks the request: the server schedules a
+     * working-view compaction for its next model call instead. */
 
     /* Resolve to a single {msg, level} terminal outcome, THEN toast once. */
     let outcome = null;
@@ -20449,9 +20634,7 @@ function loadCompactionHistory(conversationId) {
         res = await Api.compactions.compactNow(convId, {});
       } catch (err) {
         const code = err && err.code;
-        if (code === 'task_active') {
-          outcome = { msg: _tt('compactNow.busy', '任务进行中，无法压缩'), level: 'warning' };
-        } else if (code === 'nothing_to_compact') {
+        if (code === 'nothing_to_compact') {
           // Not a failure — a neutral, informative note (context already lean).
           outcome = { msg: _tt('compactNow.nothing', '上下文已很精简，暂无需压缩'), level: 'info' };
         } else {
@@ -20464,11 +20647,19 @@ function loadCompactionHistory(conversationId) {
         const code = res && res.code;
         if (code === 'nothing_to_compact') {
           outcome = { msg: _tt('compactNow.nothing', '上下文已很精简，暂无需压缩'), level: 'info' };
-        } else if (code === 'task_active') {
-          outcome = { msg: _tt('compactNow.busy', '任务进行中，无法压缩'), level: 'warning' };
         } else {
           outcome = { msg: _tt('compactNow.failed', '压缩失败'), level: 'error' };
         }
+        return;
+      }
+
+      /* Scheduled (protected or busy conversation): nothing was rewritten,
+       * so there is nothing to reload; a model call compacts the working view. */
+      const scheduledConv = getConvById(convId);
+      const scheduled = _scheduledCompactions.accept(convId, res, {
+        busy: _convHasLiveTask(scheduledConv), turns: _turnCount(scheduledConv) });
+      if (scheduled) {
+        outcome = { msg: scheduledCompactionNotice(scheduled, _tt), level: 'info' };
         return;
       }
 
@@ -20518,6 +20709,30 @@ function loadCompactionHistory(conversationId) {
       if (outcome && typeof showToast === 'function') {
         showToast(outcome.msg, outcome.level);
       }
+    }
+  }
+
+  /* Withdraw the acknowledged scheduled request; one terminal toast. */
+  async function _cancelScheduledCompaction(convId) {
+    const request = _scheduledCompactions.current(convId);
+    if (!convId || !request || _cancellingCompactionId) return;
+    _cancellingCompactionId = convId;
+    _doUpdate();
+    let outcome = null;
+    try {
+      const result = readCancelledCompaction(
+        await Api.compactions.cancelScheduled(convId, request.requestId));
+      if (!result) throw new Error('Malformed cancellation reply');
+      _scheduledCompactions.forget(convId);
+      outcome = cancelledCompactionNotice(result, _tt);
+    } catch (err) {
+      console.warn('[compactNow] cancel failed', err);
+      outcome = { msg: _tt('compactNow.cancelFailed', 'Could not cancel the scheduled compaction'),
+                  level: 'error' };
+    } finally {
+      _cancellingCompactionId = null;
+      _doUpdate();
+      if (outcome && typeof showToast === 'function') showToast(outcome.msg, outcome.level);
     }
   }
 
@@ -20600,7 +20815,10 @@ function loadCompactionHistory(conversationId) {
    1. The chip node is CREATED ONCE in `_ensureChip()`; steady-state
       updates only set textContent / title / visibility.
    2. The popover list is rebuilt ONLY when its data signature changes —
-      a live poll must never collapse a row the user is reading.
+      a live poll must never collapse a row the user is reading. Command
+      rows are <details> disclosures (one ellipsized line → the whole
+      command, wrapped and selectable); a rebuild reopens the rows that
+      were expanded, keyed by command_id.
    3. ONE chained-setTimeout poll loop (never setInterval): ~3s while
       anything is active, ~10s idle, ticks skipped while the tab is
       hidden (no pending timeout), and an immediate tick on visibility return.
@@ -20622,7 +20840,9 @@ let backgroundConversationActivity = new Map();
   function _mountDock() {
     if (_disposed) return;
     const convId = typeof activeConvId !== 'undefined' ? activeConvId : '';
-    const input = runtimeScope.ConversationTurnRead?.latest?.(convId, turn => turn.actor === 'human', 'main');
+    const input = runtimeScope.ConversationTurnRead?.latest?.(
+      convId, turn => ['human', 'critic', 'virtual_user'].includes(turn.actor), 'main',
+    );
     const host = backgroundAgentContextHost(document.getElementById('chatInner'), convId, input?.turnId);
     if (!_dock && host) _dock = createAgentSidebarDock({ host, translate: _tt });
     _dock?.mount(host);
@@ -20635,17 +20855,33 @@ let backgroundConversationActivity = new Map();
     const convId = typeof activeConvId !== 'undefined' ? activeConvId : '';
     const conv = getConvById(convId);
     // Temporary retained rendering ports; remove when swarm cards migrate.
-    const messageTurns = conv ? runtimeScope.ConversationSwarmPresentation?.candidates(conv) || [] : [];
-    const messageSwarms = summarizeBackgroundActivity(_last, convId).swarms;
+    const turns = conv ? runtimeScope.ConversationSwarmPresentation?.candidates(conv) || [] : [];
+    const swarms = summarizeBackgroundActivity(_last, convId).swarms;
     _dock.update(convId || '', agentDockProjection({
-      turns: conv ? runtimeScope.ConversationSwarmPresentation?.candidates(conv) || [] : [],
-      swarms: summarizeBackgroundActivity(_last, convId).swarms,
+      turns,
+      swarms,
       recover: (...args) => _recoverSwarmAgents(...args),
       renderPanel: (...args) => _buildSwarmPanelHTML(...args),
       renderActivity: agent => renderBackgroundActivityAgent(document, agent, _tt),
       openConversation: loadConversation,
+      stopAgent: _stopAgent,
       translate: _tt,
-    }), swarmMessagesProjection(messageTurns, messageSwarms));
+    }), swarmMessagesProjection(turns, swarms));
+  }
+
+  // The route's own answers: the agent settled or its run left the registry, so
+  // nothing is left to stop and the refresh reconciles the row. Any other failure,
+  // including a server without the route, is reported.
+  const _STOP_SETTLED_CODES = ['swarm_agent_not_found', 'swarm_agent_not_running'];
+
+  function _stopAgent(swarmId, agentId) {
+    return Api.swarm.stopAgent(swarmId, agentId).then(() => true, error => {
+      if (!_STOP_SETTLED_CODES.includes(error?.code) && typeof showToast === 'function') {
+        showToast(_tt('agentDock.stopFailed', 'Could not stop the agent: {error}',
+          { error: error?.message || String(error) }), 'error');
+      }
+      return false;
+    }).finally(() => controller.refresh());
   }
 
   let _disposed = false;
@@ -20717,7 +20953,7 @@ let backgroundConversationActivity = new Map();
   function _chipTitle(sum) {
     const lines = [_tt('bgActivity.title', 'Background activity')];
     for (const c of sum.commands) {
-      lines.push('· $ ' + (c.command || ''));
+      lines.push('· $ ' + (c.command || '').slice(0, 200));
     }
     return lines.join('\n');
   }
@@ -20835,6 +21071,8 @@ let backgroundConversationActivity = new Map();
     _popover.commandClocks = [];
     _popover.sig = sig;
     const body = _popover.bodyNode;
+    const expanded = new Set(Array.from(body.querySelectorAll('.bg-act-cmd[open]'),
+      row => row.dataset.commandId));
     body.textContent = '';
 
     if (sum.commands.length) {
@@ -20843,24 +21081,38 @@ let backgroundConversationActivity = new Map();
       secTitle.textContent = _tt('bgActivity.sectionCommands', 'Background commands');
       body.appendChild(secTitle);
       for (const cmd of sum.commands) {
-        const row = _commandRow(cmd);
+        const row = _commandRow(cmd, expanded.has(cmd.command_id || ''));
         _popover.commandClocks.push(row.querySelector('.bg-act-elapsed'));
         body.appendChild(row);
       }
     }
   }
 
-  function _commandRow(cmd) {
-    const row = document.createElement('div');
+  function _keepSelectionOpen(e) {
+    // Drag-selecting the expanded command to copy it must not fold the row.
+    const selection = document.getSelection();
+    if (selection && !selection.isCollapsed && e.currentTarget.contains(selection.anchorNode)) {
+      e.preventDefault();
+    }
+  }
+
+  function _commandRow(cmd, expanded) {
+    const row = document.createElement('details');
     row.className = 'bg-act-cmd';
+    row.dataset.commandId = cmd.command_id || '';
+    row.open = expanded;
+    const head = document.createElement('summary');
+    head.className = 'bg-act-cmd-head';
+    head.addEventListener('click', _keepSelectionOpen);
     const text = document.createElement('code');
     text.className = 'bg-act-cmd-text';
     text.textContent = cmd.command || '';
-    row.appendChild(text);
+    head.appendChild(text);
     const elapsed = document.createElement('span');
     elapsed.className = 'bg-act-elapsed';
     elapsed.textContent = _fmtElapsed(cmd.elapsed_s);
-    row.appendChild(elapsed);
+    head.appendChild(elapsed);
+    row.appendChild(head);
     return row;
   }
 
@@ -20925,7 +21177,7 @@ let backgroundConversationActivity = new Map();
 
   runtimeScope.updateBackgroundActivity = updateBackgroundActivity;
 
-  // Render/mount only: commits and the existing rail follower never start reads.
+  // Render/mount only: commits and the rail track pass never start reads.
   runtimeScope.renderBackgroundAgents = _updateDock;
   runtimeScope.mountBackgroundAgents = _mountDock;
 
@@ -21008,6 +21260,15 @@ let backgroundConversationActivity = new Map();
     if (root !== projectPath()) conv = null;
     var api = typeof Api !== 'undefined' ? Api.project : null;
     if (!root || !api) return null;
+    // The router home and the Watchdog location are not projects: the main
+    // coordinator's card stands in that slot instead of a project Coordinator row.
+    if (sidebarOnly && isRouterManaged(root)) return null;
+    // Both surfaces read through one join: identical reads in one task share a request.
+    function sharedRead(endpoint, args, signal) {
+      return joinRead([endpoint].concat(args), signal, function (shared) {
+        return api[endpoint].apply(api, args.concat([shared]));
+      });
+    }
     return {
           path: root, currentConversationId: conv?.id || '', currentPath: resolvePath,
 
@@ -21022,11 +21283,12 @@ let backgroundConversationActivity = new Map();
           },
           subscribe: function (refresh) {
             pushSubscribe('project', '*', refresh);
-            return function () { pushUnsubscribe('project', '*', refresh); };
+            var stopReconnect = typeof pushOnReconnect === 'function' ? pushOnReconnect(refresh) : null;
+            return function () { pushUnsubscribe('project', '*', refresh); stopReconnect?.(); };
           },
-          binding: function (path) { return api.coordination(path); },
+          binding: function (path, signal) { return sharedRead('coordination', [path], signal); },
 
-          workerConversations: function (path, cursor) { return api.workerConversations(path, cursor); },
+          workerConversations: function (path, cursor, signal) { return sharedRead('workerConversations', [path, cursor], signal); },
           dispatch: {
             recipients: function () {
               return conversations.filter(function (item) {
@@ -21044,7 +21306,7 @@ let backgroundConversationActivity = new Map();
               });
             },
             commandId: function () { return api.newAssignmentCommandId(); },
-            list: function (path, commandId, options) { return api.coordinationAssignments(path, commandId, options); },
+            list: function (path, commandId, options, signal) { return sharedRead('coordinationAssignments', [path, commandId, options], signal); },
             grant: function (request, commandId) { return api.grantAssignment(request, commandId); },
             dispatch: function (request) { return api.dispatchAssignment(request); },
             revoke: function (request) { return api.revokeAssignment(request); },
@@ -21074,15 +21336,20 @@ let backgroundConversationActivity = new Map();
           },
 
           reports: {
-            read: function (path) { return api.coordinatorReports(path); },
+            read: function (path, signal) { return sharedRead('coordinatorReports', [path], signal); },
             markRead: function (body) { return api.markCoordinatorReportRead(body); },
           },
           budget: {
-            read: function (path) { return api.coordinatorBudget(path); },
-            update: function (body) { return api.updateCoordinatorBudget(body); },
+            read: function (path, signal) { return sharedRead('coordinatorBudget', [path], signal); },
+          },
+          // The router home's control lives in the main coordinator's header instead;
+          // the Watchdog never delegates, so it has no Worker model and no task board.
+          workerModel: sidebarOnly || isRouterManaged(root) ? undefined : routerWorkerModelPorts,
+          progress: isRouterWatchdog(root) ? undefined : {
+            read: function (path, signal) { return sharedRead('coordinatorProgress', [path], signal); },
           },
           messages: function (path, id, beforeId) { return api.coordinationMessages(path, id, beforeId); },
-          board: function (path) { return api.board(path); },
+          board: function (path, signal) { return sharedRead('board', [path], signal); },
           bind: function (path, id, revision) { return api.bindCoordinator(path, id, revision); },
 
           create: function (path, revision) {
@@ -21109,9 +21376,37 @@ let backgroundConversationActivity = new Map();
 
     };
   }
+  // A conversation is the Global Router when its project is the router home
+  // the Global Router owner last read; the binding there is the identity.
+  function isRouterHome(path) {
+    var home = globalRouter.home();
+    return !!home && norm(home) === norm(path);
+  }
+  function isRouterWatchdog(path) {
+    var location = routerWatchdog.location();
+    return !!location && norm(location) === norm(path);
+  }
+  function isRouterManaged(path) { return isRouterHome(path) || isRouterWatchdog(path); }
+  // Worker model choices are the composer model picker's catalog and policy.
+  var routerWorkerModelPorts = {
+    read: function (path, signal) { return Api.project.routerWorkerModel(path, signal); },
+    write: function (path, model) { return Api.project.setRouterWorkerModel(path, model); },
+    catalog: {
+      models: function () { return (typeof _registeredModels !== 'undefined' && _registeredModels) || []; },
+      visible: function (model) {
+        if (typeof _hiddenModels !== 'undefined' && _hiddenModels.has(model.model_id)) return false;
+        return typeof runtimeScope.isChatModel !== 'function' || runtimeScope.isChatModel(model);
+      },
+      compare: function (left, right) {
+        return typeof _compareModelsByDisplayName === 'function' ? _compareModelsByDisplayName(left, right) : 0;
+      },
+      label: function (id) { return typeof _modelShortName === 'function' ? _modelShortName(id) : id; },
+    },
+  };
   var host = document.getElementById('presenceStrip');
   var list = document.getElementById('convList');
   if (!host || !list) return;
+  var joinRead = createSameTaskReadJoin();
   var sidebar = document.createElement('div');
   sidebar.id = 'projectCoordinatorEntry';
   var column = document.createElement('div');
@@ -21146,8 +21441,151 @@ let backgroundConversationActivity = new Map();
   }
   var surface = createSurface(false);
   var sidebarSurface = createSurface(true);
-  runtimeScope.presenceRefresh = function () { surface.refresh(); sidebarSurface.refresh(); };
-  window.addEventListener('pagehide', function (event) { if (!event.persisted) { surface.destroy(); sidebarSurface.destroy(); } });
+  // Narrow bridge to the typed Global Router and Watchdog owners
+  // (features/global-router.ts, features/router-watchdog.ts); delete with the
+  // retained sidebar and conversation navigation. The main coordinator's card
+  // takes the leader slot wherever the list has no project of its own.
+  var routerEntryHost = document.createElement('div');
+  routerEntryHost.id = 'globalRouterEntry';
+  column.insertBefore(routerEntryHost, sidebar);
+  var routerHeaderHost = document.createElement('div');
+  var watchdogHeaderHost = document.createElement('div');
+  host.before(routerHeaderHost, watchdogHeaderHost);
+  function openRouterConversation(id) { if (typeof loadConversation === 'function') loadConversation(id); }
+  function activeRouterConversationId() {
+    return String((typeof getActiveConv === 'function' && getActiveConv()?.id)
+      || (typeof activeConvId !== 'undefined' ? activeConvId : '') || '');
+  }
+  function notifyRouterError(message) { if (typeof showToast === 'function') showToast(message, 'error'); }
+  // A new router identity changes which rows the list hides; the list render refreshes presence.
+  function routerIdentityChanged() {
+    if (typeof renderConversationList === 'function') renderConversationList();
+    else runtimeScope.presenceRefresh?.();
+  }
+  var routerWatchdog = createRouterWatchdogEntry({
+    read: function (signal) { return Api.project.routerWatchdog(signal); },
+    ensure: function () { return Api.project.ensureRouterWatchdog(); },
+    configureReview: function (request) { return Api.project.configureRouterWatchdogReview(request); },
+    open: openRouterConversation,
+    back: function () { if (globalRouter.conversationId()) openRouterConversation(globalRouter.conversationId()); },
+    activeConversationId: activeRouterConversationId,
+    notifyError: notifyRouterError,
+    changed: routerIdentityChanged,
+  }, { header: watchdogHeaderHost });
+  var globalRouter = createGlobalRouterEntry({
+    read: function (signal) { return Api.project.globalRouter(signal); },
+    ensure: function () { return Api.project.ensureGlobalRouter(); },
+    open: openRouterConversation,
+    activeConversationId: activeRouterConversationId,
+    notifyError: notifyRouterError,
+    changed: routerIdentityChanged,
+    workerModel: routerWorkerModelPorts,
+    instructions: {
+      list: function (cursor, signal) { return Api.project.routerInstructions(cursor, signal); },
+      pause: function (id) { return Api.project.pauseRouterInstruction(id); },
+      resume: function (id) { return Api.project.resumeRouterInstruction(id); },
+      cancel: function (id) { return Api.project.cancelRouterInstruction(id); },
+    },
+  }, { sidebar: routerEntryHost, header: routerHeaderHost, controls: [routerWatchdog.settings] });
+  // Other surfaces (the studio's compute-stall dialog) ensure the Watchdog through its
+  // owner, so the header and composer steering adopt the binding they open.
+  runtimeScope.ensureRouterWatchdogConversation = function () { return routerWatchdog.ensure(); };
+  function sidebarHasProject() {
+    var root = sidebarPath();
+    return !!root && !isRouterManaged(root);
+  }
+  /* A bound Coordinator's composer steers its live reply without asking
+   * (_promptInjectMode). Each owner names one from a server binding: the open
+   * chat's project, the browsed folder's project, the Global Router and the
+   * Watchdog, so browsing another folder never changes the answer. */
+  runtimeScope.isCoordinatorConversation = function (id) {
+    return !!id && (id === surface.coordinatorId() || id === sidebarSurface.coordinatorId()
+      || id === globalRouter.conversationId() || id === routerWatchdog.conversationId());
+  };
+  // Reached from the main coordinator's card and settings, never as list rows.
+  runtimeScope.routerConversationIds = function () {
+    return [globalRouter.conversationId(), routerWatchdog.conversationId()].filter(Boolean);
+  };
+  runtimeScope.presenceRefresh = function () {
+    routerEntryHost.hidden = sidebarHasProject();
+    // The router home and the Watchdog location are internal coordination
+    // homes, not projects the owner attaches, detaches or edits.
+    var projectBar = document.getElementById('projectBar');
+    if (projectBar) projectBar.hidden = isRouterManaged(projectPath());
+    surface.refresh(); sidebarSurface.refresh(); globalRouter.refresh(); routerWatchdog.refresh();
+  };
+  // Remove with the retained catalog bridge; grouping policy, rendering and
+  // provenance live in the typed group and existing conversation owners.
+  var coordinatorConversationGroups = createCoordinatorConversationGroups({
+    listHost: list,
+    pinned: function () {
+      var pins = [];
+      var project = sidebar.querySelector('[data-coordinator-id]')?.dataset.coordinatorId;
+      if (project) pins.push({ id: project, path: sidebarPath(), host: sidebar });
+      // Both router conversations stay reserved, so neither becomes a replaced
+      // Coordinator's row. Only the main coordinator groups its work, and only
+      // beneath its card while the card is shown; the Watchdog never delegates.
+      if (globalRouter.conversationId()) pins.push({
+        id: globalRouter.conversationId(), path: routerEntryHost.hidden ? '' : globalRouter.home() || '', host: routerEntryHost,
+      });
+      if (routerWatchdog.conversationId()) pins.push({ id: routerWatchdog.conversationId(), path: '', host: routerEntryHost });
+      return pins;
+    },
+    historySettled: function () { return !sidebar.querySelector('.coordination-leader[aria-busy="true"]'); },
+    projectPath: function (c) { return _getConvProjectPath(c); },
+    rows: function () { return conversations; },
+    readPage: function (path, cursor, signal) { return Api.project.workerConversations(path, cursor, signal); },
+    adoptCoordinator: function (id, path) {
+      if (!id || !path) return;
+      mergeConversationCatalogRows([{ id: id, settings: { projectPath: path } }]);
+    },
+    adoptPage: function (page) {
+      for (const item of page.conversations) {
+        mergeConversationCatalogRows([{
+          id: item.conversationId, title: item.title, msgCount: item.turnCount,
+          createdAt: item.createdAt, updatedAt: item.updatedAt,
+          settings: { _coordinatorSource: item.coordinatorId },
+        }]);
+        var local = conversations.find(function (row) { return row.id === item.conversationId; });
+        if (local) local._localOnly = false;
+      }
+    },
+    open: function (id) { if (typeof loadConversation === 'function') loadConversation(id); },
+    renderRow: function (c) {
+      return _buildConvItemHTML(c, escapeHtml(_conversationDisplayTitle(c.title, t('chat.newConversation'))), '');
+    },
+    activeConversationId: activeRouterConversationId,
+    refresh: function () { renderConversationList(); },
+    refreshActive: function () {
+      if (_swapActiveConvItem(activeRouterConversationId())) renderConversationList();
+    },
+    isRunning: function (c) {
+      var flags = _convStatusFlags(c);
+      return flags.streaming || flags.waiting || Boolean(flags.background && !flags.background.queuedOnly);
+    },
+    hasUnread: function (c) {
+      return _convStatusFlags(c).needsReview;
+    },
+    status: function (c) {
+      var flags = _convStatusFlags(c);
+      if (flags.streaming || flags.waiting || flags.background) return 'running';
+      if (flags.errored) return 'failed';
+      if (flags.incomplete) return 'cancelled';
+      return 'done';
+    },
+  });
+  runtimeScope.coordinatorConversationGroups = coordinatorConversationGroups;
+  const refreshPresence = runtimeScope.presenceRefresh;
+  runtimeScope.presenceRefresh = function () {
+    refreshPresence();
+    coordinatorConversationGroups.refresh();
+  };
+  window.addEventListener('pagehide', function (event) {
+    if (!event.persisted) {
+      surface.destroy(); sidebarSurface.destroy(); globalRouter.destroy(); routerWatchdog.destroy();
+      coordinatorConversationGroups.destroy();
+    }
+  });
   runtimeScope.presenceRefresh();
 })();
 /* ===== migrated source: info-rail.js ===== */
@@ -21189,6 +21627,10 @@ let backgroundConversationActivity = new Map();
      runtimeScope.buildTurnCtxSnapshot()               — capture current context (or null).
      runtimeScope.renderTurnCtxNote(snapshot)          — snapshot → { fold, rail } HTML
         strings (two surfaces with DIFFERENT DOM homes — see renderTurnCtxNote).
+        A bridge: the markup is owned by the typed module
+        frontend/src/conversation/ui/turn-context-rail (see its AGENTS.md);
+        this section only supplies the retained catalog/branch services.
+        Deletion path: the Surface port takes those services directly.
      runtimeScope.reconcileTurnCtxCapsule(snap, fact)  — overwrite snap in place
         with facts from the done event; `fact` fields are ALL optional:
           { actualModel?, actualDepth?, actualModes? }. Returns true when
@@ -21282,13 +21724,13 @@ let backgroundConversationActivity = new Map();
       out.push({ label: sm === 'single' ? 'Search' : 'Search ×N', tone: 'search' });
     }
     if (typeof fetchEnabled !== 'undefined' && fetchEnabled) out.push({ label: 'Fetch', tone: 'net' });
-    if (typeof browserEnabled !== 'undefined' && browserEnabled) out.push({ label: 'Browser', tone: 'net' });
     if (typeof desktopEnabled !== 'undefined' && desktopEnabled) out.push({ label: 'Desktop', tone: 'net' });
     if (typeof codeExecEnabled !== 'undefined' && codeExecEnabled) out.push({ label: 'Code Exec', tone: 'code' });
     if (typeof memoryEnabled !== 'undefined' && memoryEnabled) out.push({ label: 'Memory', tone: 'ai' });
-    // Scheduler is a default tool (always on, no toggle) — like read_files /
-    // todo it is intentionally NOT shown as a per-turn chip (would be constant
-    // noise). The reconcile rule below still maps its fn names defensively.
+    // Scheduler and Browser are default tools (always on, no toggle) — like
+    // read_files / todo they are intentionally NOT shown as per-turn chips
+    // (would be constant noise). The reconcile rule below still maps the
+    // scheduler fn names defensively.
     if (typeof imageGenEnabled !== 'undefined' && imageGenEnabled) out.push({ label: 'Image Gen', tone: 'ai' });
     if (typeof humanGuidanceEnabled !== 'undefined' && humanGuidanceEnabled) out.push({ label: 'Ask User', tone: 'ai' });
     if (typeof autoTranslate !== 'undefined' && autoTranslate) out.push({ label: 'Translate', tone: 'ai' });
@@ -21323,9 +21765,9 @@ let backgroundConversationActivity = new Map();
   /* ── Collect the git branch state ────────────────────────────────
    * projectState.gitBranch / gitBranches are kept live by
    * applyProjectGitState (fed by every project status payload). The
-   * snapshot records the primary branch + each root's branch so a
-   * multi-root turn can label chips; a single-root turn renders one chip.
-   * Returns { branch, branches: [{path, short, branch}] } or null. */
+   * snapshot records the primary branch and each root's own branch, so
+   * every workspace line of the rail reads `root:branch`.
+   * Returns { branch, branches: [{path, branch}] } or null. */
   function _collectGit() {
     const ps = (typeof projectState !== 'undefined') ? projectState : null;
     if (!ps) return null;
@@ -21335,20 +21777,15 @@ let backgroundConversationActivity = new Map();
     for (const row of rows) {
       const path = typeof row?.path === 'string' ? row.path : '';
       const branch = typeof row?.branch === 'string' ? row.branch.trim() : '';
-      if (!path || !branch || seen.has(branch + '@' + path)) continue;
-      seen.add(branch + '@' + path);
-      branches.push({ path, short: _short(path), branch: branch.slice(0, 80) });
+      if (!path || !branch || seen.has(path)) continue;
+      seen.add(path);
+      branches.push({ path, branch: branch.slice(0, 80) });
     }
     let branch = typeof ps.gitBranch === 'string' ? ps.gitBranch.trim() : '';
     if (!branch && branches.length) branch = branches[0].branch;
     if (!branch) return null;
-    /* Collapse to the single-branch shape when every root agrees — the
-     * common case — so the rail shows ONE chip, not N duplicates. */
-    const distinct = new Set(branches.map((b) => b.branch));
-    if (distinct.size <= 1) {
-      return { branch, branches: [{ path: branches[0]?.path || ps.path || '', short: _short(branches[0]?.path || ps.path || ''), branch }] };
-    }
-    return { branch, branches };
+    /* A status payload without per-root probes names the primary's branch. */
+    return { branch, branches: branches.length ? branches : [{ path: ps.path || '', branch }] };
   }
 
   function _resolveModel() {
@@ -21374,10 +21811,6 @@ let backgroundConversationActivity = new Map();
       || (typeof config !== 'undefined' && config && config.defaultThinkingDepth)
       || fallback
       || '';
-  }
-
-  function _esc(s) {
-    return escapeHtml(String(s));
   }
 
   /**
@@ -21406,309 +21839,62 @@ let backgroundConversationActivity = new Map();
     return snap;
   }
 
-  function _modelLabel(modelId) {
-    if (!modelId) return '';
-    return (typeof _modelShortName === 'function') ? _modelShortName(modelId) : modelId;
-  }
-
-  /* Real provider brand logo (Anthropic / OpenAI / Gemini / …) for a model
-   * id — reuses the typed model-brand icon owner so the mark + color match
-   * the model picker. Falls back to '' for isolated alternate entries. */
-  function _brandLogo(modelId, size) {
-    if (typeof _brandSvg !== 'function') return '';
-    if (typeof _modelBrand === 'function') {
-      return _brandSvg(_modelBrand(modelId || ''), size || 15);
-    }
-    if (typeof _detectBrand === 'function') {
-      return _brandSvg(_detectBrand(modelId || ''), size || 15);
-    }
-    return '';
-  }
-
-  const _LOCK = '<svg class="tctx-lock" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
-
-  /* Branch glyph — the classic git-fork mark, stroke-drawn so it inherits
-   * the chip's tone color via currentColor. Same per-child fill="none"
-   * discipline as every stroked glyph in the rail (the .stg-brand-icon CSS
-   * fill override does not reach here, but keeping the attribute costs
-   * nothing and matches the file's other inline icons). */
-  const _BRANCH = '<svg class="tctx-branch-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.4"/><circle cx="6" cy="19" r="2.4"/><circle cx="18" cy="7" r="2.4"/><path d="M6 7.4v9.2"/><path d="M18 9.4c0 4.6-7.2 3.4-10 7"/></svg>';
-
-  /* Checklist status glyphs, one per todo_write status. Reused by both the
-   * rail row and the fold's compact counter. */
-  const _TODO_MARK = {
-    completed: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg>',
-    in_progress: '<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="4.2"/></svg>',
-    blocked: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M6.5 6.5l11 11"/></svg>',
-    pending: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/></svg>',
+  /* Retained services of the typed rail renderer
+   * (frontend/src/conversation/ui/turn-context-rail, the single owner of the
+   * rail's markup): the catalog's model names, the brand marks the model
+   * picker paints, and the branch the workspace is on now. */
+  const _railHost = {
+    text(key, fallback, values) {
+      const localized = t(key, values);
+      if (localized && localized !== key) return localized;
+      return String(fallback).replace(/\{(\w+)\}/g, (token, name) => (
+        values && Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : token));
+    },
+    modelLabel(modelId) {
+      return (typeof _modelShortName === 'function') ? _modelShortName(modelId) : modelId;
+    },
+    brandIconHtml(modelId) {
+      if (typeof _brandSvg !== 'function') return '';
+      if (typeof _modelBrand === 'function') return _brandSvg(_modelBrand(modelId), 16);
+      if (typeof _detectBrand === 'function') return _brandSvg(_detectBrand(modelId), 16);
+      return '';
+    },
+    currentGit: _collectGit,
   };
 
-  /** Max tool chips rendered up-front; the rest collapse behind a "+N"
-   * CLICK toggle. This cap — together with `_MAX_VISIBLE_PATHS` — decides
-   * what a card shows up-front so a TYPICAL card renders complete without
-   * scrolling (the old 132px `overflow:hidden` guillotine clipped ordinary
-   * cards mid-WORKSPACE with no way to reach the facts). WHY a bound at
-   * all: `_collectTools()` emits one chip per connected MCP server, which
-   * can be dozens. The rail's box is bounded by the message's own height
-   * (styles.css `.turn-ctx` is out of flow, `max-height:100%`) and
-   * SCROLLS, so the cap is about glanceability, not geometry — 4 gives a
-   * useful preview without turning a large MCP catalog into a wall of badges.
-   * The count and stationary disclosure expose all remaining entries.
-   * Expansion is a click (not hover) because a hover overlay would have
-   * to escape `.message`'s content-visibility paint containment — exactly
-   * the carve-out this redesign deleted. */
-  const _MAX_VISIBLE_CHIPS = 4;
-
-  /** Max workspace paths rendered up-front; extra roots collapse behind
-   * the same "+N" toggle as chips (the delegated click handler only asks
-   * for a `.tctx-overflow` sibling, so the mechanism is shared verbatim).
-   * Roots were previously unbounded — the same defect family as chips:
-   * the rail's scroll length driven by how many roots the workspace
-   * happens to have. */
-  const _MAX_VISIBLE_PATHS = 3;
-
   /**
-   * Render a captured snapshot into the per-turn context surfaces.
-   *
-   * Two surfaces, both in normal flow — there is NO hover overlay. They have
-   * DIFFERENT DOM homes, which is why this returns them separately:
-   *   • `rail` (`.turn-ctx`) — a DIRECT CHILD of `.message`, absolutely
-   *     positioned into the third track the pane owns (`.chat-inner`), so
-   *     it can never overflow the viewport AND — being out of flow —
-   *     never inflates the turn's height; its box starts at the message
-   *     top and the sticky follower (below) glides it down the track as
-   *     the conversation scrolls, until the next railed turn arrives.
-   *     Shows model + depth + mode badges + tool chips + workspace paths
-   *     permanently. Visible only when the container query grants the
-   *     track.
-   *   • `fold` (`.tctx-fold`) — the same facts compressed to ONE line,
-   *     spliced INSIDE `.message-content` between the header and the body
-   *     (in-flow — its `margin-bottom` is meaningless anywhere else). Shown
-   *     exactly when the rail track is absent (narrow pane, or the
-   *     request-inspector drawer is open and the pane has as little as 74px
-   *     to give). The context is compacted, never lost.
-   *
-   * ⚠️ The two used to ship as ONE concatenated string spliced as a direct
-   * `.message` child: below the rail threshold the fold auto-placed into the
-   * ZERO-WIDTH rail track and rendered at width 0 — `display:flex`, correct
-   * text, invisible element (the 2026-08-03 "context completely disappears
-   * at 100% zoom" report). Keep the surfaces separate.
-   *
-   * @param {object|null} snap — output of buildTurnCtxSnapshot (or a
-   *   persisted copy loaded from the DB).
-   * @returns {{fold: string, rail: string}|string} the two HTML fragments,
-   *   or '' when there's nothing to show.
+   * Render a captured or persisted snapshot into the per-turn context
+   * surfaces: `{fold, rail}` HTML strings, or '' when there is nothing to
+   * show. The two have DIFFERENT DOM homes: the rail (`.turn-ctx`) is a
+   * direct child of the Turn, absolutely positioned into the rail column the
+   * pane owns and stretched into the track its sticky card travels (see
+   * "Rail tracks" below); the fold (`.tctx-fold`)
+   * sits inside `.message-content` and shows exactly when the pane cannot
+   * grant the track. Keep them separate: spliced as one string, the fold
+   * auto-placed into the zero-width rail track and painted nothing.
    */
-  /* Render the checklist as ONE integrated unit inside the sticky rail.
-   *
-   * Two fixed facts shape this renderer:
-   *   • The checklist must travel WITH `.turn-ctx`/`.tctx-stuck` — never as
-   *     a detached `.tctx-overflow` block outside the rail. The old design
-   *     emitted the full list as a full-width overflow sibling, so the list
-   *     painted in a different visual box than the rail that owns it (and,
-   *     being built twice — here and in classic-conversation-renderers.ts —
-   *     the same plan/branch could paint twice). So the list now lives INSIDE
-   *     `.tctx-todos` as plain content: one rail, one unit, one follower.
-   *   • The in-progress item is the single most useful line, so it is ALWAYS
-   *     rendered — never hidden in the count chip's hover title. The old code
-   *     picked it as `current`, removed it from the list, and surfaced it only
-   *     on hover, which is why an expanded checklist appeared to be missing
-   *     its in-flight row. `current` is now rendered as a dedicated
-   *     `.tctx-todo-current` line and STAYS in the list below.
-   *
-   * Layout: a count chip (glyph + done/total) sits in the rail's chip flow;
-   * the in-flight item renders inline right after it; the full per-item list
-   * collapses behind the same "+N" toggle the tools/workspace rows use — but
-   * as an in-flow column under the chip, inside the rail. Shared by the
-   * snapshot renderer and the live patch path so both stay byte-identical. */
-  function _buildTodoListHtml(todos) {
-    const MAX = 24;
-    const norm = [];
-    let doneN = 0;
-    for (const item of todos) {
-      if (!item || typeof item !== 'object') continue;
-      if (norm.length >= MAX) break;
-      const st = (item.status === 'completed' || item.status === 'in_progress'
-        || item.status === 'blocked') ? item.status : 'pending';
-      const text = String(item.content || '').trim().slice(0, 240);
-      if (!text) continue;
-      if (st === 'completed') doneN++;
-      norm.push({ st, text });
-    }
-    const total = norm.length;
-    if (!total) return '';
-    /* The in-flight line the rail surfaces inline: the in_progress item, else
-     * the first not-yet-done item, else the last completed one. It is rendered
-     * as its own visible line AND stays in `norm`, so the full list below is
-     * complete — no row lives only in a hover tooltip. */
-    let current = null;
-    for (const it of norm) { if (it.st === 'in_progress') { current = it; break; } }
-    if (!current) for (const it of norm) { if (it.st !== 'completed') { current = it; break; } }
-    if (!current) current = norm[norm.length - 1];
-    const rest = norm.filter((it) => it !== current);
-
-    const allDone = doneN === total;
-    const glyph = _TODO_MARK[allDone ? 'completed'
-      : (current.st === 'in_progress' ? 'in_progress'
-      : (current.st === 'blocked' ? 'blocked' : 'pending'))];
-    /* ONE chip in the rail's chip flow: count + status glyph. The in-flight
-     * item is rendered as a visible line right after it (not buried in the
-     * chip's hover title), so the plan's live edge is always on screen. */
-    const chip =
-      '<span class="tctx-chip tctx-tone-todo tctx-todo-count' +
-      (allDone ? ' is-done' : '') + '" title="' +
-      _esc(t('turnCtx.todoLabel')) + ' ' + doneN + '/' + total + '">' + glyph +
-      '<span>' + doneN + '/' + total + '</span></span>';
-
-    /* The always-visible in-flight line, inline after the chip. This is the
-     * line the old design hid in a tooltip — the "missing in-progress row". */
-    const currentLine =
-      '<span class="tctx-todo-item tctx-todo-' + current.st + ' tctx-todo-current"' +
-      ' title="' + _esc(current.text) + '">' +
-      '<span class="tctx-todo-mark">' + (_TODO_MARK[current.st] || _TODO_MARK.pending) + '</span>' +
-      '<span class="tctx-todo-text">' + _esc(current.text) + '</span></span>';
-
-    /* Full list rendered inline inside the rail (no "+N" collapse). */
-    let list = '';
-    if (rest.length) {
-      const items = rest.map((it) =>
-        '<div class="tctx-todo-item tctx-todo-' + it.st + '">' +
-        '<span class="tctx-todo-mark">' + (_TODO_MARK[it.st] || _TODO_MARK.pending) + '</span>' +
-        '<span class="tctx-todo-text" title="' + _esc(it.text) + '">' + _esc(it.text) + '</span></div>').join('');
-      list = '<span class="tctx-todo-list">' + items + '</span>';
-    }
-    return '<div class="tctx-todos">' + chip + currentLine + list + '</div>';
-  }
-
   function renderTurnCtxNote(snap) {
-    if (!snap || typeof snap !== 'object') return '';
-    let tools = Array.isArray(snap.tools) ? snap.tools : [];
-    const roots = Array.isArray(snap.roots) ? snap.roots : [];
-    // Modes are a dedicated field on new snapshots. Legacy snapshots (sent
-    // before modes were split out) embedded them inside `tools` as
-    // tone:'mode' entries — recover those so old turns still show a badge.
-    let modes = Array.isArray(snap.modes) ? snap.modes : [];
-    if (!Array.isArray(snap.modes)) {
-      modes = tools.filter((t) => t && t.tone === 'mode');
-      tools = tools.filter((t) => !(t && t.tone === 'mode'));
-    }
-    const model = snap.model ? _modelLabel(snap.model) : '';
-    /* A turn sent before the workspace's branch was known — an engine restart
-     * clears the ephemeral scoped root registry, so the send-time probe found
-     * nothing — froze a snapshot with NO `git`. Paint the branch the workspace
-     * is on now instead of leaving the rail silent; a snapshot that recorded a
-     * branch keeps its own (a mid-turn `git checkout` history stays accurate). */
-    const git = (snap.git && typeof snap.git === 'object') ? snap.git : _collectGit();
-    const todos = Array.isArray(snap.todos) ? snap.todos : [];
-    if (!model && !tools.length && !modes.length && !roots.length
-        && !git && !todos.length) return '';
-
-    const logo = model ? _brandLogo(snap.model, 15) : '';
-    const depthChip = snap.depth ? '<span class="tctx-depth">' + _esc(snap.depth) + '</span>' : '';
-
-    // ── Rail head: brand + model + depth + mode badges ──
-    const head = ['<div class="tctx-head">'];
-    if (logo) head.push('<span class="tctx-logo">' + logo + '</span>');
-    if (model || depthChip) {
-      head.push('<span class="tctx-model-group">');
-      if (model) head.push('<span class="tctx-model">' + _esc(model) + '</span>');
-      if (depthChip) head.push(depthChip);
-      head.push('</span>');
-    }
-    for (const md of modes) {
-      head.push('<span class="tctx-mode-badge">' + _esc(md.label) + '</span>');
-    }
-    head.push('</div>');
-
-    const rows = [];
-    if (tools.length) {
-      const _chip = (tl) =>
-        '<span class="tctx-chip tctx-tone-' + _esc(tl.tone || 'mode') + '">' +
-        _esc(tl.label) + '</span>';
-      const shown = tools.slice(0, _MAX_VISIBLE_CHIPS).map(_chip).join('');
-      const rest = tools.slice(_MAX_VISIBLE_CHIPS);
-      let overflow = '';
-      let toggle = '';
-      if (rest.length) {
-        overflow = '<span class="tctx-overflow" hidden>' + rest.map(_chip).join('') + '</span>';
-        toggle = '<button type="button" class="tctx-more" data-tctx-more="1"' +
-          ' aria-expanded="false">' + _esc(t('turnCtx.showMore', {count: rest.length})) + '</button>';
-      }
-      rows.push('<div class="tctx-row"><div class="tctx-row-heading"><span class="tctx-row-h">' +
-        _esc(t('turnCtx.toolsLabel')) + '<span class="tctx-row-count">' + tools.length + '</span></span></div>' +
-        '<div class="tctx-chips">' + shown + overflow + toggle + '</div></div>');
-    }
-    if (roots.length) {
-      // SHORT path (last two segments) with the full path on hover: a full
-      // absolute path is ~90 chars and `word-break:break-all` would stack it
-      // four lines high inside a 232px rail, inflating every turn that has a
-      // workspace. The rail is a glance surface; the full path stays reachable.
-      const _path = (r) =>
-        '<div class="tctx-path" title="' + _esc(r.path || r.short) + '">' +
-        (r.ro ? _LOCK : '') + '<span>' + _esc(r.short || r.path) + '</span></div>';
-      const shownPaths = roots.slice(0, _MAX_VISIBLE_PATHS).map(_path).join('');
-      const restPaths = roots.slice(_MAX_VISIBLE_PATHS);
-      let pathOverflow = '';
-      let pathToggle = '';
-      if (restPaths.length) {
-        pathOverflow = '<div class="tctx-overflow" hidden>' + restPaths.map(_path).join('') + '</div>';
-        pathToggle = '<button type="button" class="tctx-more" data-tctx-more="1"' +
-          ' aria-expanded="false">' + _esc(t('turnCtx.showMore', {count: restPaths.length})) + '</button>';
-      }
-      rows.push('<div class="tctx-row"><div class="tctx-row-heading"><span class="tctx-row-h">' +
-        _esc(t('turnCtx.workspaceLabel')) + '<span class="tctx-row-count">' + roots.length + '</span></span></div>' +
-        '<div class="tctx-paths">' + shownPaths + pathOverflow + pathToggle + '</div></div>');
-    }
-    /* ── Git branch + checklist rows ── LIVE rows (rebuilt in place by
-     * _patchLiveCtxRails on a branch switch / todo_write). The snapshot
-     * path renders the same markup off the frozen values so a settled
-     * turn keeps its final record. */
-    const gitRowHtml = _renderGitRowHtml(git);
-    if (gitRowHtml) rows.push(gitRowHtml);
-    const todoRowHtml = _renderTodoRowHtml(todos);
-    if (todoRowHtml) rows.push(todoRowHtml);
-
-    // ── Fold line for panes with no rail track ──
-    const foldBits = [];
-    if (model) foldBits.push(model);
-    if (snap.depth) foldBits.push(snap.depth);
-    for (const md of modes) foldBits.push(md.label);
-    if (tools.length) foldBits.push(t('turnCtx.toolCount', { count: tools.length }));
-    if (roots.length) foldBits.push(t('turnCtx.workspaceCount', { count: roots.length }));
-    if (git && git.branch) foldBits.push('⑂ ' + git.branch);
-    if (todos.length) {
-      const doneN = todos.filter((x) => x && x.status === 'completed').length;
-      foldBits.push(t('turnCtx.todoCount', { done: doneN, total: todos.length }));
-    }
-    /* The fold truncates with ellipsis on tight panes; the title keeps the
-     * full (already localized) line one hover away. */
-    const foldLine = foldBits.join(' · ');
-    const fold = '<div class="tctx-fold" title="' + _esc(foldLine) + '"><span class="tctx-fold-dot"></span>' +
-      '<span>' + _esc(foldLine) + '</span></div>';
-
-    return {
-      fold: fold,
-      rail: '<div class="turn-ctx">' + head.join('') + rows.join('') + '</div>',
-    };
+    return renderTurnContextRailHtml(snap, _railHost) || '';
   }
 
   /* "+N" toggle + rail click guard. Delegated at document level so it
    * survives every re-render of the message list without per-node listener
-   * bookkeeping. Expanding changes the rail's height IN FLOW — no overlay,
-   * no paint containment to escape. The rail is hit-testable (its backstop
-   * scrolls, paths have hover titles), but a click ANYWHERE inside it must
-   * never be seen by a message-level delegated handler — so every rail
-   * click is swallowed here, toggle or not. */
+   * bookkeeping. Expanding grows the card IN FLOW — no overlay, no paint
+   * containment to escape; the card's CSS height bound absorbs the growth
+   * and the track is unchanged. The card is hit-testable (it scrolls, paths
+   * have hover titles), but a click ANYWHERE inside the rail must never be
+   * seen by a message-level delegated handler — so every rail click is
+   * swallowed here, toggle or not. */
   function _onTctxClick(ev) {
     const rail = (ev.target && ev.target.closest)
       ? ev.target.closest('.turn-ctx') : null;
     if (!rail) return;
     const btn = ev.target.closest('[data-tctx-more]');
     if (btn) {
-      /* The toggle sits INLINE as the last item of the flow it gates (inside
-       * .tctx-chips / .tctx-paths), next to the hidden .tctx-overflow group.
-       * Search the toggle's parent first, then the row, so a differently-shaped
-       * row (checklist) still resolves its own overflow. */
+      /* The toggle sits on its section heading and gates the hidden
+       * .tctx-overflow group of the same row. Search the toggle's parent
+       * first, then the row, so a differently-shaped row (checklist) still
+       * resolves its own overflow. */
       const scope = btn.parentNode;
       const row = btn.closest('.tctx-row');
       const hidden = (scope && scope.querySelector('.tctx-overflow'))
@@ -21722,142 +21908,150 @@ let backgroundConversationActivity = new Map();
       }
     }
     ev.stopPropagation();
-    /* The toggle just changed the rail's height — re-clamp any pinned
-     * travel so it never grows over the next round's rail. */
-    _scheduleRailFollow();
   }
 
-  /* ── Sticky rail follower ─────────────────────────────────────────
-   * The rail is absolutely positioned at the TOP of its own turn's box
-   * (out of flow so it never inflates the row). That box is short — an
-   * input turn is often one line — so the turn's context used to scroll
-   * away with the bubble while the round's reply filled screens below it
-   * (2026-09-08 owner report: "when a conversation is scrolling, the turn
-   * ctx should move along until it reaches the next round").
+  /* ── Rail tracks ─────────────────────────────────────────────────
+   * The rail root (`.turn-ctx`) is absolutely positioned at the TOP of its
+   * own turn's box (out of flow so it never inflates the row). That box is
+   * short — an input turn is often one line — while the round's reply fills
+   * screens below it, and the context must move along with the reading
+   * until the next round arrives (2026-09-08 owner report).
    *
-   * The follower re-implements sticky-header stacking WITHOUT a DOM
-   * restructure: on scroll/resize it translates each rail down by
-   *     off = clamp(stickTop − hostTop, 0, nextRailTop − railHeight − hostTop)
-   * — pinned to the pane's top inside its round, pushed out exactly when
-   * the next round's rail arrives, in one continuous motion. The travel
-   * carries the rail BEYOND its host's border box, which is why the host
-   * message drops content-visibility's paint containment (see
-   * `.message:has(> .turn-ctx)` in 17-compaction-context-rail.css); the
-   * rail track ends at the next human input OR the next visible rail in
-   * the same lane, whichever comes first. Assistant turns can also carry
-   * context; treating only human turns as boundaries stacks two cards.
+   * Each rail root is therefore a TRACK: stretched from its host's top down
+   * to the host of the next visible rail in the same lane, or to the end of
+   * the transcript. Its card (`.tctx-card`) is `position: sticky` inside it
+   * (23-reading-context-rail.css), so the browser does the travel — pinned
+   * under the pane's top edge inside its round, pushed out exactly as the
+   * next round's card arrives, in one continuous motion, in the same frame
+   * as the scroll. The card is bounded by its track and by the pane height
+   * published here, so a card with more facts than fit scrolls within itself
+   * and its last section is reachable from anywhere in the round.
    *
-   * Geometry is measured entirely from UNTRANSFORMED boxes (the host
-   * message's rect; rail height is transform-independent), so a
-   * previously applied translation never feeds back into the next one.
-   * Runs at most once per animation frame; the reads force layout, which
-   * is clean on pure scrolls and already dirty while streaming. */
-  const _RAIL_STICK_PAD_PX = 6;
-  let _railFollowScheduled = false;
-  let _railFollowObserved = [];
-  let _railFollowRO = null;
-  let _railFollowMO = null;
+   * This replaced a follower that translated each card from a scroll
+   * listener and sized it to the free track below it: the card trailed the
+   * compositor's scroll by a frame or more (worst while a stream kept the
+   * main thread busy), and a card taller than the pane hung below its edge,
+   * unreachable until the reader scrolled to the round's end (2026-11-01
+   * owner report).
+   *
+   * Assistant turns can also carry context; treating only human turns as
+   * boundaries stacks two cards. An input persisted without a context
+   * snapshot is not a boundary: the preceding card keeps its seat beside
+   * that round instead of leaving the gutter empty.
+   *
+   * Script measures LAYOUT only. A track's length is a difference of host
+   * positions, which scrolling never changes; it changes when content inside
+   * or above a round changes size (streaming, disclosures, re-renders, a
+   * rail appearing). The pane height changes with the window and composer.
+   * Resizes are measured before the frame paints; structure changes take a
+   * pass coalesced to the next frame; nothing runs on scroll. */
+  let _railTracksScheduled = false;
+  let _railTracksObserved = [];
+  let _railTracksRO = null;
+  let _railTracksMO = null;
+  /* The length last written per track: a fractional px value does not
+   * round-trip through the CSSOM serializer, so compare with the write. */
+  const _railTrackLength = new WeakMap();
 
-  function _updateRailFollow() {
+  function _setRailTrack(rail, length) {
+    if (_railTrackLength.get(rail) === length) return;
+    _railTrackLength.set(rail, length);
+    rail.style.height = length === null ? '' : length + 'px';
+  }
+
+  /* Writes only track lengths, the pane height and paint state, none of
+   * which resizes an observed box, so it is safe inside a resize callback. */
+  function _measureRailTracks() {
+    for (const cont of document.querySelectorAll('.chat-container')) {
+      const paneHeight = cont.clientHeight + 'px';
+      if (cont.style.getPropertyValue('--tctx-pane-h') !== paneHeight) {
+        cont.style.setProperty('--tctx-pane-h', paneHeight);
+      }
+      const live = [];
+      for (const rail of cont.querySelectorAll('.turn-ctx')) {
+        if (rail.offsetParent === null || rail.hidden) {
+          /* Fold mode / empty rail: drop its track so a re-granted rail
+           * never resurrects a stale length. */
+          _setRailTrack(rail, null);
+          rail.classList.remove('tctx-no-space');
+          continue;
+        }
+        live.push(rail);
+      }
+      const transcript = cont.querySelector('.chat-inner');
+      if (!live.length || !transcript) continue;
+      const contR = cont.getBoundingClientRect();
+      /* The last track ends with the transcript's in-flow content, or at the
+       * pane's bottom while the transcript is shorter than the pane. Never
+       * the scroll height, which a track's own extent could feed. */
+      const end = Math.max(transcript.getBoundingClientRect().bottom,
+        contR.top + cont.clientTop + cont.clientHeight - cont.scrollTop);
+      const railedHosts = new Set(live.map((rail) => rail.parentElement));
+      const tracks = live.map((rail) => {
+        const host = rail.parentElement;
+        let nextTop = end;
+        /* The next visible card, a new round's or a railed assistant's,
+         * ends this one. Sibling hosts keep independent lanes from
+         * constraining each other. Hidden/empty rails never reserve a
+         * boundary. */
+        for (let el = host.nextElementSibling; el; el = el.nextElementSibling) {
+          if (railedHosts.has(el)) {
+            nextTop = el.getBoundingClientRect().top;
+            break;
+          }
+        }
+        const card = rail.querySelector(':scope > .tctx-card');
+        const style = card ? getComputedStyle(card) : null;
+        const insets = style
+          ? parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
+            + parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth)
+          : 0;
+        /* From the track's own top: its grid placement inside the host may
+         * start below the host's border edge, and its top never depends on
+         * the length written below. */
+        return { rail, insets,
+          length: Math.max(0, nextTop - rail.getBoundingClientRect().top) };
+      });
+      for (const { rail, length, insets } of tracks) {
+        _setRailTrack(rail, length);
+        /* A card cannot shrink below its padding, so a shorter track would
+         * paint a sliver of it over the next card. Suppress it without
+         * display:none/hidden, which would drop this rail from the next pass
+         * and prevent recovery when space returns. */
+        rail.classList.toggle('tctx-no-space', length <= insets);
+      }
+    }
+  }
+
+  function _railTrackPass() {
     /* Partial-DOM guard: bare-node harnesses and SSR shims stub `document`
      * with only readyState/addEventListener. Bailing here keeps those loads
      * inert without changing the real-browser path (where querySelectorAll
      * always exists). */
     if (typeof document === 'undefined'
         || typeof document.querySelectorAll !== 'function') return;
-    const containers = document.querySelectorAll('.chat-container');
-
     runtimeScope.mountBackgroundAgents?.();
-    for (const cont of containers) {
-      const rails = cont.querySelectorAll('.turn-ctx');
-      if (!rails.length) continue;
-      const contR = cont.getBoundingClientRect();
-      const stickTop = contR.top + _RAIL_STICK_PAD_PX;
-      /* Bottom of the scrollable content in VIEW coordinates: the last
-       * rail may pin until its round's tail leaves the pane. */
-      const contentBottom = contR.top + (cont.scrollHeight - cont.scrollTop);
-      const live = [];
-      for (const rail of rails) {
-        if (rail.offsetParent === null || rail.hidden) {
-          /* Fold mode / empty rail: park any travel AND its computed height
-           * so a re-granted track never resurrects a stale offset or box. */
-          if (rail.style.transform) rail.style.transform = '';
-          if (rail.style.maxHeight) rail.style.maxHeight = '';
-          rail.classList.remove('tctx-stuck', 'tctx-no-space');
-          continue;
-        }
-        live.push(rail);
-      }
-      /* Measure intrinsic height, never last frame's clipped height.
-       * Otherwise each reclamp shrinks the card again and an expanded
-       * track cannot restore content after a zero-space interval. Batch
-       * resets before reads and restore final caps before the next paint. */
-      live.forEach((rail) => { if (rail.style.maxHeight) rail.style.maxHeight = ''; });
-      const railedHosts = new Set(live.map((rail) => rail.parentElement));
-      const geometry = live.map((rail) => {
-        const host = rail.parentElement;
-        const style = getComputedStyle(rail);
-        const insets = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
-          + parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
-        let nextTop = contentBottom;
-        /* Both boundaries matter: an unrailed human starts a new round,
-         * while a railed assistant starts a new card within this round.
-         * Sibling hosts keep independent lanes from constraining each other.
-         * Hidden/empty rails never reserve a boundary. */
-        for (let el = host.nextElementSibling; el; el = el.nextElementSibling) {
-          if (el.classList && (el.classList.contains('user-msg') || railedHosts.has(el))) {
-            nextTop = Math.min(nextTop, el.getBoundingClientRect().top);
-            break;
-          }
-        }
-        return { rail, hostTop: host.getBoundingClientRect().top,
-          railH: rail.getBoundingClientRect().height, nextTop, insets };
-      });
-      for (const { rail, hostTop, railH, nextTop, insets } of geometry) {
-        let off = stickTop - hostTop;
-        const limit = nextTop - railH - hostTop;
-        if (off > limit) off = limit;
-        if (!(off > 0.5)) off = 0;
-        if (off > 0) {
-          const y = 'translateY(' + off.toFixed(1) + 'px)';
-          if (rail.style.transform !== y) rail.style.transform = y;
-          rail.classList.add('tctx-stuck');
-        } else {
-          if (rail.style.transform) rail.style.transform = '';
-          rail.classList.remove('tctx-stuck');
-        }
-        /* USE THE SPACE: size the rail to the actual free track. The old
-         * caps were a host-relative 100% parked (a one-line input turn gave
-         * the rail ~1 line) and a fixed 60vh while stuck — the gutter beside
-         * the reply sat empty while the rail's own facts scrolled internally
-         * (the 2026-09-23 "two halves that don't move together" report).
-         * The free track space is nextTop − visible top (its bottom edge is
-         * exactly the follower's push-out clamp), so the rail is sized to
-         * fill the space it already glides through instead of being squeezed
-         * by its one-line host. The CSS cap becomes none — the geometry,
-         * not an arbitrary vh, is the budget. Out-of-flow + the clamp keep
-         * the no-row-inflation and continuous-handoff contracts intact. */
-        // Use the same tenth-pixel translation that was applied above.
-        // Rounding the remaining height independently opens a visible seam
-        // at handoff when localized text gives the rail fractional height.
-        const visibleTop = hostTop + (off > 0 ? Math.round(off * 10) / 10 : 0);
-        const maxH = Math.max(0, nextTop - visibleTop);
-        rail.style.maxHeight = maxH + 'px';
-        /* max-height:0 still paints padding/borders. Suppress that sliver,
-         * without display:none/hidden (which would drop this rail from the
-         * next geometry pass and prevent recovery when space returns). */
-        rail.classList.toggle('tctx-no-space', maxH <= insets);
-      }
-    }
-    _railFollowReobserve();
+    _measureRailTracks();
+    _observeRailTrackLayout();
   }
 
-  /* Scroll alone doesn't cover the follower's triggers: streaming grows
-   * the content under a pinned rail, and the sidebar/inspector drawer
-   * resize the pane. chat-inner's box tracks both; a rail's own growth
-   * (the "+N" toggle) re-clamps via the click handler above. Transforms
-   * never change these observed boxes, so the observer can't self-feed. */
-  function _railFollowReobserve() {
+  /* Lengthen the tracks before this frame paints. A stream grows the
+   * transcript and follows its end in one frame; a pass a frame later let
+   * the last card paint pushed up by that growth, then snap back. A pane
+   * resize can also move the agent section between card and fold, which
+   * mounts in-flow content and so stays on the coalesced pass. */
+  function _onRailTrackResize(entries) {
+    _measureRailTracks();
+    if (entries.some((entry) => entry.target.classList.contains('chat-container'))) {
+      _scheduleRailTracks();
+    }
+  }
+
+  /* chat-inner's box changes with streaming growth and every content resize;
+   * the chat container's with the window, sidebar, drawer and composer (the
+   * pane height). Track writes never change these observed boxes, so the
+   * observer cannot self-feed. */
+  function _observeRailTrackLayout() {
     if (typeof ResizeObserver === 'undefined') return;
     const nodes = [];
     document.querySelectorAll('.chat-container').forEach((c) => {
@@ -21865,46 +22059,39 @@ let backgroundConversationActivity = new Map();
       const inner = c.querySelector('.chat-inner');
       if (inner) nodes.push(inner);
     });
-    const same = nodes.length === _railFollowObserved.length
-      && nodes.every((n, i) => n === _railFollowObserved[i]);
+    const same = nodes.length === _railTracksObserved.length
+      && nodes.every((n, i) => n === _railTracksObserved[i]);
     if (same) return;
-    if (_railFollowRO) _railFollowRO.disconnect();
-    else _railFollowRO = new ResizeObserver(_scheduleRailFollow);
-    _railFollowObserved = nodes;
-    nodes.forEach((n) => _railFollowRO.observe(n));
+    if (_railTracksRO) _railTracksRO.disconnect();
+    else _railTracksRO = new ResizeObserver(_onRailTrackResize);
+    _railTracksObserved = nodes;
+    nodes.forEach((n) => _railTracksRO.observe(n));
     /* A new absolute rail (or a hidden rail becoming populated) need not
      * resize chat-inner. Watch structure/visibility, never our own style or
-     * class writes, so reconciliation also gets one coalesced clamp. The
-     * observer shares the page follower's rebinding lifecycle. */
+     * class writes, so reconciliation also gets one coalesced pass. The
+     * observer shares the resize observer's rebinding lifecycle. */
     if (typeof MutationObserver !== 'undefined') {
-      if (_railFollowMO) _railFollowMO.disconnect();
-      else _railFollowMO = new MutationObserver(_scheduleRailFollow);
+      if (_railTracksMO) _railTracksMO.disconnect();
+      else _railTracksMO = new MutationObserver(_scheduleRailTracks);
       nodes.filter((n) => n.classList.contains('chat-container')).forEach((n) => {
-        _railFollowMO.observe(n, { childList: true, subtree: true,
+        _railTracksMO.observe(n, { childList: true, subtree: true,
           attributes: true, attributeFilter: ['hidden', 'open'] });
       });
     }
   }
 
-  function _scheduleRailFollow() {
-    if (_railFollowScheduled) return;
-    _railFollowScheduled = true;
+  function _scheduleRailTracks() {
+    if (_railTracksScheduled) return;
+    _railTracksScheduled = true;
     if (typeof requestAnimationFrame !== 'function') {
-      _railFollowScheduled = false;
-      _updateRailFollow();
+      _railTracksScheduled = false;
+      _railTrackPass();
       return;
     }
     requestAnimationFrame(() => {
-      _railFollowScheduled = false;
-      _updateRailFollow();
+      _railTracksScheduled = false;
+      _railTrackPass();
     });
-  }
-
-  function _onRailFollowScroll(ev) {
-    const t = ev.target;
-    if (t && t.classList && t.classList.contains('chat-container')) {
-      _scheduleRailFollow();
-    }
   }
 
   /* Fact-card fields on the done frame the reconcile MAY overwrite. Kept as
@@ -22054,8 +22241,9 @@ let backgroundConversationActivity = new Map();
    * path. Their rails were already painted from those snapshots, so ask the
    * authoritative surface to repaint; the render path then falls back to the
    * live branch (`renderTurnCtxNote`) without writing into the frozen record.
-   * Only a conversation that actually has a branch-less human turn triggers
-   * the repaint, so this cannot loop. */
+   * Only a conversation that actually has a branch-less human turn with
+   * workspace roots (a root-less turn shows no branch) triggers the repaint,
+   * so this cannot loop. */
   function _repaintRailsMissingBranch() {
     const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
     if (!conv || !conv.id) return;
@@ -22064,7 +22252,7 @@ let backgroundConversationActivity = new Map();
     const missing = (read.ordered(conv) || []).some((turn) => {
       if (!turn || turn.actor !== 'human') return false;
       const snap = _turnCtxSnapshot(turn);
-      return !!snap && !snap.git;
+      return !!snap && !snap.git && Array.isArray(snap.roots) && snap.roots.length > 0;
     });
     if (!missing) return;
     if (typeof runtimeScope.requestAuthoritativeConversationRender === 'function') {
@@ -22136,10 +22324,7 @@ let backgroundConversationActivity = new Map();
     try {
       const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
       /* Ignore live state left over from a different conversation. */
-      if (!conv || (_liveConvId !== null && String(conv.id) !== _liveConvId)) {
-        _scheduleRailFollow();
-        return;
-      }
+      if (!conv || (_liveConvId !== null && String(conv.id) !== _liveConvId)) return;
       /* The in-flight turn is TRANSIENT (excluded from ConversationTurnRead
        * .ordered()) and is always rendered as the LAST human-input rail in
        * the conversation. Patch that rail's rows in place. Settled turns —
@@ -22159,20 +22344,22 @@ let backgroundConversationActivity = new Map();
       const rail = rails.length ? rails[rails.length - 1] : null;
       if (rail) {
         const facts = rail.querySelector('[data-conversation-part="turn-context-content"]') || rail;
-        /* Branch row: rebuild (or remove) in place. Prefer the live branch
+        /* Each workspace line ends with its root's branch (`root:branch`):
+         * rebuild (or remove) that suffix in place. Prefer the live branch
          * (it moves on a mid-turn `git checkout`); fall back to the branch
          * derivable from projectState so a gap in the live state never
-         * blanks a branch the workspace is still on. */
-        const gitRow = rail.querySelector('[data-tctx-git]');
+         * blanks a branch the workspace is still on. Lines keep snapshot
+         * order, so the first is the primary root. */
         const gitForRow = live.git || _collectGit();
-        const gitHtml = _renderGitRowHtml(gitForRow);
-        if (gitHtml) {
-          if (gitRow) gitRow.outerHTML = gitHtml;
-          else facts.insertAdjacentHTML('beforeend', gitHtml);
-        } else if (gitRow) gitRow.remove();
+        rail.querySelectorAll('[data-tctx-root]').forEach((line, index) => {
+          const html = renderTurnContextRootBranchHtml(gitForRow, line.dataset.tctxRoot, index === 0);
+          const suffix = line.querySelector('[data-tctx-git]');
+          if (suffix) suffix.outerHTML = html;
+          else if (html) line.querySelector('.tctx-path-text')?.insertAdjacentHTML('beforeend', html);
+        });
         /* Checklist row: rebuild (or remove) in place. */
         const todoRow = rail.querySelector('[data-tctx-todo]');
-        const todoHtml = _renderTodoRowHtml(live.todos);
+        const todoHtml = renderTurnContextChecklistRowHtml(live.todos, _railHost);
         if (todoHtml) {
           if (todoRow) todoRow.outerHTML = todoHtml;
           else facts.insertAdjacentHTML('beforeend', todoHtml);
@@ -22203,32 +22390,6 @@ let backgroundConversationActivity = new Map();
         }
       }
     } catch (_e) { /* best-effort reconcile; settled rails already correct */ }
-    /* The patched rows changed rail heights — re-clamp sticky travel. */
-    _scheduleRailFollow();
-  }
-
-  function _renderGitRowHtml(git) {
-    if (!git || !git.branch) return '';
-    const rows_ = Array.isArray(git.branches) && git.branches.length ? git.branches
-      : [{ path: '', short: '', branch: git.branch }];
-    const multi = rows_.length > 1;
-    const chips = rows_.map((b) =>
-      '<span class="tctx-chip tctx-tone-git" title="' +
-      _esc((b.path ? b.path + ' ￩ ' : '') + b.branch) + '">' + _BRANCH +
-      '<span>' + _esc(b.branch) + '</span>' +
-      (multi && b.short ? '<span class="tctx-branch-root">' + _esc(b.short) + '</span>' : '') +
-      '</span>').join('');
-    return '<div class="tctx-row tctx-git-row" data-tctx-git="1"><span class="tctx-row-h">' +
-      _esc(t('turnCtx.branchLabel')) + '</span>' +
-      '<div class="tctx-chips">' + chips + '</div></div>';
-  }
-
-  function _renderTodoRowHtml(todos) {
-    if (!todos || !todos.length) return '';
-    /* No label cell: the checklist is a single chip inside the chip flow,
-     * so the row is just the chip (no "待办 |" header splitting it off). */
-    return '<div class="tctx-row tctx-todo-row" data-tctx-todo="1">' +
-      _buildTodoListHtml(todos) + '</div>';
   }
 
   function _scheduleCtxPatch() {
@@ -22249,20 +22410,19 @@ let backgroundConversationActivity = new Map();
   runtimeScope.updateTurnCtxTodos = updateTurnCtxTodos;
   runtimeScope.activateTurnCtxConversation = activateTurnCtxConversation;
 
-  /* Browser lifecycle: clicks (delegated), pane scrolls (captured —
-   * element scrolls don't bubble), one boot pass, and a ResizeObserver
-   * (re)bound by every pass for streaming growth / pane resizes. MCP
-   * state arrives through existing responses and installs no hook. */
+  /* Browser lifecycle: clicks (delegated), one boot pass, and the resize /
+   * mutation observers (re)bound by every pass for layout changes. Scrolling
+   * runs no script: the sticky card travels on its own. MCP state arrives
+   * through existing responses and installs no hook. */
   if (typeof document !== 'undefined') {
     document.addEventListener('click', _onTctxClick);
-    document.addEventListener('scroll', _onRailFollowScroll, { capture: true, passive: true });
-    _scheduleRailFollow();
+    _scheduleRailTracks();
   }
 })();
 /* ===== migrated source: local-control-state.js ===== */
 /* Responsibility: retained Local Control badge projection only.
  * Entry: _lcUpdateBadge, called when conversation tool flags change.
- * Dependencies: retained browser/desktop wire flags and the optional
+ * Dependencies: the retained desktop wire flag and the optional
  * demand-loaded LocalControlPresentationState reachability port. */
 
 function _lcBadgeT(key, fallback) {
@@ -22273,23 +22433,24 @@ function _lcBadgeT(key, fallback) {
   return fallback;
 }
 
-/* ONE summary badge on the merged toolbar entry, counting whichever
- * capabilities are on. The merged row is `active` when either is.
+/* ONE summary badge on the merged toolbar entry, counting the switchable
+ * capability when it is on; the merged row is `active` with it. The browser
+ * is always on with no switch, so like the other default tools it never
+ * counts: a permanent count, or a permanent stale warning for everyone
+ * without the extension, would be noise.
  *
  * Enabled is not the same as working: an enabled capability confirmed
  * unreachable ships zero tools. The presentation owner publishes its live
  * reachability object only after that chunk is requested; absence means
  * "not probed", which must never be presented as broken. */
 function _lcUpdateBadge() {
-  var bOn = (typeof browserEnabled !== 'undefined' && browserEnabled);
   var dOn = (typeof desktopEnabled !== 'undefined' && desktopEnabled);
-  var n = (bOn ? 1 : 0) + (dOn ? 1 : 0);
+  var n = dOn ? 1 : 0;
   var presentation = runtimeScope.LocalControlPresentationState;
   var reach = (presentation && typeof presentation.reach === 'object'
       && presentation.reach)
     ? presentation.reach : { browser: null, desktop: null };
-  var stale = ((bOn && reach.browser === false) ? 1 : 0)
-            + ((dOn && reach.desktop === false) ? 1 : 0);
+  var stale = (dOn && reach.desktop === false) ? 1 : 0;
   var badge = document.getElementById('localControlBadge');
   if (badge) {
     badge.textContent = n > 0 ? String(n) : '';
@@ -22639,8 +22800,8 @@ if (typeof window !== 'undefined') {
 
   function _label(reading) {
     const { ms, state, connected } = reading;
-    if (!connected || state === 'offline') return t('net.offline') || '离线';
     if (state === 'timeout') return t('net.timeout') || '超时';
+    if (!connected || state === 'offline') return t('net.offline') || '离线';
     // SSE chat stream is reconnecting even though the push RTT looks fine — the
     // reply connection is the one in trouble, so say so rather than a green ms.
     if (_sseDegraded) return t('net.reconnecting') || '重连中';
@@ -22651,11 +22812,11 @@ if (typeof window !== 'undefined') {
   function _title(reading) {
     const { ms, state, connected } = reading;
     const head = t('net.title') || '网络延迟';
-    if (!connected || state === 'offline') {
-      return `${head}: ${t('net.offlineDesc') || '推送连接已断开'}`;
-    }
     if (state === 'timeout') {
       return `${head}: ${t('net.timeoutDesc') || '探测超时，网络可能很差'}`;
+    }
+    if (!connected || state === 'offline') {
+      return `${head}: ${t('net.offlineDesc') || '推送连接已断开'}`;
     }
     if (_sseDegraded) {
       const base = (ms == null) ? head : `${head}: ${ms}ms`;
@@ -22669,7 +22830,10 @@ if (typeof window !== 'undefined') {
   function _render(reading) {
     if (!_el) return;
     _lastReading = reading;
-    let state = (!reading.connected) ? 'offline' : (reading.state || 'unknown');
+    // The Push owner retires timed-out sockets immediately; keep that explicit
+    // cause while recovery proceeds instead of erasing it with the closed bit.
+    let state = reading.state === 'timeout' ? 'timeout'
+      : (!reading.connected) ? 'offline' : (reading.state || 'unknown');
     /* ① Merge the chat-SSE health: if any active reply stream is
      *    reconnecting/stalled, the badge must warn even when the push RTT is
      *    green. Show the WORSE of the two — but never DOWNGRADE a real push
@@ -23353,6 +23517,7 @@ runtimeScope._wireConvSyncPush = _wireConvSyncPush;
    Contents:
      _SW_SVG, _SW_FILE_WRITE_TOOLS,
      _swAgentModifiedCount, _SW_STATUS_SVG, _SW_STALE_MS, _swStatusIcon,
+     _swElapsedText, _swTokenText,
      _swarmResultsByAgent, _recoverSwarmAgents, _buildSwarmPanelHTML,
      _swarmRoundTaskId, _settleStuckSwarmRound,
      _reconcileStuckSwarmPanelsOnce, _tickSwarmTimers (+ typed scheduler).
@@ -23365,9 +23530,8 @@ runtimeScope._wireConvSyncPush = _wireConvSyncPush;
 const _SW_SVG = {
   /* hub-and-spoke: one parent forking into parallel agents */
   hub: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.1"/><circle cx="5" cy="19" r="2.1"/><circle cx="19" cy="19" r="2.1"/><path d="M12 7.1v3.4M12 10.5L6 16.9M12 10.5l6 6.4"/></svg>',
-  hubSm: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.4"/><circle cx="5" cy="19" r="2.4"/><circle cx="19" cy="19" r="2.4"/><path d="M12 7.4v3M12 10.4L6 16.6M12 10.4l6 6.2"/></svg>',
-  /* tiny tool glyph (wrench) — fallback when a sub-agent tool has no icon */
-  tool: '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.2 5.2L3 18v3h3l6.5-6.5a4 4 0 0 0 5.2-5.2l-2.5 2.5-2.3-.6-.6-2.3z"/></svg>',
+  /* speech bubble — a message delivered into an agent's input */
+  message: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
   /* pencil — marks an agent that modified files on disk */
   pencil: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
   chevron: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
@@ -23411,6 +23575,15 @@ function _swStatusIcon(status) {
   if (status === 'failed' || status === 'error') return _SW_STATUS_SVG.failed;
   if (status === 'running' || status === 'thinking') return _SW_STATUS_SVG.running;
   return _SW_STATUS_SVG.pending;
+}
+/* One clock format for the run header, live agent rows and the 1Hz ticker. */
+function _swElapsedText(seconds) {
+  const sec = Math.max(0, seconds);
+  return sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${sec}s`;
+}
+function _swTokenText(tokens) {
+  return tokens >= 1000000 ? (tokens / 1000000).toFixed(1) + "m"
+    : tokens > 1000 ? (tokens / 1000).toFixed(1) + "k" : String(tokens);
 }
 
 /* After a page reload the live-only `_swarmAgents` array is gone (it is
@@ -23575,6 +23748,8 @@ function _recoverSwarmAgents(round, allRounds) {
         preview: a.preview || "",
         elapsed: (a.elapsed === 0 || a.elapsed) ? a.elapsed : "",
         tokens: (a.tokens === 0 || a.tokens) ? a.tokens : "",
+        /* Model rounds run so far; the background-agent row shows the count. */
+        round: a.round,
         modifiedFiles: typeof a.modifiedFiles === "number" ? a.modifiedFiles : 0,
         error: swarmFailureReason(a.error),
         failure: a.failure || a.error,
@@ -23753,9 +23928,7 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
   /* ── Elapsed timer ── */
   let elapsed = "";
   if (round._swarmStartTime && !isStale) {
-    const ms = (round._swarmEndTime || Date.now()) - round._swarmStartTime;
-    const sec = Math.floor(ms / 1000);
-    elapsed = sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${sec}s`;
+    elapsed = _swElapsedText(Math.floor(((round._swarmEndTime || Date.now()) - round._swarmStartTime) / 1000));
   }
   /* When the panel is still active, expose the start timestamp so a
    * 1Hz ticker can update the elapsed text in place without going
@@ -23774,12 +23947,9 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
     _swDemandReconciliation(_SW_RECONCILE_INTERVAL_MS);
   }
 
-  /* ── Header icon ── */
-  const headerIcon = isActive
-    ? `<span class="sw-header-icon" style="animation:swarmIconBounce 1.2s ease-in-out infinite">${_SW_SVG.hub}</span>`
-    : `<span class="sw-header-icon">${_SW_SVG.hub}</span>`;
-
-  /* ── Header subtitle counts ── */
+  /* ── Header counts: the run's only quantitative summary (zero buckets
+     omitted). The verdict chip and completion bar carry the rest, so no
+     other line restates progress, totals or elapsed time. ── */
   let headerSubtitle = "";
   if (total > 0) {
     const parts = [];
@@ -23793,68 +23963,77 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
     if (pending > 0 && isActive) parts.push(escapeHtml(t('bgActivity.summaryWaiting', { count: pending })));
     if (unknown > 0) parts.push(escapeHtml(t('swarm.summary.unknown', { count: unknown })));
     headerSubtitle = `<span class="sw-header-subtitle">${parts.join(" · ")}</span>`;
-  } else if (isActive) {
-    headerSubtitle = `<span class="sw-header-subtitle">Planning…</span>`;
   }
 
-  /* Async outranks Complete while background agents remain unresolved. */
+  /* ── Verdict: ONE chip for the whole run, as [tone, label, tooltip]. The
+     tone also tints the header glyph (data-sw-tone). Async outranks Complete
+     while background agents remain unresolved. ── */
   const stillRunningAsync = !isStale && !!round._asyncRunning && (running > 0 || pending > 0);
-  let statusPill;
+  let verdict;
   if (launchFailure) {
-    statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} ${escapeHtml(t('swarm.launchFailed'))}</span>`;
+    verdict = ["error", t('swarm.launchFailed')];
   } else if (failed > 0 && running === 0 && pending === 0 && finished === total) {
-    statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} ${escapeHtml(t(done === 0 ? 'swarm.phase.failed' : 'swarm.failure.mixed'))}</span>`;
+    verdict = ["error", t(done === 0 ? 'swarm.phase.failed' : 'swarm.failure.mixed')];
   } else if (interrupted > 0 && running === 0 && pending === 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-stale" title="${escapeHtml(t('swarm.restart.continueHint'))}">${_SW_STATUS_SVG.stale} ${escapeHtml(t('swarm.phase.interrupted'))}</span>`;
+    verdict = ["stale", t('swarm.phase.interrupted'), t('swarm.restart.continueHint')];
   } else if (isStale) {
-    statusPill = `<span class="sw-status-pill sw-pill-stale" title="This swarm panel never received its completion signal (likely a server restart or dropped connection). It will reconcile automatically when the server is reachable.">${_SW_STATUS_SVG.stale} Stale</span>`;
+    verdict = ["stale", t('swarm.status.stale'), t('swarm.status.staleHint')];
   } else if (total === 0 && isActive) {
-    statusPill = `<span class="sw-status-pill sw-pill-planning"><span class="sw-spinner" style="width:10px;height:10px;border-width:1.5px"></span>Planning</span>`;
+    verdict = ["planning", t('swarm.status.planning')];
   } else if (isActive && running === 0 && pending > 0 && unknown === 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-queued">${_SW_STATUS_SVG.pending} ${escapeHtml(t('swarm.phase.queued'))}</span>`;
+    verdict = ["queued", t('swarm.phase.queued')];
   } else if (isActive && running === 0 && unknown > 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-stale">${_SW_STATUS_SVG.stale} Unconfirmed</span>`;
+    verdict = ["stale", t('swarm.status.unconfirmed')];
   } else if (isActive) {
-    statusPill = `<span class="sw-status-pill sw-pill-running"><span class="sw-spinner" style="width:10px;height:10px;border-width:1.5px"></span>${escapeHtml(t('swarm.phase.running'))}</span>`;
+    verdict = ["running", t('swarm.phase.running')];
   } else if (stillRunningAsync) {
-    const n = running + pending;
-    statusPill = `<span class="sw-status-pill sw-pill-async" title="Sub-agents are still working in the background — updates arrive automatically as the conversation continues."><span class="sw-async-dot"></span>${n} running async</span>`;
+    verdict = ["async", t('swarm.status.background', { count: running + pending }), t('swarm.status.backgroundHint')];
   } else if (round._swarmError) {
     /* Explicit driver failure outranks inferred agent counts. */
-    statusPill = `<span class="sw-status-pill sw-pill-error" title="${escapeHtml(round._swarmError)}">${_SW_STATUS_SVG.failed} Failed</span>`;
+    verdict = ["error", t('swarm.phase.failed'), round._swarmError];
   } else if (aborted > 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} ${aborted === total ? "Aborted" : "Finished with interruptions"}</span>`;
+    verdict = ["error", t(aborted === total ? 'swarm.phase.aborted' : 'swarm.status.partlyCancelled')];
   } else if (stalled > 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-stale">${_SW_STATUS_SVG.stale} Stalled</span>`;
-  } else if (failed > 0 && done === 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} Failed</span>`;
+    verdict = ["stale", t('swarm.phase.stalled')];
   } else if (failed > 0) {
-    statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} Completed with errors</span>`;
+    verdict = ["error", t(done === 0 ? 'swarm.phase.failed' : 'swarm.failure.mixed')];
   } else if (finished < total || (total === 0 && !round._swarmSnapshot?.settled)) {
     /* No terminal agent or settled snapshot is never Complete. Deliberately
        ignore `_swarmEndTime`: reconciliation freezes it even when truth for
        every agent remains unknown. */
     _swScheduleUnconfirmedProbe(round);
-    statusPill = `<span class="sw-status-pill sw-pill-stale" title="This panel was reloaded while its agents were still working and lost its live connection; no agent has reported a final result yet. It will reconcile automatically when the server is reachable.">${_SW_STATUS_SVG.stale} Unconfirmed</span>`;
+    verdict = ["stale", t('swarm.status.unconfirmed'), t('swarm.status.unconfirmedHint')];
   } else {
-    statusPill = `<span class="sw-status-pill sw-pill-done">${_SW_STATUS_SVG.done} Complete</span>`;
+    verdict = ["done", t('swarm.phase.complete')];
   }
+  const [tone, verdictLabel, verdictHint] = verdict;
+  const verdictGlyph = (tone === "running" || tone === "planning") ? '<span class="sw-spinner"></span>'
+    : tone === "async" ? '<span class="sw-async-dot"></span>'
+    : tone === "done" ? _SW_STATUS_SVG.done
+    : tone === "error" ? _SW_STATUS_SVG.failed
+    : tone === "queued" ? _SW_STATUS_SVG.pending
+    : _SW_STATUS_SVG.stale;
+  const statusPill = `<span class="sw-status-pill sw-pill-${tone}"`
+    + (verdictHint ? ` title="${escapeHtml(verdictHint)}"` : "")
+    + `>${verdictGlyph} ${escapeHtml(verdictLabel)}</span>`;
 
-  /* ── Progress bar (only when agents exist) ── */
+  /* ── Completion bar (only when agents exist) ── */
   let progressBar = "";
   if (total > 0) {
-    const pctDone = Math.round((done / total) * 100);
-    const pctFailed = Math.round(((failed + aborted) / total) * 100);
-    const pctRunning = Math.round((running / total) * 100);
-    const fillStyle = (failed > 0 && done > 0) ? ` style="--ok-pct:${pctDone}%"` : "";
-    const fillClass = failed > 0 && done > 0 ? " has-errors" : "";
-    progressBar = `<div class="sw-progress">` +
+    /* Completion matches the label, not admission: running and unresolved
+       agents contribute no fill. Do not round unfinished rosters to 100%.
+       The success color occupies its fraction of the finished portion.
+       The header counts are the visible summary; the bar names its exact
+       fraction to assistive technology instead of repeating it in text. */
+    const hasErrors = failed + aborted > 0;
+    const fillClass = hasErrors ? " has-errors" : "";
+    const fillStyle = `width:${(finished / total) * 100}%;` +
+      (hasErrors ? `--ok-pct:${(done / finished) * 100}%;` : "");
+    const progressLabel = escapeHtml(t('swarm.summary.finished', { finished, total }));
+    progressBar = `<div class="sw-progress" role="progressbar" aria-valuemin="0"` +
+      ` aria-valuemax="${total}" aria-valuenow="${finished}" aria-label="${progressLabel}">` +
       `<div class="sw-progress-track">` +
-        `<div class="sw-progress-fill${fillClass}" style="width:${pctDone + pctFailed + pctRunning}%"${fillStyle}></div>` +
-      `</div>` +
-      `<div class="sw-progress-label">` +
-        `<span>${finished}/${total} agents finished</span>` +
-        (elapsed ? `<span>${elapsed}</span>` : "") +
+        `<div class="sw-progress-fill${fillClass}" style="${fillStyle}"></div>` +
       `</div>` +
     `</div>`;
   }
@@ -23866,7 +24045,6 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
       const sIcon = _swStatusIcon(a.status);
       const taskNum = `#${i + 1}`;
       const objective = escapeHtml(a.objective || "");
-      const phase = a.phase || a.status || "";
       /* FULL answer — the panel is a debugging surface, so the sub-agent's
          result is never clipped. The durable snapshot carries the complete
          text and CSS owns the visual bounding (scroll), not a JS slice. */
@@ -23885,7 +24063,7 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
          parent default), resolved server-side and sent on spawn / start /
          complete events. */
       const modelChip = a.model
-        ? `<span class="sw-a-model" title="Model: ${escapeHtml(a.model)}">${escapeHtml(a.model)}</span>`
+        ? `<span class="sw-a-model" title="${escapeHtml(a.model)}">${escapeHtml(a.model)}</span>`
         : "";
 
       /* ── Status class ── */
@@ -23897,96 +24075,69 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
       else if (a.status === "running" || a.status === "thinking") sClass = "sw-a-running";
       else sClass = "sw-a-pending";
 
-      /* ── Phase pill label ── */
-      const phaseMap = {
-        thinking: t("swarm.phase.thinking"), tool_use: t("swarm.phase.tool_use"), writing: t("swarm.phase.writing"),
-        searching: t("swarm.phase.searching"), coding: t("swarm.phase.coding"), analyzing: t("swarm.phase.analyzing"),
-        done: t("swarm.phase.complete"), completed: t("swarm.phase.complete"), failed: t("swarm.phase.failed"), error: t("swarm.phase.error"),
-        pending: t("swarm.phase.queued"), running: t("swarm.phase.running"), waiting: t("swarm.phase.queued"), queued: t("swarm.phase.queued"),
-        retrying: t("swarm.phase.retrying"),
-        stalled: t("swarm.phase.stalled"),
-        unknown: t("swarm.phase.noResult"),
-        aborted: t('swarm.phase.aborted'), cancelled: t('swarm.phase.aborted'), canceled: t('swarm.phase.aborted'),
-      };
-      /* Status wins for a terminated agent: if status is done/failed but the
-         phase got stranded at a spawn-time value (e.g. "waiting" because the
-         per-agent events were routed to another panel), show the terminal
-         label rather than a contradictory "waiting"/"Queued" pill next to a
-         done checkmark (status/phase desync). */
-      let phaseLabel;
-      if (a.status === "done" || a.status === "completed") phaseLabel = t("swarm.phase.complete");
-      else if (a.status === "failed" || a.status === "error") phaseLabel = t("swarm.phase.failed");
-      else if (a.status === 'interrupted') phaseLabel = t('swarm.phase.interrupted');
-      else if (['aborted', 'cancelled', 'canceled'].includes(a.status)) phaseLabel = t('swarm.phase.aborted');
-      else if (a.status === "stalled") {
-        /* Verdict, not mystery: the backend judged this agent silent (see
-           master._stalled_agents). Show the measured silence so the card
-           answers "why" — the 无结果 bucket is for never-produced only. */
-        const sil = Number(a.stallSilentSeconds);
-        phaseLabel = Number.isFinite(sil) && sil > 0
-          ? t("swarm.phase.stalledSilent", { seconds: Math.round(sil) })
-          : t("swarm.phase.stalled");
-      }
-      else phaseLabel = swarmAgentWaitLabel(a, key => t(key)) || phaseMap[phase] || phase || t("swarm.phase.noResult");
+      /* ── Phase pill: one word per state, whichever event vocabulary
+         delivered it (policy in swarm-agent-presentation.ts). ── */
+      const phaseLabel = swarmAgentPhaseLabel(a, (key, _fallback, args) => t(key, args));
 
       /* ── Agent elapsed ── */
       let agentTimer = "";
       const aRunning = a.status === "running" || a.status === "thinking";
       if (aRunning && a._startedAt) {
         // Live-ticking timer driven by the 1Hz updater (data-sw-start).
-        const sec = Math.max(0, Math.floor((Date.now() - a._startedAt) / 1000));
-        const txt = sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${sec}s`;
+        const txt = _swElapsedText(Math.floor((Date.now() - a._startedAt) / 1000));
         agentTimer = `<span class="sw-a-timer" data-sw-start="${a._startedAt}">${txt}</span>`;
-      } else if (a.elapsed) {
-        agentTimer = `<span class="sw-a-timer">${a.elapsed}s</span>`;
+      } else if (Number(a.elapsed) > 0) {
+        agentTimer = `<span class="sw-a-timer">${_swElapsedText(Math.round(Number(a.elapsed)))}</span>`;
       }
 
-      /* ── Agent body: objective + tools + preview ── */
+      /* ── Agent body, in reading order: brief → work → result ── */
       let bodyContent = "";
 
-      // Objective — always show prominently
+      /* The brief stays one quiet line (its opening sentence) until the
+         reader opens it; the full instructions are never clipped. */
       if (objective) {
-        bodyContent += `<details class="sw-a-task"><summary>${escapeHtml(t('swarm.taskInstructions'))}</summary><div class="sw-a-objective">${objective}</div></details>`;
+        const brief = escapeHtml(swarmAgentBrief(a.objective));
+        bodyContent += `<details class="sw-a-task"><summary>` +
+          `<span class="sw-a-task-label">${escapeHtml(t('swarm.taskInstructions'))}</span>` +
+          `<span class="sw-a-task-brief">${brief}</span></summary>` +
+          `<div class="sw-a-objective">${objective}</div></details>`;
       }
 
-      // Dependency chain
+      /* Prerequisites use the same #N ordinals as the agent rows. */
       if (a.dependsOn && a.dependsOn.length > 0) {
         const depHTML = a.dependsOn.map(depId => {
-          const depAgent = agents.find(x => x.id === depId);
-          const depLabel = depAgent ? `Task ${agents.indexOf(depAgent) + 1}` : depId;
+          const depIndex = agents.findIndex(x => x.id === depId);
+          const depAgent = agents[depIndex];
+          const depLabel = depAgent ? `#${depIndex + 1}` : depId;
           const depDone = depAgent && (depAgent.status === "done" || depAgent.status === "completed");
-          return `<span class="sw-dep-tag ${depDone ? 'sw-dep-done' : ''}">${depDone ? _SW_STATUS_SVG.done + ' ' : ''}${escapeHtml(depLabel)}</span>`;
+          return `<span class="sw-dep-tag${depDone ? ' sw-dep-done' : ''}">${depDone ? _SW_STATUS_SVG.done + ' ' : ''}${escapeHtml(depLabel)}</span>`;
         }).join("");
-        bodyContent += `<div class="sw-a-deps"><span class="sw-a-deps-label">Waits for:</span>${depHTML}</div>`;
+        bodyContent += `<div class="sw-a-deps"><span class="sw-a-deps-label">${escapeHtml(t('swarm.dependsOn'))}</span>${depHTML}</div>`;
       }
 
-      // Tools used — compact inline
-      if (a.tools && a.tools.length > 0) {
-        const toolHTML = a.tools.slice(-6).map(t => {
-          const td = _TOOL_DISPLAY[t];
-          const icon = (td && td.icon) ? td.icon : _SW_SVG.tool;
-          const label = td ? (td.label || t) : t;
-          return `<span class="sw-a-tool-tag" title="${escapeHtml(t)}">${icon} ${label}</span>`;
+      /* Per-call timeline in the parent tool panel's glyph language: one
+         tool glyph per row, tinted by the call's state. Earlier calls fold
+         above the latest one, so the body reads chronologically. */
+      const projectedCalls = projectAgentTimeline(a, t);
+      const timelineCalls = projectedCalls.filter(call => call.entryKind !== 'message_receipt');
+      const messageCalls = projectedCalls.filter(call => call.entryKind === 'message_receipt');
+      const omittedToolCalls = Number(a._toolCallsOmitted || 0);
+
+      /* Tool names alone are evidence only when no per-call record exists. */
+      if (timelineCalls.length === 0 && omittedToolCalls === 0 && a.tools && a.tools.length > 0) {
+        const toolHTML = a.tools.slice(-6).map(name => {
+          const td = _TOOL_DISPLAY[name];
+          const label = td ? (td.label || name) : name;
+          return `<span class="sw-a-tool-tag" title="${escapeHtml(name)}">${toolRoundSvg({ toolName: name })}${escapeHtml(label)}</span>`;
         }).join("");
         const more = a.tools.length > 6 ? `<span class="sw-a-tool-tag">+${a.tools.length - 6}</span>` : "";
         bodyContent += `<div class="sw-a-tools">${toolHTML}${more}</div>`;
       }
 
-      // Per-tool-call execution timeline — same look as ptool-panel rows.
-      // Each row has a status dot, tool name, args brief, and elapsed.
-      // Click a row to expand its preview/error.
-      const projectedCalls = projectAgentTimeline(a, t);
-      const timelineCalls = projectedCalls.filter(call => call.entryKind !== 'message_receipt');
-      const messageCalls = projectedCalls.filter(call => call.entryKind === 'message_receipt');
-      const omittedToolCalls = Number(a._toolCallsOmitted || 0);
       if (timelineCalls.length > 0 || messageCalls.length > 0 || omittedToolCalls > 0) {
         const renderCall = (c, index) => {
-          const dot = c.entryKind === 'message_receipt' ? '<span class="sw-tl-dot"></span>'
-                    : c.status === "running" ? '<span class="sw-tl-dot sw-tl-running"></span>'
-                    : c.status === "failed"  ? `<span class="sw-tl-dot sw-tl-failed">${_SW_STATUS_SVG.failed}</span>`
-                    :                          `<span class="sw-tl-dot sw-tl-done">${_SW_STATUS_SVG.done}</span>`;
-          const td = _TOOL_DISPLAY[c.toolName];
-          const icon = (td && td.icon) ? td.icon : _SW_SVG.tool;
+          const glyph = c.entryKind === 'message_receipt'
+            ? _SW_SVG.message : toolRoundSvg({ toolName: c.toolName });
           const elapsedStr = (typeof c.elapsed === "number") ? `${c.elapsed.toFixed(1)}s` : "";
           const detailIsError = !!c.error || !!c.errorTruncated
             || Number(c.errorFullChars || 0) > 0;
@@ -24006,8 +24157,7 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
           const lineTag = toggle ? 'summary' : 'div';
           const row = `<${rowTag} class="sw-tl-row sw-tl-${escapeHtml(c.entryKind === 'message_receipt' ? 'receipt' : c.status || 'unknown')}${toggle ? ' sw-tl-expandable' : ''}" data-call-id="${escapeHtml(c.callId || '')}">` +
               `<${lineTag} class="sw-tl-line">` +
-                dot +
-                `<span class="sw-tl-icon">${icon}</span>` +
+                `<span class="sw-tl-icon">${glyph}</span>` +
                 `<span class="sw-tl-name">${escapeHtml(c.toolName || "?")}</span>` +
                 (c.argsBrief ? `<span class="sw-tl-args" title="${escapeHtml(c.argsBrief)}">${escapeHtml(c.argsBrief)}</span>` : "") +
                 (elapsedStr ? `<span class="sw-tl-elapsed">${elapsedStr}</span>` : "") +
@@ -24027,8 +24177,8 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
           : "";
         const latestHTML = rowsHTML.pop() || '';
         const historyHTML = rowsHTML.length || omittedToolCalls > 0
-          ? `<details class="sw-a-tool-history"><summary>${escapeHtml(t('swarm.recentTools', { count: rowsHTML.length }))}</summary>${omittedHTML}${rowsHTML.join('')}</details>` : '';
-        bodyContent += `<div class="sw-a-timeline">${latestHTML}${historyHTML}${messageHTML}</div>`;
+          ? `<details class="sw-a-tool-history"><summary>${escapeHtml(t('swarm.recentTools', { count: rowsHTML.length + omittedToolCalls }))}</summary>${omittedHTML}${rowsHTML.join('')}</details>` : '';
+        bodyContent += `<div class="sw-a-timeline">${historyHTML}${latestHTML}${messageHTML}</div>`;
       } else if (aRunning) {
         bodyContent += `<div class="sw-a-activity-empty">${escapeHtml(t('swarm.awaitingTools'))}</div>`;
       }
@@ -24052,12 +24202,9 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
         }
       }
 
-      // Meta line
-      if (a.tokens || a.elapsed) {
-        const metaParts = [];
-        if (a.elapsed) metaParts.push(`${a.elapsed}s`);
-        if (a.tokens) metaParts.push(`${a.tokens >= 1000000 ? (a.tokens/1000000).toFixed(1) + "m" : a.tokens > 1000 ? (a.tokens/1000).toFixed(1) + "k" : a.tokens} tok`);
-        bodyContent += `<div class="sw-a-meta">${metaParts.join(' · ')}</div>`;
+      /* Elapsed already sits on the agent row; only usage remains. */
+      if (a.tokens) {
+        bodyContent += `<div class="sw-a-meta">${_swTokenText(a.tokens)} tok</div>`;
       }
 
       /* Auto-open running agents, collapse done ones */
@@ -24067,17 +24214,16 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
          closer review, so mark them with a pencil pill + the edit count. */
       const editCount = _swAgentModifiedCount(a);
       const editPill = editCount > 0
-        ? `<span class="sw-a-edited" title="This agent modified ${editCount} file action(s) — review its changes">${_SW_SVG.pencil}${editCount}</span>`
+        ? `<span class="sw-a-edited" title="${escapeHtml(t('swarm.editedFiles', { count: editCount }))}">${_SW_SVG.pencil}${editCount}</span>`
         : "";
-      const editedClass = editCount > 0 ? " sw-a-has-edits" : "";
 
-      return `<div class="sw-agent ${sClass}${autoOpen}${editedClass}" data-agent-id="${escapeHtml(a.id || '')}" data-sw-agent-status="${escapeHtml(a.status || '')}">` +
+      return `<div class="sw-agent ${sClass}${autoOpen}" data-agent-id="${escapeHtml(a.id || '')}" data-sw-agent-status="${escapeHtml(a.status || '')}">` +
         `<div class="sw-a-header" data-tofu-action="_swarmToggleClass(this,'.sw-agent','sw-a-open')">` +
           `<span class="sw-a-status-icon">${sIcon}</span>` +
           `<span class="sw-a-num">${taskNum}</span>` +
-          `<span class="sw-a-role-tag" title="role">${roleLabel}</span>` +
-          idChip +
-          modelChip +
+          `<span class="sw-a-ident"><span class="sw-a-role-tag">${roleLabel}</span>` +
+            ((idChip || modelChip) ? `<span class="sw-a-ids">${idChip}${modelChip}</span>` : "") +
+          `</span>` +
           editPill +
           `<span class="sw-a-phase-pill">${escapeHtml(phaseLabel)}</span>` +
           agentTimer +
@@ -24100,33 +24246,31 @@ function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
       ? `<div class="sw-agent-grid"><div class="sw-a-err" role="note"><div class="sw-a-err-title">${escapeHtml(t('swarm.launchFailed'))}</div><div>${escapeHtml(t('swarm.launchFailedHint'))}</div><details class="sw-a-err-details"><summary>${escapeHtml(t('swarm.failure.details'))}</summary><pre class="sw-a-err-reason">${escapeHtml(launchFailure)}</pre></details></div></div>`
       : `<div class="sw-agent-grid"><div class="sw-empty">${escapeHtml(t("swarm.panelEmpty"))}</div></div>`;
   }
-  /* ── Stats footer ── */
+  /* ── Usage footer: run totals only (count and elapsed live in the header) ── */
   let statsFooter = "";
-  const footerParts = [];
-  if (total > 0) footerParts.push(`${_SW_SVG.hubSm} ${total} parallel task${total > 1 ? "s" : ""}`);
-  if (round._swarmStats) {
-    const s = round._swarmStats;
-    if (s.totalTokens) footerParts.push(`${s.totalTokens >= 1000000 ? (s.totalTokens/1000000).toFixed(1) + "m" : s.totalTokens > 1000 ? (s.totalTokens/1000).toFixed(1) + "k" : s.totalTokens} tokens`);
-    if (s.totalCostUsd) footerParts.push(`$${s.totalCostUsd.toFixed(4)}`);
-  }
-  if (elapsed) footerParts.push(`${elapsed}`);
-  if (footerParts.length > 0) {
+  const stats = round._swarmStats;
+  if (stats && (stats.totalTokens || stats.totalCostUsd)) {
+    const footerParts = [];
+    if (stats.totalTokens) footerParts.push(`${_swTokenText(stats.totalTokens)} tok`);
+    if (stats.totalCostUsd) footerParts.push(`$${stats.totalCostUsd.toFixed(4)}`);
     statsFooter = `<div class="sw-footer">${footerParts.join('<span class="sw-footer-sep">·</span>')}</div>`;
   }
 
-  return `<div class="sw-panel${isActive ? ' sw-active' : ' sw-complete'}">` +
+  return `<div class="sw-panel${isActive ? ' sw-active' : ' sw-complete'}" data-sw-tone="${tone}">` +
     `<div class="sw-header" data-tofu-action="_swarmToggleClass(this,'.sw-panel','sw-collapsed')">` +
       `<div class="sw-header-left">` +
-        headerIcon +
+        `<span class="sw-header-icon" aria-hidden="true">${_SW_SVG.hub}</span>` +
         `<div class="sw-header-info">` +
-          `<span class="sw-header-title">Parallel Execution</span>` +
+          `<span class="sw-header-title">${escapeHtml(t('swarm.title'))}</span>` +
           headerSubtitle +
         `</div>` +
       `</div>` +
       `<div class="sw-header-right">` +
+        /* The debug anchor leads the cluster: it is hover-only chrome in the
+           reading surface, so at rest it must not hold a gap before the caret. */
+        (inspectorAnchorHtml || "") +
         statusPill +
         (elapsed ? `<span class="sw-header-timer"${tickerAttr}>${elapsed}</span>` : "") +
-        (inspectorAnchorHtml || "") +
         `<span class="sw-chevron">${_SW_SVG.chevron}</span>` +
       `</div>` +
     `</div>` +
@@ -24575,8 +24719,7 @@ function _tickSwarmTimers() {
     if (!start) continue;
     /* Freeze zombie elapsed text at the same offline-staleness boundary. */
     if (now - start > _SW_STALE_MS) continue;
-    const sec = Math.max(0, Math.floor((now - start) / 1000));
-    const txt = sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${sec}s`;
+    const txt = _swElapsedText(Math.floor((now - start) / 1000));
     if (el.textContent !== txt) el.textContent = txt;
   }
 }
@@ -25285,6 +25428,7 @@ const runtimeActions = Object.freeze({
   _safeClipboardWrite,
   _swarmCopyAgentId,
   _swarmToggleClass,
+  _syncRangeOutput,
   _timerInstructionToggle,
   _timerPollToggle,
   _timerWatcherToggle,
@@ -25363,6 +25507,7 @@ const ImageGenerationComposerState = Object.freeze({
   set pendingImages(value) { if (Array.isArray(value)) pendingImages = value; },
   get imageGenMode() { return imageGenMode; },
   get planMode() { return planMode; },
+  get delegateMode() { return delegateMode; },
   get autopilotEnabled() { return autopilotEnabled; },
   get activeFlow() { return activeFlow; },
   get selectedModel() { return _igSelectedModel; },
@@ -25405,11 +25550,10 @@ const ProjectPresentationShellState = Object.freeze({
   },
 });
 
-// Local Control keeps the independent browser/desktop permission flags in
-// retained conversation state. Its demand-loaded presentation must always
-// observe the current values after navigation or a settings restore.
+// Local Control keeps the desktop permission flag in retained conversation
+// state (the browser is always on). Its demand-loaded presentation must always
+// observe the current value after navigation or a settings restore.
 const LocalControlShellState = Object.freeze({
-  get browserEnabled() { return browserEnabled; },
   get desktopEnabled() { return desktopEnabled; },
 });
 
@@ -25446,6 +25590,7 @@ Object.assign(runtimeScope, {
   _findRenderedNativeTurnNode,
   _loadServerConfigAndPopulate,
   _refreshServerConfigAfterSave,
+  _adoptModelRoutingResponse,
   _modelBrand,
   _modelRoutingDropdownModels,
   _modelShortName,

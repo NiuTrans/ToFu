@@ -41,7 +41,6 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -56,12 +55,6 @@ PAPER_JS = os.path.join(JS_DIR, 'paper', 'report.js')
 # _reportView + the _paperReportModel/_paperReviewModel module state live in
 # the (still-shipped) paper-reader.js; report.js only carries the seed logic.
 PAPER_READER_DEPS = os.path.join(JS_DIR, 'paper-reader.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -176,8 +169,6 @@ def _run_harness(paper_js: str) -> subprocess.CompletedProcess:
             pass
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_paper_model_default_seeds_from_frontend_preset():
     proc = _run_harness(PAPER_JS)
     out = proc.stdout.strip()
@@ -187,8 +178,6 @@ def test_paper_model_default_seeds_from_frontend_preset():
     assert out.count('PASS') >= 7, f'expected >=7 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_source_level_negative_control_first_model_default_reintroduces_bug():
     """Revert the seeding block to the old first-model default and prove FAIL.
 

@@ -207,6 +207,17 @@ if [ -n "${PYTEST_CURRENT_TEST:-}" ] \
   [ "${PORT}" != "15000" ] || _lifecycle_test_refuse
 fi
 
+# The supervisord ownership fallback, the descendant guard, the [pre/5c]
+# approval gate and the exact-PID stop all identify the :PORT listener with
+# `ss`. Without it each would see "no listener": the approval gate would be
+# skipped and [1/5] would fall back to signalling every `server.py` by name.
+if ! ss -ltn >/dev/null 2>&1; then
+  echo "FATAL: 'ss' (iproute2) is unavailable, so the :${PORT} listener cannot be"
+  echo "       identified. No process was touched. Install iproute2, or use"
+  echo "       python serverctl.py restart."
+  exit 2
+fi
+
 # ── Headless-Chromium libs from LOCAL disk, never the FUSE conda env. ──
 # The conda env lives on beegfs-fuse, which intermittently fails .so reads
 # under pressure — measured 2026-08-03: 'libatk-1.0.so.0: cannot open shared

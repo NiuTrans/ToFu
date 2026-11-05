@@ -134,6 +134,7 @@ const ImageGenerationComposerState = Object.freeze({
   set pendingImages(value) { if (Array.isArray(value)) pendingImages = value; },
   get imageGenMode() { return imageGenMode; },
   get planMode() { return planMode; },
+  get delegateMode() { return delegateMode; },
   get autopilotEnabled() { return autopilotEnabled; },
   get activeFlow() { return activeFlow; },
   get selectedModel() { return _igSelectedModel; },
@@ -176,11 +177,10 @@ const ProjectPresentationShellState = Object.freeze({
   },
 });
 
-// Local Control keeps the independent browser/desktop permission flags in
-// retained conversation state. Its demand-loaded presentation must always
-// observe the current values after navigation or a settings restore.
+// Local Control keeps the desktop permission flag in retained conversation
+// state (the browser is always on). Its demand-loaded presentation must always
+// observe the current value after navigation or a settings restore.
 const LocalControlShellState = Object.freeze({
-  get browserEnabled() { return browserEnabled; },
   get desktopEnabled() { return desktopEnabled; },
 });
 
@@ -217,6 +217,7 @@ Object.assign(runtimeScope, {
   _findRenderedNativeTurnNode,
   _loadServerConfigAndPopulate,
   _refreshServerConfigAfterSave,
+  _adoptModelRoutingResponse,
   _modelBrand,
   _modelRoutingDropdownModels,
   _modelShortName,

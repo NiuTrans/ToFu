@@ -60,7 +60,7 @@ def test_invalid_v3_fails_before_any_mutation(mutation):
     messages = [{'role': 'user', 'content': 'continue'}]
     with pytest.raises(ContinueResumeStateProtocolError):
         apply_resume_state(task=task, cfg={'contentPrefix': 'changed', 'checkpointTodoState': state},
-                           messages=messages, model='test', tid='test')
+                           messages=messages, tid='test')
     assert task == before
     assert messages == [{'role': 'user', 'content': 'continue'}]
 

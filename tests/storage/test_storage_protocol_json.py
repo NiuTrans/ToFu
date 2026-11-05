@@ -1,5 +1,6 @@
 """The storage wire rejects lossy, non-standard JSON numbers."""
 
+import json
 import math
 from collections import UserDict
 from collections.abc import Mapping
@@ -131,3 +132,45 @@ def test_scalar_and_sequence_subclasses_keep_registered_mapping_admission():
     for document in [MappingText('finite text'), MappingList([17])]:
         with pytest.raises(StorageError, match='non-finite JSON number'):
             validate_finite_json_numbers(document)
+
+
+def test_frozen_payload_encodes_once_and_both_wire_encoders_splice_those_bytes():
+    from copy import deepcopy
+
+    from lib.storage.protocol import FrozenPayload, wire_payload
+    from lib.storage.v2_semantics import request_payload
+    from tofu_db.wire import _payload_bytes
+
+    transcript = [{'role': 'tool', 'content': '证据 "quoted"\n' * 3}]
+    payload = {'swarm_key': 'wave', 'messages': transcript,
+               'result': {'cost_usd': 0.25, 'view': MappingProxyType({'k': 'v'})},
+               'rounds_used': 2, 'delivered': None}
+    frozen = FrozenPayload(payload)
+    expected = orjson.loads(orjson.dumps({**payload, 'result': {'cost_usd': 0.25,
+                                                                'view': {'k': 'v'}}}))
+    # A later change to the caller's graph cannot alter a replay of this receipt.
+    transcript.append({'role': 'assistant', 'content': 'after freezing'})
+    v2 = orjson.loads(_payload_bytes(request_payload('swarm.agent.save', frozen, owner_id=7)))
+    assert v2 == {**expected, 'user_id': 7}
+    v1 = orjson.loads(encode_frame({'payload': wire_payload(frozen)})[4:])['payload']
+    assert v1 == expected
+    assert type(wire_payload(frozen)['messages']) is orjson.Fragment
+    assert wire_payload(payload) == payload and wire_payload(None) == {}
+    # Receipt-replay doubles may copy or compare the mapping view.
+    plain = FrozenPayload({'swarm_key': 'wave', 'messages': transcript})
+    assert deepcopy(plain) == plain and deepcopy(plain).encoded == plain.encoded
+
+
+def test_frozen_payload_keeps_admission_and_the_native_encoder_fallback():
+    from lib.storage.protocol import FrozenPayload, wire_payload
+    from tofu_db.wire import _payload_bytes
+
+    with pytest.raises(StorageError, match='non-finite JSON number'):
+        FrozenPayload({'result': {'cost_usd': math.nan}})
+    with pytest.raises(StorageError, match='not serializable'):
+        FrozenPayload({'result': {'bad': object()}})
+    with pytest.raises(StorageError, match='not serializable'):
+        FrozenPayload({'messages': [{'content': '\ud800'}]})
+    wide = FrozenPayload({'result': {'integer': 2**70, 1: 'key'}})
+    assert json.loads(_payload_bytes(wire_payload(wide)))['result'] == {
+        'integer': 2**70, '1': 'key'}

@@ -11,35 +11,31 @@ public enum InteractiveSso {
         switch result {
         case .success, .needsInteractiveSso:
             return true
-        case .badCredentials, .noCredential, .error, .incompatible:
+        case .badCredentials, .error, .incompatible:
             return false
         }
     }
 
-    /// Whether an in-WebView sign-in should now be recorded as a real session.
-    /// Both required: the finished page is back on the profile's OWN host, and
-    /// the jar actually holds a cookie for that origin. Still sitting on the
-    /// IdP — or on the login page — means the gate has not been passed.
-    public static func completedSignIn(
-        profile: Profile,
-        finishedUrl: String,
-        cookieHeader: String?
-    ) -> Bool {
-        guard profile.authType == .interactiveSso else { return false }
-        guard let header = cookieHeader,
-              !header.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        guard let own = ServerUrl.parse(profile.baseUrl)?.host,
-              let landed = ServerUrl.parse(finishedUrl)?.host,
-              landed == own else { return false }
-        return !isLoginPage(finishedUrl)
+    /// A landing page is only a candidate. A protected probe must prove the gate.
+    public static func isCompletionCandidate(profile: Profile, finishedUrl: String, cookieHeader: String?) -> Bool {
+        guard profile.authType == .interactiveSso, let header = cookieHeader,
+              !header.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let own = ServerUrl.parse(profile.baseUrl), let landed = ServerUrl.parse(finishedUrl),
+              own.origin == landed.origin else { return false }
+        let base = own.components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let path = landed.components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return (base.isEmpty || path == base || path.hasPrefix(base + "/")) && landed.path.split(separator: "/").last != "login"
     }
 
-    /// The host to stamp on the profile once ``completedSignIn`` holds, or nil.
-    public static func hostToStamp(_ profile: Profile) -> String? {
-        ServerUrl.parse(profile.baseUrl)?.host
+    public static func completedSignIn(profile: Profile, finishedUrl: String, cookieHeader: String?, gatewayVerified: Bool = false) -> Bool {
+        gatewayVerified && isCompletionCandidate(profile: profile, finishedUrl: finishedUrl, cookieHeader: cookieHeader)
     }
 
-    private static func isLoginPage(_ url: String) -> Bool {
-        url.hasSuffix("/login") || url.contains("/login?") || url.contains("/login#")
+    public static func profileForWebView(_ profile: Profile, result: LoginResult) -> Profile {
+        var active = profile
+        if case .needsInteractiveSso = result { active.authType = .interactiveSso }
+        return active
     }
+
+    public static func hostToStamp(_ profile: Profile) -> String? { ServerUrl.parse(profile.baseUrl)?.host }
 }

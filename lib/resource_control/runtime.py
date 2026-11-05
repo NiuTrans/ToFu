@@ -1,7 +1,7 @@
-"""Serving-loop feedback lifecycle, sharing the cached launch probe and policy.
+"""Serving-loop feedback lifecycle over one fixed, hardware-independent policy.
 
 Sampling uses one awaited job in the existing asyncio worker pool; no dedicated
-thread, provider connection, DB scan or per-task hardware probe.
+thread, provider connection, DB scan, hardware probe or memory observation.
 Failure leaves the last acknowledged budgets in place and is retried next tick.
 """
 from __future__ import annotations
@@ -9,39 +9,21 @@ from __future__ import annotations
 import asyncio
 import threading
 
-from runtime_guards import (
-    observe_host_memory_available_bytes, resource_budget_manifest,
-    resolve_resource_budget, task_concurrency_hard_ceiling,
-)
+from runtime_guards import MAX_TASK_CONCURRENCY, resolve_deployment_mode
 
 from . import ResourceController, install_controller
 from .adapters import bind_root
 from .contract import catalog_document
 
+# native/storage frame ceiling; fixed, never probe-derived
+FRAME_MAXIMUM_BYTES = 1 << 32
+
 
 def launch_policy(environ) -> dict:
-    manifest = resource_budget_manifest(environ)
-    overrides = manifest['overrides']
-    def budget(name, maximum, minimum=1):
-        return resolve_resource_budget(name, environ, minimum=minimum, maximum=maximum)
-
-    from runtime_guards import MAX_TASK_CONCURRENCY
-    workers = budget('TOFU_AGENT_WORKERS', MAX_TASK_CONCURRENCY)
-    admission = budget('TOFU_MAX_INFLIGHT_TASKS', MAX_TASK_CONCURRENCY, 0)
-    maximum = task_concurrency_hard_ceiling(environ)
-    if 'TOFU_AGENT_WORKERS' in overrides:
-        maximum = min(maximum, workers)
-    if 'TOFU_MAX_INFLIGHT_TASKS' in overrides and admission:
-        maximum = min(maximum, admission)
-    maximum = max(1, maximum)
-    children = budget('TOFU_SWARM_GLOBAL_WORKERS', 64, 0)
-    if not children:
-        children = budget('TOFU_SWARM_MAX_PARALLEL', 64) * budget('TOFU_SWARM_SESSION_CAPACITY', 128)
-    task_bytes = budget('TOFU_TASK_RSS_RESERVE_MB', 16384, 64) * (1 << 20)
-    available = manifest['probe']['effective_memory_available_mb']
-    return {'automatic': bool(manifest['adaptive']), 'root_maximum': maximum,
-            'child_maximum': children, 'task_bytes': task_bytes,
-            'frame_maximum': max(128 << 20, int(available or 128) * (1 << 20) // 8)}
+    return {'automatic': resolve_deployment_mode(environ) != 'distributed',
+            'root_maximum': MAX_TASK_CONCURRENCY,
+            'child_maximum': MAX_TASK_CONCURRENCY,
+            'frame_maximum': FRAME_MAXIMUM_BYTES}
 
 
 def start_controller(runtime):
@@ -53,35 +35,13 @@ def start_controller(runtime):
     return controller
 
 
-def memory_observation() -> tuple[bool, int | None]:
-    from lib.cgroup_guard import process_rss_admission_snapshot, pressure as cgroup_pressure
-    # These are local kernel counters. The full launch probe stays cached.
-    process = process_rss_admission_snapshot()
-    headroom = max(0, process['headroom_bytes'] - process['reserve_bytes']) if process else None
-    pressure = bool(process and not process['allowed'])
-    snapshot = cgroup_pressure()
-    if snapshot and snapshot.get('limit'):
-        reclaimable = snapshot.get('reclaimable', 0)
-        available = max(0, snapshot['limit'] - snapshot['usage'] + reclaimable)
-        headroom = min(headroom, available) if headroom is not None else available
-        pressure = pressure or available < (process['reserve_bytes'] if process else 64 << 20)
-    host_available = observe_host_memory_available_bytes()
-    if host_available is not None:
-        headroom = min(headroom, host_available) if headroom is not None else host_available
-        pressure = pressure or host_available < (process['reserve_bytes'] if process else 64 << 20)
-    return pressure, headroom
-
-
 def _feedback_sample(runtime, cancelled):
-    """Keep synchronous owner/kernel reads off the HTTP serving loop."""
-    pressure, headroom = memory_observation()
+    """Keep synchronous owner reads off the HTTP serving loop."""
     controller = runtime.resource_controller
     before = controller.snapshot()
     if cancelled.is_set() or runtime.shutdown_requested.is_set():
         return before, before
-    after = controller.tick(memory_pressure=pressure, headroom_bytes=headroom,
-                            allow_growth=headroom is not None)
-    return before, after
+    return before, controller.tick()
 
 
 async def run_controller(runtime) -> None:

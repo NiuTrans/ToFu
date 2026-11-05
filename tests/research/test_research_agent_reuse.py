@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -16,7 +15,6 @@ pytestmark = pytest.mark.unit
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RESEARCH_VIEW_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'evolution', 'research', 'components', 'view.ts')
-ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 @pytest.mark.parametrize('raw,expected', [
@@ -98,9 +96,6 @@ def test_survey_grounds_against_loaded_corpus_not_mutable_folder(monkeypatch):
     assert got['open_gaps']['surveyed_arxiv_ids'] == ['2502.00299']
 
 
-@pytest.mark.skipif(not shutil.which('node') or not os.path.isdir(
-    os.path.join(ROOT, 'node_modules', 'jsdom')) or not os.path.isfile(ESBUILD),
-    reason='node/jsdom/vite test bundler dev-deps not installed')
 def test_frontend_replays_agent_tools_and_renders_usage_accounting(tmp_path):
     harness = r"""
 const fs = require('fs'), path = require('path');

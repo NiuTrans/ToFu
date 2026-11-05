@@ -3,13 +3,13 @@ import type { EndpointPorts } from './contracts';
 export function createMediaEndpoints(ports: EndpointPorts) {
   const { request, get, del } = ports;
   const media = {
-    upload: (formData: FormData) => request('/api/v4/media/attachments', {
-      method: 'POST', body: formData, timeout: 0,
+    upload: (formData: FormData, options: { signal?: AbortSignal } = {}) => request('/api/v4/media/attachments', {
+      method: 'POST', body: formData, timeout: 0, signal: options.signal,
     }),
-    // Bounded .zip/.tar(.gz) drop on the composer → atomic extract into a
-    // managed workspace + TeX candidates. Needs no pre-attached project.
-    expandArchive: (formData: FormData) => request('/api/v4/media/attachments/expand-archive', {
-      method: 'POST', body: formData, timeout: 0,
+    // .zip/.tar(.gz) drop on the composer → stored verbatim (never extracted)
+    // in a fresh managed workspace directory. Needs no pre-attached project.
+    storeArchive: (formData: FormData, options: { signal?: AbortSignal } = {}) => request('/api/v4/media/attachments/archive', {
+      method: 'POST', body: formData, timeout: 0, signal: options.signal,
     }),
     get: (attachmentId: string) => get(
       `/api/v4/media/attachments/${encodeURIComponent(attachmentId)}`,

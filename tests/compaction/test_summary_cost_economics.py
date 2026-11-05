@@ -226,6 +226,50 @@ def test_recorded_price_is_preserved_when_rate_card_changes(prices):
     assert result['costUsd'] == pytest.approx(.03)
 
 
+def _one_hour_usage():
+    return {'input_tokens': 1_000, 'output_tokens': 200, 'cache_creation_input_tokens': 4_000,
+            'cache_creation': {'ephemeral_5m_input_tokens': 1_000,
+                               'ephemeral_1h_input_tokens': 3_000}}
+
+
+def test_one_hour_cache_writes_stay_recomputable_through_the_receipt(prices):
+    """A stored summary cost carries the 1h write share and the rate it paid."""
+    pricing, _ = prices
+    pricing.set_provider_pricing(PROVIDER, MODEL, {**RATES, 'cacheWrite1hMul': 2.})
+    usage = _one_hour_usage()
+    priced = price_summary_call(usage, model=MODEL, provider_id=PROVIDER)
+    pricing.set_provider_pricing(PROVIDER, MODEL, dict(RATES))
+    [row] = summary_cost_details({'_summaryCalls': [
+        {'model': MODEL, 'provider_id': PROVIDER, 'usage': usage, 'cost': priced}]})['calls']
+
+    rates = row['pricingSnapshot']['rates']
+    assert (row['cacheWrite1hTokens'], rates['cacheWrite1hMul']) == (3_000, 2.)
+    five_minute = 4_000 - row['cacheWrite1hTokens']
+    recomputed = (1_000 * rates['input'] + 200 * rates['output'] + rates['input'] * (
+        five_minute * rates['cacheWriteMul']
+        + row['cacheWrite1hTokens'] * rates['cacheWrite1hMul'])) / 1e6
+    assert row['costUsd'] == pytest.approx(recomputed)
+    assert recomputed == pytest.approx(.0185), 'the 1h share pays 2x, not the 1.25x write rate'
+
+
+@pytest.mark.parametrize('mutation', [
+    {'cacheWrite1hTokens': 2_999}, {'cacheWrite1hTokens': True},
+    {'cacheWrite1hTokens': -1}, {'rates': {'cacheWrite1hMul': -2.}},
+    {'rates': {'cacheWrite1hMul': float('nan')}},
+])
+def test_inconsistent_one_hour_write_evidence_is_never_known_spend(prices, mutation):
+    pricing, _ = prices
+    pricing.set_provider_pricing(PROVIDER, MODEL, {**RATES, 'cacheWrite1hMul': 2.})
+    usage = _one_hour_usage()
+    stored = deepcopy(price_summary_call(usage, model=MODEL, provider_id=PROVIDER))
+    stored['pricingSnapshot']['rates'].update(mutation.pop('rates', {}))
+    stored.update(mutation)
+    result = summary_cost_details({'_summaryCalls': [
+        {'model': MODEL, 'provider_id': PROVIDER, 'usage': usage, 'cost': stored}]})
+    assert result['known'] is False
+    assert result['calls'][0]['reason'] == 'invalid_cost'
+
+
 @pytest.mark.parametrize('cost', [
     {}, None, {'costUsd': 0}, {'costUsd': -1}, {'costUsd': float('nan')},
     {'costUsd': float('inf')}, {'costUsd': None, 'reason': 'failed_usage'},
@@ -461,13 +505,27 @@ def test_raw_tier_normalization_cannot_turn_missing_prices_into_free_spend(price
     assert _economics()['pricing_known'] is False
 
 
-@pytest.mark.parametrize('provider_id', [None, '', 'unknown-provider', 'model-route:41:task-a'])
-def test_known_model_table_does_not_prove_actual_summary_provider_price(prices, monkeypatch, provider_id):
+@pytest.mark.parametrize(('provider_id', 'known'), [
+    (None, False), ('', False), ('unknown-provider', True), ('model-route:41:task-a', True)])
+def test_summary_call_without_provider_rate_card_uses_model_price(
+        prices, monkeypatch, provider_id, known):
+    """Owner decision 2026-11-02: without its own rate card a summary call is
+    billed at the model's maintained price, as native settlement already is.
+    A call with no route at all stays unknown."""
     pricing, _ = prices
     monkeypatch.setitem(pricing.MODEL_PRICING, MODEL, dict(RATES))
     result = price_summary_call(_usage(), model=MODEL, provider_id=provider_id)
-    assert result['costUsd'] is None
-    assert result['known'] is False
+    assert result['known'] is known
+    if not known:
+        assert result['costUsd'] is None
+        return
+    assert result['costUsd'] == pytest.approx(.03)
+    assert result['pricingSource'] == 'model_table'
+    assert result['pricingSnapshot']['provider'] == provider_id
+    # Call-time evidence survives readback instead of turning unknown.
+    readback = summary_cost_details({'_summaryCalls': [
+        {'model': MODEL, 'provider_id': provider_id, 'usage': _usage(), 'cost': result}]})
+    assert readback['costUsd'] == pytest.approx(.03)
 
 
 def test_same_model_uses_actual_provider_price_and_preserves_execution_pin(prices, monkeypatch):

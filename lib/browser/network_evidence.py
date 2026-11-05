@@ -1,15 +1,16 @@
-"""Bounded, redacted business-data extraction from browser network captures.
+"""Browser-capture policy, redaction and accepted-response diagnostics.
 
 The browser extension owns transport and returns response bodies captured in
-the user's authenticated page context.  This module is the only place that
-turns those wire records into model-visible evidence: it applies owner-scoped
-read policy to every response URL, removes likely telemetry, redacts credential
-fields, ranks business-shaped JSON, and enforces one shared character budget.
+the user's authenticated page context. content.collect_content owns acceptance
+and budgets; this module supplies owner-scoped URL policy and redaction, then
+inventories the exact sanitized responses accepted during that collection.
+Diagnostic scoring and endpoint shapes share one shape-count traversal.
 
 Entry points:
 ``analyze_network_evidence`` emits token-cheap endpoint shapes,
 ``extract_business_records`` normalizes list-shaped responses for adapters,
-``render_network_evidence`` formats useful response bodies, and
+``render_network_evidence`` formats useful response bodies, ``render_shape``
+renders an inferred shape (types, never values), and
 ``merge_page_and_network`` combines them with rendered DOM text.
 """
 
@@ -152,25 +153,6 @@ def _network_rows(payload: dict) -> list[dict]:
             if isinstance(row, dict)]
 
 
-def _parse_body(row: dict):
-    body = row.get('body')
-    if body is None:
-        body = row.get('responsePreview')
-    if body is None:
-        body = row.get('responseBody')
-    if isinstance(body, (dict, list, int, float, bool)):
-        return body
-    if not isinstance(body, str) or not body.strip():
-        return None
-    if len(body) > 262144:
-        return None
-    stripped = body.strip()
-    try:
-        return json.loads(stripped)
-    except (TypeError, ValueError, RecursionError):
-        return stripped
-
-
 def _shape_counts(value) -> tuple[int, int, bool]:
     """Return business-key count, tracking-key count, and non-empty-array flag."""
     business = 0
@@ -210,7 +192,7 @@ def _content_type(row: dict) -> str:
                or row.get('ct') or '')
 
 
-def _score_response(row: dict, body) -> float:
+def _score_response(row: dict, body, *, shape_counts) -> float:
     url = str(row.get('url') or '')
     status = _status(row)
     content_type = _content_type(row)
@@ -234,7 +216,7 @@ def _score_response(row: dict, body) -> float:
         score += 3.0 if body else -2.0
     elif isinstance(body, dict):
         score += 1.0 if body else -2.0
-        business, tracking, has_array = _shape_counts(body)
+        business, tracking, has_array = shape_counts
         score += min(4.0, business * 0.35)
         if has_array:
             score += 2.0
@@ -343,6 +325,14 @@ def _infer_shape(value) -> dict[str, str]:
     return shape
 
 
+def render_shape(shape: dict) -> str:
+    """One line of inferred ``path=type`` pairs; values never appear."""
+    if not isinstance(shape, dict) or not shape:
+        return '(body unavailable)'
+    return ', '.join(
+        f'{path}={descriptor}' for path, descriptor in list(shape.items())[:18])
+
+
 def _endpoint_key(row: dict) -> str:
     operation = str(row.get('operationName') or '').strip()
     if operation:
@@ -356,7 +346,7 @@ def _endpoint_key(row: dict) -> str:
     return f'{method} {endpoint[:300]}'
 
 
-def _score_reasons(row: dict, body, score: float) -> list[str]:
+def _score_reasons(row: dict, body, score: float, *, shape_counts) -> list[str]:
     reasons = []
     status = _status(row)
     content_type = _content_type(row).lower()
@@ -369,7 +359,7 @@ def _score_reasons(row: dict, body, score: float) -> list[str]:
     if _NOISE_URL_RE.search(str(row.get('url') or '')):
         reasons.append('telemetry-like URL')
     if isinstance(body, (dict, list)):
-        business, tracking, has_array = _shape_counts(body)
+        business, tracking, has_array = shape_counts
         if business:
             reasons.append(f'{business} business-like keys')
         if has_array:
@@ -385,7 +375,8 @@ def _inventory_network_evidence(
     payload: dict,
     *,
     owner_user_id: str,
-    max_entries: int = 12,
+    max_entries: int,
+    accepted_responses: list[tuple[dict, object]],
 ) -> dict:
     """Return a bounded, redacted endpoint inventory for site reconnaissance.
 
@@ -398,15 +389,13 @@ def _inventory_network_evidence(
     except (TypeError, ValueError):
         entry_limit = 12
     grouped: dict[str, dict] = {}
-    denied = 0
-    for row in _network_rows(payload):
+    for row, body in accepted_responses:
         url = str(row.get('url') or '')
         if not _response_allowed(owner_user_id, url):
-            denied += 1
             continue
         status = _status(row)
-        body = _parse_body(row)
-        score = _score_response(row, body)
+        counts = _shape_counts(body) if isinstance(body, (dict, list)) else (0, 0, False)
+        score = _score_response(row, body, shape_counts=counts)
         blocked = status in (401, 403)
         if not blocked and (body is None or score < 3.0):
             continue
@@ -425,7 +414,7 @@ def _inventory_network_evidence(
             'content_type': _content_type(row).split(';', 1)[0][:80],
             'real_data_score': round(max(0.0, min(1.0, (score + 1.0) / 12.0)), 2),
             'verdict': verdict,
-            'reasons': _score_reasons(row, body, score),
+            'reasons': _score_reasons(row, body, score, shape_counts=counts),
             'shape': _infer_shape(body) if body is not None else {},
             'observations': 1,
             'body_truncated': bool(
@@ -451,13 +440,16 @@ def _inventory_network_evidence(
     )[:entry_limit]
     network = payload.get('network') if isinstance(payload, dict) else {}
     network = network if isinstance(network, dict) else {}
+    captured = _network_rows(payload)
+    denied = sum(not _response_allowed(owner_user_id, str(row.get('url') or ''))
+                 for row in captured)
     return {
         'candidates': candidates,
         'candidate_count': len(candidates),
         'denied_response_count': denied,
         'capture': {
             'body_capture': bool(network.get('bodyCapture')),
-            'response_count': len(_network_rows(payload)),
+            'response_count': len(captured),
             'dropped_entries': int(network.get('droppedEntries') or 0),
             'dropped_bodies': int(network.get('droppedBodies') or 0),
             'websocket_frames': int(network.get('webSocketFrameCount') or 0),
@@ -545,27 +537,19 @@ def render_network_evidence(payload, *, owner_user_id, max_chars=30000, target=N
 
 def analyze_network_evidence(payload, *, owner_user_id, max_entries=12, target=None,
                              content_receipt=None):
-    """Inventory only endpoints corroborated by the same page-content rules."""
-    from .content import collect_content, WorkBudget
-    from .content_contract import ReadTarget
-    receipt = content_receipt or collect_content(payload, owner_user_id=owner_user_id, target=target)
-    allowed = {e['url'] for e in receipt['evidence'] if e['strategy'] == 'captured_api'}
-    scoped = dict(payload) if isinstance(payload, dict) else {}
-    network = dict(scoped.get('network') or {})
-    work = WorkBudget()
-    network['responses'] = [dict(row, body=work.clean(_parse_body(row), ReadTarget.from_value(target), str(scoped.get('finalUrl') or scoped.get('url') or '')),
-                                 responsePreview=None, responseBody=None)
-                            for row in _network_rows(scoped)
-                            if _redact_url(str(row.get('url') or '')) in allowed]
-    scoped['network'] = network
-    result = _inventory_network_evidence(scoped, owner_user_id=owner_user_id,
-                                              max_entries=max_entries)
-    result['denied_response_count'] = sum(not _response_allowed(owner_user_id, str(row.get('url') or '')) for row in _network_rows(payload))
-    return result
+    """Inventory responses accepted in this collection, not URLs from a prior receipt.
+
+    ``content_receipt`` is a compatibility-only input: a presentation snapshot
+    cannot establish which particular responses supplied accepted content.
+    """
+    from .content import collect_content_and_network
+    _, network = collect_content_and_network(
+        payload, owner_user_id=owner_user_id, target=target, max_entries=max_entries)
+    return network
 
 
 __all__ = [
     'analyze_network_evidence', 'extract_business_records',
     'merge_page_and_network', 'redact_url', 'redact_value',
-    'render_network_evidence',
+    'render_network_evidence', 'render_shape',
 ]

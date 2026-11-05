@@ -102,6 +102,13 @@ assert row['joined_cleanup'] and row['audit_queue_settled']
 '''
     script = script.replace('POST_EXEC', repr(post_exec))
     launcher = shlex.split(os.environ.get('TOFU_BENCHMARK_PYTHON', sys.executable))
+    # worker.measure('candidate', ...) refuses unless the measuring interpreter
+    # has the optional, separately built tofu-repo-kernel package installed.
+    probe = subprocess.run([*launcher, '-c', 'import importlib.util, sys; sys.exit('
+                            'importlib.util.find_spec("tofu_repo_kernel") is None)'],
+                           capture_output=True, timeout=60)
+    if probe.returncode:
+        pytest.skip('the candidate arm requires an installed tofu-repo-kernel package')
     result = subprocess.run([*launcher, '-c', script], capture_output=True, text=True, timeout=60,
                             env=dict(os.environ, TOFU_DATA_DIR=str(tmp_path / 'data')))
     assert result.returncode == 0, result.stdout + result.stderr

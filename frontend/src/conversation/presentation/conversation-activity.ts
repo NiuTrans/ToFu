@@ -61,6 +61,6 @@ export function presentConversationActivity(input: ConversationActivityInput) {
   return {
     streaming, awaitingHuman, waiting, errored, incomplete,
     rateLimited: Boolean(streaming && presentConversationRateLimit(input.livePhase)),
-    unconfirmed: streaming && ['recovering', 'degraded', 'offline'].includes(input.syncHealth || ''),
+    unconfirmed: streaming && input.syncHealth !== 'live',
   };
 }

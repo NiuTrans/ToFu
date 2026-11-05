@@ -28,6 +28,15 @@ import json
 import math
 import re
 
+from lib.conversation_sync.settled_rows import (
+    SettledDict,
+    SettledList,
+    compact_json_bytes,
+    memo_get,
+    memo_put,
+    settle_unless_same,
+)
+
 TRACE_CONTRACT_VERSION = 1
 
 # The trace is durable user state once it is folded into its generation attempt.
@@ -52,6 +61,7 @@ TOOL_EXECUTION_BUDGETS_MS = {
     'apply_diffs': 2_000,
     'insert_content': 2_000,
     'insert_contents': 2_000,
+    'search_files': 20_000,
     'grep_search': 20_000,
     'find_files': 10_000,
     'glob_search': 10_000,
@@ -112,6 +122,20 @@ def _sanitize_trace_value(value, *, depth=0):
         return value[:400]
     if depth >= 5:
         return _bounded_trace_text(value, 200)
+    kind = type(value)
+    if kind is SettledDict or kind is SettledList:
+        # Settled status entries are re-sanitized on every live projection;
+        # the result is a pure function of the row and its depth.
+        key = ('trace-sanitized', depth)
+        sanitized = memo_get(value, key)
+        if sanitized is None:
+            sanitized = memo_put(value, key, settle_unless_same(
+                value, _sanitize_trace_container(value, depth)))
+        return sanitized
+    return _sanitize_trace_container(value, depth)
+
+
+def _sanitize_trace_container(value, depth):
     if isinstance(value, Mapping):
         out = {}
         for key, child in list(value.items())[:32]:
@@ -141,6 +165,16 @@ def _bounded_trace_rows(rows, maximum, *, keep_recent=False):
     head = maximum // 2
     tail = maximum - head
     return clean[:head] + clean[-tail:], len(clean) - maximum
+
+
+_TRACE_ROW_FIELDS = ('spans', 'gaps', 'statusHistory', 'clientObservations')
+
+
+_TRACE_COMPACTION_MARKERS = (
+    'droppedSpans', 'droppedGaps', 'statusDroppedCount',
+    'clientObservationDroppedCount', 'overBudgetDroppedCount',
+    'detailCompacted',
+)
 
 
 def compact_trace_document(document, *, source=None):
@@ -214,6 +248,14 @@ def compact_trace_document(document, *, source=None):
         return len(json.dumps(
             out, ensure_ascii=False, separators=(',', ':'),
         ).encode('utf-8'))
+
+    # A live trace is re-compacted on every projected event and normally sits
+    # far below the cap; one measurement then proves every guard below is a
+    # no-op, so the document is not re-serialized once per guard.
+    if compact_json_bytes(out, row_fields=_TRACE_ROW_FIELDS) <= TRACE_MAX_PERSISTED_BYTES:
+        if any(out.get(key) for key in _TRACE_COMPACTION_MARKERS):
+            out['compacted'] = True
+        return out
 
     # The shape caps normally stay well below 96 KiB. This final byte guard is
     # deliberately deterministic for unusually rich attempt diagnostics.
@@ -318,7 +360,10 @@ def compact_trace_document(document, *, source=None):
                 )
             aggregate_keys = (
                 'totalMs', 'llmMs', 'toolMs', 'waitMs', 'compactionMs',
-                'approvalWaitMs', 'unattributedMs', 'ttftMs',
+                'approvalWaitMs', 'flowStepMs', 'orchestrationMs',
+                'unattributedMs', 'ttftMs',
+                'admissionWaitMs', 'retryWaitMs', 'spawnWaitMs',
+                'startupMs', 'roundPrepMs', 'roundSettleMs', 'finalizeMs',
             )
             out['summary'] = {
                 key: summary[key]
@@ -327,11 +372,7 @@ def compact_trace_document(document, *, source=None):
             out['summary']['overBudget'] = []
         out['detailCompacted'] = True
         out['compacted'] = True
-    if any(out.get(key) for key in (
-        'droppedSpans', 'droppedGaps', 'statusDroppedCount',
-        'clientObservationDroppedCount', 'overBudgetDroppedCount',
-        'detailCompacted',
-    )):
+    if any(out.get(key) for key in _TRACE_COMPACTION_MARKERS):
         out['compacted'] = True
     return out
 

@@ -5,6 +5,20 @@
 > Nature/Science figure plates. The committee evaluates the problem, the
 > method, the evidence, and the contribution.
 
+## Evidence before polish
+
+- State the research question and distinguish the paper's claims from the
+  presenter's own contribution or interpretation. Cite the supplied paper,
+  figure/table identifier or source near the claim; never invent a DOI.
+- Preserve dataset/split, baseline, metric direction, units, sample size and
+  uncertainty when supplied. Keep relative improvement distinct from percentage
+  points. Do not infer statistical significance or causality from a large bar.
+- Report limitations, failure cases and conditions of validity. Missing
+  experiments remain open questions; they must not become positive results.
+- Reuse original figures with axes, legends and captions intact. Generated
+  imagery may explain a concept but must never stand in for an experiment,
+  microscopy image, measured curve or other research evidence.
+
 ## Core character
 
 - **Value in the first minute**: background → evidence gap → research
@@ -18,10 +32,9 @@
 
 ## Density & type
 
-- High density AT READABLE SIZES: body 17–21 pt equivalent, line spacing
-  ~1.2–1.45; regions stay FULL — a region planned for 100 px of content that
-  shows 70 px is the most serious crudeness. Forbidden to fix overflow by
-  shrinking below the floor.
+- Keep one principal claim per page at readable projection sizes. Preserve
+  whitespace around the main figure; move derivations and exhaustive tables to
+  backup pages or notes. Rewrite or split crowded material before shrinking type.
 - Neutral hei for Chinese body; academic serif for titles/English/formulas
   when a document feel is wanted; monospace for identifiers.
 - Formulas keep numbering, conditions, symbol explanations; tables prefer

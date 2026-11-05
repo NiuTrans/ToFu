@@ -9,8 +9,6 @@ The SDK's parser handles:
 
 from __future__ import annotations
 
-import os
-import sys
 import unittest
 
 import pytest
@@ -19,13 +17,8 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-_SDK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         '..', 'clients', 'python')
-sys.path.insert(0, os.path.abspath(_SDK_DIR))
-
-
 class _FakeResp:
-    """Minimal stand-in for ``requests.Response`` for ``iter_lines``."""
+    """Minimal byte transport for ``requests.Response.iter_content``."""
 
     def __init__(self, lines):
         self._lines = lines
@@ -42,11 +35,11 @@ class _FakeResp:
 class ParseSSETest(unittest.TestCase):
 
     def setUp(self):
-        from tofu_sdk import _parse_sse
+        from tofu_sdk._streaming import _parse_sse
         self.parse = _parse_sse
 
     def test_native_model_selection_is_structured_and_copied(self):
-        from tofu_sdk import _native_model_payload
+        from tofu_sdk._protocol import _native_model_payload
 
         source = {'creator_id': 'anthropic', 'model_id': 'claude'}
         payload = _native_model_payload(source)
@@ -61,7 +54,7 @@ class ParseSSETest(unittest.TestCase):
             _native_model_payload({'creator_id': 'anthropic'})
 
     def test_sync_and_async_agents_share_native_payload_builder(self):
-        from tofu_sdk import _native_agent_payload
+        from tofu_sdk._protocol import _native_agent_payload
 
         model = {'creator_id': 'anthropic', 'model_id': 'claude'}
         routing = {'preferred_provider_id': 'provider-a'}

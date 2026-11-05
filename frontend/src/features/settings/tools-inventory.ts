@@ -3,12 +3,14 @@
  *
  * Responsibility: fetch and render the process-wide tool catalogue exposed by
  * `Api.tools.inventory()`. Entry points are `populateToolsInventory` and
- * `searchToolsInventory`; runtime dependencies are read through the injected
+ * `searchToolsInventory`; `destroyToolsInventory` retires the opening's read.
+ * Runtime dependencies are read through the injected
  * feature registry so this module stays independently testable and lazy.
  */
 import { featureRegistry } from '../../feature-registry';
 import { escapeHtml as escape } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
+import {createLifecycleScope, type LifecycleScope} from '../../lifecycle';
 
 export interface ToolInventoryItem {
   name: string;
@@ -38,7 +40,7 @@ export interface ToolInventorySnapshot {
 }
 
 interface ToolsInventoryApi {
-  inventory(): Promise<ToolInventorySnapshot | null>;
+  inventory(options?: {signal?: AbortSignal}): Promise<ToolInventorySnapshot | null>;
 }
 
 type ToolsInventoryRuntime = Window & {
@@ -47,6 +49,7 @@ type ToolsInventoryRuntime = Window & {
   debugLog?: (message: string, level?: string) => void;
   populateToolsInventory?: () => Promise<void>;
   searchToolsInventory?: (query: unknown) => void;
+  _destroyToolsInventory?: () => void;
 };
 
 const GROUP_ORDER = [
@@ -58,6 +61,7 @@ const GROUP_ORDER = [
 let inventorySnapshot: ToolInventorySnapshot | null = null;
 let inventoryQuery = '';
 let inventoryRequestSequence = 0;
+let inventoryRead: LifecycleScope | null = null;
 
 function runtime(): ToolsInventoryRuntime {
   return featureRegistry as unknown as ToolsInventoryRuntime;
@@ -239,15 +243,20 @@ function renderCurrentInventory(): void {
 export async function populateToolsInventory(): Promise<void> {
   const body = document.getElementById('toolsInvBody');
   const requestSequence = ++inventoryRequestSequence;
+  inventoryRead?.destroy();
+  const scope = createLifecycleScope();
+  inventoryRead = scope;
+  const current = () => requestSequence === inventoryRequestSequence && !scope.signal.aborted
+    && document.getElementById('toolsInvBody') === body;
   body?.setAttribute('aria-busy', 'true');
   try {
-    const snapshot = await toolsApi().inventory();
+    const snapshot = await toolsApi().inventory({signal: scope.signal});
     if (!snapshot) throw new Error(translate('toolsInv.noResponse'));
-    if (requestSequence !== inventoryRequestSequence) return;
+    if (!current()) return;
     inventorySnapshot = snapshot;
     renderCurrentInventory();
   } catch (error: unknown) {
-    if (requestSequence !== inventoryRequestSequence) return;
+    if (!current()) return;
     const message = errorMessage(error);
     runtime().debugLog?.(
       `[ToolsPanel] Failed to load inventory: ${message}`, 'error',
@@ -257,10 +266,19 @@ export async function populateToolsInventory(): Promise<void> {
         'toolsInv.loadFailed', { err: message }))}</p>`;
     }
   } finally {
-    if (requestSequence === inventoryRequestSequence) {
+    if (current()) {
       body?.removeAttribute('aria-busy');
     }
+    scope.destroy();
+    if (inventoryRead === scope) inventoryRead = null;
   }
+}
+
+export function destroyToolsInventory(): void {
+  inventoryRequestSequence++;
+  inventoryRead?.destroy();
+  inventoryRead = null;
+  document.getElementById('toolsInvBody')?.removeAttribute('aria-busy');
 }
 
 export function searchToolsInventory(query: unknown): void {
@@ -271,3 +289,4 @@ export function searchToolsInventory(query: unknown): void {
 const bridge = runtime();
 bridge.populateToolsInventory = populateToolsInventory;
 bridge.searchToolsInventory = searchToolsInventory;
+bridge._destroyToolsInventory = destroyToolsInventory;

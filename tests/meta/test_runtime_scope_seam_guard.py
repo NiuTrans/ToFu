@@ -14,6 +14,10 @@ click time …) and unguarded ones threw ``ReferenceError``.
 This test pins the seam dead for the names fixed in that incident. A bare
 reference outside an owner section is a regression: route it through
 ``runtimeScope.<name>`` (or the action registry for inline handlers).
+
+An ES ``import`` declaration in the prelude is the binding site of an eager
+typed owner, shared lexically by every eager section: it is a definition, not
+a cross-section reference, so it never counts as a bare ref.
 """
 
 import json
@@ -27,8 +31,13 @@ SECTIONS = REPO / "frontend" / "src" / "runtime" / "sections"
 MANIFEST = SECTIONS / "manifest.json"
 
 # Names whose cross-section bare references were rewritten to runtimeScope.X.
-# Eager typed imports (for example resolveOrchestrationApiClient) do not belong
-# here even when the epilogue also publishes them for a lazy consumer.
+# Eager typed imports that consumers bind lexically (for example
+# resolveOrchestrationApiClient) do not belong here even when the epilogue also
+# publishes them for a lazy consumer. An eager import that retained consumers
+# still read through runtimeScope stays pinned, so the owner check keeps its
+# publisher from vanishing behind a silent `typeof runtimeScope.X` guard:
+# modelDisplayUnits, and initVoiceInput since a6caddda2 moved voice input to
+# features/voice-input.ts (main.js boots it through runtimeScope).
 PINNED_NAMES = [
     "openProjectBrain", "presenceRefresh",
     "updateContextBar", "ConversationTurnStore",
@@ -52,6 +61,7 @@ PINNED_NAMES = [
 ALLOWED_GLOBAL_BRIDGES = ()
 
 MARKER_RE = re.compile(r"^/\*\s*=====\s*migrated source:\s*(.+?)\s*=====\s*\*/\s*$")
+ES_IMPORT_RE = re.compile(r"^import\s*\{[^}]*\}\s*from\s*['\"][^'\"]+['\"];?", re.M)
 
 
 def _runtime_source() -> str:
@@ -68,8 +78,8 @@ def _runtime_source() -> str:
     )
 
 
-def _sections():
-    lines = _runtime_source().split("\n")
+def _sections(source: str | None = None):
+    lines = (_runtime_source() if source is None else source).split("\n")
     out = []  # (section_name, start, end)
     cur_name, cur_start = "(prelude)", 0
     for i, ln in enumerate(lines):
@@ -90,6 +100,37 @@ def _mask_line(line: str) -> str:
     out = re.sub(r"'(?:\\.|[^'\\])*'", lambda m: "'" + " " * max(0, len(m.group(0)) - 2) + "'", line)
     out = re.sub(r'"(?:\\.|[^"\\])*"', lambda m: '"' + " " * max(0, len(m.group(0)) - 2) + '"', out)
     return out
+
+
+def _import_declaration_lines(lines: list[str]) -> set[int]:
+    """Indexes of every line inside an ES ``import { ... } from`` declaration."""
+    text = "\n".join(lines)
+    covered: set[int] = set()
+    for match in ES_IMPORT_RE.finditer(text):
+        first = text.count("\n", 0, match.start())
+        covered.update(range(first, first + match.group(0).count("\n") + 1))
+    return covered
+
+
+def _bare_references(lines, sections, owners: dict[str, set[str]]) -> list[str]:
+    declarations = _import_declaration_lines(lines)
+    violations = []
+    for name, owned_by in owners.items():
+        ref_re = re.compile(r"(?<![.\w$])\b%s\b(?!\s*:)" % re.escape(name))
+        for sec_name, start, end in sections:
+            if sec_name in owned_by:
+                continue
+            for i in range(start, end):
+                if i in declarations:
+                    continue
+                code = _mask_line(lines[i])
+                if not code or not ref_re.search(code):
+                    continue
+                violations.append(
+                    f"{name}: bare ref in [{sec_name}] L{i + 1}: "
+                    f"{lines[i].strip()[:110]}"
+                )
+    return violations
 
 
 def _publishes_runtime_scope_name(source: str, name: str) -> bool:
@@ -156,25 +197,28 @@ def test_no_bare_cross_section_refs_to_runtimescope_names():
     missing = [n for n in PINNED_NAMES if not owners[n]]
     assert not missing, f"pinned names with no runtimeScope owner: {missing}"
 
-    violations = []
-    for name in PINNED_NAMES:
-        ref_re = re.compile(r"(?<![.\w$])\b%s\b(?!\s*:)" % re.escape(name))
-        for sec_name, start, end in sections:
-            if sec_name in owners[name]:
-                continue
-            for i in range(start, end):
-                code = _mask_line(lines[i])
-                if not code or not ref_re.search(code):
-                    continue
-                violations.append(
-                    f"{name}: bare ref in [{sec_name}] L{i + 1}: "
-                    f"{lines[i].strip()[:110]}"
-                )
+    violations = _bare_references(lines, sections, owners)
     assert not violations, (
         "runtimeScope seam regression — bare cross-section reference(s):\n  "
         + "\n  ".join(violations)
         + "\nRoute them through runtimeScope.<name> (see 2026-08-14 incident)."
     )
+
+
+@pytest.mark.unit
+def test_prelude_imports_bind_names_without_hiding_bare_uses():
+    lines, sections = _sections("\n".join([
+        "import {",
+        "  initVoiceInput,",
+        "} from '../features/voice-input';",
+        "/* ===== migrated source: voice.js ===== */",
+        "runtimeScope.initVoiceInput = initVoiceInput;",
+        "/* ===== migrated source: main.js ===== */",
+        "initVoiceInput();",
+    ]))
+    assert _bare_references(lines, sections, {"initVoiceInput": {"voice.js"}}) == [
+        "initVoiceInput: bare ref in [main.js] L7: initVoiceInput();",
+    ]
 
 
 @pytest.mark.unit

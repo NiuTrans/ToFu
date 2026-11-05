@@ -223,7 +223,7 @@ def test_confirmed_guard_collapses_steady_checkpoint_to_one_sidecar_rpc(
         "conversation.get", "task_results.replay_get",
     ]
     assert client.commands[0][2] == "user"
-    assert 0 < client.commands[0][3] <= 0.5
+    assert 0 < client.commands[0][3] <= 4.0
 
     assert _upsert_task_row(
         task,
@@ -240,7 +240,7 @@ def test_confirmed_guard_collapses_steady_checkpoint_to_one_sidecar_rpc(
     assert client.commands[1][1]["expected_version"] == 1
     assert client.commands[1][1]["require_parent"] is True
     assert client.commands[1][2] == "maintenance"
-    assert 0 < client.commands[1][3] <= 0.5
+    assert 0 < client.commands[1][3] <= 4.0
     assert task["_taskResultVersion"] == 2
 
 

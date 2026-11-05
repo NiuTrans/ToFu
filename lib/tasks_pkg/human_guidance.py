@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+from lib.error_envelope import BadRequest
 from lib.human_gate_contract import MAX_HUMAN_GATE_RESPONSE_LENGTH
 from lib.log import get_logger
 from lib.tasks_pkg.human_gate_registry import (
@@ -81,8 +82,8 @@ def request_human_guidance(
     )
 
     if entry is None:
-        logger.error('[HumanGuidance] duplicate or capacity-exhausted request '
-                     'guidance_id=%s; refusing registration', guidance_id)
+        logger.error('[HumanGuidance] duplicate request guidance_id=%s; '
+                     'refusing registration', guidance_id)
         return None
 
     durable_response = None
@@ -156,13 +157,13 @@ def resolve_human_guidance(
 ) -> bool:
     """Commit scoped legacy answers too; unscoped non-chat gates keep compatibility."""
     if not isinstance(response_text, str):
-        raise ValueError('human guidance response must be a string')
+        raise BadRequest('human guidance response must be a string', field='response')
     if not response_text.strip():
-        raise ValueError('human guidance response is required')
+        raise BadRequest('human guidance response is required', field='response')
     if len(response_text) > MAX_HUMAN_GATE_RESPONSE_LENGTH:
-        raise ValueError(
+        raise BadRequest(
             'human guidance response exceeds '
-            f'{MAX_HUMAN_GATE_RESPONSE_LENGTH} characters')
+            f'{MAX_HUMAN_GATE_RESPONSE_LENGTH} characters', field='response')
     scope = human_gate_registry.owned_durable_scope(
         GATE_GUIDANCE, guidance_id, owner_user_id=owner_user_id)
     if scope is not None and not durably_accepted:

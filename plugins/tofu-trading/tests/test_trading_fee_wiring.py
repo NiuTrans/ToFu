@@ -37,8 +37,15 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_ENGINE_SOURCES = (
+_SIMULATION_SOURCES = (
     'tofu_trading/trading/llm_simulator.py',
+    'tofu_trading/trading/simulation_execution.py',
+    'tofu_trading/trading/simulation_ledger.py',
+    'tofu_trading/trading/simulation_prompt.py',
+)
+
+_ENGINE_SOURCES = (
+    *_SIMULATION_SOURCES,
     'tofu_trading/trading_backtest_engine/engine.py',
     'tofu_trading/trading_backtest_engine/intel_backtest.py',
     'tofu_trading/trading_backtest_engine/strategies.py',
@@ -240,11 +247,10 @@ class TestPromptMatchesLedger:
 
     def test_system_prompt_has_no_competing_fee_schedule(self):
         """The system prompt stated 0.1% round-trip while the ledger took 0.65%."""
-        code = _strip_comments(open(
-            os.path.join(_repo_root(), 'tofu_trading/trading/llm_simulator.py'),
-            encoding='utf-8').read())
-        assert '万2.5' not in code, 'system prompt still hardcodes a fee schedule'
-        assert '0.05%印花税' not in code, 'system prompt still hardcodes a stamp-tax rate'
+        from tofu_trading.trading.simulation_prompt import SIMULATION_SYSTEM_PROMPT
+
+        assert '万2.5' not in SIMULATION_SYSTEM_PROMPT, 'system prompt hardcodes a fee schedule'
+        assert '0.05%印花税' not in SIMULATION_SYSTEM_PROMPT, 'system prompt hardcodes a stamp-tax rate'
 
 
 # ═══════════════════════════════════════════════════════════
@@ -264,7 +270,7 @@ class TestNetworkFeePathIsFencedOff:
     """
 
     _LOOP_MODULES = (
-        'tofu_trading/trading/llm_simulator.py',
+        *_SIMULATION_SOURCES,
         'tofu_trading/trading_backtest_engine/engine.py',
         'tofu_trading/trading_backtest_engine/intel_backtest.py',
         'tofu_trading/trading_backtest_engine/strategies.py',
@@ -296,23 +302,20 @@ class TestNetworkFeePathIsFencedOff:
         assert 'NOT FOR USE INSIDE A BACKTEST' in doc
         assert 'fee_book' in doc, 'the warning must name the correct alternative'
 
-    def test_fee_book_is_the_documented_alternative_and_is_pure(self):
+    def test_fee_book_is_the_documented_alternative_and_is_pure(self, monkeypatch):
         """The fence is only credible if the sanctioned path is genuinely pure."""
+        from unittest.mock import Mock
+
         from tofu_trading.trading.fee_book import FeeBook
 
         book = FeeBook()
 
-        def forbidden(self, *args, **kwargs):
-            raise AssertionError('fee_book reached for the network on a loop path')
-
-        original = FeeBook._from_network
-        FeeBook._from_network = forbidden
-        try:
-            book.prewarm(['600519', '510300', '003003'])
-            for sym in ('600519', '510300', '003003'):
-                assert book.fee_for(sym, 20000, 'sell', holding_days=5)['fee_amount'] >= 0
-        finally:
-            FeeBook._from_network = original
+        forbidden = Mock(side_effect=AssertionError('fee_book reached for the network on a loop path'))
+        monkeypatch.setattr(FeeBook, '_from_network', forbidden)
+        book.prewarm(['600519', '510300', '003003'])
+        for sym in ('600519', '510300', '003003'):
+            assert book.fee_for(sym, 20000, 'sell', holding_days=5)['fee_amount'] >= 0
+        forbidden.assert_not_called()
 
 
 @pytest.mark.unit
@@ -350,13 +353,39 @@ class TestAccountingFixes:
         assert m['annualized_return_pct'] > -13, (
             f"annualised {m['annualized_return_pct']} — loss inflated")
 
-    def test_position_cap_follows_current_equity(self):
+    def test_position_cap_follows_current_equity(self, trading_connection_factory):
         """Anchored to initial_capital, a halved portfolio kept the same cap."""
-        code = _strip_comments(open(
-            os.path.join(_repo_root(), 'tofu_trading/trading/llm_simulator.py'),
-            encoding='utf-8').read())
-        assert 'max_amount = config.initial_capital * config.max_position_pct' not in code
-        assert 'max_amount = portfolio_value * config.max_position_pct' in code
+        import logging
+        from unittest.mock import Mock
+
+        from tofu_trading.trading.llm_simulator import SimulatorConfig
+        from tofu_trading.trading.simulation_execution import (
+            SimulationDecisionExecution, SimulationExecutionPorts,
+        )
+        from tofu_trading.trading.simulation_ledger import SimulationLedger
+        from tofu_trading.trading.simulation_persistence import SimulationSettlement
+
+        config = SimulatorConfig(symbols=['510300'], initial_capital=100000, max_position_pct=10)
+        ledger = SimulationLedger(50000)  # Current equity after an earlier loss.
+        positions, trades = {}, []
+        unused = Mock(side_effect=AssertionError('unexpected market dependency'))
+        ports = SimulationExecutionPorts(
+            get_price_at=lambda *_: {'nav': 10}, next_bar_fill=lambda *_: (10, ''),
+            validate_symbol_code=unused, ensure_price_data=unused,
+            resolve_symbol_name=unused, holding_days=unused, logger=logging.getLogger(__name__),
+        )
+        SimulationDecisionExecution(
+            db=trading_connection_factory(isolated=True), config=config, ledger=ledger,
+            positions=positions, trade_log=trades, settlement=SimulationSettlement('cap-check'),
+            sim_date='2024-01-01', step_index=0, portfolio_value=50000,
+            strategies_used=[], symbol_names={}, emit=unused, ports=ports,
+        ).apply([{'action': 'buy', 'symbol': '510300', 'amount': 50000, 'confidence': 95}])
+
+        assert trades[0]['amount'] == 5000
+        assert ledger.cash == 45000
+        fee = config.fee_book.fee_for('510300', 5000, 'buy')['fee_amount']
+        assert positions['510300']['shares'] * 10 == pytest.approx(5000 - fee)
+        unused.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════

@@ -96,6 +96,7 @@ def _scores_phase(repository, boundary) -> dict:
         "status": block.get("status"),
         "key_source": key_source,
         "scores": len(block.get("scores") or {}),
+        "index_version": block.get("index_version"),
     }
 
 

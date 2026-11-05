@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -76,11 +76,8 @@ async function run(mode) {
 """
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD),
-    reason='node + vite test bundler unavailable',
-)
 def test_refresh_config_reads_config_only_and_falls_back_on_failure(tmp_path):
+    require_node_modules('vite')
     built = tmp_path / 'model-picker-startup.js'
     compiled = subprocess.run(
         [ESBUILD, ENTRY, '--bundle', '--format=cjs', '--platform=node',

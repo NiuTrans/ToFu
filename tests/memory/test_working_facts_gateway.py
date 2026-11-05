@@ -12,6 +12,7 @@ from lib.agent_core.native_process import ApprovalRequest, ToolRequest
 from lib.tasks_pkg.native_gateway import NativeGateway
 from lib.tools.working_facts import WORKING_FACT_CONTRACTS
 from lib.tools.registry import all_specs
+from lib.tools.result_envelope import tool_result_error
 
 pytestmark = pytest.mark.unit
 
@@ -38,13 +39,13 @@ def test_native_gateway_records_reads_and_refuses_overwriting_owner_decision(fac
             return await gateway.execute(ToolRequest(PRINCIPAL, task['id'], identity + '-execute',
                 'record_working_fact', arguments, identity, model_round=0))
         try:
-            missing = json.loads(await write(args | {'id': 'invented-new-id'}, 'invented'))['error']
-            assert missing['code'] == 'working_fact_not_found'
-            assert missing['retryable'] is False and 'omit id' in missing['next_action']
+            missing = tool_result_error(await write(args | {'id': 'invented-new-id'}, 'invented'))
+            assert missing.code == 'working_fact_not_found'
+            assert missing.retryable is False and 'omit id' in missing.next_action
             assert query(facts)['revision'] == 0 and not query(facts)['facts']
-            paraphrased = json.loads(await write(args | {'text': 'The file states Report 1'}, 'paraphrase'))['error']
-            assert paraphrased['code'] == 'working_facts_invalid_request'
-            assert paraphrased['retryable'] is False
+            paraphrased = tool_result_error(await write(args | {'text': 'The file states Report 1'}, 'paraphrase'))
+            assert paraphrased.code == 'working_facts_invalid_request'
+            assert paraphrased.retryable is False
             assert query(facts)['revision'] == 0 and not query(facts)['facts']
             saved = json.loads(await write(args, 'save'))
             fact = saved['facts'][0]
@@ -58,7 +59,7 @@ def test_native_gateway_records_reads_and_refuses_overwriting_owner_decision(fac
             assert json.loads(refreshed)['facts'][0]['text'] == 'The owner correction remains authoritative'
             assert json.loads(refreshed)['facts'][0]['revision'] == fact['revision'] + 1
             refused = await write(args | {'revision': query(facts)['revision'], 'id': fact['id']}, 'overwrite')
-            assert json.loads(refused)['error']['code'] == 'working_facts_forbidden'
+            assert tool_result_error(refused).code == 'working_facts_forbidden'
             assert 'cannot overwrite' in refused
             assert query(facts)['facts'][0]['text'] == 'The owner correction remains authoritative'
             assert [row['status'] for row in task['toolRounds']] == ['error', 'error', 'done', 'done', 'done', 'error']
@@ -70,17 +71,17 @@ def test_native_gateway_records_reads_and_refuses_overwriting_owner_decision(fac
                     raise failure
                 with monkeypatch.context() as patch:
                     patch.setattr(service, 'record_fact', unavailable_write)
-                    uncertain = json.loads(await write(args, f'uncertain-{index}'))['error']
-                assert uncertain['code'] == 'working_facts_unavailable'
-                assert uncertain['retryable'] is False
+                    uncertain = tool_result_error(await write(args, f'uncertain-{index}'))
+                assert uncertain.code == 'working_facts_unavailable'
+                assert uncertain.retryable is False
                 assert query(facts)['facts'][0]['text'] == 'The owner correction remains authoritative'
             def unavailable_read(*a, **k):
                 raise StorageError('database_unavailable', 'Injected unavailable store')
             with monkeypatch.context() as patch:
                 patch.setattr(service, 'query_facts', unavailable_read)
-                failed = json.loads(await gateway.execute(ToolRequest(PRINCIPAL, task['id'], 'unavailable-read',
-                    'read_working_facts', {}, model_round=2)))['error']
-            assert failed['code'] == 'working_facts_unavailable' and failed['retryable'] is True
+                failed = tool_result_error(await gateway.execute(ToolRequest(PRINCIPAL, task['id'], 'unavailable-read',
+                    'read_working_facts', {}, model_round=2)))
+            assert failed.code == 'working_facts_unavailable' and failed.retryable is True
             assert [row['status'] for row in task['toolRounds'][-3:]] == ['error'] * 3
 
         finally:

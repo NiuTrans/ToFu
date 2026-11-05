@@ -1,4 +1,4 @@
-"""Bounded, owner-aware registry for blocking human decisions.
+"""Owner-aware registry for blocking human decisions.
 
 The three task-facing human gates differ in wait policy, but their mutable
 state machine is identical: register one waiter, accept exactly one answer,
@@ -15,6 +15,10 @@ the waiting replica adopts it through :meth:`poll_store_resolution`, which
 re-validates ownership and delivers through the same entry — so the local
 state machine below stays the single authority for who consumed what.
 Personal mode is byte-equivalent: no store reads, no new threads.
+
+Registration is never refused for count: every waiter owns exactly one entry
+and removes it through ``take`` or ``discard_unresolved``, so the map is
+bounded by the live waiters themselves.
 """
 
 from __future__ import annotations
@@ -27,7 +31,6 @@ from typing import Generic, TypeVar
 from lib.human_gate_contract import require_human_gate_request_id
 from lib.identity import require_user_id
 from lib.log import get_logger
-from runtime_guards import resolve_resource_budget
 
 
 logger = get_logger(__name__)
@@ -62,18 +65,6 @@ _VALID_GATE_KINDS = frozenset({
 })
 
 
-def _default_capacity() -> int:
-    """Size waiters from the launch-time active-task budget.
-
-    A task normally owns at most one blocking human gate.  Two slots per
-    admitted task leave room for nested orchestration transitions without
-    turning abandoned request IDs into an unbounded process-lifetime map.
-    """
-    active_tasks = resolve_resource_budget(
-        'TOFU_MAX_INFLIGHT_TASKS', minimum=1, maximum=256)
-    return max(8, min(512, active_tasks * 2))
-
-
 @dataclass
 class HumanGateEntry(Generic[ResponseT]):
     owner_user_id: int
@@ -92,13 +83,9 @@ class HumanGateResolution(Generic[ResponseT]):
 
 
 class OwnedHumanGateRegistry:
-    """Thread-safe first-resolution-wins registry with a hard capacity."""
+    """Thread-safe first-resolution-wins registry; only duplicates refuse."""
 
-    def __init__(self, capacity: int) -> None:
-        if isinstance(capacity, bool) or int(capacity) != capacity \
-                or int(capacity) <= 0:
-            raise ValueError('human gate capacity must be a positive integer')
-        self._capacity = int(capacity)
+    def __init__(self) -> None:
         self._entries: dict[tuple[str, str], HumanGateEntry[object]] = {}
         self._lock = threading.Lock()
 
@@ -123,7 +110,7 @@ class OwnedHumanGateRegistry:
         entry: HumanGateEntry[object] = HumanGateEntry(
             owner_user_id=owner, durable_scope=durable_scope)
         with self._lock:
-            if key in self._entries or len(self._entries) >= self._capacity:
+            if key in self._entries:
                 return None
             self._entries[key] = entry
         # Mirror the pending waiter so a resolve landing on ANOTHER replica
@@ -371,7 +358,7 @@ class OwnedHumanGateRegistry:
             return len(self._entries)
 
 
-human_gate_registry = OwnedHumanGateRegistry(_default_capacity())
+human_gate_registry = OwnedHumanGateRegistry()
 
 
 __all__ = [

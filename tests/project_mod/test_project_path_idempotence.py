@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from tests._runtime_sections import native_module_path
-import shutil
 import subprocess
 
 import pytest
@@ -16,7 +15,6 @@ ROOT = Path(__file__).resolve().parents[2]
 API_SOURCE = ROOT / "frontend/src/runtime/sections/api.js"
 
 
-@pytest.mark.skipif(not shutil.which("node"), reason="node unavailable")
 def test_project_set_paths_coalesces_only_identical_inflight_requests() -> None:
     harness = r"""
 const assert = require('node:assert/strict');

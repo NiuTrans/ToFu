@@ -23,13 +23,13 @@ its persisted `elapsed`).
 """
 
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 
 from tests._runtime_sections import runtime_section_path
+from tests._jsdom import require_node_modules
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Materialized migrated section (scope prelude included — the harness evals
@@ -39,12 +39,6 @@ PANEL_JS = runtime_section_path('ui/streaming_swarm_panel.js')
 import pytest  # noqa: E402
 
 pytestmark = pytest.mark.unit
-
-
-def _node_deps_available():
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -150,7 +144,7 @@ const h2 = document.createElement('div');
 h2.innerHTML = html;
 const doneTimer = h2.querySelector('.sw-a-timer');
 check('terminal_agent_keeps_elapsed',
-      !!doneTimer && /12\.5/.test(doneTimer.textContent || ''));
+      !!doneTimer && doneTimer.textContent === '13s');
 
 console.log(out.join('\n'));
 process.exit(0);
@@ -158,6 +152,7 @@ process.exit(0);
 
 
 def _run(module_path):
+    require_node_modules('jsdom')
     with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False) as f:
         f.write(_HARNESS)
         hp = f.name
@@ -171,7 +166,6 @@ def _run(module_path):
         os.unlink(hp)
 
 
-@pytest.mark.skipif(not _node_deps_available(), reason='node/jsdom unavailable')
 class TestSwarmTimerReattach(unittest.TestCase):
 
     def test_swarm_timer_survives_reload(self):

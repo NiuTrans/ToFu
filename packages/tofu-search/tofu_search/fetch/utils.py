@@ -626,7 +626,7 @@ def _ip_is_blocked(ip_str: str) -> bool:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
         return False
-    return (ip.is_private or ip.is_loopback or ip.is_link_local
+    return (not ip.is_global or ip.is_loopback or ip.is_link_local
             or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
 
 

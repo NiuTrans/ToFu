@@ -114,7 +114,8 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::vfs::{
-    BoundedDirectoryEntries, BoundedDirectoryMatches, FileKind, OpenRequest, Vfs, VfsFile,
+    BoundedDirectoryEntries, BoundedDirectoryMatches, DirectoryEntry, FileKind, OpenRequest, Vfs,
+    VfsFile,
 };
 
 /// Fixed encryption region. 4 KiB divides the 4 KiB CONTROL slot exactly and
@@ -613,18 +614,10 @@ impl EncryptingVfs {
     }
 
     fn rename_reencrypt(&self, source: &Path, destination: &Path) -> io::Result<()> {
-        let plaintext = {
-            let mut file = self.open(
-                source,
-                OpenRequest {
-                    read: true,
-                    ..OpenRequest::default()
-                },
-            )?;
-            // Bound: the largest payload file is the 64 MiB WAL; blocks and
-            // segments are far smaller.
-            file.read_all(crate::ACTIVE_LOG_MAX_BYTES as usize)?
-        };
+        let mut source_file = self.open(source, OpenRequest {
+            read: true, ..OpenRequest::default()
+        })?;
+        let source_length = source_file.len()?;
         let parent = destination.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -654,17 +647,28 @@ impl EncryptingVfs {
                 },
             )?;
             let mut file = EncryptingFile::new(inner, &self.key, identity);
-            file.write_all_at(0, &plaintext)?;
+            // A durable WAL backlog is not size-limited by maintenance.
+            // Rebind authenticated regions with a fixed copy buffer instead
+            // of allocating the entire source or refusing a large log.
+            let mut plaintext = vec![0_u8; REGION_BYTES * 16];
+            let mut offset = 0_u64;
+            while offset < source_length {
+                let count = (source_length - offset).min(plaintext.len() as u64) as usize;
+                source_file.read_exact_at(offset, &mut plaintext[..count])?;
+                file.write_all_at(offset, &plaintext[..count])?;
+                offset += count as u64;
+            }
             crate::vfs::sync_all_barrier(&mut file)?;
             drop(file);
             self.inner.rename(&temporary, destination)?;
             crate::vfs::sync_directory_barrier(self.inner.as_ref(), parent)
         })();
+        drop(source_file);
         if result.is_err() {
             let _ = self.inner.remove_file(&temporary);
             return result;
         }
-        // Remove the source temp only after the destination is durable; a
+        // Remove the closed source only after the destination is durable; a
         // crash before removal leaves an orphan `.new-*` the existing GC
         // already reclaims.
         self.inner.remove_file(source)
@@ -705,8 +709,7 @@ impl Vfs for EncryptingVfs {
             // The AAD binds the file identity derived from its store-relative
             // path, which the temp→final rename changes. Re-encrypt the bytes
             // under the destination identity so ciphertext stays bound to the
-            // file that names it. Bounded by the largest payload file
-            // (blocks ≤ 4 MiB, segments ≤ 8 MiB, WAL ≤ 64 MiB); the real
+            // file that names it. A fixed copy buffer handles every length; the real
             // rename at the end is the atomic publication point, and the
             // source temp remains until then, preserving crash recovery.
             return self.rename_reencrypt(source, destination);
@@ -724,6 +727,10 @@ impl Vfs for EncryptingVfs {
 
     fn read_directory(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         self.inner.read_directory(path)
+    }
+
+    fn read_directory_entries(&self, path: &Path) -> io::Result<Vec<DirectoryEntry>> {
+        self.inner.read_directory_entries(path)
     }
 
     fn read_directory_bounded(
@@ -1072,6 +1079,39 @@ mod tests {
             file.read_exact_at(0, &mut output).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn identity_changing_rename_preserves_a_large_encrypted_file_and_partial_region() {
+        let directory = tempfile::tempdir().unwrap();
+        let vfs = encrypting(directory.path(), test_key(17));
+        let source = directory.path().join("active.wal");
+        let destination = directory.path().join("active-0000000000000002.wal");
+        let chunk = vec![0x63; 1024 * 1024];
+        let mut file = vfs.open(&source, writable(true)).unwrap();
+        for index in 0..65_u64 {
+            file.write_all_at(index * chunk.len() as u64, &chunk).unwrap();
+        }
+        let tail_offset = 65 * chunk.len() as u64;
+        let tail = b"exact partial region";
+        file.write_all_at(tail_offset, tail).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        vfs.rename(&source, &destination).unwrap();
+        assert!(!source.exists());
+        drop(vfs);
+        let reopened = encrypting(directory.path(), test_key(17));
+        let mut file = reopened.open(&destination, OpenRequest {
+            read: true, ..OpenRequest::default()
+        }).unwrap();
+        assert_eq!(file.len().unwrap(), tail_offset + tail.len() as u64);
+        let mut actual = vec![0; chunk.len()];
+        for index in 0..65_u64 {
+            file.read_exact_at(index * chunk.len() as u64, &mut actual).unwrap();
+            assert_eq!(actual, chunk);
+        }
+        file.read_exact_at(tail_offset, &mut actual[..tail.len()]).unwrap();
+        assert_eq!(&actual[..tail.len()], tail);
     }
 
     #[test]

@@ -17,6 +17,7 @@ from quart import Blueprint, request
 from lib.api_response import (
     api_bad_request, api_conflict, api_error, api_internal_error, api_ok,
 )
+from lib.error_envelope import BadRequest
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
 
@@ -156,7 +157,7 @@ def database_paths_apply():
                 state = probe.configure_search_projection_directory(projection['directory'])
             except probe.SearchProjectionEnvironmentOverrideError as exc:
                 return api_conflict(str(exc), errorKind='search_projection_env_override')
-            except ValueError as exc:
+            except BadRequest as exc:
                 return api_bad_request(str(exc))
             return api_ok({
                 'restartRequired': state['restartRequired'],
@@ -190,6 +191,8 @@ def database_paths_apply():
                 state = probe.configure_native_fastpath(enabled, directory)
             except probe.NativeFastpathSettingsError as exc:
                 return api_conflict(str(exc), errorKind=exc.code)
+            except BadRequest as exc:
+                return api_bad_request(str(exc))
             return api_ok({
                 'restartRequired': state['restartRequired'], 'fastpath': state,
                 'searchProjection': probe.search_projection_state('tofudb'),
@@ -241,8 +244,6 @@ def database_paths_apply():
             'fastpath': probe.fastpath_state(engine['backend']),
             'searchProjection': None,
         })
-    except ValueError as exc:
-        return api_bad_request(str(exc))
     except Exception as exc:
         return api_internal_error(exc, context="api_v1.database.paths_apply")
 

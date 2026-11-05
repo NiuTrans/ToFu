@@ -7,9 +7,8 @@ unit-testable without a running loop — see
 ``tests/cgroup_guard/test_loop_stall_watchdog.py``.
 
 This module must NOT import ``server`` (server.py imports it for re-export).
-``_pid_alive`` is duplicated here (it is also defined in the lock cluster)
-because the prune helpers use it as a default argument and this module cannot
-reach back into the composition root.
+The prune helpers default to ``runtime_guards.pid_is_alive``, the liveness
+rule shared with the boot instance lock: an exited, unreaped pid is dead.
 """
 
 import errno
@@ -23,6 +22,7 @@ import time
 import typing
 
 from lib.server.server_runtime_probes import stall_pressure_context
+from runtime_guards import pid_is_alive as _pid_alive
 
 _FAULT_DUMP_PREFIX = 'tofu_faulthandler_'
 _FAULT_DUMP_SUFFIX = '.log'
@@ -265,25 +265,6 @@ def _listener_death_decide(was_bound, bound, misses, k):
         return (False, 0, False)
     misses += 1
     return (True, misses, misses >= k)
-
-
-def _pid_alive(pid):
-    """Best-effort liveness probe for *pid* (signal 0). Conservative: an
-    ambiguous OSError (other than 'no such process') reports True so we never
-    delete a dump whose owner might still be running."""
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OverflowError:
-        return False  # pid out of representable range → cannot be a live process
-    except PermissionError:
-        return True   # exists but owned by another user
-    except OSError:
-        return True   # ambiguous — err on the side of keeping
-    return True
 
 
 def _parse_fault_dump_pid(basename):

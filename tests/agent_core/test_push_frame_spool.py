@@ -2,10 +2,12 @@
 import asyncio
 import gc
 import threading
+import time
+from concurrent.futures import Future
 
 import pytest
 
-from lib.agent_core.push import PushClient, PushHub
+from lib.agent_core.push import PushClient, PushHub, _QueuedPushEvent
 from lib.agent_core.push_frames import PushFrameStore
 
 pytestmark = pytest.mark.unit
@@ -254,6 +256,44 @@ def test_thirty_two_blocked_encoders_do_not_delay_healthy_thirty_third(monkeypat
         assert [frame.result(timeout=3).decode()['n'] for frame in pending] == list(range(32))
     finally:
         release.set()
+        store.close()
+    assert not store._executor.worker_threads_snapshot()
+
+
+def test_loop_frame_read_does_not_wait_behind_another_physical_start(monkeypatch):
+    store = PushFrameStore()
+    ready = Future()
+    ready.set_result(store._encode({'n': 1}))
+    start_entered, start_release = threading.Event(), threading.Event()
+    real_start = threading.Thread.start
+
+    def start(thread):
+        if thread.name.startswith('tofu-push-frame') and not start_entered.is_set():
+            start_entered.set()
+            assert start_release.wait(10)
+        return real_start(thread)
+
+    async def loop_read():
+        began = time.monotonic()
+        frame = await _QueuedPushEvent(store, ready).decode()
+        return frame, (time.monotonic() - began) * 1000, start_release.is_set()
+
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    publisher = threading.Thread(target=lambda: store.prepare({'n': 2}))
+    # Bounds a loop that waits behind the publisher so a failing kernel ends.
+    fence = threading.Timer(3, start_release.set)
+    publisher.start()
+    try:
+        assert start_entered.wait(2), 'publication must need a physical start'
+        fence.start()
+        frame, read_ms, released = asyncio.run(loop_read())
+        print({'loop_read_ms': round(read_ms, 3), 'completed_while_other_start_blocked': not released})
+        assert frame == {'n': 1}
+        assert not released, 'loop-side frame read waited behind another Thread.start()'
+    finally:
+        fence.cancel()
+        start_release.set()
+        publisher.join(5)
         store.close()
     assert not store._executor.worker_threads_snapshot()
 

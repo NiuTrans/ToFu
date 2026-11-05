@@ -95,14 +95,17 @@ def test_normal_executor_uses_slow_tool_scope(clock, monkeypatch, caplog):
 
 def test_streaming_prefetch_keeps_call_identity_and_same_budget(clock, monkeypatch, caplog):
     from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
-    accumulator = object.__new__(StreamingToolAccumulator)
-    accumulator._task = {'id':'task-123','convId':'conv-123'}
+    accumulator = StreamingToolAccumulator({'id':'task-123','convId':'conv-123'}, project_path=None)
     def read(name, args):
         clock.value = 6
         return 'private-read-content'
     monkeypatch.setattr(accumulator, '_execute_one', read)
-    assert accumulator._execute_one_for_call('read_files', {}, 'call-prefetch') == ('private-read-content',)
-    fields = caplog.records[-1].tofu_event_fields
+    try:
+        assert accumulator._execute_one_for_call('read_files', {}, 'call-prefetch') == ('private-read-content',)
+    finally:
+        accumulator.close(wait=True)
+    fields = next(record.tofu_event_fields for record in reversed(caplog.records)
+                  if getattr(record, 'tofu_event_fields', {}).get('tool_call_id'))
     assert fields['tool_call_id'] == 'call-prefetch'
     assert fields['budget_ms'] == TOOL_EXECUTION_BUDGETS_MS['read_files']
     assert 'private-read-content' not in caplog.text

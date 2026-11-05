@@ -13,6 +13,8 @@ from lib.mcp.registry import is_opensource_build
 pytestmark = [pytest.mark.unit, pytest.mark.skipif(
     is_opensource_build(), reason='The private publication toolchain is not shipped')]
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'docs/readme.txt'}
+
 
 def git(repo: Path, *args: str, env=None) -> str:
     result = subprocess.run(['git', *args], cwd=repo, capture_output=True,

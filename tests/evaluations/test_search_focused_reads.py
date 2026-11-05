@@ -51,7 +51,7 @@ def test_invalid_focus_arguments_never_dispatch(extra):
 def test_focused_query_cannot_authorize_an_undiscovered_url():
     assert execute_tool(None, 'tofu', tasks()[0], 'custom__fetch',
                         {'url': 'https://example.com/other', 'query': 'manual'},
-                        discovered(), 10) == {'error': 'url_not_returned_by_search'}
+                        discovered(), 10) == {'error': 'url_not_observed'}
 
 
 @pytest.mark.parametrize('arm', ['tofu', 'ddgs'])

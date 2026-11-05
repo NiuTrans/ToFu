@@ -140,6 +140,33 @@ def test_m2_folds_grep_to_structured_fact():
 
 
 @pytest.mark.unit
+def test_m2_folds_search_files_under_its_own_name():
+    from lib.tasks_pkg.compaction.api import micro_compact
+
+    msgs = [{'role': 'user', 'content': 'go'}]
+    for message in _mk_grep_msg('s1', n_matches=4):
+        if message.get('role') == 'tool':
+            message['name'] = 'search_files'
+        for call in message.get('tool_calls') or []:
+            call['function']['name'] = 'search_files'
+        msgs.append(message)
+    for i in range(60):
+        msgs.append({'role': 'assistant', 'content': f'p{i}',
+                     'tool_calls': [{'id': f'p{i}',
+                                     'function': {'name': 'noop', 'arguments': '{}'}}]})
+        msgs.append({'role': 'tool', 'name': 'noop', 'tool_call_id': f'p{i}',
+                     'content': 'short'})
+
+    micro_compact(msgs, conv_id='',
+                  steps=['fold_observations'],
+                  constant_overrides={'MICRO_HOT_TAIL': 1})
+
+    s = next(m['content'] for m in msgs if m.get('tool_call_id') == 's1')
+    assert s.startswith('[search_files folded'), s
+    assert '4 match line(s)' in s, s
+
+
+@pytest.mark.unit
 def test_m2_respects_hot_tail():
     from lib.tasks_pkg.compaction.api import micro_compact
 

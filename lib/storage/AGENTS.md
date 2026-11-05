@@ -17,6 +17,10 @@ process owns durable state and transactions. Read `docs/STORAGE.md` and
   correlation, cancellation, supervision, readiness, and write fencing.
 - A selected backend failing is an error; the client never silently switches
   authority or opens `data/tofu.db` itself.
+- `connection_file.py` supports separate SQL v1 and native v2 handoffs. Native
+  attachment validates scope, project, admitted engine and PID/start identity;
+  client detach never stops the external owner. See
+  `docs/NATIVE_STORAGE_LIFECYCLE.md` and native connection/supervision tests.
 - `protocol.py` owns finite-number admission and mapping materialization shared
   by framing and native request adaptation. Exact built-ins may use direct
   dispatch; subclasses/views retain generic checks. Verify

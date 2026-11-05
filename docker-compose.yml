@@ -27,8 +27,9 @@ services:
       target: worker
     # image: ghcr.io/rangehow/tofu:latest  # uncomment after publishing
     restart: unless-stopped
-    # PID 1 reaps MCP/browser children; bounded resources make failure local
-    # and let the in-process soft/hard RSS guards act before the kernel does.
+    # PID 1 reaps MCP/browser children. The container limits keep memory
+    # exhaustion local: the kernel enforces them, Tofu never refuses work for
+    # memory, and the restart policy recovers the worker after an OOM kill.
     init: true
     mem_limit: ${TOFU_MEMORY_LIMIT:-4g}
     mem_reservation: ${TOFU_MEMORY_RESERVATION:-512m}
@@ -58,28 +59,26 @@ services:
       - TOFU_AUTH_MODE=${TOFU_AUTH_MODE:-}
       # Used only by explicit operator-facing URL helpers inside the container.
       - TOFU_PUBLISHED_PORT=${PORT:-15000}
-      # Earlier pressure gates for a dedicated, memory-bounded container.
+      # Start best-effort cache relief earlier in a dedicated, memory-bounded
+      # container. Relief drops caches and trims the heap; it never blocks work.
       - TOFU_CGROUP_RELIEF_PCT=${TOFU_CGROUP_RELIEF_PCT:-85}
-      - TOFU_CGROUP_REQUEST_PCT=${TOFU_CGROUP_REQUEST_PCT:-90}
-      - TOFU_ADMISSION_CGROUP_PCT=${TOFU_ADMISSION_CGROUP_PCT:-90}
-      - TOFU_PROCESS_RSS_RELIEF_MB=${TOFU_PROCESS_RSS_RELIEF_MB:-}
-      - TOFU_PROCESS_RSS_RECYCLE_MB=${TOFU_PROCESS_RSS_RECYCLE_MB:-}
-      # Empty means: derive one bounded personal budget from the container's
-      # CPU quota, cgroup memory/headroom, and persistent-volume free space.
-      # Any explicit operator value still wins.
+      # Empty means the built-in default. Hardware never limits work: task
+      # admission, concurrency and fan-out are unlimited, worker idle-reuse
+      # hints and retry budgets are fixed constants, and only evict-only
+      # retention follows the container's cgroup memory and persistent-volume
+      # free space. Any explicit operator value still wins.
       - TOFU_MAX_INFLIGHT_TASKS=${TOFU_MAX_INFLIGHT_TASKS:-}
       - TOFU_SYNC_WORKERS=${TOFU_SYNC_WORKERS:-}
       - TOFU_AGENT_WORKERS=${TOFU_AGENT_WORKERS:-}
       - TOOL_MAX_PARALLEL_WORKERS=${TOOL_MAX_PARALLEL_WORKERS:-}
-      - TOFU_PRODUCTION_LLM_FANOUT=${TOFU_PRODUCTION_LLM_FANOUT:-}
       - TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS=${TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS:-}
       - TOFU_PRODUCTION_IMAGE_FANOUT=${TOFU_PRODUCTION_IMAGE_FANOUT:-}
       - TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS=${TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS:-}
       - TOFU_PRODUCTION_TTS_FANOUT=${TOFU_PRODUCTION_TTS_FANOUT:-}
       - TOFU_NUMERIC_THREADS=${TOFU_NUMERIC_THREADS:-}
-      # glibc reads this before Python can probe. Two is the safe container
-      # fallback; source/desktop launchers resolve it from the early probe.
-      - MALLOC_ARENA_MAX=${TOFU_MALLOC_ARENA_MAX:-2}
+      # glibc reads this before Python starts, so Compose passes the fixed
+      # hardware-independent arena count (8) directly.
+      - MALLOC_ARENA_MAX=${TOFU_MALLOC_ARENA_MAX:-8}
       - TOFU_STORAGE_SQLITE_READ_POOL=${TOFU_STORAGE_SQLITE_READ_POOL:-}
       - TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY=${TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY:-}
       - TOFU_STORAGE_RPC_CAPACITY=${TOFU_STORAGE_RPC_CAPACITY:-}
@@ -90,10 +89,8 @@ services:
       - TOFU_TRANSLATE_CACHE_MAX_MIB=${TOFU_TRANSLATE_CACHE_MAX_MIB:-}
       - TOFU_TRANSLATE_MAX_429_ATTEMPTS=${TOFU_TRANSLATE_MAX_429_ATTEMPTS:-}
       - TOFU_TRANSLATE_WORKERS=${TOFU_TRANSLATE_WORKERS:-}
-      - TOFU_TRANSLATE_QUEUE_CAPACITY=${TOFU_TRANSLATE_QUEUE_CAPACITY:-}
       - TOFU_TRANSLATE_WORKER_IDLE_SECONDS=${TOFU_TRANSLATE_WORKER_IDLE_SECONDS:-}
       - TOFU_RUN_PYTHON_CACHE=${TOFU_RUN_PYTHON_CACHE:-}
-      - TOFU_RUN_PYTHON_CACHE_MAX_MIB=${TOFU_RUN_PYTHON_CACHE_MAX_MIB:-}
       - TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY=${TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY:-}
       - TOFU_TOOL_SEARCH_TERM_CACHE_CAPACITY=${TOFU_TOOL_SEARCH_TERM_CACHE_CAPACITY:-}
       - TOFU_TOOL_RESULT_CACHE_CAPACITY=${TOFU_TOOL_RESULT_CACHE_CAPACITY:-}
@@ -101,20 +98,6 @@ services:
       - TOFU_MEMORY_METADATA_CACHE_CAPACITY=${TOFU_MEMORY_METADATA_CACHE_CAPACITY:-}
       - TOFU_MEMORY_METADATA_CACHE_MAX_MIB=${TOFU_MEMORY_METADATA_CACHE_MAX_MIB:-}
       - TOFU_PAPER_QA_SOURCE_CACHE_CAPACITY=${TOFU_PAPER_QA_SOURCE_CACHE_CAPACITY:-}
-      - TOFU_PAPER_REPORT_AGENT_TOKEN_BUDGET=${TOFU_PAPER_REPORT_AGENT_TOKEN_BUDGET:-}
-      - TOFU_PAPER_REPORT_AGENT_DISPATCH_BUDGET=${TOFU_PAPER_REPORT_AGENT_DISPATCH_BUDGET:-}
-      - TOFU_PAPER_QA_AGENT_TOKEN_BUDGET=${TOFU_PAPER_QA_AGENT_TOKEN_BUDGET:-}
-      - TOFU_PAPER_QA_AGENT_DISPATCH_BUDGET=${TOFU_PAPER_QA_AGENT_DISPATCH_BUDGET:-}
-      - TOFU_PAPER_DEEPEN_AGENT_TOKEN_BUDGET=${TOFU_PAPER_DEEPEN_AGENT_TOKEN_BUDGET:-}
-      - TOFU_PAPER_DEEPEN_AGENT_DISPATCH_BUDGET=${TOFU_PAPER_DEEPEN_AGENT_DISPATCH_BUDGET:-}
-      - TOFU_PAPER_INSIGHT_AGENT_TOKEN_BUDGET=${TOFU_PAPER_INSIGHT_AGENT_TOKEN_BUDGET:-}
-      - TOFU_PAPER_INSIGHT_AGENT_DISPATCH_BUDGET=${TOFU_PAPER_INSIGHT_AGENT_DISPATCH_BUDGET:-}
-      - TOFU_PAPER_RECOMMEND_AGENT_TOKEN_BUDGET=${TOFU_PAPER_RECOMMEND_AGENT_TOKEN_BUDGET:-}
-      - TOFU_PAPER_RECOMMEND_AGENT_DISPATCH_BUDGET=${TOFU_PAPER_RECOMMEND_AGENT_DISPATCH_BUDGET:-}
-      - TOFU_RESEARCH_SURVEY_TOKEN_BUDGET=${TOFU_RESEARCH_SURVEY_TOKEN_BUDGET:-}
-      - TOFU_RESEARCH_SURVEY_DISPATCH_BUDGET=${TOFU_RESEARCH_SURVEY_DISPATCH_BUDGET:-}
-      - TOFU_RESEARCH_IDEATE_TOKEN_BUDGET=${TOFU_RESEARCH_IDEATE_TOKEN_BUDGET:-}
-      - TOFU_RESEARCH_IDEATE_DISPATCH_BUDGET=${TOFU_RESEARCH_IDEATE_DISPATCH_BUDGET:-}
       # ── LLM API (optional — can also configure via Settings UI) ──
       - LLM_API_KEYS=${LLM_API_KEYS:-}
       - LLM_BASE_URL=${LLM_BASE_URL:-}

@@ -1,0 +1,4 @@
+/* Timer panel "check now" action: runs the watcher's own readiness check. The
+   panel's other buttons stay in the frozen legacy owner 08-timer-panels.css. */
+.tpi-btn-check{border-color:var(--accent);color:var(--accent)}
+.tpi-btn-check:hover{background:var(--accent-subtle);color:var(--text-primary)}

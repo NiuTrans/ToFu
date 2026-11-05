@@ -223,8 +223,11 @@ def test_large_steer_receipt_is_bounded_and_replay_is_exactly_once(
     before = client.query('turn.sync.snapshot', {
         'conversation_id': 'conv-command-inject', 'user_id': 1,
     })
+    # An exact replay repeats the author record the command seam committed.
+    author = {'actor': 'human', 'text': 'insert now'}
     receipt = commit_user_steer('conv-command-inject', attempt_id,
-                              command_id='large-steer', text='insert now', user_id=1)
+                              command_id='large-steer', text='insert now', user_id=1,
+                              author=author)
     assert 'turn' not in receipt
     assert receipt['turnId'] == turn_id
     assert len(json.dumps(receipt).encode()) < 2048
@@ -232,7 +235,7 @@ def test_large_steer_receipt_is_bounded_and_replay_is_exactly_once(
     envelope = client._call(
         'command', 'turn.steer.commit',
         {'conversation_id': 'conv-command-inject', 'attempt_id': attempt_id,
-         'command_id': 'large-steer', 'text': 'insert now', 'user_id': 1},
+         'command_id': 'large-steer', 'text': 'insert now', 'user_id': 1, 'author': author},
         command_id='turn-steer-commit:conv-command-inject:large-steer',
         deadline=None, priority='user',
     )
@@ -246,8 +249,8 @@ def test_large_steer_receipt_is_bounded_and_replay_is_exactly_once(
     }) == before
     assert len(get_turn('conv-command-inject', turn_id, user_id=1)[
         'projection']['_userSteerInjects']) == 1
-    for overrides in ({'text': 'different'}, {'user_id': 2}):
-        args = dict(command_id='large-steer', text='insert now', user_id=1)
+    for overrides in ({'text': 'different'}, {'user_id': 2}, {'author': None}):
+        args = dict(command_id='large-steer', text='insert now', user_id=1, author=author)
         args.update(overrides)
         with pytest.raises(LifecycleConflict):
             commit_user_steer('conv-command-inject', attempt_id, **args)
@@ -484,7 +487,7 @@ def test_busy_lane_read_failure_preserves_storage_retry_contract(
     )
     assert response.status_code == 503, response.get_json()
     body = response.get_json()
-    assert body['error']['kind'] == 'server_busy'
+    assert body['error']['kind'] == 'storage_unavailable'
     assert 'database_resource_exhausted' in body['error']['detail']
     assert '请稍后重试' in body['error']['detail']
     assert body['error']['retryable'] is True

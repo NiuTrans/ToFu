@@ -254,7 +254,7 @@ def test_continue_resume_restores_flat_snapshot_detached():
              'update_count': 2, 'explanation': 'Scope changed'}
     task = {}
     apply_resume_state(task=task, cfg={'checkpointTodoState': state},
-                       messages=[], model='test-model', tid='test')
+                       messages=[], tid='test')
     assert task['_todoState'] == state
     state['todos'].clear()
     assert task['_todos'][0]['content'] == 'Remaining work'
@@ -283,7 +283,6 @@ def test_continue_resume_rejects_malformed_authority_before_any_mutation():
     }
     invalid_fields = [
         ('contentPrefix', False),
-        ('resumePrefill', []),
         ('checkpointToolRounds', {'0': 'not-a-list'}),
         ('checkpointToolRounds', [{
             'toolCallId': 'orphan', 'toolName': 'run_command',
@@ -308,7 +307,6 @@ def test_continue_resume_rejects_malformed_authority_before_any_mutation():
         original_messages = [dict(message) for message in messages]
         config = {
             'contentPrefix': 'must-not-apply',
-            'resumePrefill': 'must-not-append',
             field: value,
         }
 
@@ -317,7 +315,6 @@ def test_continue_resume_rejects_malformed_authority_before_any_mutation():
                 task=task,
                 cfg=config,
                 messages=messages,
-                model='gpt-4o',
                 tid='atomic',
             )
 
@@ -357,7 +354,7 @@ def test_continue_resume_preserves_equal_tool_occurrences_by_position():
     apply_resume_state(
         task=task,
         cfg={'checkpointToolRounds': [dict(duplicate), dict(duplicate)]},
-        messages=[], model='test-model', tid='testtask',
+        messages=[], tid='testtask',
     )
 
     assert len(task['_checkpointToolRounds']) == 2
@@ -416,7 +413,6 @@ def test_checkpoint_resume_replays_the_same_bytes_as_next_turn_history():
         task=task,
         cfg={'checkpointToolRounds': checkpoint},
         messages=messages,
-        model='test-model',
         tid='resume',
     )
 

@@ -33,13 +33,16 @@ import re
 import xml.etree.ElementTree as ET
 from concurrent.futures import as_completed
 from difflib import SequenceMatcher
+from importlib import import_module
 
 from tofu_search._worker_executor import DemandThreadPoolExecutor as ThreadPoolExecutor
 from tofu_search.log import get_logger
-from tofu_search.search.vertical import base
-from tofu_search.search.vertical.semantic_scholar import _ss_headers
 from tofu_search.verify.parse import Citation, parse_bibtex, parse_references
 
+# Leaf imports, not via the package or a statement that may first load it:
+# see search/vertical/base.py.
+base = import_module('tofu_search.search.vertical.base')
+semantic_scholar = import_module('tofu_search.search.vertical.semantic_scholar')
 logger = get_logger(__name__)
 
 __all__ = [
@@ -322,7 +325,7 @@ def _verify_title_s2(cit: Citation) -> dict | None:
         resp = base.http_get(_S2_SEARCH,
                              params={'query': title, 'limit': 5,
                                      'fields': 'title,year,externalIds'},
-                             headers=_ss_headers(), timeout=_TIMEOUT)
+                             headers=semantic_scholar._ss_headers(), timeout=_TIMEOUT)
     except Exception as e:
         logger.warning('[verify] S2 title transport error for %r: %s', title[:60], e)
         return None

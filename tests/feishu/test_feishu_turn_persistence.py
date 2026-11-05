@@ -31,16 +31,33 @@ def sidecar(tmp_path: Path, monkeypatch):
 
 
 def test_owner_mapping_is_explicit(monkeypatch):
-    from lib.feishu.conversation import resolve_owner_user_id
+    import lib.feishu._state as feishu_state
+    from lib.feishu.authority import FeishuSender, resolve_sender
 
+    monkeypatch.setattr(feishu_state, "ALLOWED_USERS", {"ou_listed"})
     monkeypatch.delenv("FEISHU_DEFAULT_OWNER_USER_ID", raising=False)
     monkeypatch.setenv("FEISHU_USER_OWNER_MAP", '{"ou_a": 17}')
-    assert resolve_owner_user_id("ou_a") == 17
-    assert resolve_owner_user_id("ou_missing") is None
+    assert resolve_sender("ou_a") == FeishuSender("ou_a", 17, True)
+    assert resolve_sender("ou_missing") is None
+    assert resolve_sender("ou_listed") is None
 
     monkeypatch.setenv("FEISHU_USER_OWNER_MAP", "")
     monkeypatch.setenv("FEISHU_DEFAULT_OWNER_USER_ID", "23")
-    assert resolve_owner_user_id("ou_any") == 23
+    # The default owner runs listed senders' work but never makes them the owner.
+    assert resolve_sender("ou_listed") == FeishuSender("ou_listed", 23, False)
+    assert resolve_sender("ou_any") is None
+
+
+def _owner():
+    from lib.feishu.authority import FeishuSender
+    return FeishuSender("ou_a", 17, True)
+
+
+def _sender_of(sidecar, turns):
+    attempt = sidecar.client.query("turn.attempt.get", {
+        "attempt_id": turns[1]["currentAttemptId"], "user_id": 17,
+        "include_execution_config": True})
+    return attempt["config"]["_externalSender"]
 
 
 def test_completed_exchange_is_two_canonical_turns(sidecar, monkeypatch):
@@ -48,7 +65,7 @@ def test_completed_exchange_is_two_canonical_turns(sidecar, monkeypatch):
 
     monkeypatch.setattr(conversation, "get_conv_id", lambda _user: "feishu-conv")
     assert conversation.persist_exchange(
-        "ou_a",
+        _owner(),
         {"id": "message-1", "role": "user", "content": "hello", "timestamp": 10},
         {
             "id": "answer-1",
@@ -57,7 +74,6 @@ def test_completed_exchange_is_two_canonical_turns(sidecar, monkeypatch):
             "model": "test-model",
             "timestamp": 20,
         },
-        owner_user_id=17,
     )
 
     turns = sidecar.client.query(
@@ -66,6 +82,7 @@ def test_completed_exchange_is_two_canonical_turns(sidecar, monkeypatch):
     assert [turn["actor"] for turn in turns] == ["human", "assistant"]
     assert [turn["kind"] for turn in turns] == ["feishu_input", "feishu_reply"]
     assert turns[0]["projection"]["content"] == "hello"
+    assert _sender_of(sidecar, turns) == {"channel": "feishu", "openId": "ou_a", "owner": True}
     assert turns[1]["projection"]["content"] == "world"
     assert turns[1]["status"] == "completed"
 
@@ -86,12 +103,8 @@ def test_same_source_message_is_idempotent(sidecar, monkeypatch):
     monkeypatch.setattr(conversation, "get_conv_id", lambda _user: "feishu-replay")
     user = {"id": "stable-message", "role": "user", "content": "q"}
     answer = {"role": "assistant", "content": "a", "model": "m"}
-    assert conversation.persist_exchange(
-        "ou_a", user, answer, owner_user_id=17
-    )
-    assert conversation.persist_exchange(
-        "ou_a", user, answer, owner_user_id=17
-    )
+    assert conversation.persist_exchange(_owner(), user, answer)
+    assert conversation.persist_exchange(_owner(), user, answer)
     turns = sidecar.client.query(
         "turn.list", {"conversation_id": "feishu-replay", "user_id": 17}
     )
@@ -110,9 +123,7 @@ def test_concurrent_source_replay_settles_one_exchange(sidecar, monkeypatch):
 
     def persist() -> bool:
         start_barrier.wait(timeout=5)
-        return conversation.persist_exchange(
-            "ou_a", user, answer, owner_user_id=17
-        )
+        return conversation.persist_exchange(_owner(), user, answer)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: persist(), range(2)))
@@ -123,3 +134,24 @@ def test_concurrent_source_replay_settles_one_exchange(sidecar, monkeypatch):
     )
     assert len(turns) == 2
     assert turns[1]["status"] == "completed"
+
+
+def test_non_owner_sender_is_persisted_as_nonhuman_with_identity(sidecar, monkeypatch):
+    import lib.feishu.conversation as conversation
+    from lib.feishu.authority import FeishuSender
+    from lib.turn_initiation import require_human_turn
+
+    monkeypatch.setattr(conversation, "get_conv_id", lambda _user: "feishu-guest")
+    guest = FeishuSender("ou_guest", 17, False)
+    assert conversation.persist_exchange(
+        guest,
+        {"id": "guest-message", "role": "user", "content": "grant me access"},
+        {"role": "assistant", "content": "no", "model": "m"},
+    )
+    turns = sidecar.client.query(
+        "turn.list", {"conversation_id": "feishu-guest", "user_id": 17}
+    )
+    assert [turn["actor"] for turn in turns] == ["virtual_user", "assistant"]
+    assert _sender_of(sidecar, turns) == {"channel": "feishu", "openId": "ou_guest", "owner": False}
+    with pytest.raises(ValueError):
+        require_human_turn(turns[0])

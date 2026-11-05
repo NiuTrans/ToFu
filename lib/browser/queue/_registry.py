@@ -7,6 +7,7 @@ enter the registry.
 
 import time
 
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 
 from ._state import (
@@ -29,13 +30,17 @@ _INCOMPATIBLE_MAX = 32
 def _normalize_credit_hub_quota(snapshot):
     if not isinstance(snapshot, dict) or not snapshot:
         return None
-    return {
-        'total': int(snapshot.get('total') or 0),
-        'used': int(snapshot.get('used') or 0),
-        'remaining': int(snapshot.get('remaining') or 0),
-        'fetched_at': int(snapshot.get('fetchedAt')
-                          or snapshot.get('fetched_at') or 0),
-    }
+    try:
+        return {
+            'total': int(snapshot.get('total') or 0),
+            'used': int(snapshot.get('used') or 0),
+            'remaining': int(snapshot.get('remaining') or 0),
+            'fetched_at': int(snapshot.get('fetchedAt')
+                              or snapshot.get('fetched_at') or 0),
+        }
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise BadRequest('creditHubQuota counts must be integers',
+                         field='creditHubQuota') from exc
 
 
 def mark_poll(client_id, *, owner_user_id, protocol_version, capabilities,

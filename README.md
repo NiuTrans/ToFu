@@ -63,19 +63,16 @@ HTTP 200 after the Provider is saved.
 
 ## Embed in a Python process
 
-A Python application that does not need the HTTP boundary can pass a
-`ProviderConfig` directly or inject one through its process environment:
-
-```bash
-export TOFU_AGENT_PROVIDER_BASE_URL=https://api.openai.com/v1
-export TOFU_AGENT_PROVIDER_API_KEY=sk-...
-export TOFU_AGENT_PROVIDER_MODEL=gpt-5.6
-```
+Embedded callers configure a complete `tofu.model-routing/v2` access envelope,
+including model selection and separately supplied credential secrets. See the
+[model-routing contract](docs/DEVELOPER_RUNTIME.md#model-routing-ownership).
+Set that JSON object as `TOFU_AGENT_MODEL_ROUTING`, then:
 
 ```python
-from tofu_agent import AgentRuntime
+from tofu_agent import AgentRuntime, ModelRoutingConfig
 
-with AgentRuntime.local() as agent:
+access = ModelRoutingConfig.from_env(required=True)
+with AgentRuntime.local(model_routing=access) as agent:
     result = agent.run(
         [{"role": "user", "content": "Research this issue and propose a fix"}],
         config={"tools": ["search", "fetch"], "thinking": "high"},
@@ -85,26 +82,11 @@ print(result.content)
 print(result.usage)
 ```
 
-The provider is configured once. Calls may omit endpoint, key, and model.
+Access is configured once; subsequent calls can omit model configuration.
 `run_async`, `stream`, `stream_async`, `start`, task replay, abort, custom tools,
-and request-level provider overrides are also available. Use the sidecar and a
-remote SDK when the application should contain no Provider configuration code.
-
-For a local OpenAI-compatible engine, use its endpoint and model and leave the
-key empty:
-
-```python
-from tofu_agent import AgentRuntime, ProviderConfig
-
-provider = ProviderConfig(
-    base_url="http://127.0.0.1:8000/v1",
-    api_key="",
-    model="Qwen3.5-32B",
-)
-
-with AgentRuntime.local(provider=provider) as agent:
-    print(agent.run([{"role": "user", "content": "Hello"}]).content)
-```
+and request-level `model_routing` overrides are available. Local compatible
+engines use the same v2 connection and model contract. Use the sidecar and a
+remote SDK when the operator should manage model access outside application code.
 
 ## Deploy the sidecar
 
@@ -154,9 +136,8 @@ TOFU_API_KEY=<sidecar bearer token>
 Unattended deployments can still use environment variables:
 
 ```text
-TOFU_AGENT_PROVIDER_BASE_URL
-TOFU_AGENT_PROVIDER_API_KEY
-TOFU_AGENT_PROVIDER_MODEL
+TOFU_AGENT_MODEL_ROUTING       # Complete v2 access envelope as JSON
+TOFU_AGENT_MODEL_ROUTING_FILE  # CLI path to a complete v2 envelope file
 ```
 
 Command-line arguments take precedence over environment variables, which take
@@ -243,11 +224,8 @@ Eval harnesses and CI jobs that cannot manage a long-lived sidecar use the
 single-shot contract: one process, one task, one JSON result.
 
 ```bash
-export TOFU_AGENT_PROVIDER_BASE_URL=https://api.openai.com/v1
-export TOFU_AGENT_PROVIDER_API_KEY=sk-...
-export TOFU_AGENT_PROVIDER_MODEL=gpt-5.6
-
-tofu-agent run --task-file /tmp/task.txt --cwd /work/repo \
+tofu-agent run --model-routing-file model-routing.json \
+  --task-file /tmp/task.txt --cwd /work/repo \
   --timeout-s 7200 --trajectory tofu-native --output result.json
 ```
 

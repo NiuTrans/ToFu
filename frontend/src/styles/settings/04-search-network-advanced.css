@@ -7,106 +7,15 @@
 @media (max-width: 768px) {
   .settings-row.two-col { flex-direction: column; gap: var(--space-1); }
 }
-
-/* ── Advanced: executable/search/wire separation ─────────────────────── */
-.tool-discovery-card {
-  margin: var(--space-3) 0 var(--space-4);
-  padding: 15px;
-  border: 1px solid color-mix(in srgb, var(--s-gold, #b98a2f) 38%, transparent);
-  border-radius: 12px;
-  background:
-    radial-gradient(circle at 100% 0, color-mix(in srgb, var(--s-gold, #b98a2f) 16%, transparent), transparent 42%),
-    var(--s-white, #fff);
-  box-shadow: 0 1px 2px rgba(26, 24, 20, 0.05), 0 10px 26px rgba(26, 24, 20, 0.08);
-}
-.tool-discovery-head { display: flex; align-items: center; gap: 11px; }
-.tool-discovery-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
-  border: 0;
-  border-radius: 9px;
-  background: linear-gradient(180deg, #3d362c 0%, #1a1814 100%);
-  color: var(--s-gold, #f0c66b);
-  font: 800 16px/1 'JetBrains Mono', ui-monospace, monospace;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 2px 6px rgba(26, 24, 20, 0.30), 0 0 0 3px rgba(201, 153, 63, 0.16);
-}
-.tool-discovery-title { color: var(--s-ink, #2a2a2a); font-size: var(--font-size-lg); font-weight: 900; }
-.tool-discovery-sub { margin-top: 2px; color: var(--s-ink-soft, #6b6250); font-size: 11.5px; line-height: 1.45; }
-.tool-discovery-flow {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: center;
-  gap: var(--space-2);
-  margin: 14px 0;
-}
-.tool-discovery-flow > span {
-  min-width: 0;
-  padding: 9px 10px;
-  border: 1px solid color-mix(in srgb, var(--s-ink, #2a2a2a) 20%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--s-gold, #b98a2f) 8%, var(--s-white, #fff));
-}
-.tool-discovery-flow b,
-.tool-discovery-flow small { display: block; }
-.tool-discovery-flow b { color: var(--s-ink, #2a2a2a); font-size: 11.5px; font-weight: 850; }
-.tool-discovery-flow small { margin-top: 2px; color: var(--s-ink-soft, #6b6250); font-size: 9.5px; line-height: 1.35; }
-.tool-discovery-flow i { color: var(--s-gold, #b98a2f); font-style: normal; font-weight: 900; }
-.tool-discovery-controls { margin: 0 !important; }
-.settings-field-label {
-  display: block;
-  margin-bottom: 6px;
-  color: var(--s-ink-soft, #6b6250);
-  font-size: var(--font-size-xs);
-  font-weight: 800;
-}
-.tool-execution-policy {
-  min-height: 38px;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) 10px;
-  border: 1px solid color-mix(in srgb, var(--s-ink, #2a2a2a) 22%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, #16a34a 5%, var(--s-white, #fff));
-  color: var(--s-ink, #2a2a2a);
-  font-size: var(--font-size-xs);
-}
-.tool-execution-policy strong { min-width: 0; flex: 1; font-weight: 800; }
-.tool-execution-policy em {
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: rgba(22, 163, 74, .11);
-  color: #15803d;
-  font-size: 9px;
-  font-style: normal;
-  font-weight: 850;
-  white-space: nowrap;
-}
-.tool-discovery-note {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 5px var(--space-2);
-  margin-top: 11px;
-  padding-top: 10px;
-  border-top: 1px dashed color-mix(in srgb, var(--s-ink, #2a2a2a) 22%, transparent);
-  color: var(--s-ink-soft, #6b6250);
-  font-size: 10.5px;
-  font-weight: 650;
-}
-.tool-state-dot { width: 7px; height: 7px; border-radius: 999px; }
-.tool-state-dot.is-visible { background: #16a34a; box-shadow: 0 0 0 2px rgba(22, 163, 74, .15); }
-.tool-state-dot.is-searchable { background: #d49b27; box-shadow: 0 0 0 2px rgba(212, 155, 39, .16); }
-.tool-state-dot.is-blocked { background: #94a3b8; box-shadow: 0 0 0 2px rgba(148, 163, 184, .16); }
-
-@media (max-width: 620px) {
-  .tool-discovery-card { padding: 13px; }
-  .tool-discovery-flow { grid-template-columns: 1fr; gap: 5px; }
-  .tool-discovery-flow > i { transform: rotate(90deg); justify-self: center; line-height: 1; }
+/* The .modal and .settings-field input rules size every input like a text
+   box (full width, 36px tall); a checkbox or radio in a field keeps its
+   native box instead. */
+.settings-panel .settings-field :is(input[type="checkbox"], input[type="radio"]) {
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  box-shadow: none;
 }
 
 /* ── Cost optimization A/B channel (Settings › Advanced) ── */
@@ -715,10 +624,6 @@
   align-items: baseline;
   gap: 5px;
 }
-.proxy-pool-meta-sep {
-  color: rgba(26, 24, 20, .28);
-  font-size: var(--font-size-xs);
-}
 .proxy-pool-toolbar .auth-src-btn {
   border-width: 1px;
   border-radius: 6px;
@@ -726,11 +631,6 @@
   box-shadow: none;
 }
 #proxyPoolList { gap: 7px; margin-bottom: 0; }
-.proxy-pool-order-hint {
-  color: var(--s-ink-soft);
-  font-size: 10px;
-  font-weight: 600;
-}
 
 #settingsTab_network .proxy-pool-row {
   overflow: hidden;
@@ -938,7 +838,6 @@
 }
 @media (max-width: 420px) {
   .proxy-pool-toolbar { margin-bottom: 7px; }
-  .proxy-pool-order-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #settingsTab_network .proxy-pool-head { padding: 7px; }
   #settingsTab_network .pp-enabled-control { flex-basis: 32px; min-width: 32px; }
   #settingsTab_network .pp-enabled-text { display: none; }
@@ -1139,42 +1038,31 @@
   margin-bottom: 14px;
 }
 .search-pipeline-title { font-weight: 800; font-size: var(--font-size-md); color: var(--s-ink); }
-.search-pipeline-flow {
-  margin-top: 6px;
-  font-size: var(--font-size-md);
-  font-weight: 600;
-  color: var(--s-ink);
-  line-height: 1.6;
-}
-.search-pipeline-flow.filter-off { color: var(--s-ink-soft); }
 .search-pipeline-hint { margin-top: 6px; font-size: 11.5px; color: var(--s-ink-soft); font-weight: 600; }
 .settings-field-hint { font-size: 11.5px; color: var(--s-ink-soft); font-weight: 600; }
 .search-advanced-sub { font-size: 11.5px; font-weight: 600; color: var(--s-ink-soft); }
 
-/* ── Search tab: labelled knob groups inside 高级参数 ──
-   档位覆盖 (override-gated — dims while following the profile) vs
-   传输与内容上限 (profile-independent). Titles pair with a small `why`. */
-.search-knob-group {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
-  border-top: 1px dashed rgba(26, 24, 20, 0.14);
+/* ── Search tab: 搜索 API source picker — one checkbox per gateway source ── */
+.search-gateway-sources {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 8px 14px;
+  margin: var(--space-1) 0 var(--space-3);
 }
-.search-knob-group:first-child { margin-top: 2px; padding-top: 0; border-top: 0; }
-.search-knob-group-title {
+/* The picker sits in a .settings-field, whose field-label rule would turn
+   each option label into a block caption; restate the option row. */
+.settings-panel .settings-field .search-gateway-source {
   display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  font-weight: 800;
-  font-size: 12.5px;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 700;
+  letter-spacing: 0;
   color: var(--s-ink);
+  cursor: pointer;
 }
-.search-knob-group-title small { font-size: 11.5px; font-weight: 600; color: var(--s-ink-soft); }
-.search-knob-group.search-override-control { transition: opacity .15s ease; }
-.search-knob-group.search-override-control:has(input:disabled) { opacity: .5; }
+.search-gateway-source input { flex: none; }
 
 /* 访问边界 sub-section heads (屏蔽域名 / 内网放行 / 浏览器读取授权) */
 .search-boundary-head { margin: 14px 0 2px; }

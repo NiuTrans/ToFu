@@ -41,7 +41,7 @@ def _manifest() -> dict:
             "name": "codex", "version": "0.149.1",
             "binarySha256": _sha("codex-binary"),
         },
-        provider_face="meituan-chat",
+        provider_face="yourprovider-chat",
         provider_slot_id="kimi-slot-fixture",
         thinking="high",
         experiment_arm="codex_0_149_1",

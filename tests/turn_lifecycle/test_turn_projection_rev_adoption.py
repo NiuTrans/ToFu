@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -40,7 +39,6 @@ pytestmark = pytest.mark.unit
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TURN_PROJECTION_TS = os.path.join(
     ROOT, 'frontend', 'src', 'core', 'turn-projection.ts')
-ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 _HARNESS = r"""
 const fs = require('fs');
@@ -115,8 +113,6 @@ console.log(JSON.stringify({
 """
 
 
-@pytest.mark.skipif(not shutil.which('node') or not os.path.isfile(ESBUILD),
-                    reason='node/esbuild dev-deps not installed')
 def test_rev_only_projection_advances_server_rev(tmp_path):
     built = native_module_path('turn-projection-rev-adoption.js',
                                TURN_PROJECTION_TS)

@@ -33,7 +33,7 @@ def test_installed_worker_reuses_success_and_retires_failed_callback(tmp_path):
     async def run():
         budget=Budget(1,32<<20,1<<20,1<<20,2)
         image=NativeArchiveImage(archive=archive,sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),application_version=manifest['build']['application_version'],budget=budget)
-        host=NativeHost(image);host.enable_worker_reuse({'root_maximum':2})
+        host=NativeHost(image);host.enable_worker_reuse(2)
         identity=PrincipalContext.user(subject_id='worker-test',owner_user_id=7)
         settings=config(f'http://127.0.0.1:{server.server_port}/chat','same-task')
         async def lookup(_request):raise RuntimeError('injected callback failure')

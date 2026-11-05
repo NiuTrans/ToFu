@@ -64,6 +64,46 @@ test('prefix reuse stays correct across a math-free table and fence boundary', t
   }
 });
 
+test('late reference definitions preserve full-render parity across consecutive streaming frames', t => {
+  const { renderer } = fixture(t);
+  const { renderer: oracle } = fixture(t);
+  const initial = '[reference]\n\nTail.';
+  const defined = initial + '\n\n[reference]: /source "Source"';
+  const frames = [initial, defined, defined, defined + '\n\nMore evidence.',
+    initial + '\n\n[reference]: /changed "Changed"', initial];
+  for (const frame of frames) {
+    assert.equal(renderer.render(frame, { streaming: true }), oracle.render(frame),
+      `consecutive reference frame diverged:\n${frame}`);
+  }
+});
+
+test('reference definitions before their uses and reference images remain exact', t => {
+  const { renderer } = fixture(t);
+  const { renderer: oracle } = fixture(t);
+  const definition = '[reference]: /source\n\n';
+  const initial = definition + 'Stable evidence.\n\nTail.';
+  const frames = [initial, initial + '\n\n[reference]', initial + '\n\n[reference]',
+    initial + '\n\n![evidence][reference]'];
+  for (const frame of frames) {
+    assert.equal(renderer.render(frame, { streaming: true }), oracle.render(frame),
+      `reference document diverged:\n${frame}`);
+  }
+});
+
+test('a plain leading prefix stays reusable while reference-bearing suffixes parse together', t => {
+  const { renderer } = fixture(t);
+  const { renderer: oracle } = fixture(t);
+  const prefix = 'Stable reader paragraph.\n\n';
+  const initial = prefix + '[证据]\n\nTail.';
+  const defined = initial + '\n\n[证据]: /source';
+  for (const frame of [initial, defined, defined, defined + '\n\nMore.']) {
+    assert.equal(renderer.render(frame, { streaming: true }), oracle.render(frame));
+  }
+  assert.equal(findStreamingPrefixEnd(defined), 'Stable reader paragraph.\n'.length);
+  assert.equal(findStreamingPrefixEnd('[reference]\n\nTail.\n\n[reference]: /source'), 0);
+  assert.ok(findStreamingPrefixEnd('plain\n\n```js\nconst a = [1];\n```\n\ntail') > 'plain\n'.length);
+});
+
 test('findStreamingPrefixEnd refuses math-bearing or fence-open prefixes', () => {
   const mathLine = `has ${STX}MATH0${ETX} math`;
   /* A blank-line boundary that lands AFTER the math is safe: the stable prefix
@@ -75,4 +115,75 @@ test('findStreamingPrefixEnd refuses math-bearing or fence-open prefixes', () =>
   assert.equal(findStreamingPrefixEnd('```js\nopen fence\n\ninside'), 0);
   assert.ok(findStreamingPrefixEnd('plain\n\nmore') > 0);
   assert.equal(findStreamingPrefixEnd('no boundary yet'), 0);
+});
+
+function countingFixture(t) {
+  const dom = new JSDOM('<main></main>');
+  const counter = { characters: 0 };
+  const environment = { document: dom.window.document,
+    parser: { parse: s => { counter.characters += s.length; return marked.parse(s); } },
+    sanitizer: createDOMPurify(dom.window), highlighter: null, mathRenderer: null, basePath: '', projectActive: false };
+  const renderer = createMarkdownRenderer({ getEnvironment: () => ({ ...environment }), maximumCacheEntries: 0, ensureMath: () => {} });
+  t.after(() => { renderer.dispose(); dom.window.close(); });
+  return { renderer, counter };
+}
+
+function chunkedFrames(documentText, chunk) {
+  const frames = [];
+  for (let end = chunk; end < documentText.length + chunk; end += chunk) {
+    frames.push(documentText.slice(0, Math.min(end, documentText.length)));
+  }
+  return frames;
+}
+
+// A reuse-free oracle: a fresh renderer per frame has no prior streaming
+// prefix. Math placeholders carry the renderer owner id; normalize only that.
+function freshStreamingRender(t, frame) {
+  const { renderer } = fixture(t);
+  return renderer.render(frame, { streaming: true });
+}
+const withoutMathOwner = html => html.replace(/data-markdown-math="\d+"/g, 'data-markdown-math="owner"');
+
+test('every chunked streaming frame matches an independent from-scratch streaming render', t => {
+  const { renderer } = fixture(t);
+  const documentText = [
+    'Intro paragraph with **bold** and `code`.',
+    '###标题 without a space',
+    '-项目一\n-项目二',
+    '```py\nx = [1]\n\nprint(x)\n```',
+    '| a | b |\n| - | - |\n| 1 | 2 |',
+    'Inline math $a+b$ inside prose.',
+    'After math, plain prose again.',
+    '「重点」**强调**内容。',
+    '$$\nE = mc^2\n$$',
+    'Plain paragraph after display math.',
+    'A [reference] use.',
+    'More plain text.',
+    '[reference]: /source',
+    'Closing paragraph.',
+  ].join('\n\n');
+  for (const chunk of [1, 3, 7, 19]) {
+    for (const frame of chunkedFrames(documentText, chunk)) {
+      assert.equal(withoutMathOwner(renderer.render(frame, { streaming: true })),
+        withoutMathOwner(freshStreamingRender(t, frame)), `chunk ${chunk} diverged at:\n${frame}`);
+    }
+    renderer.clearCache();
+  }
+});
+
+test('streaming prefix reuse keeps parsed work proportional to the grown tail', t => {
+  const { renderer, counter } = countingFixture(t);
+  let documentText = '';
+  for (let index = 0; index < 60; index++) {
+    documentText += `Paragraph ${index} explains **step ${index}** with \`inline code\` and enough prose to resemble a model answer.\n\n`;
+    if (index % 10 === 5) documentText += '```js\nconst x = ' + index + ';\n```\n\n';
+  }
+  const frames = chunkedFrames(documentText, 16);
+  for (const frame of frames) renderer.render(frame, { streaming: true });
+  const fullRenderCharacters = frames.reduce((sum, frame) => sum + frame.length, 0);
+  // Each frame parses its open tail plus each completed block once more when it
+  // joins the prefix. Re-parsing the accumulated prefix every frame is
+  // quadratic (about frames/2 times the document length).
+  assert.ok(counter.characters < documentText.length * 12,
+    `parsed ${counter.characters} characters; full re-render parses ${fullRenderCharacters}`);
 });

@@ -174,7 +174,7 @@ def test_prefill_conversion_never_fires_for_nonclaude():
         msgs = copy.deepcopy(trailing)
         # Reproduce the _build.py call-site guard exactly.
         if is_claude(model):
-            _strip_trailing_assistant_for_claude(msgs, model)
+            msgs = _strip_trailing_assistant_for_claude(msgs, model)
         last = msgs[-1]
         assert last['role'] == 'assistant', (
             f'{model}: trailing assistant must stay a bare assistant (no '
@@ -219,7 +219,7 @@ def test_nc_prefill_conversion_would_fire_if_gate_dropped():
             {'role': 'assistant', 'content': 'trailing prose'}]
     # Ungated call (the function is model-parameterized but does NOT self-gate
     # on is_claude — the gate lives at the call site).
-    _strip_trailing_assistant_for_claude(msgs, 'glm-5')
+    msgs = _strip_trailing_assistant_for_claude(msgs, 'glm-5')
     last = msgs[-1]
     assert last['role'] == 'user' and \
         str(last['content']).startswith(CLAUDE_PREFILL_SENTINEL), (

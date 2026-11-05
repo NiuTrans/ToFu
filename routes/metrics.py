@@ -493,6 +493,49 @@ def _collect_storage_metrics(out: list) -> None:
                 out, 'tofu_storage_sqlite_runtime_info',
                 'SQLite runtime version linked into the storage authority',
                 [({'backend': backend, 'version': sqlite_version}, 1)])
+        collectors = [
+            ({**labels, 'collector': name}, gc)
+            for key, name in (('onlineGarbageCollector', 'source'),
+                              ('searchGarbageCollector', 'search'))
+            if isinstance(gc := metrics.get(key), dict)
+        ]
+        if collectors:
+            _emit_counter(
+                out, 'tofu_storage_gc_epochs_completed_total',
+                'Online garbage-collection epochs that completed',
+                [(gc_labels, gc.get('epochs_completed', 0))
+                 for gc_labels, gc in collectors])
+            _emit_counter(
+                out, 'tofu_storage_gc_epochs_failed_total',
+                'Online garbage-collection epochs that failed (not stops)',
+                [(gc_labels, gc.get('failed_epochs', 0))
+                 for gc_labels, gc in collectors])
+            _emit_counter(
+                out, 'tofu_storage_gc_epochs_deferred_total',
+                'Online garbage-collection epochs deferred or failed',
+                [(gc_labels, gc.get('deferred_epochs', 0))
+                 for gc_labels, gc in collectors])
+            _emit_gauge(
+                out, 'tofu_storage_gc_epoch_failing',
+                'Whether the latest online GC epoch failed with none completed since',
+                [(gc_labels, 1 if gc.get('epoch_error') else 0)
+                 for gc_labels, gc in collectors])
+            _emit_counter(
+                out, 'tofu_storage_gc_reclaimed_bytes_total',
+                'Bytes the online garbage collector reclaimed',
+                [(gc_labels, gc.get('total_reclaimed_bytes', 0))
+                 for gc_labels, gc in collectors])
+            _emit_counter(
+                out, 'tofu_storage_gc_orphan_segments_removed_total',
+                'Superseded payload-segment files the online collector removed',
+                [(gc_labels, gc.get('total_orphan_segments_removed', 0))
+                 for gc_labels, gc in collectors])
+        maintenance = metrics.get('maintenance')
+        if isinstance(maintenance, dict) and 'retainedHistorySegments' in maintenance:
+            _emit_gauge(
+                out, 'tofu_storage_history_retained_segments',
+                'History segments the native authority retains',
+                [(labels, maintenance.get('retainedHistorySegments', 0))])
         fastpath = metrics.get('fastpath')
         if isinstance(fastpath, dict):
             _emit_gauge(

@@ -20,7 +20,9 @@ fn storage_error(error: Error) -> io::Error {
     let kind = match error {
         Error::Conflict | Error::Ineligible => io::ErrorKind::WouldBlock,
         Error::Invalid => io::ErrorKind::InvalidData,
-        Error::Oversize => io::ErrorKind::OutOfMemory,
+        Error::Oversize => {
+            return crate::resource_exhaustion::domain_bound("checkpoint publication refused");
+        }
         Error::Storage | Error::Poisoned => io::ErrorKind::Other,
     };
     io::Error::new(kind, "checkpoint publication refused")

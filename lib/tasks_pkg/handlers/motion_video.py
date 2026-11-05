@@ -75,12 +75,11 @@ def _work_unit_ref(result: dict, fn_name: str) -> dict | None:
 
 def _mark_background_task_accepted(task: dict, fn_name: str,
                                    result: dict, round_num: int) -> None:
-    """Stamp the explicit post-dispatch terminal contract for root chat.
+    """Record accepted work without settling the rest of the human request.
 
-    The worker owns subsequent progress. Asking the model to poll it creates a
-    second state machine, spends provider rounds, and can fabricate completion
-    claims. The root loop consumes this marker immediately after every tool in
-    the current round has settled.
+    Production owns progress and delivery. Chat may continue independent work
+    or acknowledge the accepted task, but acceptance is never artifact success.
+    Dependency suspension (for example compute_wait) remains a separate policy.
     """
     if not isinstance(task, dict) or result.get('ok') is not True:
         return
@@ -112,6 +111,7 @@ def _mark_background_task_accepted(task: dict, fn_name: str,
         'poll': str(result.get('poll') or '')[:240],
         'download': str(result.get('download') or '')[:240],
         'deduped': bool(result.get('deduped')),
+        'continueConversation': True,
         'round': int(round_num) + 1,
         'message': message,
     }
@@ -313,18 +313,13 @@ def _handle_produce_video(task, tc, fn_name, tc_id, fn_args, rn,
     the research→script→timeline recipe, then returns a task_id immediately —
     the render runs in the background and the user watches the video panel.
     """
-    import os as _os
-
     topic = str(fn_args.get('topic') or '').strip()
     if not topic:
         result = {'ok': False, 'detail': 'topic is required'}
         badge = 'failed'
     else:
         try:
-            from lib.motion_video._env import motion_root
-            from lib.motion_video.engine import run_topic_motion_task
-            from lib.motion_video.runtime import (
-                _motion_task_id, _new_motion_task, _motion_runtime)
+            from lib.motion_video.service import start_motion_video
 
             _ASPECTS = {'1080x1440': (1080, 1440), '1080x1920': (1080, 1920),
                         '1920x1080': (1920, 1080), '1080x1080': (1080, 1080)}
@@ -343,32 +338,15 @@ def _handle_produce_video(task, tc, fn_name, tc_id, fn_args, rn,
             creative_mode = normalise_creative_mode(
                 fn_args.get('creative_mode'))
 
-            job_id = _motion_task_id()
-            workdir = _os.path.join(motion_root(), 'jobs', job_id)
-            _os.makedirs(workdir, exist_ok=True)
-            job = _new_motion_task(
-                job_id, srt_path='', workdir=workdir, voice='', speed=None,
-                alignment='loose', narration=narration, quality='standard',
-                parallel=2, width=width, height=height, scenes_path='',
-                user_id=task_user_id(task))
-            job['topic'] = topic
-            job['lang'] = lang
-            job['max_scenes'] = max_scenes
-            job['creative_mode'] = creative_mode
-            job['kind'] = 'topic'
-            # C4: chat-initiated films pause ONCE for storyboard review
-            # (same shared human-gate registry as the slides outline gate);
-            # headless/API jobs keep the flag off.
-            job['interactive_storyboard'] = True
-            if model:
-                job['model'] = model
-                job['qa_model'] = model
-            # 默认精品 (owner 2026-07-27): the template path cannot pass the
-            # renderer's own lint, so it must not be what a user gets by
-            # default. 'template' stays reachable for explicit speed-over-looks.
+            # Chat requests a fresh film and one storyboard review. The
+            # authored/template choice remains an explicit tool policy.
             visual = str(fn_args.get('visual_quality') or 'authored').strip()
-            job['scene_author'] = (visual != 'template')
-            _motion_runtime.spawn(job_id, run_topic_motion_task, job)
+            job_id, _ = start_motion_video(
+                user_id=task_user_id(task), topic=topic, lang=lang,
+                max_scenes=max_scenes, creative_mode=creative_mode,
+                narration=narration, width=width, height=height,
+                interactive_storyboard=True, scene_author=(visual != 'template'),
+                model=model or None, qa_model=model or None)
             logger.info('[Produce] video job %s started topic=%r lang=%s '
                         'visual=%s', job_id, topic[:60], lang, visual)
             # 画质选择面 (owner 2026-07-26): the user cannot perceive the
@@ -392,8 +370,10 @@ def _handle_produce_video(task, tc, fn_name, tc_id, fn_args, rn,
                       'visual_quality': visual,
                       'quality_hint': quality_hint,
                       'poll': f'/api/v4/motion/videos/poll/{job_id}',
-                      'note': 'Video is generating in the background; watch '
-                              'the video panel for progress.'}
+                      'note': 'Accepted, not yet delivered. Video generation continues '
+                              'in the background. Continue other requested work; '
+                              'do not poll just to keep this Chat turn alive. '
+                              'The task panel owns progress and final quality.'}
             badge = 'queued'
         except Exception as e:
             logger.error('[Produce] failed to start video job: %s', e, exc_info=True)
@@ -517,6 +497,7 @@ def _handle_produce_slides(task, tc, fn_name, tc_id, fn_args, rn,
                                        creative_mode=creative_mode,
                                        interactive_outline=True,
                                        template_id=template_id,
+                                       material=str(fn_args.get('material') or ''),
                                        user_id=task_user_id(task))
             tid = started['task_id']
             result = {'ok': True, 'task_id': tid, 'topic': topic,
@@ -527,7 +508,9 @@ def _handle_produce_slides(task, tc, fn_name, tc_id, fn_args, rn,
                       'deduped': started.get('deduped', False),
                       'poll': f'/api/v4/tasks/{tid}',
                       'download': f'/api/v4/slides/{tid}/file',
-                      'note': 'The deck generates in the background. You '
+                      'note': 'Accepted, not yet delivered. Continue other requested '
+                              'work without polling to keep Chat alive. The deck '
+                              'generates in the background. You '
                               'will get ONE outline to review in the card '
                               '(approve or request changes), then every '
                               'page streams in as a thumbnail; download the '

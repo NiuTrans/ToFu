@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Tests for lib.cgroup_guard — the shared-cgroup memory-pressure defenses.
 
-Covers the three defenses (① startup self-check, ② runtime relief monitor,
-③ large-request headroom guard), the graceful NO-OP when the cgroup is
+Covers the defenses (① startup self-check, ② runtime relief monitor,
+③ pressure journal + OOM-kill witness), the graceful NO-OP when the cgroup is
 unreadable (bare metal / restricted sandbox), and a NEUTER reverse-control per
-defense proving the pressure signal is load-bearing.
+defense proving the pressure signal is load-bearing. None of them refuses,
+shrinks, recycles or throttles work (owner decision 2026-10-24).
 
 Run:
     PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/cgroup_guard/test_cgroup_guard.py -v
@@ -32,20 +33,13 @@ def guard(monkeypatch, tmp_path):
     monkeypatch.setattr(cg, '_JOURNAL_PATH', str(tmp_path / 'pressure.log'))
     # Neutralise env so defaults apply unless a test sets them.
     for k in ('TOFU_CGROUP_WARN_PCT', 'TOFU_CGROUP_RELIEF_PCT',
-              'TOFU_CGROUP_REQUEST_PCT', 'TOFU_CGROUP_POLL_SEC',
-              'TOFU_CGROUP_REQUEST_MIN_BYTES', 'TOFU_CGROUP_REQUEST_GUARD',
-              'TOFU_CGROUP_RELIEF_COOLDOWN_SEC'):
+              'TOFU_CGROUP_POLL_SEC',
+              'TOFU_CGROUP_RELIEF_COOLDOWN_SEC', 'TOFU_CGROUP_MATERIAL_PCT'):
         monkeypatch.delenv(k, raising=False)
-    for k in ('TOFU_PROCESS_RSS_RELIEF_MB',
-              'TOFU_PROCESS_RSS_COOLDOWN_SEC',
-              'TOFU_PROCESS_RSS_RECYCLE_MB'):
-        monkeypatch.delenv(k, raising=False)
-    monkeypatch.setattr(cg, '_last_process_rss_relief_at', 0.0)
-    monkeypatch.setattr(cg, '_process_rss_recycle_requested', False)
     monkeypatch.setattr(cg, '_ineffective_reliefs', 0)
     monkeypatch.setattr(cg, '_ineffective_escalated', False)
     monkeypatch.setattr(cg, '_relief_suppressed_until', 0.0)
-    monkeypatch.setattr(cg, '_ineffective_backoff_exponent', 0)
+    monkeypatch.setattr(cg, '_relief_rss_baseline', None)
     yield cg
     reset_for_tests()
 
@@ -56,7 +50,7 @@ def _set_pressure(cg, monkeypatch, pct, swap=0, reclaimable=None):
     monkeypatch.setattr(cg, 'mem_usage_bytes', lambda: int(limit * pct / 100.0))
     monkeypatch.setattr(cg, 'swap_total_bytes', lambda: swap)
     # Hermetic reclaim signal: without this stub the REAL host memory.stat
-    # leaks into pressure() and refusal tests depend on the dev machine's
+    # leaks into pressure() and relief tests depend on the dev machine's
     # live page cache. ``reclaimable=None`` means "stat unreadable" → the
     # raw, conservative measurement applies (pre-2026-09-18 semantics).
     stat = {} if reclaimable is None else {'inactive_file': int(reclaimable)}
@@ -74,24 +68,6 @@ def test_unreadable_cgroup_is_total_noop(guard, monkeypatch):
     assert guard.startup_self_check() is None          # ①
     assert guard.run_monitor_once() is None            # ②
     assert guard.start_monitor() is False              # ② thread not started
-    ok, reason = guard.check_request_headroom('x', approx_bytes=50 * 1024 * 1024)  # ③
-    assert ok is True and reason is None
-
-
-def test_bare_metal_personal_rss_defaults_leave_room_for_the_desktop(
-        guard, monkeypatch):
-    monkeypatch.delenv('TOFU_DEPLOYMENT_MODE', raising=False)
-    monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: None)
-    defaults = {
-        'TOFU_PROCESS_RSS_RELIEF_MB': 2048,
-        'TOFU_PROCESS_RSS_RECYCLE_MB': 3072,
-    }
-    monkeypatch.setattr(
-        guard, 'deployment_resource_default',
-        lambda name, _environment: defaults[name])
-
-    assert guard._process_rss_relief_limit_bytes() == 2 * _GIB
-    assert guard._process_rss_recycle_limit_bytes() == 3 * _GIB
 
 
 # ── ① startup self-check ──
@@ -143,6 +119,140 @@ def test_monitor_relieves_over_threshold(guard, monkeypatch):
     assert 'r' in calls  # relief was invoked
 
 
+def _isolate_aggregate_monitor(guard, monkeypatch):
+    """Drive run_monitor_once without journal or OOM-witness side effects."""
+    monkeypatch.setattr(guard, 'write_pressure_journal', lambda _snap: True)
+    monkeypatch.setattr(guard, 'check_oom_kill_count', lambda: False)
+
+
+def test_monitor_triggers_on_reclaim_aware_pressure_not_raw_cache(
+        guard, monkeypatch):
+    """Other tenants' reclaimable page cache is not work relief can do.
+
+    Live 2026-10-23: a shared 220 GiB cgroup sat at raw 92-96% with ~97 GiB
+    inactive_file (effective ~50%); relief fired 118 times an hour, dropped
+    Tofu's own caches each time and could not move the number.
+    """
+    _isolate_aggregate_monitor(guard, monkeypatch)
+    calls = []
+    monkeypatch.setattr(guard, 'relieve_memory',
+                        lambda reason: calls.append(reason) or {'reason': reason})
+
+    _set_pressure(guard, monkeypatch, pct=96.0, reclaimable=88 * _GIB)
+    assert guard.run_monitor_once() is None
+    assert calls == []
+
+    # NEUTER: the same raw usage with a near-full working set is real pressure.
+    _set_pressure(guard, monkeypatch, pct=96.0, reclaimable=2 * _GIB)
+    assert guard.run_monitor_once() is not None
+    assert len(calls) == 1 and 'effective 95.0%' in calls[0]
+
+
+def test_no_progress_relief_does_not_repeat_every_monitor_tick(
+        guard, monkeypatch):
+    """Each pass that reclaims ~nothing doubles the wait before the next one."""
+    import time
+
+    _isolate_aggregate_monitor(guard, monkeypatch)
+    _set_pressure(guard, monkeypatch, pct=99.0)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
+    monkeypatch.setattr(guard, 'drop_logs_cache', lambda: {
+        'files': 0, 'bytes': 0, 'skipped': 4})
+    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: 512 << 20)
+    escalations = []
+    monkeypatch.setattr(guard, 'audit_log',
+                        lambda *a, **k: escalations.append(a))
+    now = [1000.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: now[0])
+
+    passes = []
+    for tick in range(240):  # two hours of 30-second monitor ticks
+        now[0] = 1000.0 + 30.0 * tick
+        if guard.run_monitor_once() is not None:
+            passes.append(30 * tick)
+
+    assert passes == [0, 60, 150, 300, 600, 1200, 2400, 4800]
+    assert len(escalations) == 1
+    assert guard._relief_rss_baseline == 512 << 20
+
+
+def test_aggregate_backoff_survives_noise_around_the_trigger(
+        guard, monkeypatch):
+    """Only a real recovery re-arms relief; a dip just under the line does not.
+
+    Live 2026-10-24: back-off re-armed at 91.1/91.5/91.9/92.0% against the
+    92% trigger and every re-arm restarted per-tick relief.
+    """
+    _isolate_aggregate_monitor(guard, monkeypatch)
+    monkeypatch.setattr(guard, '_ineffective_reliefs', 3)
+    monkeypatch.setattr(guard, '_relief_suppressed_until', float('inf'))
+
+    _set_pressure(guard, monkeypatch, pct=91.0)
+    assert guard.run_monitor_once() is None
+    assert guard._ineffective_reliefs == 3
+    assert guard._relief_suppressed_until == float('inf')
+
+    _set_pressure(guard, monkeypatch, pct=89.0)
+    assert guard.run_monitor_once() is None
+    assert guard._ineffective_reliefs == 0
+    assert guard._relief_suppressed_until == 0.0
+
+
+def test_tofu_rss_growth_reopens_deferred_relief(guard, monkeypatch):
+    """Back-off must not hide Tofu memory that grew since the last pass."""
+    import math
+
+    _isolate_aggregate_monitor(guard, monkeypatch)
+    _set_pressure(guard, monkeypatch, pct=99.0)
+    monkeypatch.setattr(guard, '_relief_suppressed_until', float('inf'))
+    monkeypatch.setattr(guard, '_relief_rss_baseline', 1 * _GIB)
+    calls = []
+    monkeypatch.setattr(guard, 'relieve_memory',
+                        lambda reason: calls.append(reason) or {'reason': reason})
+    floor = math.ceil(guard._material_reclaim_bytes(200 * _GIB))
+
+    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: 1 * _GIB + floor - 1)
+    assert guard.run_monitor_once() is None
+
+    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: 1 * _GIB + floor)
+    assert guard.run_monitor_once() is not None
+    assert len(calls) == 1 and 'Tofu RSS +' in calls[0]
+
+
+def test_repeated_no_progress_relief_is_demoted_below_warning(
+        guard, monkeypatch, caplog):
+    """The first no-progress pass and state changes stay WARNING+; repeats do not."""
+    import logging
+
+    _set_pressure(guard, monkeypatch, pct=99.0)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
+    monkeypatch.setattr(guard, 'drop_logs_cache', lambda: {
+        'files': 0, 'bytes': 0, 'skipped': 4})
+    monkeypatch.setattr(guard, 'audit_log', lambda *a, **k: None)
+    caplog.set_level(logging.INFO, logger='lib.cgroup_guard')
+
+    def relief_levels():
+        return [record.levelno for record in caplog.records
+                if record.getMessage().startswith('[cgroup] relief (')]
+
+    for _ in range(guard._INEFFECTIVE_LIMIT + 2):
+        guard.relieve_memory('monitor')
+
+    assert relief_levels() == (
+        [logging.WARNING] + [logging.INFO] * (guard._INEFFECTIVE_LIMIT + 1))
+    assert len([record for record in caplog.records
+                if record.levelno >= logging.CRITICAL]) == 1
+
+    limit = 200 * _GIB
+    usage = iter([int(limit * 0.99), int(limit * 0.99), int(limit * 0.80)])
+    monkeypatch.setattr(guard, 'mem_usage_bytes', lambda: next(usage))
+    caplog.clear()
+    guard.relieve_memory('monitor')
+
+    assert relief_levels() == [logging.WARNING]
+    assert guard._ineffective_reliefs == 0
+
+
 def test_monitor_neuter_below_threshold_no_relief(guard, monkeypatch):
     """NEUTER: usage below relief threshold → relieve_memory NOT called."""
     _set_pressure(guard, monkeypatch, pct=80.0, swap=0)
@@ -178,28 +288,36 @@ def test_ineffective_probe_renews_cooldown_after_the_first_escalation(
     assert guard._relief_suppressed_until > 0
 
 
-def test_ineffective_probes_back_off_exponentially_to_one_hour(
+def test_no_progress_deferral_doubles_through_escalation_to_one_hour(
         guard, monkeypatch):
-    """A shared-cgroup squeeze must not flush hot caches every ten minutes."""
+    """The configured cooldown is the deferral at the escalating pass.
+
+    Earlier no-progress passes wait 1/16..1/2 of it, later ones double to the
+    one-hour ceiling: a shared-cgroup squeeze must not flush hot caches on
+    every monitor tick.
+    """
     import time
 
     _set_pressure(guard, monkeypatch, pct=99.0, swap=0)
     monkeypatch.setenv('TOFU_CGROUP_RELIEF_COOLDOWN_SEC', '600')
-    monkeypatch.setattr(guard, '_ineffective_reliefs', guard._INEFFECTIVE_LIMIT)
-    monkeypatch.setattr(guard, '_ineffective_escalated', True)
     monkeypatch.setattr(guard, 'malloc_trim', lambda: False)
     monkeypatch.setattr(guard, 'drop_logs_cache', lambda: {
         'files': 0, 'bytes': 0, 'skipped': 0})
+    escalations = []
+    monkeypatch.setattr(guard, 'audit_log',
+                        lambda *a, **k: escalations.append(len(observed) + 1))
     now = [1000.0]
     monkeypatch.setattr(time, 'monotonic', lambda: now[0])
 
     observed = []
-    for _ in range(5):
+    for _ in range(9):
         guard.relieve_memory('adaptive probe')
         observed.append(guard._relief_suppressed_until - now[0])
         now[0] += observed[-1]
 
-    assert observed == [600.0, 1200.0, 2400.0, 3600.0, 3600.0]
+    assert observed == [37.5, 75.0, 150.0, 300.0, 600.0,
+                        1200.0, 2400.0, 3600.0, 3600.0]
+    assert escalations == [guard._INEFFECTIVE_LIMIT]
 
 
 def test_monitor_rearms_backoff_after_pressure_episode_ends(
@@ -208,118 +326,27 @@ def test_monitor_rearms_backoff_after_pressure_episode_ends(
     monkeypatch.setattr(guard, '_ineffective_reliefs', 8)
     monkeypatch.setattr(guard, '_ineffective_escalated', True)
     monkeypatch.setattr(guard, '_relief_suppressed_until', float('inf'))
-    monkeypatch.setattr(guard, '_ineffective_backoff_exponent', 3)
 
     assert guard.run_monitor_once() is None
     assert guard._ineffective_reliefs == 0
     assert guard._ineffective_escalated is False
     assert guard._relief_suppressed_until == 0.0
-    assert guard._ineffective_backoff_exponent == 0
 
 
-def test_process_rss_relief_bypasses_aggregate_backoff(guard, monkeypatch):
-    """External pressure backoff must not disable process-owned RSS relief."""
-    _set_pressure(guard, monkeypatch, pct=99.0, swap=0)
-    monkeypatch.setenv('TOFU_PROCESS_RSS_RELIEF_MB', '1024')
-    monkeypatch.setattr(guard, '_relief_suppressed_until', float('inf'))
-    rss = iter([5 * _GIB, 2 * _GIB])
-    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: next(rss))
-    monkeypatch.setattr(guard, 'write_pressure_journal', lambda _snap: True)
-    monkeypatch.setattr(guard, 'check_oom_kill_count', lambda: False)
-    monkeypatch.setattr(
-        guard, 'relieve_memory', lambda reason: {'reason': reason})
+def test_large_process_rss_alone_never_triggers_relief(guard, monkeypatch):
+    """Process RSS is not a trigger; only aggregate pressure drives relief.
 
-    result = guard.run_monitor_once()
-
-    assert result['process_rss_before'] == 5 * _GIB
-    assert result['process_rss_after'] == 2 * _GIB
-    assert result['process_rss_reclaimed_bytes'] == 3 * _GIB
-
-
-def test_monitor_relieves_process_rss_even_when_cgroup_is_roomy(
-        guard, monkeypatch):
-    """A large Tofu process must not hide behind a roomy shared cgroup."""
+    Owner decision 2026-10-24 removed process-RSS relief and the worker
+    recycle it could request: a large Tofu in a roomy cgroup is left alone.
+    """
+    _isolate_aggregate_monitor(guard, monkeypatch)
     _set_pressure(guard, monkeypatch, pct=40.0, swap=0)
-    monkeypatch.setenv('TOFU_PROCESS_RSS_RELIEF_MB', '1024')
-    rss = iter([5 * _GIB, 2 * _GIB])
-    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: next(rss))
-    monkeypatch.setattr(guard, 'write_pressure_journal', lambda _snap: True)
-    monkeypatch.setattr(guard, 'check_oom_kill_count', lambda: False)
-    called = []
+    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: 64 * _GIB)
     monkeypatch.setattr(
         guard, 'relieve_memory',
-        lambda reason: called.append(reason) or {'reason': reason})
-    out = guard.run_monitor_once()
-    assert out['process_rss_before'] == 5 * _GIB
-    assert out['process_rss_after'] == 2 * _GIB
-    assert called and 'process RSS' in called[0]
+        lambda _reason: pytest.fail('process RSS alone must not relieve'))
 
-
-def test_process_rss_relief_is_cooldown_bounded(guard, monkeypatch):
-    monkeypatch.setenv('TOFU_PROCESS_RSS_RELIEF_MB', '1024')
-    monkeypatch.setenv('TOFU_PROCESS_RSS_COOLDOWN_SEC', '300')
-    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: 5 * _GIB)
-    called = []
-    monkeypatch.setattr(
-        guard, 'relieve_memory',
-        lambda reason: called.append(reason) or {'reason': reason})
-    assert guard._maybe_relieve_process_rss(now=1000.0) is not None
-    assert guard._maybe_relieve_process_rss(now=1100.0) is None
-    assert guard._maybe_relieve_process_rss(now=1301.0) is not None
-    assert len(called) == 2
-
-
-def test_process_rss_hard_ceiling_requests_one_recycle_after_failed_relief(
-        guard, monkeypatch):
-    monkeypatch.setenv('TOFU_PROCESS_RSS_RELIEF_MB', '1024')
-    monkeypatch.setenv('TOFU_PROCESS_RSS_RECYCLE_MB', '2048')
-    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: 3 * _GIB)
-    monkeypatch.setattr(guard, 'relieve_memory', lambda _reason: {})
-    requested = []
-
-    first = guard._maybe_relieve_process_rss(
-        now=1000.0, recycle_callback=requested.append)
-    second = guard._maybe_relieve_process_rss(
-        now=1400.0, recycle_callback=requested.append)
-
-    assert first['process_rss_recycle_requested'] is True
-    assert len(requested) == 1
-    assert 'hard ceiling' in requested[0]
-    assert second is not None
-    assert len(requested) == 1
-
-
-def test_effective_process_rss_relief_avoids_recycle(guard, monkeypatch):
-    monkeypatch.setenv('TOFU_PROCESS_RSS_RELIEF_MB', '1024')
-    monkeypatch.setenv('TOFU_PROCESS_RSS_RECYCLE_MB', '2048')
-    rss = iter([3 * _GIB, 1 * _GIB])
-    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: next(rss))
-    monkeypatch.setattr(guard, 'relieve_memory', lambda _reason: {})
-    requested = []
-
-    result = guard._maybe_relieve_process_rss(
-        now=1000.0, recycle_callback=requested.append)
-
-    assert result['process_rss_after'] == 1 * _GIB
-    assert requested == []
-
-
-def test_default_process_rss_thresholds_adapt_to_small_cgroup(
-        guard, monkeypatch):
-    monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: 4 * _GIB)
-
-    assert guard._process_rss_relief_limit_bytes() == 2 * _GIB
-    assert guard._process_rss_recycle_limit_bytes() == int(2.8 * _GIB)
-
-
-def test_explicit_process_rss_thresholds_override_cgroup_fraction(
-        guard, monkeypatch):
-    monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: 4 * _GIB)
-    monkeypatch.setenv('TOFU_PROCESS_RSS_RELIEF_MB', '3072')
-    monkeypatch.setenv('TOFU_PROCESS_RSS_RECYCLE_MB', '3584')
-
-    assert guard._process_rss_relief_limit_bytes() == 3 * _GIB
-    assert guard._process_rss_recycle_limit_bytes() == int(3.5 * _GIB)
+    assert guard.run_monitor_once() is None
 
 
 def test_relieve_clears_caches_and_trims(guard, monkeypatch):
@@ -363,119 +390,6 @@ def test_relieve_clears_caches_and_trims(guard, monkeypatch):
         usage_cache._reset_usage_cache_for_tests()
 
 
-# ── ③ large-request headroom guard ──
-
-def test_request_guard_refuses_when_critical(guard, monkeypatch):
-    # 200 MiB free cannot cover the 320 MiB peak envelope for a 40 MiB body.
-    _set_pressure(guard, monkeypatch, pct=99.9, swap=0)
-    # relief cannot help in this scenario (still critical after trim)
-    monkeypatch.setattr(guard, 'relieve_memory', lambda reason: {'reason': reason})
-    ok, reason = guard.check_request_headroom('conv=abc', approx_bytes=40 * 1024 * 1024)
-    assert ok is False
-    assert 'refusing' in reason
-
-
-def test_request_guard_passes_small_body_even_when_full(guard, monkeypatch):
-    """Small bodies always pass — the guard only gates large ones."""
-    _set_pressure(guard, monkeypatch, pct=99.9, swap=0)
-    ok, reason = guard.check_request_headroom('conv=abc', approx_bytes=1000)
-    assert ok is True and reason is None
-
-
-def test_request_guard_enforces_process_soft_rss_without_cgroup_pressure(
-        guard, monkeypatch):
-    monkeypatch.setattr(
-        guard, '_process_rss_relief_limit_bytes',
-        lambda: 128 * 1024 * 1024)
-    monkeypatch.setattr(
-        guard, '_self_rss_bytes', lambda: 100 * 1024 * 1024)
-    monkeypatch.setattr(guard, '_maybe_relieve_process_rss', lambda: None)
-    monkeypatch.setattr(
-        guard, 'pressure',
-        lambda: pytest.fail(
-            'process-local refusal must not need cgroup pressure'))
-
-    ok, reason = guard.check_request_headroom(
-        'conv=local-rss', approx_bytes=1000)
-
-    assert ok is False
-    assert 'process RSS' in reason
-    assert 'soft ceiling' in reason
-
-
-def test_process_rss_admission_reserves_one_declared_task_envelope(
-        guard, monkeypatch):
-    monkeypatch.setenv('TOFU_TASK_RSS_RESERVE_MB', '1024')
-    monkeypatch.setattr(
-        guard, '_process_rss_recycle_limit_bytes',
-        lambda: 6 * 1024 * 1024 * 1024)
-    monkeypatch.setattr(
-        guard, '_self_rss_bytes',
-        lambda: int(5.25 * 1024 * 1024 * 1024))
-
-    snapshot = guard.process_rss_admission_snapshot()
-
-    assert snapshot is not None
-    assert snapshot['allowed'] is False
-    assert snapshot['reserve_bytes'] == 1024 * 1024 * 1024
-
-
-def test_request_guard_passes_when_roomy(guard, monkeypatch):
-    _set_pressure(guard, monkeypatch, pct=50.0, swap=0)
-    ok, reason = guard.check_request_headroom('conv=abc', approx_bytes=40 * 1024 * 1024)
-    assert ok is True and reason is None
-
-
-def test_request_guard_relief_rescues(guard, monkeypatch):
-    """If a trim drops usage back under the threshold, the request proceeds."""
-    seq = iter([99.0, 50.0])  # before trim critical, after trim fine
-
-    def fake_pressure():
-        pct = next(seq)
-        return {'limit': 200 * _GIB, 'usage': int(200 * _GIB * pct / 100),
-                'pct': pct, 'swap': 0}
-    monkeypatch.setattr(guard, 'pressure', fake_pressure)
-    monkeypatch.setattr(guard, 'relieve_memory', lambda reason: {'reason': reason})
-    ok, reason = guard.check_request_headroom('conv=abc', approx_bytes=400 * 1024 * 1024)
-    assert ok is True and reason is None
-
-
-def test_request_guard_allows_small_request_with_large_absolute_headroom(
-        guard, monkeypatch):
-    """A huge shared cgroup's percentage is not a refusal by itself.
-
-    Production rejected a 2.3 MB request at 99.3% of 220 GiB even though about
-    1.5 GiB remained and Tofu itself used under 40 MiB. That cannot protect the
-    process from sibling pressure; it only kills an otherwise safe turn.
-    """
-    limit = 220 * _GIB
-    monkeypatch.setattr(guard, 'pressure', lambda: {
-        'limit': limit,
-        'usage': int(limit * 0.993),
-        'pct': 99.3,
-        'swap': 0,
-    })
-    relief_calls = []
-    monkeypatch.setattr(
-        guard, 'relieve_memory', lambda reason: relief_calls.append(reason))
-
-    ok, reason = guard.check_request_headroom(
-        'conv=production-regression', approx_bytes=2_300_000)
-
-    assert ok is True and reason is None
-    assert relief_calls == [], 'ample absolute headroom must not trigger trim'
-
-
-def test_request_guard_neuter_ignoring_pressure_would_pass(guard, monkeypatch):
-    """NEUTER: if pressure() returned None (signal ignored), the critical case passes.
-
-    Proves the pressure reading is load-bearing for the refusal.
-    """
-    monkeypatch.setattr(guard, 'pressure', lambda: None)
-    ok, reason = guard.check_request_headroom('conv=abc', approx_bytes=40 * 1024 * 1024)
-    assert ok is True and reason is None
-
-
 # ── reclaim-aware measurement (2026-09-18 cache-dominated-cgroup incident) ──
 
 def test_pressure_snapshot_is_reclaim_aware(guard, monkeypatch):
@@ -504,54 +418,6 @@ def test_reclaimable_file_bytes_prefers_hierarchical_total(guard):
     assert guard.reclaimable_file_bytes({'inactive_file': 100}) == 100
     assert guard.reclaimable_file_bytes({}) is None
     assert guard.reclaimable_file_bytes({'cache': 5}) is None
-
-
-def test_request_guard_admits_when_pressure_is_only_sibling_page_cache(
-        guard, monkeypatch):
-    """The 2026-09-18 self-DoS regression: raw 99% with 75% reclaimable cache.
-
-    Admission of a large request must NOT consult raw usage — the kernel
-    hands inactive_file back to any allocation, so effective pressure is low
-    and no relief churn fires either.
-    """
-    _set_pressure(guard, monkeypatch, pct=99.0, reclaimable=150 * _GIB)
-    relief_calls = []
-    monkeypatch.setattr(
-        guard, 'relieve_memory',
-        lambda reason: relief_calls.append(reason) or {'reason': reason})
-
-    ok, reason = guard.check_request_headroom(
-        'conv=cache-dominated', approx_bytes=40 * 1024 * 1024)
-
-    assert ok is True and reason is None
-    assert relief_calls == [], 'reclaimable cache must not trigger trim churn'
-
-
-def test_request_guard_refuses_when_effective_pressure_is_real(
-        guard, monkeypatch):
-    """Raw 99.9% with almost nothing reclaimable: the envelope truly cannot fit."""
-    _set_pressure(guard, monkeypatch, pct=99.9, reclaimable=64 * 1024 * 1024)
-    monkeypatch.setattr(guard, 'relieve_memory', lambda reason: {'reason': reason})
-    ok, reason = guard.check_request_headroom(
-        'conv=real-pressure', approx_bytes=40 * 1024 * 1024)
-    assert ok is False
-    assert 'refusing' in reason
-    assert 'effective' in reason
-
-
-def test_approx_body_bytes_counts_text(guard):
-    body = {'messages': [
-        {'role': 'user', 'content': 'x' * 1000},
-        {'role': 'assistant', 'content': [{'type': 'text', 'text': 'y' * 500},
-                                          {'type': 'image', 'source': {}}]},
-    ]}
-    n = guard.approx_body_bytes(body)
-    assert n >= 1500  # 1000 + 500 text, plus fixed cost for the image part
-
-
-def test_approx_body_bytes_handles_garbage(guard):
-    assert guard.approx_body_bytes(None) == 0
-    assert guard.approx_body_bytes(42) == 0
 
 
 # ── page-cache relief (fadvise) ──
@@ -792,7 +658,7 @@ def test_effective_relief_never_escalates(guard, monkeypatch):
     assert last is not None and last['reclaimed_bytes'] > 0
     assert guard._ineffective_reliefs == 0
     assert guard._ineffective_escalated is False
-    assert guard._ineffective_backoff_exponent == 0
+    assert guard._relief_suppressed_until == 0.0
 
 
 def test_noise_sized_reclaim_does_not_rearm_the_escalation(guard, monkeypatch):

@@ -48,12 +48,17 @@ OPERATIONS = {
         'command', False, ops._turn_related_announce, ops._turn_change_capture),
     'turn.branch.create': ops.OperationSpec(
         'command', False, ops._turn_branch_create, ops._turn_change_capture),
+    # Deletes are receipted: re-executing a committed delete finds no rows
+    # and answers database_not_found, so a lost-ACK replay of a delete that
+    # succeeded must return its recorded outcome. Turn and lane identities
+    # are freshly minted and never reissued, so one delete intent names one
+    # receipt.
     'turn.branch.delete': ops.OperationSpec(
-        'command', False, ops._turn_branch_delete, ops._turn_change_capture),
+        'command', True, ops._turn_branch_delete, ops._turn_change_capture),
     'turn.compact': ops.OperationSpec(
         'command', True, ops._turn_compact, ops._turn_change_capture),
     'turn.delete': ops.OperationSpec(
-        'command', False, ops._turn_delete, ops._turn_change_capture),
+        'command', True, ops._turn_delete, ops._turn_change_capture),
     'turn.recover': ops.OperationSpec(
         'command', False, ops._turn_recover, ops._turn_change_capture),
     # Bounded superseded-attempt cleanup is receipted so a lost-ACK retry
@@ -69,6 +74,11 @@ OPERATIONS = {
         'command', False, ops._turn_attempt_start, ops._turn_change_capture),
     'turn.event.record': ops.OperationSpec(
         'command', False, ops._turn_event_record, ops._turn_change_capture),
+    # K ordinary records in one transaction. Receipt-free like its steps: a
+    # repeated committed batch fails each projection CAS, and the producer
+    # reconciles unknown outcomes from the exact durable task-event rows.
+    'turn.event.record_batch': ops.OperationSpec(
+        'command', False, ops._turn_event_record_batch, ops._turn_change_capture),
     'turn.get': ops.OperationSpec('query', False, ops._turn_get),
     'turn.image.get': ops.OperationSpec('query', False, ops._turn_image_get),
     'turn.exists': ops.OperationSpec('query', False, ops._turn_exists),

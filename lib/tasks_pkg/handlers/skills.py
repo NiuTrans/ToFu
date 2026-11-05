@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from lib.log import get_logger
 from lib.skills import SKILL_TOOL_NAMES
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
@@ -9,6 +11,20 @@ from lib.tasks_pkg.executor import tool_registry
 from lib.tool_results.tool_rejection import stamp_tool_rejection
 
 logger = get_logger(__name__)
+
+_INSTALL_ATTEMPTS_PER_TASK = 3
+# Calls of one round run concurrently, so reading and bumping the task's
+# attempt count must be one step. Leaf lock: nothing is called while held.
+_INSTALL_ATTEMPTS_LOCK = threading.Lock()
+
+
+def _reserve_install_attempt(task) -> bool:
+    with _INSTALL_ATTEMPTS_LOCK:
+        attempts = int(task.get('_skillInstallAttempts') or 0)
+        if attempts >= _INSTALL_ATTEMPTS_PER_TASK:
+            return False
+        task['_skillInstallAttempts'] = attempts + 1
+        return True
 
 
 def _result_meta(fn_name: str, title: str, content: str, *, ok: bool) -> dict:
@@ -31,9 +47,11 @@ def _handle_skill_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
                        cfg, project_path, project_enabled, all_tools=None):
     """Execute one skill operation under the task's explicit owner."""
     from lib.skills.paths import extra_skill_project_paths
+    from lib.skills.activation import SkillSelectionError, verify_selected_guide
 
     owner_user_id = task.get('_userId')
-    primary = project_path if project_enabled else None
+    primary = project_path if project_enabled else (
+        (cfg or {}).get('skillSelectionProjectPath') if (cfg or {}).get('skillSelection') else None)
     extras = extra_skill_project_paths(
         (cfg or {}).get('projectPaths') if project_enabled else [], primary)
     title = str(
@@ -48,6 +66,14 @@ def _handle_skill_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
         from lib.identity import require_user_id
         owner_user_id = require_user_id(
             owner_user_id, context='skill tool execution')
+        if fn_name == 'read_skill_resource':
+            required = [row for row in (cfg or {}).get('skillSelection', [])
+                        if row['skill_id'] == fn_args.get('skill_id')]
+            if required:
+                from lib.skills.activation import bind_skill_selection
+                bind_skill_selection([row['skill_id'] for row in required],
+                                     project_path=primary, owner_user_id=owner_user_id,
+                                     expected=required)
         if fn_name == 'search_skills':
             from lib.skills.discovery import (
                 render_skill_search,
@@ -91,6 +117,7 @@ def _handle_skill_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
             from lib.skills.activation import instruction_receipt
             usage_receipt = instruction_receipt(
                 str(fn_args.get('skill_id') or ''), content, trigger='model')
+            verify_selected_guide(usage_receipt, (cfg or {}).get('skillSelection') or [])
 
         elif fn_name == 'read_skill_resource':
             from lib.skills import read_skill_resource
@@ -122,13 +149,11 @@ def _handle_skill_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
             else:
                 from lib.skills.catalog_install import install_catalog_skill
                 try:
-                    attempts = int(task.get('_skillInstallAttempts') or 0)
-                    if attempts >= 3:
+                    if not _reserve_install_attempt(task):
                         raise CatalogInstallError(
                             'This task has used its three installation attempts. '
                             'Continue with installed skills and available tools.',
                             code='task_install_budget_exhausted')
-                    task['_skillInstallAttempts'] = attempts + 1
                     result = install_catalog_skill(
                         str(fn_args.get('catalog_id') or ''),
                         owner_user_id=owner_user_id,
@@ -174,6 +199,11 @@ def _handle_skill_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
         else:
             content = f'Unknown skill tool: {fn_name}'
             status = 'error'
+    except SkillSelectionError as exc:
+        content = str(exc)
+        status = 'error'
+        usage_receipt = {'skill_id': str(fn_args.get('skill_id') or ''),
+                         'trigger': 'bound', 'status': 'unavailable', 'content_hash': ''}
     except Exception as exc:
         logger.warning('[Skills] %s failed: %s', fn_name, exc, exc_info=True)
         content = 'Skill operation failed safely; no unverified change was made.'

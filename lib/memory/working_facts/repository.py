@@ -7,6 +7,7 @@ from copy import deepcopy
 import hashlib
 import json
 
+from lib.error_envelope import BadRequest
 from lib.identity import PrincipalContext
 from lib.storage import StorageError, get_storage_client
 from .contract import limit
@@ -65,7 +66,7 @@ class FactRepository:
         value.update(owner=self.owner, tenant=self.tenant, conversationId=self.conversation_id)
         value.pop('_commitDigest', None)
         if len(json.dumps(value, ensure_ascii=False).encode()) > limit('maxRecordBytes'):
-            raise ValueError('Working facts record is full; existing evidence was preserved')
+            raise BadRequest('Working facts record is full; existing evidence was preserved')
         commit = digest([self.key, revision, value])
         value['_commitDigest'] = commit
         try:

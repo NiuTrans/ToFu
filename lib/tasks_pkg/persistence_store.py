@@ -270,6 +270,22 @@ class DefaultConversationStore:
             bindings=ProjectCoordinationRepository(
                 user_id, client=_storage_client, conversations=conversations))
 
+    def schedule_working_view_compaction(self, conv_id, *, user_id, reason):
+        """Record the owner's pending working-view compaction on this authority."""
+        from lib.conversations.compaction_policy import schedule_working_view_compaction
+        return schedule_working_view_compaction(
+            conv_id, user_id=user_id, reason=reason, client=_storage_client)
+
+    def scheduled_working_view_compaction(self, conv_id, *, user_id):
+        from lib.conversations.compaction_policy import scheduled_working_view_compaction
+        return scheduled_working_view_compaction(
+            conv_id, user_id=user_id, client=_storage_client)
+
+    def clear_scheduled_working_view_compaction(self, conv_id, *, user_id, request_id):
+        from lib.conversations.compaction_policy import clear_scheduled_working_view_compaction
+        return clear_scheduled_working_view_compaction(
+            conv_id, user_id=user_id, request_id=request_id, client=_storage_client)
+
     def compact_turn_transcript(
         self,
         conv_id,

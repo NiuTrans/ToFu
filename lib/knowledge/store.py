@@ -19,7 +19,7 @@ from lib.log import get_logger
 from lib.runtime.runtime_paths import data_root
 
 from .asset_spool import close_extracted_assets
-from .assets import proxy_text
+from .assets import IMAGE_EXTENSIONS, proxy_text
 from .chunking import chunk_document
 from .file_durability import prepare_directory, sync_publication_directories
 from .ingest import HtmlProjector, KnowledgeIngestError, detect_kind, extract
@@ -457,6 +457,99 @@ def _reserve_pdf_pipeline(raw: bytes, display_name: str):
     return CLASSIC_PDF_ADMISSION.reserve()
 
 
+def _prepare_document_publication(
+    raw: bytes,
+    display_name: str,
+    document_id: str,
+    *,
+    user_id: int,
+    scope: str,
+    pdf_already_admitted: bool,
+    html_projector: HtmlProjector | None,
+    defer_image_ocr: bool,
+    previous: dict | None,
+    digest: str = '',
+):
+    """Prepare a complete create/replace candidate and its rollback owner."""
+    publication = KnowledgePublicationAttempt()
+    options = {'html_projector': html_projector} if html_projector is not None else {}
+    if pdf_already_admitted:
+        options['_pdf_already_admitted'] = True
+    if defer_image_ocr and previous is None:
+        options['_defer_image_ocr'] = True
+    parsed = extract(raw, display_name, **options)
+    try:
+        chunks = chunk_document(parsed['text']) if parsed['text'].strip() else []
+        now = time.time()
+    except BaseException as failure:
+        _close_extracted_assets_after_failure(parsed, failure)
+        raise
+    chunks, assets, asset_paths = _prepare_visual_index(
+        display_name, parsed, document_id, now, chunks,
+        user_id=user_id, scope=scope)
+    final_path = None
+    try:
+        if not chunks:
+            raise KnowledgeIngestError('The document produced no searchable evidence')
+        warnings = list(parsed.get('warnings') or [])
+        indexed_chunks = _indexed_chunks(display_name, chunks)
+        if previous is not None:
+            document = {
+                **previous,
+                'kind': parsed['kind'],
+                'method': parsed['method'],
+                'warnings_json': json.dumps(warnings, ensure_ascii=False),
+                'text_chars': len(parsed['text']),
+                'chunk_count': len(chunks),
+                'pages': int(parsed.get('pages') or 0),
+                'updated_at': now,
+                'chunks': indexed_chunks,
+                'assets': assets,
+            }
+        else:
+            stored_name = _safe_source_name(digest, parsed['kind'], document_id)
+            final_path = _write_source(raw, stored_name, user_id=user_id)
+            document = {
+                'id': document_id,
+                'sha256': digest,
+                'name': display_name,
+                'stored_name': stored_name,
+                'kind': parsed['kind'],
+                'size_bytes': len(raw),
+                'method': parsed['method'],
+                'warnings_json': json.dumps(warnings, ensure_ascii=False),
+                'text_chars': len(parsed['text']),
+                'chunk_count': len(chunks),
+                'pages': int(parsed.get('pages') or 0),
+                'scope': scope,
+                'media_metadata_json': json.dumps({
+                    'media_kind': 'document',
+                    'status': 'ready',
+                }, separators=(',', ':')),
+                'created_at': now,
+                'updated_at': now,
+                'chunks': indexed_chunks,
+                'assets': assets,
+            }
+        _sync_publication_directories(
+            user_id=user_id, source=previous is None, assets=bool(asset_paths))
+        return parsed, document, assets, asset_paths, final_path, publication
+    except BaseException as failure:
+        candidates = [final_path, *asset_paths] if final_path is not None else asset_paths
+        _rollback_publication_files(
+            candidates, publication,
+            reason='reindex rollback' if previous is not None else 'failed index',
+            failure=failure)
+        raise
+
+
+def _enrich_published_visuals(*, user_id: int, scope: str, assets: list[dict]) -> None:
+    if (scope in {'library', 'shared'} and assets
+            and visual_enrichment_enabled(user_id=user_id)):
+        from .enrichment import start_visual_enrichment
+        start_visual_enrichment(user_id=user_id)
+
+
 def _index_new_document(
     raw: bytes,
     display_name: str,
@@ -468,54 +561,17 @@ def _index_new_document(
     repository,
     pdf_already_admitted: bool,
     html_projector: HtmlProjector | None = None,
+    defer_image_ocr: bool = False,
 ) -> dict:
     """Parse and atomically persist one digest-miss under caller admission."""
     document_id = uuid.uuid4().hex
-    publication = KnowledgePublicationAttempt()
-    final_path = None
-    options = {'html_projector': html_projector} if html_projector is not None else {}
-    if pdf_already_admitted:
-        options['_pdf_already_admitted'] = True
-    parsed = extract(raw, display_name, **options)
+    parsed, document, assets, asset_paths, final_path, publication = (
+        _prepare_document_publication(
+            raw, display_name, document_id, user_id=user_id, scope=scope,
+            pdf_already_admitted=pdf_already_admitted,
+            html_projector=html_projector,
+            defer_image_ocr=defer_image_ocr, previous=None, digest=digest))
     try:
-        chunks = chunk_document(parsed['text']) if parsed['text'].strip() else []
-        now = time.time()
-    except BaseException as failure:
-        _close_extracted_assets_after_failure(parsed, failure)
-        raise
-    chunks, assets, asset_paths = _prepare_visual_index(
-        display_name, parsed, document_id, now, chunks,
-        user_id=user_id, scope=scope)
-    try:
-        if not chunks:
-            raise KnowledgeIngestError('The document produced no searchable evidence')
-        warnings = list(parsed.get('warnings') or [])
-        indexed_chunks = _indexed_chunks(display_name, chunks)
-        stored_name = _safe_source_name(digest, parsed['kind'], document_id)
-        final_path = _write_source(raw, stored_name, user_id=user_id)
-        document = {
-            'id': document_id,
-            'sha256': digest,
-            'name': display_name,
-            'stored_name': stored_name,
-            'kind': parsed['kind'],
-            'size_bytes': len(raw),
-            'method': parsed['method'],
-            'warnings_json': json.dumps(warnings, ensure_ascii=False),
-            'text_chars': len(parsed['text']),
-            'chunk_count': len(chunks),
-            'pages': int(parsed.get('pages') or 0),
-            'scope': scope,
-            'media_metadata_json': json.dumps({
-                'media_kind': 'document',
-                'status': 'ready',
-            }, separators=(',', ':')),
-            'created_at': now,
-            'updated_at': now,
-            'chunks': indexed_chunks,
-            'assets': assets,
-        }
-        _sync_publication_directories(user_id=user_id, source=True, assets=bool(asset_paths))
         row, inserted = repository.create_document(
             document,
             command_id=_mutation_command_id(
@@ -560,10 +616,19 @@ def _index_new_document(
         '[Knowledge] indexed %s: %d chars, %d chunks via %s',
         display_name, result['text_chars'], result['chunk_count'],
         result['method'])
-    if (scope in {'library', 'shared'} and assets
-            and visual_enrichment_enabled(user_id=user_id)):
-        from .enrichment import start_visual_enrichment
-        start_visual_enrichment(user_id=user_id)
+    if defer_image_ocr and parsed['kind'] in IMAGE_EXTENSIONS:
+        from .image_ocr_jobs import schedule_attachment_image_ocr
+        for asset in assets:
+            try:
+                if not schedule_attachment_image_ocr(
+                        user_id=user_id, asset_id=str(asset['id'])):
+                    logger.info('[Knowledge] OCR for %s not scheduled: owner stopping '
+                                'or job already running', display_name)
+            except Exception as exc:
+                # The committed attachment stays valid; reindex recomputes OCR.
+                logger.warning('[Knowledge] OCR for %s did not start: %s',
+                               display_name, exc)
+    _enrich_published_visuals(user_id=user_id, scope=scope, assets=assets)
     return result
 
 
@@ -572,8 +637,15 @@ def add_document(
     command_id: str | None = None,
     scope: str = 'library',
     html_projector: HtmlProjector | None = None,
+    defer_image_ocr: bool = False,
 ) -> dict:
-    """Parse, chunk, persist and atomically index one uploaded document."""
+    """Parse, chunk, persist and atomically index one uploaded document.
+
+    ``defer_image_ocr`` commits a new image before its OCR text, which an
+    owned background job (``image_ocr_jobs``) publishes afterwards. Identical
+    bytes return the owner's existing content-addressed record; its OCR text
+    is never recomputed here.
+    """
     if not raw:
         raise KnowledgeIngestError('Empty file')
     if scope not in {'draft', 'library', 'attachment'}:
@@ -618,6 +690,7 @@ def add_document(
             repository=repository,
             pdf_already_admitted=pdf_lease is not None,
             html_projector=html_projector,
+            defer_image_ocr=defer_image_ocr,
         )
     finally:
         if pdf_lease is not None:
@@ -650,39 +723,15 @@ def _replace_document_index(
     html_projector: HtmlProjector | None = None,
 ) -> dict | None:
     """Build and atomically publish one replacement parser projection."""
-    publication = KnowledgePublicationAttempt()
-    options = {'html_projector': html_projector} if html_projector is not None else {}
-    if pdf_already_admitted:
-        options['_pdf_already_admitted'] = True
-    parsed = extract(raw, display_name, **options)
+    scope = str(row.get('scope') or 'library')
+    _, replacement, assets, asset_paths, _, publication = (
+        _prepare_document_publication(
+            raw, display_name, document_id, user_id=user_id, scope=scope,
+            pdf_already_admitted=pdf_already_admitted,
+            html_projector=html_projector,
+            defer_image_ocr=False, previous=row,
+            digest=str(row.get('sha256') or '')))
     try:
-        chunks = chunk_document(parsed['text']) if parsed['text'].strip() else []
-        now = time.time()
-        scope = str(row.get('scope') or 'library')
-    except BaseException as failure:
-        _close_extracted_assets_after_failure(parsed, failure)
-        raise
-    chunks, assets, asset_paths = _prepare_visual_index(
-        display_name, parsed, document_id, now, chunks,
-        user_id=user_id, scope=scope)
-    try:
-        if not chunks:
-            raise KnowledgeIngestError('The document produced no searchable evidence')
-        warnings = list(parsed.get('warnings') or [])
-        indexed_chunks = _indexed_chunks(display_name, chunks)
-        replacement = {
-            **row,
-            'kind': parsed['kind'],
-            'method': parsed['method'],
-            'warnings_json': json.dumps(warnings, ensure_ascii=False),
-            'text_chars': len(parsed['text']),
-            'chunk_count': len(chunks),
-            'pages': int(parsed.get('pages') or 0),
-            'updated_at': now,
-            'chunks': indexed_chunks,
-            'assets': assets,
-        }
-        _sync_publication_directories(user_id=user_id, source=False, assets=bool(asset_paths))
         updated = repository.replace_document(
             replacement,
             command_id=_mutation_command_id(
@@ -710,10 +759,8 @@ def _replace_document_index(
         '[Knowledge] reindexed %s: %d chars, %d chunks via %s',
         result['name'], result['text_chars'], result['chunk_count'],
         result['method'])
-    if (row.get('scope') in {'library', 'shared'} and assets
-            and visual_enrichment_enabled(user_id=user_id)):
-        from .enrichment import start_visual_enrichment
-        start_visual_enrichment(user_id=user_id)
+    _enrich_published_visuals(
+        user_id=user_id, scope=row.get('scope'), assets=assets)
     return result
 
 

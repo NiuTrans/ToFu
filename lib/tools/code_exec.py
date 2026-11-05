@@ -2,7 +2,7 @@
 
 The standalone ``run_command`` tool (no project attached) shares its schema
 with the project-mode ``run_command`` so the model gets the same usage
-guidance (WHEN-TO-USE matrix, prefer-grep_search hint, pipeline warning)
+guidance (WHEN-TO-USE matrix, prefer-search_files hint, pipeline warning)
 regardless of mode. The only difference is the parameter description for
 ``working_dir``, which can't reference a "project root" when there isn't
 one — we override that field below.

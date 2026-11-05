@@ -12,8 +12,8 @@
  */
 
 const _conversationSettingsResolution = createConversationSettingsResolution({
-  resolveConfig: (inputs) => Api.conversations.resolveConfig(inputs),
-  resolveSettings: (inputs) => Api.conversations.resolveSettings(inputs),
+  resolveConfig: (inputs, options) => Api.conversations.resolveConfig(inputs, options),
+  resolveSettings: (inputs, options) => Api.conversations.resolveSettings(inputs, options),
   patchResolvedSettings: (id, inputs) => (
     Api.conversations.patchResolvedSettings(id, inputs)
   ),
@@ -265,6 +265,7 @@ const _conversationCatalogLoader = createConversationCatalogLoader({
       ? ConvCache.putSidebarList(rows) : Promise.resolve(0)
   ),
   warn: (message) => debugLog(`[conversation-catalog] ${message}`, 'warn'),
+  onSettled: (succeeded) => runtimeScope.conversationCatalogAvailability?.settled(succeeded),
 });
 retainedCompositionLifecycle.add(() => _conversationCatalogLoader.destroy());
 
@@ -289,7 +290,9 @@ async function hydrateConversationRuntime(convId) {
   }
   await withProjectHydration(conv, () => turnStore.hydrateConversation(conv));
   conv._turnSnapshotRequired = false;
-  conv._serverTurnCount = runtimeScope.ConversationTurnRead?.ordered?.(conv)?.length || 0;
+  /* _serverTurnCount stays the TurnRuntime projection of the lane total. The
+   * loaded tail window is smaller, so recording it made every later catalog
+   * row look changed and re-downloaded the whole window on the next visit. */
   if (typeof runtimeScope.loadCompactionHistory === 'function') {
     void runtimeScope.loadCompactionHistory(convId).catch((error) =>
       console.debug('[compaction] history hydrate failed:', error));

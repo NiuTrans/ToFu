@@ -63,139 +63,88 @@ class _TrackingLock:
         return False
 
 
-def test_turn_start_delta_and_finalize_share_one_task_projection():
+def test_turn_start_and_finalize_share_one_task_projection():
     lock = _TrackingLock()
-    task = {
-        'content': 'old content',
-        'thinking': 'old thinking',
-        'content_lock': lock,
-        '_flow_phase': 'planning',
-    }
+    task = {'content': 'old content', 'thinking': 'old thinking',
+            'content_lock': lock, '_flow_phase': 'planning'}
     forwarded = []
     sink = OrchestrationChatTaskEventSink(
         task, lambda owner, event: forwarded.append((owner, event)))
-
-    start = {
-        'type': 'flow_iteration',
-        'phase': 'working',
-        'iteration': 2,
-        'flowProjection': 'flow',
-        'turnRole': 'worker',
-        'emits': 'assistant',
-        'vuMsgId': None,
-    }
+    start = {'type': 'flow_iteration', 'phase': 'working', 'iteration': 2,
+             'flowProjection': 'flow', 'turnRole': 'worker',
+             'emits': 'assistant', 'vuMsgId': None}
     sink(start)
-    sink({'type': 'delta', 'content': 'answer ', 'thinking': 'reason '})
-    sink({'type': 'delta', 'content': 42})
-    sink({
-        'type': 'flow_planner_done',
-        'content': 'final answer',
-        'thinking': 'final reason',
-    })
-
+    final = {'type': 'flow_planner_done', 'content': 'final answer',
+             'thinking': 'final reason'}
+    sink(final)
     assert task['_flow_phase'] == 'working'
     assert task['_flow_iteration'] == 2
     assert task['_flow_current_turn'] == {
-        'flowProjection': 'flow',
-        'turnRole': 'worker',
-        'emits': 'assistant',
-    }
+        'flowProjection': 'flow', 'turnRole': 'worker', 'emits': 'assistant'}
     assert task['content'] == 'final answer'
     assert task['thinking'] == 'final reason'
-    assert lock.entries == 4
-    assert [event for owner, event in forwarded] == [
-        start,
-        {'type': 'delta', 'content': 'answer ', 'thinking': 'reason '},
-        {'type': 'delta', 'content': 42},
-        {
-            'type': 'flow_planner_done',
-            'content': 'final answer',
-            'thinking': 'final reason',
-        },
-    ]
+    assert lock.entries == 2
+    assert [event for _owner, event in forwarded] == [start, final]
     assert all(owner is task for owner, _event in forwarded)
 
 
-def test_tool_lifecycle_updates_reconnect_snapshot_without_duplicate_rows():
-    task = {'content': '', 'thinking': '', 'toolRounds': []}
+def test_relayed_events_never_rebuild_output_without_a_bound_child():
+    """Live output has one source: a bound child. Relayed frames only publish."""
+    task = {'content': 'kept', 'thinking': '', 'toolRounds': [{'toolCallId': 'kept'}]}
     forwarded = []
-    sink = OrchestrationChatTaskEventSink(
-        task, lambda _owner, event: forwarded.append(event))
-    sink({
-        'type': 'flow_iteration', 'phase': 'working', 'iteration': 1,
-        'flowProjection': 'autopilot', 'turnRole': 'worker',
-        'emits': 'assistant',
-    })
-    start = {
-        'type': 'tool_start', 'roundNum': 3, 'llmRound': 3,
-        'toolCallId': 'flow-tool-occurrence', 'toolName': 'read_files',
-        'query': 'Read a.py', 'toolArgs': {'path': 'a.py'},
-        'status': 'searching', 'tStart': 100,
-    }
-    sink(start)
-    sink(start)  # reconnect replay / duplicate start is an upsert
-    sink({
-        'type': 'tool_result', 'roundNum': 3,
-        'toolCallId': 'flow-tool-occurrence', 'toolName': 'read_files',
-        'results': [{'title': 'read_files'}], 'status': 'done', 'tEnd': 150,
-    })
-    sink({
-        'type': 'tool_complete', 'roundNum': 3,
-        'toolCallId': 'flow-tool-occurrence', 'toolName': 'read_files',
-        'toolContent': 'ok', 'isError': False, 'tEnd': 151,
-    })
-
-    assert task['toolRounds'] == [{
-        'roundNum': 3, 'llmRound': 3,
-        'toolCallId': 'flow-tool-occurrence', 'toolName': 'read_files',
-        'toolArgs': {'path': 'a.py'}, 'query': 'Read a.py',
-        'status': 'done', 'tStart': 100,
-        'results': [{'title': 'read_files'}], 'tEnd': 151,
-        'toolContent': 'ok',
-    }]
-    assert [event['type'] for event in forwarded] == [
-        'flow_iteration', 'tool_start', 'tool_start',
-        'tool_result', 'tool_complete']
+    sink = OrchestrationChatTaskEventSink(task, lambda _owner, event: forwarded.append(event))
+    for event in ({'type': 'delta', 'content': 'relayed'},
+                  {'type': 'tool_start', 'roundNum': 1, 'toolCallId': 'relayed'},
+                  {'type': 'delta_reset', 'roundNum': 0}):
+        sink(event)
+    assert task['content'] == 'kept'
+    assert task['toolRounds'] == [{'toolCallId': 'kept'}]
+    assert [event['type'] for event in forwarded] == ['delta', 'tool_start', 'delta_reset']
 
 
-def test_tool_start_carries_swarm_agent_identity_into_snapshot_row():
-    """The reconnect/poll snapshot row must keep ``agentId`` — the frontend
-    debug entry re-derives the ``{parent}#agent:{agentId}`` Request
-    Inspector stream from the projected round."""
-    task = {'content': '', 'thinking': '', 'toolRounds': []}
-    sink = OrchestrationChatTaskEventSink(task, lambda _owner, _event: None)
-    sink({
-        'type': 'tool_start', 'roundNum': 2, 'llmRound': 2,
-        'agentId': 'agent-9', 'toolCallId': 'flow-tool-x',
-        'toolName': 'run_command', 'query': 'pytest -x', 'tStart': 100,
-    })
-    assert task['toolRounds'][0]['agentId'] == 'agent-9'
-
-
-@pytest.mark.parametrize('late_ref', [False, True])
-def test_exact_inspector_reference_survives_live_tool_and_state_handoff(late_ref):
-    from copy import deepcopy
+def test_bound_child_output_is_what_every_published_frame_carries():
+    """The parent renders the running child's own state, as a normal Turn does."""
     ref = {'taskId': 'root#agent:child', 'roundNum': 1, 'turn': 'request:exact'}
-    task, events = {}, []
-    sink = OrchestrationChatTaskEventSink(task, lambda owner, event: events.append(deepcopy(event)))
-    start = {'type': 'tool_start', 'roundNum': 1, 'llmRound': 0,
-             'toolCallId': 'same-provider-id', 'taskId': 'child',
-             'attemptId': 'child-attempt', 'toolName': 'read_files', 'query': 'Read'}
-    if not late_ref:
-        start['inspectorRef'] = ref
-    sink(start)
-    sink({'type': 'tool_complete', 'roundNum': 1, 'toolCallId': 'same-provider-id',
-          'toolContent': 'Full evidence', 'inspectorRef': ref})
+    task = {'content': '', 'thinking': '', 'toolRounds': []}
+    seen = []
+    sink = OrchestrationChatTaskEventSink(task, lambda owner, event: seen.append(
+        (event['type'], owner['content'], [dict(row) for row in owner['toolRounds']],
+         owner.get('segments'))))
+    row = {'roundNum': 1, 'toolCallId': 'call', 'taskId': 'child', 'status': 'searching',
+           'assistantContent': 'Narration', 'inspectorRef': ref}
+    child = {'content': 'Narration', 'thinking': 'why', 'toolRounds': []}
+    with task['_flowLiveOutputPort'](child) as bound:
+        assert bound
+        sink({'type': 'delta', 'content': 'Narration'})
+        child.update(content='', toolRounds=[row],
+                     segments=[{'type': 'text', 'text': 'Narration'}])
+        sink({'type': 'phase', 'phase': 'tool_exec'})
+        row['status'] = 'done'
+        child.update(content='Final', segments=[{'type': 'text', 'text': 'Narration'},
+                                                {'type': 'text', 'text': 'Final'}])
+    assert [entry[:2] for entry in seen] == [('delta', 'Narration'), ('phase', '')]
+    assert seen[1][2] == [{**row, 'status': 'searching'}]
+    assert seen[1][3] == [{'type': 'text', 'text': 'Narration'}]
+    # Settlement after the last frame crosses once when the child finishes.
+    assert task['content'] == 'Final'
+    assert task['toolRounds'][0]['status'] == 'done'
     assert task['toolRounds'][0]['inspectorRef'] == ref
-    assert task['toolRounds'][0]['taskId'] == 'child'
-    assert task['toolRounds'][0]['attemptId'] == 'child-attempt'
-    assert events[-1]['inspectorRef'] == ref
-    rounds = deepcopy(task['toolRounds'])
-    sink({'type': 'state', 'toolRounds': rounds, 'content': 'Final output',
-          'thinking': '', 'segments': [{'type': 'tool', 'roundNum': 1, 'inspectorRef': ref}]})
-    assert task['toolRounds'][0]['inspectorRef'] == ref
-    assert task['segments'][0]['inspectorRef'] == ref
-    assert [event['type'] for event in events] == ['tool_start', 'tool_complete']
+    assert task['toolRounds'][0] is not row  # never aliases the child's live rows
+    sink({'type': 'delta', 'content': 'after'})
+    assert task['content'] == 'Final'
+
+
+def test_concurrent_sibling_is_refused_the_visible_output():
+    task = {'content': '', 'thinking': '', 'toolRounds': []}
+    sink = OrchestrationChatTaskEventSink(task, lambda *_args: None)
+    first, sibling = {'content': 'first'}, {'content': 'sibling'}
+    with task['_flowLiveOutputPort'](first) as bound:
+        with task['_flowLiveOutputPort'](sibling) as sibling_bound:
+            assert bound and not sibling_bound
+            sink({'type': 'delta', 'content': 'x'})
+        assert task['content'] == 'first'
+    with task['_flowLiveOutputPort'](sibling) as bound:
+        assert bound
 
 
 def test_discard_unknown_events_and_lockless_final_content_are_safe():

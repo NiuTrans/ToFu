@@ -35,7 +35,8 @@ export function slideProp(prop: Prop, to: Point, duration: number) {
   prop.from = { x: prop.x, y: prop.y };
   prop.to = { ...to };
   prop.elapsed = 0;
-  prop.duration = Math.max(0, duration);
+  // A prop already at its destination has nothing to animate: it is settled now.
+  prop.duration = prop.x === to.x && prop.y === to.y ? 0 : Math.max(0, duration);
   if (!prop.duration) { prop.x = to.x; prop.y = to.y; }
 }
 export function placeProp(prop: Prop, to: Point) { slideProp(prop, to, 0); }
@@ -48,9 +49,11 @@ export function stepProps(props: Iterable<Prop>, dtMs: number): boolean {
     prop.elapsed = Math.min(prop.duration, prop.elapsed + dtMs);
     const t = prop.duration ? prop.elapsed / prop.duration : 1;
     const eased = t < .5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2;
-    prop.x = prop.from.x + (prop.to.x - prop.from.x) * eased;
-    prop.y = prop.from.y + (prop.to.y - prop.from.y) * eased;
-    moving = moving || !propSettled(prop);
+    // Settling lands exactly on the destination, so a later slide there is a no-op.
+    const done = propSettled(prop);
+    prop.x = done ? prop.to.x : prop.from.x + (prop.to.x - prop.from.x) * eased;
+    prop.y = done ? prop.to.y : prop.from.y + (prop.to.y - prop.from.y) * eased;
+    moving = moving || !done;
   }
   return moving;
 }

@@ -121,10 +121,15 @@ def test_parse_subprocess_keeps_timeout_failure_and_join_boundary(source_tree, m
     with pytest.raises(engines.EnginePreparationError) as caught:
         engines.source_fingerprint(source_tree)
     assert caught.value.__cause__ is failure
+    if isinstance(failure, subprocess.TimeoutExpired):
+        assert 'parser timed out after 10s' in str(caught.value)
+    else:
+        assert 'parser exited with code 1' in str(caught.value)
     assert len(commands) == 1
     command, options = commands[0]
     assert '-c' in command and Path(command[-1]).name == 'Cargo.toml'
-    assert options['timeout'] == 10 and options['check'] and options['capture_output']
+    assert options['timeout'] == engines.MANIFEST_PARSE_TIMEOUT_SECONDS
+    assert options['check'] and options['capture_output']
 
 
 def test_changed_external_declaration_and_new_dependency_are_not_cached(source_tree):
@@ -138,3 +143,32 @@ def test_changed_external_declaration_and_new_dependency_are_not_cached(source_t
     root.write_text(root.read_text() + '\n[build-dependencies]\nmissing = { path = "../missing" }\n')
     with pytest.raises(engines.EnginePreparationError, match='no manifest'):
         engines.source_fingerprint(source_tree)
+
+
+def test_manifest_parse_uses_remaining_preparation_budget(source_tree, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(engines.time, 'monotonic', lambda: 100.0)
+    calls = []
+
+    def parse(command, **options):
+        calls.append(options['timeout'])
+        return SimpleNamespace(stdout='{"package":"fixture"}')
+
+    monkeypatch.setattr(engines.subprocess, 'run', parse)
+    token = engines._deadline.set(123.0)
+    try:
+        assert engines._read_manifest(source_tree / 'packages/tofu-db/Cargo.toml')['package'] == 'fixture'
+    finally:
+        engines._deadline.reset(token)
+    assert calls == [23.0]
+
+
+def test_expired_preparation_does_not_launch_manifest_parser(source_tree, monkeypatch):
+    monkeypatch.setattr(engines.time, 'monotonic', lambda: 100.0)
+    monkeypatch.setattr(engines.subprocess, 'run', lambda *a, **k: pytest.fail('expired preparation launched a child'))
+    token = engines._deadline.set(100.0)
+    try:
+        with pytest.raises(engines.EnginePreparationError, match='preparation timed out'):
+            engines._read_manifest(source_tree / 'packages/tofu-db/Cargo.toml')
+    finally:
+        engines._deadline.reset(token)

@@ -26,6 +26,34 @@ export function runStatusLabel(status: string, copy: StudioCopy): string {
   return copy(key[status] || 'missionStatusUnknown');
 }
 
+type ComputeWait = NonNullable<EvolutionRun['compute_wait']>;
+/** The live run's compute wait while its job status cannot be read or verified. */
+export function stalledComputeWait(run: EvolutionRun | undefined): ComputeWait | undefined {
+  const wait = run?.status === 'executing' ? run.compute_wait : undefined;
+  return wait?.last_error ? wait : undefined;
+}
+
+/** A live run's wait outranks its current task's archived turn: a parked turn is not a finished delivery. */
+export function waitStatusLabel(run: EvolutionRun, copy: StudioCopy): string {
+  if (run.status !== 'executing') return '';
+  if (run.compute_wait) return copy(run.compute_wait.last_error ? 'computeStalled' : 'waitingCompute');
+  return run.background_wait ? copy('waitingBackground') : '';
+}
+
+export interface StallFact {fact: 'at' | 'since' | 'error' | 'origin'; label: string; value?: string; code?: string; bad?: boolean}
+/** Where a stalled compute wait is stuck, in reading order; empty while its job status reads succeed. */
+export function computeStallFacts(run: EvolutionRun, copy: StudioCopy): StallFact[] {
+  const wait = stalledComputeWait(run);
+  if (!wait) return [];
+  const exit = wait.last_error!.startsWith('successful_exit_unverified');
+  const facts: StallFact[] = [{fact: 'at', label: copy('stallAt'), value: copy(exit ? 'stallVerifyingExit' : 'stallReadingStatus'), code: wait.operation_id}];
+  if (wait.failed_since) facts.push({fact: 'since', label: copy('stallSince'), value: new Date(wait.failed_since * 1000).toLocaleString(
+    document.documentElement.lang || undefined, {month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit'})});
+  facts.push({fact: 'error', label: copy('computeLastError'), code: wait.last_error, bad: true});
+  if (wait.last_error_origin) facts.push({fact: 'origin', label: copy('computeErrorOrigin'), code: wait.last_error_origin});
+  return facts;
+}
+
 export function failureReason(error: string | undefined, copy: StudioCopy): string {
   if (!error) return '';
   const code = error.split(/[;:]/, 1)[0].trim().toLowerCase();
@@ -73,6 +101,7 @@ export function runTelemetry(run: EvolutionRun, workspace: GoalWorkspace | undef
 
 export function taskRecords(run: EvolutionRun, copy: StudioCopy) {
   const records = new Map<string, {taskId: string; stage: string; status: string; outcomeAvailable: boolean; restoredFromOutcome: boolean; reviewFormatNote: string}>();
+  const waiting = waitStatusLabel(run, copy);
   for (const receipt of run.receipts || []) {
     if (!receipt.task_id) continue;
     records.set(receipt.task_id, {
@@ -82,12 +111,12 @@ export function taskRecords(run: EvolutionRun, copy: StudioCopy) {
         : receipt.review_format_retry.admitted ? 'reviewFormatRetryAdmitted' : 'reviewFormatRetryRefused') : '',
       stage: copy(receipt.stage === 'reviewing' ? 'reviewer' : receipt.stage === 'executing' ? 'executor' : 'executionRecords'),
       outcomeAvailable: receipt.submission_voided !== true && receipt.outcome_available === true, restoredFromOutcome: receipt.submission_voided !== true && receipt.restored_from_outcome === true,
-      status: receipt.submission_voided === true ? copy('sourceNotSubmitted') : receipt.terminal_verdict ? copy({completed:'sourceCompletedShort',interrupted:'sourceInterrupted',
+      status: receipt.submission_voided === true ? copy('sourceNotSubmitted') : receipt.task_id === run.task_id && waiting ? waiting : receipt.terminal_verdict ? copy({completed:'sourceCompletedShort',interrupted:'sourceInterrupted',
         truncated:'sourceTruncated',failed:'sourceFailed'}[receipt.terminal_verdict]) : runStatusLabel(receipt.task_id === run.task_id && isTerminalRun(run) && !['completed','failed','cancelled','success','error'].includes(receipt.status || '') ? run.status : receipt.status || 'unknown', copy),
     });
   }
   if (run.task_id && !records.has(run.task_id)) {
-    records.set(run.task_id, {taskId: run.task_id, stage: copy('inspectTask'), status: runStatusLabel(run.status, copy), outcomeAvailable: false, restoredFromOutcome: false, reviewFormatNote: ''});
+    records.set(run.task_id, {taskId: run.task_id, stage: copy('inspectTask'), status: waiting || runStatusLabel(run.status, copy), outcomeAvailable: false, restoredFromOutcome: false, reviewFormatNote: ''});
   }
   return [...records.values()].reverse();
 }

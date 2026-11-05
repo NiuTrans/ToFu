@@ -131,22 +131,36 @@ def test_behaviour_snapshot_once_and_flow_skip():
         'Flow-managed tasks never get a snapshot')
 
 
-def test_behaviour_log_open_bracket_and_timing(caplog):
-    """Both log lines fire; queue_wait only when _t_created is set; the
-    return value is a float timestamp."""
+def test_behaviour_log_open_bracket_and_timing(caplog, monkeypatch):
+    """Both log lines fire; queue_wait only when the monotonic creation
+    anchor is set; durations never subtract wall-clock readings."""
+    import time
     import lib.tasks_pkg.orchestrator._task_open as leaf
+
+    real_monotonic = time.monotonic
+
+    class _SteppedWallClock:  # an NTP step must not reach the duration
+        monotonic = staticmethod(real_monotonic)
+
+        @staticmethod
+        def time():
+            return 0.0
+
+    monkeypatch.setattr(leaf, 'time', _SteppedWallClock)
+    created = time.monotonic() - 2.0
     with caplog.at_level('INFO'):
         out = leaf.log_task_open(
             {'id': 'deadbeefcafebabe', 'convId': 'c1', 'messages': [1, 2],
-             '_t_created': 1000.0}, 'deadbeef')
-    assert isinstance(out, float)
+             '_t_created_monotonic': created}, 'deadbeef')
+    assert isinstance(out, float) and out >= created + 2.0
     assert any('▶ START' in r.message and 'deadbeefcafebabe' in r.message
                for r in caplog.records), (
         'the START bracket must carry the FULL task id')
-    assert any('queue_wait=' in r.message for r in caplog.records)
+    [queue_wait] = [r.message for r in caplog.records if 'queue_wait=' in r.message]
+    assert 2.0 <= float(queue_wait.split('queue_wait=')[1].split('s')[0]) < 60
     caplog.clear()
     with caplog.at_level('INFO'):
         leaf.log_task_open(
             {'id': 'deadbeefcafebabe', 'messages': []}, 'deadbeef')
     assert not any('queue_wait=' in r.message for r in caplog.records), (
-        'no _t_created → no queue_wait line')
+        'no creation anchor → no queue_wait line')

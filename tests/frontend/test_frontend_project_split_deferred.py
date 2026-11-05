@@ -52,8 +52,8 @@ def test_workspace_declares_one_closed_dependency_surface():
         'frontend/src/core/project-browse-coordinator.ts': (
             'createProjectBrowseCoordinator',
         ),
-        'frontend/src/features/project/directory-browser.ts': (
-            'createProjectDirectoryBrowser',
+        'frontend/src/features/project/folder-browser.ts': (
+            'createFolderBrowser',
         ),
         'frontend/src/features/project/presentation-assets.ts': (
             'PROJECT_PRESENTATION_ASSETS',
@@ -74,15 +74,9 @@ def test_workspace_declares_one_closed_dependency_surface():
         'onProjectCleared': 'function',
         'reconcileConversationCatalogMetadata': 'function',
         'renderConversationList': 'function',
-        'showAlert': 'function',
         'showConfirm': 'function',
-        'showPrompt': 'function',
         'showToast': 'function',
     }
-    # The typed renderer emits these two declarative action names, so they are
-    # explicit ports instead of relying on the classic-source action scanner.
-    assert bundle['runtimeExports'] == [
-        'ProjectModalPresentation',
-        'mpAddBrowsedPath',
-        'mpDeleteFolder',
-    ]
+    # The typed folder browser binds its own controls, so no declarative action
+    # names leave the bundle; only the eager state owner's port is exported.
+    assert bundle['runtimeExports'] == ['ProjectModalPresentation']

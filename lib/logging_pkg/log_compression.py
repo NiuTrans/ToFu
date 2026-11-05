@@ -24,10 +24,6 @@ LOG_COMPRESSION_TIMEOUT_SECONDS = 120
 LOG_COMPRESSION_MAX_INPUT_CHARS = 60_000
 
 
-class LogCompressionBusyError(RuntimeError):
-    pass
-
-
 def compress_logs(text: str, *, owner_user_id: int) -> tuple[str, dict]:
     bounded_text = str(text or "").strip()
     if len(bounded_text) > LOG_COMPRESSION_MAX_INPUT_CHARS:
@@ -42,9 +38,7 @@ def compress_logs(text: str, *, owner_user_id: int) -> tuple[str, dict]:
         owner_user_id=owner_user_id,
         deadline_seconds=LOG_COMPRESSION_TIMEOUT_SECONDS,
     )
-    admission_lease = acquire_and_bind_admission(session, controller)
-    if admission_lease is None:
-        raise LogCompressionBusyError("log compression is at capacity")
+    acquire_and_bind_admission(session, controller)
     session.mark_dispatch_started()
     deadline = time.monotonic() + LOG_COMPRESSION_TIMEOUT_SECONDS
 
@@ -101,6 +95,5 @@ def compress_logs(text: str, *, owner_user_id: int) -> tuple[str, dict]:
 __all__ = [
     "LOG_COMPRESSION_MAX_INPUT_CHARS",
     "LOG_COMPRESSION_TIMEOUT_SECONDS",
-    "LogCompressionBusyError",
     "compress_logs",
 ]

@@ -420,18 +420,12 @@ class BaseExceptionEmitsTerminalTest(unittest.TestCase):
             on_terminal, fire_terminal_callbacks,
         )
 
-        # Force the very first thing run_task does inside its try-body to
-        # raise a BaseException (KeyboardInterrupt).
-        orig_reset = None
-        try:
-            import lib.swarm.integration as si
-            orig_reset = si.reset_autocontinue_chain
+        # Force an early step of run_task's turn prelude, inside its
+        # try-body, to raise a BaseException (KeyboardInterrupt).
+        from unittest.mock import patch
 
-            def _boom(*a, **k):
-                raise KeyboardInterrupt('simulated cancel')
-            si.reset_autocontinue_chain = _boom
-        except Exception:
-            self.skipTest('cannot install swarm.integration boom hook')
+        def _boom(*a, **k):
+            raise KeyboardInterrupt('simulated cancel')
 
         task = create_task('conv-be',
                            [{'role': 'user', 'content': 'hi'}],
@@ -441,12 +435,9 @@ class BaseExceptionEmitsTerminalTest(unittest.TestCase):
         # DONE event should fire it.
         on_terminal(task['id'], lambda _tid: fired.__setitem__('terminal', True))
 
-        try:
-            with self.assertRaises(KeyboardInterrupt):
-                orch.run_task(task)
-        finally:
-            if orig_reset is not None:
-                si.reset_autocontinue_chain = orig_reset
+        with patch('lib.agent_core.profiles.resolve_profile_name', side_effect=_boom), \
+                self.assertRaises(KeyboardInterrupt):
+            orch.run_task(task)
 
         # The task reached a terminal status and a terminal event was emitted.
         self.assertEqual(task['status'], 'error')

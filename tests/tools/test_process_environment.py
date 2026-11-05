@@ -120,6 +120,43 @@ def test_project_search_stops_at_explicit_authorized_root(tmp_path, isolated_env
     assert str(tmp_path / '.venv/bin') not in environment['PATH'].split(os.pathsep)
 
 
+def test_command_child_drops_live_storage_handles_but_keeps_storage_configuration(
+        tmp_path, isolated_environment, monkeypatch):
+    # The manager already separates instance handles from configuration.
+    from serverctl_pkg.native_storage_host import _TRANSPORT_KEYS
+    from lib.project_mod.run_command import _is_sensitive_inherited_env
+
+    handles = {'TOFU_STORAGE_CONNECTION_FILE', 'TOFU_STORAGE_TOKEN',
+               'TOFU_STORAGE_PARENT_PID', 'TOFU_STORAGE_SERVICE_ID',
+               'TOFU_STORAGE_SERVICE_STATE', *_TRANSPORT_KEYS}
+    # debug/inspect_conversation.py follows the backend and PORT to the
+    # application's loopback API, and SQLite fastpath settings offline.
+    configuration = {
+        'TOFU_PERSONAL_STORAGE_BACKEND': 'tofudb',
+        'TOFUDB_BIN': '/opt/engine/tofu-db',
+        'TOFU_STORAGE_FASTPATH': 'auto',
+        'TOFU_STORAGE_RPC_CAPACITY': '64',
+        'PORT': '15999',
+    }
+    for name in handles:
+        # Relative values fail fast if anything in this process resolves them.
+        monkeypatch.setenv(name, f'live-handle-{name}')
+    for name, value in configuration.items():
+        monkeypatch.setenv(name, value)
+
+    environment = _get_cmd_env(str(tmp_path), project_root=str(tmp_path))
+    assert sorted(handles & set(environment)) == []
+    assert {name: environment.get(name) for name in configuration} == configuration
+    # Workspace runtime preparation filters with the same predicate.
+    assert all(_is_sensitive_inherited_env(name) for name in handles)
+
+    output = tool_run_command(
+        str(tmp_path), 'printenv ' + ' '.join(sorted({*handles, *configuration})))
+    assert 'live-handle-' not in output
+    for value in configuration.values():
+        assert f'\n{value}\n' in output
+
+
 def test_incomplete_virtualenv_refuses_python_instead_of_using_server_python(tmp_path, isolated_environment):
     (tmp_path / '.venv').mkdir()
     (tmp_path / '.venv/pyvenv.cfg').write_text('home = /missing\n')

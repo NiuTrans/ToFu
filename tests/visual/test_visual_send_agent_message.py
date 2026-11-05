@@ -65,7 +65,8 @@ def test_full_authored_message_without_receipt_json_and_reader_owned_fold(fronte
     page.set_viewport_size({'width': width, 'height': 900})
     content = _fixture(page, legacy=legacy)
     card = page.locator('.ptool-agent-message')
-    assert card.locator('code').inner_text() == content
+    # The complete authored body is present even while the row is folded.
+    assert card.locator('code').text_content() == content
     assert 'Message to dispatch-frontend' in card.locator('summary').inner_text()
     assert 'Submitted' in card.locator('.ptool-line-status').inner_text()
     for junk in ('contentChars', 'execution_started', 'receipt-id', 'owned-run', 'OLD RECEIPT'):
@@ -73,14 +74,18 @@ def test_full_authored_message_without_receipt_json_and_reader_owned_fold(fronte
     assert page.locator('#tool script').count() == 0
     assert not page.evaluate('Boolean(window.messageInjected)')
     summary = card.locator('summary')
+    # A routine send is one collapsed row; the reader owns the fold.
+    assert not card.locator('.ptool-result-body').is_visible()
+    assert summary.locator('.ptool-line-preview').is_visible()
     summary.focus()
     page.keyboard.press('Enter')
-    assert not card.locator('.ptool-result-body').is_visible()
+    assert card.locator('.ptool-result-body').is_visible()
     page.evaluate('repaint()')
-    assert not card.locator('.ptool-result-body').is_visible()
+    assert card.locator('.ptool-result-body').is_visible()
     assert summary.evaluate('node=>node===document.activeElement')
-    page.keyboard.press('Space')
     assert card.locator('code').inner_text() == content
+    page.keyboard.press('Space')
+    assert not card.locator('.ptool-result-body').is_visible()
     for theme in ('dark', 'light', 'tofu'):
         page.evaluate('theme=>document.documentElement.dataset.theme=theme', theme)
         assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
@@ -116,7 +121,7 @@ def test_stable_target_turn_and_submission_states(frontend_visual_page, width, s
     content = _fixture(page, stable=True, failed=submission_state is not None,
                        submission_state=submission_state, saved=saved)
     card = page.locator('.ptool-agent-message')
-    assert card.locator('code').first.inner_text() == content
+    assert card.locator('code').first.text_content() == content
     assert 'Message to persistent-colleague' in card.locator('summary').inner_text()
     assert card.locator('.ptool-line-status').inner_text() == label
     assert card.locator('.ptool-line-status--ok').count() == 0
@@ -144,7 +149,7 @@ def test_receipt_update_preserves_authored_body_and_reader_focus(frontend_visual
     summary = card.locator('summary')
     summary.focus()
     page.keyboard.press('Enter')
-    assert not card.locator('.ptool-result-body').is_visible()
+    assert card.locator('.ptool-result-body').is_visible()
     page.evaluate('''state => {
       const receipt=JSON.parse(round.toolContent);
       receipt.state=state;
@@ -154,8 +159,10 @@ def test_receipt_update_preserves_authored_body_and_reader_focus(frontend_visual
     label = card.locator('.ptool-line-status').inner_text()
     assert ('Input consumed' if state == 'input_confirmed' else 'Run ended') in label
     assert 'Submitted' not in label
-    assert not card.locator('.ptool-result-body').is_visible()
+    # The reader's open fold survives the receipt update; closing stays theirs.
+    assert card.locator('.ptool-result-body').is_visible()
     assert summary.evaluate('node=>node===document.activeElement')
-    page.keyboard.press('Enter')
     assert card.locator('code').inner_text() == content
+    page.keyboard.press('Enter')
+    assert not card.locator('.ptool-result-body').is_visible()
     assert page.locator('#tool script').count() == 0

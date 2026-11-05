@@ -56,11 +56,13 @@ from typing import Iterable
 # Model examples:
 #   image_gen     — dall-e-3, gemini-3-pro-image-preview (POST /images/*)
 #   embedding     — text-embedding-3-large            (POST /embeddings)
+#   reranking     — Qwen3-Reranker-0.6B               (POST /rerank)
 #   transcription — Doubao-Seed-ASR-2.0, whisper-1    (POST /audio/transcriptions)
 #   tts           — tts-1-hd, gpt-4o-mini-tts         (POST /audio/speech)
 CHAT_EXCLUDED_CAPS: frozenset[str] = frozenset({
     'image_gen',
     'embedding',
+    'reranking',
     'transcription',
     'tts',
 })
@@ -105,6 +107,7 @@ KNOWN_CAPABILITIES: tuple[str, ...] = (
     'cheap',
     'image_gen',
     'embedding',
+    'reranking',
     'transcription',
     'tts',
     'audio_chat',
@@ -145,6 +148,9 @@ CAPABILITY_SEMANTICS: dict[str, dict[str, object]] = {
         'in_chat_picker': False, 'is_dispatch_chat': False},
     'embedding': {
         'role': 'non-chat', 'endpoint': 'embeddings',
+        'in_chat_picker': False, 'is_dispatch_chat': False},
+    'reranking': {
+        'role': 'non-chat', 'endpoint': 'rerank',
         'in_chat_picker': False, 'is_dispatch_chat': False},
     'transcription': {
         'role': 'non-chat', 'endpoint': 'audio_transcriptions',

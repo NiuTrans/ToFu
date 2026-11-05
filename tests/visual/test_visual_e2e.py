@@ -10,12 +10,10 @@ Run:  pytest tests/visual/test_visual_e2e.py -m visual
 Screenshots saved to: tests/screenshots/
 
 NOTE: The ``page`` fixture (conftest.py) automatically cleans up any
-conversations created during each test (snapshot-diff of conversation ids
-→ browser-side ``deleteConversation``), backed by a session-autouse
-pattern-purge of known test-only rows, so E2E runs don't leave ghost
-entries in the production database.  Tests that create their own page/
-context (e.g. TestResponsive) should use ``_cleanup_test_convs()`` if
-they send messages.
+conversations created during each test (diff of the server's conversation
+inventory → server DELETE), including chats that never render as sidebar
+rows.  Tests that create their own page/context (e.g. TestResponsive)
+should use ``_cleanup_test_convs()`` if they send messages.
 
 These tests need Playwright + a Chromium build (``pip install playwright
 && playwright install chromium``); when either is missing the ``browser``
@@ -40,8 +38,7 @@ def _cleanup_test_convs(page, server_url: str, ids_before: set[str]):
     """Delete conversations created during a test (for manually-created pages).
 
     Calls deleteConversation() from inside the browser so the frontend
-    removes them from memory (a server-side-only DELETE is insufficient
-    because the frontend re-syncs cached conversations back to the DB).
+    also removes them from memory, falling back to the server DELETE.
 
     Usage::
 

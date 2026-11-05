@@ -350,6 +350,61 @@ class TestCatalogSync:
         assert len(offerings) == 1
 
 
+@pytest.mark.unit
+class TestImportListedModels:
+    """The user's explicit "load all" imports the whole authenticated listing."""
+
+    @staticmethod
+    def _import(sandbox, listing, provider_id=None):
+        provider_id = provider_id or _document(sandbox)['provider_accesses'][0]['provider_id']
+        return cs.import_listed_models(
+            sandbox['boundary'], sandbox['repository'], provider_id,
+            discover=lambda _url, _key: listing)
+
+    def test_whole_listing_ignores_the_automatic_sweep_bounds(self, sandbox, monkeypatch):
+        monkeypatch.setattr(cs, '_MAX_CATALOG_MODELS', 3)
+        monkeypatch.setattr(cs, '_MAX_ADDITIONS_PER_PROVIDER', 2)
+        listing = _discover_rows('model-a', 'model-b', 'model-c', 'model-d', 'model-e')
+
+        result = self._import(sandbox, listing)
+        assert result['listed_model_count'] == 5
+        assert result['added_model_count'] == 4
+        assert result['revision'] == sandbox['repository'].get(sandbox['boundary']).revision
+        _doc, _access, offerings, deployments = _access_rows(sandbox)
+        served = {row.get('pending_model_id') or row['model']['model_id'] for row in offerings}
+        assert served == {'model-a', 'model-b', 'model-c', 'model-d', 'model-e'}
+        assert {row['wire_model_id'] for row in deployments} >= {'model-b', 'model-e'}
+
+        assert self._import(sandbox, listing)['added_model_count'] == 0
+
+    def test_explicit_request_restores_models_the_sweep_dismissed(self, sandbox):
+        access_id = _document(sandbox)['provider_accesses'][0]['provider_access_id']
+        cs._save_state(sandbox['boundary'],
+                       {'added': {}, 'dismissed': {access_id: ['model-b']}})
+
+        assert self._import(sandbox, _discover_rows('model-b'))['added_model_count'] == 1
+        state = cs._load_state(sandbox['boundary'])
+        assert 'model-b' not in state['dismissed'].get(access_id, [])
+        assert 'model-b' in state['added'][access_id]
+
+    def test_unlistable_provider_fails_with_a_typed_reason(self, sandbox):
+        from lib.model_routing import ModelRoutingError
+
+        with pytest.raises(ModelRoutingError) as empty:
+            self._import(sandbox, [])
+        assert empty.value.kind == 'provider_listing_empty'
+
+        _add_second_access(sandbox, provider_id='local-p',
+                           base_url='http://127.0.0.1:8000/v1')
+        with pytest.raises(ModelRoutingError) as local:
+            self._import(sandbox, _discover_rows('model-b'), provider_id='local-p')
+        assert local.value.kind == 'provider_listing_unavailable'
+
+        with pytest.raises(ModelRoutingError) as unknown:
+            self._import(sandbox, _discover_rows('model-b'), provider_id='no-such-provider')
+        assert unknown.value.kind == 'provider_not_found'
+
+
 @pytest.fixture()
 def poll_sandbox(sandbox, monkeypatch):
     """Deterministic clock + reset scheduler for polling tests."""

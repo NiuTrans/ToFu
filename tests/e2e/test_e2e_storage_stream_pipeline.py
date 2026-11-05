@@ -5,6 +5,8 @@ production paths; an explicit held durability gate proves no premature paint.
 """
 from __future__ import annotations
 
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+
 import json
 import os
 from pathlib import Path
@@ -94,7 +96,7 @@ def test_native_stream_durability_push_and_browser_anchors(page, monkeypatch):
                         anchors[marker]['push_ms'] = now_ms()
         return original_push(channel, task_id, event, user_id=user_id)
 
-    monkeypatch.setattr(llm_call, 'stream_llm_response', source)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', source)
     monkeypatch.setattr(turn_lifecycle, 'record_task_event', record)
     monkeypatch.setattr(push, 'push_event', observed_push)
     monkeypatch.setattr(StorageV2Session, 'request', acknowledged_request)

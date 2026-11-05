@@ -40,6 +40,7 @@ def round_evidence_turn(task: dict, round_num: int | None) -> str:
 def build_round_evidence(task: dict, messages: list, *, ref: dict,
                          kind: str, model: str, prepared_messages=None,
                          params=None, tools=None) -> dict:
+    from lib.conversation_sync.settled_rows import settle_items
     from lib.tasks_pkg.manager._events import _strip_base64_for_snapshot
     from lib.tasks_pkg.wire_messages import apply_wire_sanitize
     canonical = isinstance(prepared_messages, list)
@@ -47,7 +48,12 @@ def build_round_evidence(task: dict, messages: list, *, ref: dict,
         messages, conv_id=task.get('convId', ''),
         provider_id=task.get('provider_id') or '',
         user_id=task.get('_userId') or None)
-    snapshot = _strip_base64_for_snapshot(wire)
+    # Snapshot messages are settled and an unchanged message keeps the previous
+    # snapshot's twin, whose memoized digest the event-log delta projector
+    # (snapshot_delta) reuses instead of re-encoding the whole history.
+    snapshot = settle_items(_strip_base64_for_snapshot(wire),
+                            previous=task.get('_snapshotMessages'))
+    task['_snapshotMessages'] = snapshot
     label = '请求前' if kind == 'request' else '工具结果后'
     event = build_event(
         EventType.MESSAGES_SNAPSHOT, kind=kind, model=model,

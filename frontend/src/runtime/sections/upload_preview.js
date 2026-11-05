@@ -68,22 +68,88 @@ async function previewPendingPdfText(i) {
   }
   openTextPreview(title, meta, text);
 }
+
+/* The overlay is a viewer, not a poster. Fitting the whole bitmap into the
+ * viewport made a tall page render SMALLER than the same image in the message
+ * body, so "enlarge" read as a zoom-out and there was no way back to 1:1. Two
+ * explicit modes now exist:
+ *   natural — as wide as the viewport allows, never upscaled above 1:1; a
+ *             taller-than-viewport bitmap scrolls instead of shrinking.
+ *   whole   — the entire bitmap inside the viewport, for an overview.
+ * Click/Enter toggles between them, so the clicked image is always at least
+ * as large as the inline render and 1:1 is always reachable. */
+function _previewImageViewport() {
+  return {
+    width: Math.max(120, Math.round((window.innerWidth || 1200) * 0.92)),
+    height: Math.max(120, Math.round((window.innerHeight || 900) * 0.86)),
+  };
+}
+function _previewImageResize(image, scale) {
+  image.style.width = `${Math.round((image.naturalWidth || 0) * scale)}px`;
+  image.style.height = `${Math.round((image.naturalHeight || 0) * scale)}px`;
+}
+function _previewImageNatural(image) {
+  const naturalWidth = image.naturalWidth || 0;
+  if (!naturalWidth || !(image.naturalHeight || 0)) return;
+  const viewport = _previewImageViewport();
+  _previewImageResize(image, Math.min(1, viewport.width / naturalWidth));
+  image.classList.remove("preview-image--whole");
+}
+function _previewImageWhole(image) {
+  const naturalWidth = image.naturalWidth || 0;
+  const naturalHeight = image.naturalHeight || 0;
+  if (!naturalWidth || !naturalHeight) return;
+  const viewport = _previewImageViewport();
+  _previewImageResize(image, Math.min(
+    1, viewport.width / naturalWidth, viewport.height / naturalHeight,
+  ));
+  image.classList.add("preview-image--whole");
+}
+function togglePreviewImageZoom(image) {
+  if (image.classList.contains("preview-image--whole")) _previewImageNatural(image);
+  else _previewImageWhole(image);
+}
 function openImagePreview(src) {
   if (!src) return;
   const body = document.getElementById("previewBody");
   const modal = document.getElementById("previewModal");
   if (!body || !modal) return;
-  const close = document.createElement("button");
-  close.type = "button";
-  close.className = "preview-close-btn";
-  close.dataset.tofuAction = "closePreview()";
-  close.setAttribute("aria-label", typeof t === 'function' ? t('common.close') : 'Close');
-  close.textContent = "✕";
+  /* Reuse the close button across opens. Rebuilding it would remove the
+   * currently focused node, and the browser's focus fixup then lands on the
+   * now-focusable preview image instead of on the close control. */
+  let close = body.querySelector(".preview-close-btn");
+  if (!close) {
+    close = document.createElement("button");
+    close.type = "button";
+    close.className = "preview-close-btn";
+    close.dataset.tofuAction = "closePreview()";
+    close.setAttribute("aria-label", typeof t === 'function' ? t('common.close') : 'Close');
+    close.textContent = "✕";
+  }
   const image = document.createElement("img");
   image.src = String(src);
   image.alt = "Preview";
   image.className = "preview-image";
-  body.replaceChildren(close, image);
+  image.tabIndex = 0;
+  image.setAttribute("role", "button");
+  image.title = typeof t === 'function' ? t('markdown.previewImage') : 'Enlarge image';
+  _previewImageNatural(image);
+  image.addEventListener("load", () => {
+    if (image.isConnected && !image.classList.contains("preview-image--whole")) {
+      _previewImageNatural(image);
+    }
+  }, { once: true });
+  image.addEventListener("click", () => togglePreviewImageZoom(image));
+  image.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    togglePreviewImageZoom(image);
+  });
+  for (const child of Array.from(body.children)) {
+    if (child !== close) child.remove();
+  }
+  if (close.parentElement !== body) body.prepend(close);
+  body.append(image);
   showAttachmentPreview(document, typeof t === 'function' ? t('markdown.previewTitle') : 'Attachment preview');
 }
 function openTextPreview(title, meta, text) {

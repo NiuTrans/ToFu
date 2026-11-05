@@ -18,7 +18,8 @@ Journal.recover is explicit: trusted Store proves writer-process death, then the
 existing CAS advances generation with Keep. It never retries ambiguous delivery
 or accepts inflight/terminal/legacy fences. Verify checkpoint-journal fault tests.
 checkpoint_writer.rs owns shared Linux boot/PID-namespace/start-tick capture
-and pidfd death proof. Missing evidence refuses; elapsed time grants no takeover.
+and pidfd death proof; only ENOSYS selects kill(2)/procfs whole-group exit.
+Missing evidence refuses; elapsed time grants no takeover.
 Keep real child SIGKILL/reap, live/foreign identity and recycled-PID checks in
 both runtime feature modes; database adapters borrow this owner without copies.
 inspect_abandoned_frontier only observes completed/paid-pending dead-writer state;
@@ -233,8 +234,11 @@ real Agent loops and native-store reopen. Never reexecute frozen terminal debt;
 metadata fence and task commit are ordered separate transactions, not atomic.
 `tool_scheduler.rs` owns atomic batch admission, explicit read classification and
 joined scoped parallel execution; `Agent.scheduling` selects it at composition.
+`Scheduler::concurrent` starts every call, writes included; `dispatch_in_order`
+keeps only the host-declared earlier positions (Permit tool order), skips
+undispatched ones and lets a waiting call settle on Stop/deadline unentered.
 Verify 32-read overlap with hint 1, ordered writes, parent Stop, required-cleanup
-priority, partial startup before any effect,
+priority, partial startup before any effect, the concurrent order/Stop tests,
 reentrant refusal and concurrent joined close. Authorization must be Send+Sync.
 Never infer safe overlap from read permission alone or use the global Rayon pool.
 
@@ -273,8 +277,10 @@ terminal and write refusal before network effects. Never infer host authority.
 
 `cli_agent_control.rs` owns the single reactor reader, exclusive control slot,
 request-bound concurrent tool replies and required joined Upstream lease.
-`parallel_tool_names` binds the existing Scheduler; model_call_id carries exact
-occurrence correlation separately from approval. Verify reverse tool replies,
+`parallel_tool_names` binds the existing Scheduler; `concurrent_tool_dispatch`
+(exclusive with it; requires round and sibling control) binds the concurrent one
+and requires `round_ack.tool_order` on returned evidence, validated before any
+approval. model_call_id carries exact occurrence correlation separately from approval. Verify reverse tool replies,
 half-close after delivered replies, silent-provider cancel, unissued/duplicate frame refusal,
 weak parent lifetime, original stdin flags before terminal, and actor-fault
 cleanup. Never replace it with a detached blocking stdin reader.

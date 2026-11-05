@@ -102,7 +102,11 @@ test('adding a compiled template preserves unprobed state and gives explicit set
       Api: { modelRouting: { createProvider: async (draft, revision) => {
         posted.push({ draft, revision }); return { provider: draft.provider, revision: 2 };
       } } },
-      _loadModelRoutingAuthority: async () => {}, _renderModelRoutingTabs: () => {},
+      runModelRoutingMutation: async send => {
+        assert.equal((await send(1)).revision, 2);
+        return { refreshed: true };
+      },
+      _renderModelRoutingTabs: () => {},
       document: { querySelectorAll: () => [] },
       showAlert: message => assert.fail(message), showToast: message => toasts.push(message),
       t: key => copy[key],

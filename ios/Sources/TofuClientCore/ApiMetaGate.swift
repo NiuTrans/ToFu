@@ -11,15 +11,6 @@ import Foundation
 /// Android only. The apiMajor check is the cross-platform one.)
 public enum ApiMetaGate {
 
-    /// Absolute meta URL under the profile's base path. Resolving the absolute
-    /// META_PATH against the origin would DROP the `/proxy/<port>/` prefix of
-    /// a vscode code-server deploy, so the path is appended to the base as typed.
-    public static func metaUrl(_ baseUrl: String) -> String {
-        var base = baseUrl
-        while base.hasSuffix("/") { base.removeLast() }
-        return base + "/" + ApiV4Contract.metaPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-    }
-
     /// nil = compatible or unknown (never blocks on partial knowledge).
     /// Non-nil = the user-facing reason this build refuses to proceed.
     public static func incompatibilityReason(status: Int, body: String?) -> String? {

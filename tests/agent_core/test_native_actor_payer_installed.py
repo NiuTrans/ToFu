@@ -17,7 +17,7 @@ import pytest
 
 from lib.agent_core.native_model_control import ModelPricing
 from lib.agent_core.native_process import Budget, NativeProcessClient
-from lib.billing.cost import native_task_cost, transfer_native_child_fees
+from lib.billing.native_cost import native_task_cost, transfer_native_child_fees
 from lib.billing.native_actor_fees import capture
 from lib.tasks_pkg.native_model_account import NativeModelAccountPolicy
 from tests.agent_core.test_native_task_terminal import principal
@@ -31,6 +31,8 @@ def test_installed_actor_payer_transport_does_not_replay_or_reprice_paid_generat
     archive = os.environ.get('TOFU_NATIVE_MODEL_CONTROL_TEST_ARCHIVE')
     if not archive:
         pytest.skip('explicit verified native archive required')
+    from scripts.build_native_runtime import verify
+    application_version = verify(Path(archive))['build']['application_version']
     seen, tools, snapshots, invoices = [], [], [], []
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
@@ -112,7 +114,7 @@ def test_installed_actor_payer_transport_does_not_replay_or_reprice_paid_generat
                 return 'feedback-'+actor['id']
             client = NativeProcessClient.from_archive(archive=Path(archive),
                 sha256=hashlib.sha256(Path(archive).read_bytes()).hexdigest(),
-                application_version='0.18.0', principal=principal(),
+                application_version=application_version, principal=principal(),
                 budget=Budget(1, 256*1024*1024, 65536, 65536, 5))
             try:
                 result = await client.run(dict(config, task_id=actor['id']), callbacks={'lookup': lookup},

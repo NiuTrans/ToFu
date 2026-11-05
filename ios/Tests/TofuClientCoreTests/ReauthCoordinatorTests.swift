@@ -19,7 +19,7 @@ final class ReauthCoordinatorTests: XCTestCase {
         let (c, rec) = make()
         let verdict = c.navigationVerdict(
             url: "https://h.example/login", isMainFrame: true,
-            hasGesture: false, ownHost: "h.example"
+            hasGesture: false, ownURL: "https://h.example/proxy/15000/"
         )
         XCTAssertEqual(verdict, .interceptForReauth)
         XCTAssertTrue(c.inFlight)
@@ -28,7 +28,7 @@ final class ReauthCoordinatorTests: XCTestCase {
         // Latched: a second trigger while in-flight must not fire again.
         _ = c.navigationVerdict(
             url: "https://h.example/login", isMainFrame: true,
-            hasGesture: false, ownHost: "h.example"
+            hasGesture: false, ownURL: "https://h.example/proxy/15000/"
         )
         XCTAssertEqual(rec.actions, [.reauthStarted])
     }
@@ -39,7 +39,7 @@ final class ReauthCoordinatorTests: XCTestCase {
         let (c, rec) = make(.interactiveSso)
         let verdict = c.navigationVerdict(
             url: "https://h.example/login", isMainFrame: true,
-            hasGesture: false, ownHost: "h.example"
+            hasGesture: false, ownURL: "https://h.example/proxy/15000/"
         )
         XCTAssertEqual(verdict, .allow)
         c.trigger()
@@ -68,7 +68,8 @@ final class ReauthCoordinatorTests: XCTestCase {
             c.trigger()
             XCTAssertTrue(c.inFlight)
             c.settle(succeeded: false)
-            XCTAssertEqual(rec.actions.count, i)   // no .exhausted yet unless last
+            XCTAssertEqual(rec.actions, Array(repeating: .reauthStarted, count: i) +
+                (i == ReauthCoordinator.maxConsecutiveFailures ? [.exhausted] : []))
         }
         XCTAssertEqual(rec.actions.last, .exhausted)
         XCTAssertEqual(c.consecutiveFailures, 0)   // counter reset after giving up
@@ -82,12 +83,12 @@ final class ReauthCoordinatorTests: XCTestCase {
         let (c, _) = make()
         XCTAssertEqual(
             c.navigationVerdict(url: "mailto:dev@example.com", isMainFrame: true,
-                                hasGesture: true, ownHost: "h.example"),
+                                hasGesture: true, ownURL: "https://h.example/proxy/15000/"),
             .openExternally
         )
         XCTAssertEqual(
             c.navigationVerdict(url: "tel:+123", isMainFrame: true,
-                                hasGesture: true, ownHost: "h.example"),
+                                hasGesture: true, ownURL: "https://h.example/proxy/15000/"),
             .openExternally
         )
     }
@@ -98,25 +99,25 @@ final class ReauthCoordinatorTests: XCTestCase {
         let (c, _) = make()
         XCTAssertEqual(
             c.navigationVerdict(url: "https://other.example/page", isMainFrame: true,
-                                hasGesture: true, ownHost: "h.example"),
+                                hasGesture: true, ownURL: "https://h.example/proxy/15000/"),
             .openExternally
         )
         XCTAssertEqual(
             c.navigationVerdict(url: "https://other.example/page", isMainFrame: true,
-                                hasGesture: false, ownHost: "h.example"),
+                                hasGesture: false, ownURL: "https://h.example/proxy/15000/"),
             .allow
         )
         // Same host with a gesture is just navigation.
         XCTAssertEqual(
             c.navigationVerdict(url: "https://h.example/page", isMainFrame: true,
-                                hasGesture: true, ownHost: "h.example"),
+                                hasGesture: true, ownURL: "https://h.example/proxy/15000/"),
             .allow
         )
         // SSO IdP hops are foreign-host navigations that MUST stay in place.
         let (sso, _) = make(.interactiveSso)
         XCTAssertEqual(
             sso.navigationVerdict(url: "https://idp.foreign.example/auth", isMainFrame: true,
-                                  hasGesture: true, ownHost: "h.example"),
+                                  hasGesture: true, ownURL: "https://h.example/proxy/15000/"),
             .allow
         )
     }
@@ -125,7 +126,7 @@ final class ReauthCoordinatorTests: XCTestCase {
         let (c, rec) = make()
         let verdict = c.navigationVerdict(
             url: "https://h.example/login", isMainFrame: false,
-            hasGesture: false, ownHost: "h.example"
+            hasGesture: false, ownURL: "https://h.example/proxy/15000/"
         )
         XCTAssertEqual(verdict, .allow)
         XCTAssertTrue(rec.actions.isEmpty)

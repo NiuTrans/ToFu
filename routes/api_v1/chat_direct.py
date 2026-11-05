@@ -48,11 +48,11 @@ from lib.agent_core.direct_stream import (
     _DIRECT_MAX_TIMEOUT_S,
     run_direct_stream,
 )
-from lib.agent_core.sse_limit import limiter as sse_limiter
 from lib.api_response import api_bad_request, api_error, api_payload, sse_response
 from lib.billing.request_flow import (
     estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
 )
+from lib.error_envelope import BadRequest
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
 from lib.llm.stream_result import ProviderStreamResult
@@ -69,7 +69,7 @@ from .auth import (
     current_auth, guard_model_relay_or_dispose, request_principal,
     require_scope,
 )
-from .chat import _try_acquire_sse_slot, _validate_messages
+from .chat import _validate_messages
 from routes.model_routing_adapter import (
     dispose_routed_slot_group,
     mint_native_request_route,
@@ -119,7 +119,7 @@ async def serve_direct_completion(body, *, compatibility=False):
     """
     try:
         messages = _validate_messages(require_list(body, 'messages'))
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e), field='messages')
     if not messages:
         return api_bad_request('messages is empty', field='messages')
@@ -131,8 +131,9 @@ async def serve_direct_completion(body, *, compatibility=False):
         try:
             _, cfg_in, options = translate_openai_request(body)
             client_tools, client_tool_choice = validate_client_tools(body)
-        except ValueError as error:
-            return api_bad_request(str(error))
+        except BadRequest as error:
+            return api_bad_request(
+                str(error), **({'field': error.field} if error.field else {}))
     else:
         cfg_in = optional_dict(body, 'config') or {}
     timeout_s = optional_int(
@@ -273,37 +274,9 @@ async def serve_direct_completion(body, *, compatibility=False):
             ),
         )
 
-    # Admission control: shared backpressure with the rest of the headless
-    # surface. The lease follows the upstream dispatch, not the frontend SSE
+    # The execution lease follows the upstream dispatch, not the frontend SSE
     # lifetime, so repeated disconnects cannot create uncounted model work.
-    try:
-        sse_slot_token, sse_rejection = _try_acquire_sse_slot(auth)
-    except Exception:
-        await asyncio.to_thread(
-            execution_session.settle,
-            ExecutionPhase.FAILED,
-            cause='sse_admission_failed',
-        )
-        raise
-    if sse_rejection is not None:
-        await asyncio.to_thread(
-            execution_session.settle,
-            ExecutionPhase.FAILED,
-            cause='sse_admission_refused',
-        )
-        return sse_rejection
-    try:
-        admission_lease = acquire_and_bind_admission(
-            execution_session, controller)
-    except Exception:
-        sse_limiter.release(sse_slot_token)
-        raise
-    if admission_lease is None:
-        sse_limiter.release(sse_slot_token)
-        logger.warning('[chat_direct] admission refused (in_flight=%d/%d)',
-                       controller.in_flight, controller.capacity)
-        return api_error('Server at capacity; retry shortly.', status=503,
-                         error_kind='overloaded', retry_after=5)
+    acquire_and_bind_admission(execution_session, controller)
     dispatch_terminal: dict = {}
 
     def _dispatch_started():
@@ -381,7 +354,6 @@ async def serve_direct_completion(body, *, compatibility=False):
     async def _gen():
         try:
             async for frame in inner:
-                sse_limiter.refresh(sse_slot_token)
                 yield frame
         finally:
             try:
@@ -400,7 +372,6 @@ async def serve_direct_completion(body, *, compatibility=False):
                     ExecutionPhase.FAILED,
                     cause='response_closed_before_dispatch',
                 )
-            sse_limiter.release(sse_slot_token)
 
     if compatibility and not options['stream']:
         wire_error = None

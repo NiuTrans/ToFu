@@ -19,6 +19,7 @@ _SOURCE_KINDS = {'result_source': 'deliverable', 'tool_evidence_source': 'tool_e
                  'artifact_evidence_source': 'artifact_evidence',
                  'background_evidence_source': 'background_evidence'}
 _BINDING_FIELDS = ('run_id', 'stage_launch', 'attempt', 'episode_id', 'objective',
+    'skill_selection', 'skill_bindings', 'research_context',
     'acceptance_requirements', 'exploration_hypothesis', 'evidence_review_version', 'context_seed',
     'scientific_protocol', 'scientific_required_outcome', 'require_requirement_originals',
     *_SOURCE_KINDS)

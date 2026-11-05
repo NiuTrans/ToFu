@@ -10,7 +10,7 @@ import pytest
 
 # Intentional references to paths that do not (and must not)
 # exist in the real repo — negative-case fixture anchors.
-_AUDIT_SYNTHETIC_REPO_PATHS = {'scripts/check.py', 'scripts/check_release.py', 'scripts/client.py', 'scripts/generated_contract.py', 'tests/test_release.py'}
+_AUDIT_SYNTHETIC_REPO_PATHS = {'scripts/check.py', 'scripts/check_release.py', 'scripts/client.py', 'scripts/generated_contract.py', 'tests/test_plain.py', 'tests/test_release.py'}
 
 
 pytestmark = pytest.mark.unit
@@ -89,3 +89,16 @@ def test_retained_test_imports_require_tracked_script_owners(tmp_path, statement
     assert check_declared_scripts(tmp_path, tracked) == [
         'declared build script is not tracked: scripts/check_release.py']
     assert check_declared_scripts(tmp_path, tracked | {'scripts/check_release.py'}) == []
+
+
+def test_script_mentions_only_narrow_which_retained_tests_are_read(tmp_path):
+    from scripts.check_monorepo import check_declared_scripts
+    (tmp_path / 'tests').mkdir()
+    (tmp_path / 'tests/test_release.py').write_text('from scripts import check_release\n')
+    (tmp_path / 'tests/test_plain.py').write_text('def test_plain():\n    pass\n')
+    tracked = {'tests/test_release.py', 'tests/test_plain.py'}
+    missing = ['declared build script is missing: scripts/check_release.py']
+    assert check_declared_scripts(tmp_path, tracked) == missing
+    assert check_declared_scripts(
+        tmp_path, tracked, script_mentions={'tests/test_release.py'}) == missing
+    assert check_declared_scripts(tmp_path, tracked, script_mentions=set()) == []

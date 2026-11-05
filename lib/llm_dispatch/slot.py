@@ -133,6 +133,7 @@ class Slot:
     # the actual Provider identity persisted in RouteSnapshot/usage metadata.
     routing_provider_id: str = ''
     routing_owner_user_id: int = 0
+    routing_tenant_id: str = ''
     route_offering_id: str = ''
     route_deployment_id: str = ''
     route_connection_id: str = ''
@@ -211,7 +212,7 @@ class Slot:
     # Gateway-class outages (HTTP 502/503/504, upstream-vendor transients
     # wrapped in 4xx, mid-stream SSE errors). Counted separately for the
     # same reason: a gateway storm hits EVERY key on the provider
-    # uniformly, so it says nothing about key health (2026-08-03 sankuai
+    # uniformly, so it says nothing about key health (2026-08-03 example-corp
     # 502 storm: 813 such failures crushed the daily key-card success
     # rates to 40%/77%/10% and auto-disabled 2 of 3 healthy keys).
     gateway_errors: int = 0
@@ -280,6 +281,22 @@ class Slot:
     def key_stats_key_name(self) -> str:
         """Use v2 credential identity instead of request-random slot names."""
         return self.route_credential_id or self.key_name
+
+    def affinity_key(self) -> str:
+        """Stable conversation-affinity identity of the prompt-cache namespace.
+
+        Anthropic's prompt cache is keyed per upstream credential, but a
+        request-scoped v2 slot's ``key_name`` is a request-random
+        ``ephemeral_<16hex>`` handle minted per turn — an affinity recorded
+        against it can never match the next turn's fresh group. The stable
+        identity is the minted route: credential + deployment (a deployment
+        belongs to exactly one connection, so the endpoint is implied).
+        Configured v2 pool slots converge to the same identity because the
+        dispatcher already names them ``credential_id:deployment_id``.
+        """
+        if self.route_credential_id and self.route_deployment_id:
+            return f'{self.route_credential_id}:{self.route_deployment_id}'
+        return self.key_name
 
     @property
     def requests_5h(self) -> int:
@@ -473,11 +490,11 @@ class Slot:
                 not briefly cooled down and retried.
             is_account_quota: True when the quota signal is HTTP 402 Payment
                 Required — the gateway ACCOUNT's own credit pool is empty
-                (sankuai body: ext.error.source=AIGC, stage=validation), so
+                (example-corp body: ext.error.source=AIGC, stage=validation), so
                 EVERY model on this key is dead and the honest stop is the
                 key-wide ``exhausted`` flag. Per-model convergence there
                 just burns one live 402 per remaining model (2026-07-29
-                sankuai_key_2: 12 of 43 model entries stopped, ~30 more
+                example_corp_key_2: 12 of 43 model entries stopped, ~30 more
                 live 402s queued for real users). A 429+insufficient_quota
                 body stays VENDOR-AMBIGUOUS and keeps per-model granularity
                 (2026-07-28 aggregating-gateway contract).
@@ -598,7 +615,7 @@ class Slot:
             pass
         elif is_gateway:
             # Gateway-class outage — own daily counter ONLY. Feeding the
-            # failure stats here is what crushed all three sankuai key
+            # failure stats here is what crushed all three example-corp key
             # cards and auto-disabled two of them during the 2026-08-03
             # 502 storm; feeding the 429 streak would equally misattribute
             # an upstream outage to per-key contention.

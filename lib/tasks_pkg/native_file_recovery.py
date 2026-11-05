@@ -155,7 +155,9 @@ class NativeFileToolRecovery:
             calls = self._calls(request.state)
             self.batch = self.gateway.prepare_effects(request.round, calls)
             records = []
-            for _, call_id, number, operation in self.batch.identities():
+            # Records name the model's own calls (the checkpoint's identity);
+            # the batch keeps each occurrence's admission identity.
+            for call, (_, _, number, operation) in zip(calls, self.batch.identities()):
                 reference = decode(
                     "InvocationToolEffectInspectionReference" if self.registered_child else "ToolEffectInspectionReference",
                     dict(
@@ -167,7 +169,7 @@ class NativeFileToolRecovery:
                         ),
                     ),
                 )
-                records.append(dict(call_id=call_id, inspection=reference, tool_round=number))
+                records.append(dict(call_id=call['id'], inspection=reference, tool_round=number))
             metadata = dict(
                 format="tofu.native-file-tool-recovery/v1",
                 producer_task_id=self.task_id,

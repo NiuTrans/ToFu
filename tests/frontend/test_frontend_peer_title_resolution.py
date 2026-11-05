@@ -51,6 +51,7 @@ from tests._runtime_sections import (
     ROOT as SOURCE_ROOT,
     orchestration_legacy_test_root as _legacy_test_root,
 )
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -74,8 +75,7 @@ def _read(path: str) -> str:
 
 def _node() -> str:
     node = shutil.which('node')
-    if not node:
-        pytest.skip('node not available for extraction-and-eval')
+    require_node_modules('vite')
     return node
 
 

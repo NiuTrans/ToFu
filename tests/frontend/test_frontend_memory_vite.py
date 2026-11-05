@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests._esm_feature_harness import compile_feature_owner
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,18 +21,10 @@ ESBUILD = ROOT / 'scripts' / 'vite_test_bundle.mjs'
 
 def _node() -> str:
     value = shutil.which('node')
-    if not value:
-        pytest.skip('node not available')
+    require_node_modules('jsdom', 'vite')
     return value
 
 
-def _ready() -> bool:
-    return ESBUILD.is_file() and subprocess.run(
-        [_node(), '-e', "require('jsdom')"], cwd=ROOT, capture_output=True,
-    ).returncode == 0
-
-
-@pytest.mark.skipif(not _ready(), reason='jsdom + vite test bundler not installed')
 def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
     built = tmp_path / 'memory.js'
     compiled = compile_feature_owner(ESBUILD, MODULE, built, tmp_path)
@@ -63,10 +56,15 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
           scope: 'project', tags: ['one'], enabled: true }];
         const calls = [];
         let toggleReject, deleteReject;
+        const packageInstallResolvers = [];
         window.t = (key) => key; window.escapeHtml = (v) => String(v ?? '')
           .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
         window.debugLog = (...args) => calls.push(['debug', ...args]);
         window.showConfirm = async () => true;
+        window.showChoice = async (choice) => {
+          calls.push(['destinationChoices', choice.options.map((option) => option.value)]);
+          return 'cancel';
+        };
         window._applyMemoryUI = (enabled) => {
           global.memoryEnabled = enabled; calls.push(['applyMemory', enabled]);
         };
@@ -80,11 +78,13 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
           create: async (item) => { calls.push(['create', item]); return response({ memory: {
             id: 'm2', ...item, enabled: true,
           }}); },
+        }, project: {
+          recentList: async () => ({ projects: [{ path: '/projects/memory-test', exists: true }] }),
         }, skills: {
-          install: async (form) => {
-            calls.push(['packageInstall', form.get('scope'), form.get('file')?.name]);
-            return response({ memory: { name: 'Uploaded', scope: 'project' } });
-          },
+          install: (form, projectPath) => new Promise((resolve) => {
+            calls.push(['packageInstall', form.get('scope'), form.get('file')?.name, projectPath]);
+            packageInstallResolvers.push(resolve);
+          }),
         }};
         require(BUILT_PATH);
         (async () => {
@@ -99,6 +99,13 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
           window.installSkillFromFileInput(packageInput);
           await tick(); await tick(); await tick();
           const packageInstallCalls = calls.filter((row) => row[0] === 'packageInstall');
+          window.installSkillFromFileInput(packageInput);
+          await tick(); await tick(); await tick();
+          const concurrentInstallIgnored = calls.filter((row) => row[0] === 'packageInstall').length === 1;
+          for (const resolve of packageInstallResolvers) {
+            resolve(response({ memory: { name: 'Uploaded', scope: 'global' } }));
+          }
+          await tick(); await tick(); await tick();
           list.querySelector('[data-memory-action="toggle"]').click(); await tick();
           const toggledInstantly = list.querySelector('.memory-card').classList.contains('is-disabled');
           toggleReject(new Error('down')); await tick(); await tick();
@@ -143,7 +150,8 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
           console.log(JSON.stringify({ noInlineHandlers, initialRendered, toggledInstantly,
             toggleRolledBack, hiddenInstantly, deleteRolledBack, createRendered,
             oldIgnored, reopenedApplied, sameEpochSingleFlight, latestScopeApplied,
-            deferredListCalls, packageInstallCalls,
+            deferredListCalls, packageInstallCalls, concurrentInstallIgnored,
+            destinationChoiceCalls: calls.filter((row) => row[0] === 'destinationChoices').length,
             toggleCalls: calls.filter(x => x[0] === 'toggle').length,
             deleteCalls: calls.filter(x => x[0] === 'delete').length,
             createCalls: calls.filter(x => x[0] === 'create').length,
@@ -156,16 +164,19 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
                          capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
     result = json.loads(run.stdout.strip().splitlines()[-1])
-    assert all(result[key] is True for key in (
+    behavioral_results = {key: result[key] for key in (
         'noInlineHandlers', 'initialRendered', 'toggledInstantly',
         'toggleRolledBack', 'hiddenInstantly', 'deleteRolledBack',
         'createRendered', 'oldIgnored', 'reopenedApplied',
         'sameEpochSingleFlight', 'latestScopeApplied',
-    ))
+        'concurrentInstallIgnored',
+    )}
+    assert all(value is True for value in behavioral_results.values()), behavioral_results
     assert result['deferredListCalls'] == 2
     assert result['toggleCalls'] == result['deleteCalls'] == result['createCalls'] == 1
     assert result['settingsCaptures'] == 1
     assert result['memoryApply'] is False
     assert result['packageInstallCalls'] == [
-        ['packageInstall', 'project', 'memory.zip'],
+        ['packageInstall', 'global', 'memory.zip', ''],
     ]
+    assert result['destinationChoiceCalls'] == 0

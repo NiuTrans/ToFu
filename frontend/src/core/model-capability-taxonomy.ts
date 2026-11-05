@@ -10,6 +10,7 @@
 export const CHAT_EXCLUDED_CAPS_FALLBACK = Object.freeze([
   'image_gen',
   'embedding',
+  'reranking',
   'transcription',
   'tts',
 ] as const);
@@ -28,6 +29,7 @@ export const KNOWN_CAPABILITIES_FALLBACK = Object.freeze([
   'cheap',
   'image_gen',
   'embedding',
+  'reranking',
   'transcription',
   'tts',
   'audio_chat',

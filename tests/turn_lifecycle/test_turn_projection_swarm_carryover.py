@@ -9,13 +9,13 @@ pushes hydrate backend truth before releasing the overlay.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
 
 import pytest
 
 from tests._runtime_sections import runtime_section_path
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -291,6 +291,7 @@ swarmRuntime.start();
 
 
 def _run_harness(*, neuter_upsert: bool = False) -> str:
+    require_node_modules('vite')
     with tempfile.TemporaryDirectory(prefix='tofu-swarm-module-') as temp:
         bundle = os.path.join(temp, 'conversation.cjs')
         build = subprocess.run(
@@ -424,7 +425,6 @@ def _run_reducer_harness() -> str:
     return (proc.stdout or '').strip() + '\n' + (proc.stderr or '').strip()
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
 def test_swarm_agent_events_survive_multiwave_and_reload():
   out = _run_reducer_harness()
   assert 'FAIL' not in out, out
@@ -432,7 +432,6 @@ def test_swarm_agent_events_survive_multiwave_and_reload():
   assert 'PASS postreload_tool_call_hydrates_card_from_snapshot' in out, out
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
 def test_swarm_push_uses_transient_turn_overlay():
     output = _run_harness()
     failures = [line for line in output.splitlines() if line.startswith('FAIL')]
@@ -440,7 +439,6 @@ def test_swarm_push_uses_transient_turn_overlay():
     assert output.count('PASS') >= 23, output
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
 def test_NEUTER_overlay_upsert_is_load_bearing():
     output = _run_harness(neuter_upsert=True)
     assert 'FAIL overlay_created' in output, output

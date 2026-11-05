@@ -97,6 +97,40 @@ def test_v2_file_checksum_failure_releases_body_and_lease(monkeypatch):
     assert budget.metrics()['frame_bytes_inflight'] == 0
 
 
+def test_v2_file_decoding_returns_owned_fields_and_closes_after_bad_body(monkeypatch):
+    opened = []
+    original = _frame_body.tempfile.TemporaryFile
+    def create(*args, **kwargs):
+        file = original(*args, **kwargs); opened.append(file); return file
+    monkeypatch.setattr(_frame_body.tempfile, 'TemporaryFile', create)
+    payload = bytes(range(256)) * 600
+    valid = wire.encode_message({wire.FIELD_KIND: wire.KIND_RESPONSE, wire.FIELD_PAYLOAD: payload})
+    truncated = valid[:-1]
+    for body in (valid, truncated):
+        left, right = socket.socketpair()
+        budget = FrameByteAdmission(capacity_bytes=1)
+        leases = []
+        def reserve(size):
+            lease = budget.reserve_frame(size); leases.append(lease); return lease
+        try:
+            sender = threading.Thread(target=left.sendall, args=(wire.pack_frame(body),))
+            sender.start()
+            if body is valid:
+                message = wire.recv_frame(right, before_payload=reserve)
+                assert leases[0].spilled
+                assert message[wire.FIELD_PAYLOAD] == payload
+                assert type(message[wire.FIELD_PAYLOAD]) is bytes
+            else:
+                with pytest.raises(wire.StorageV2ProtocolError, match='truncated'):
+                    wire.recv_frame(right, before_payload=reserve)
+            sender.join(timeout=10)
+        finally:
+            for lease in leases: lease.close()
+            left.close(); right.close()
+        assert budget.metrics()['frame_bytes_inflight'] == 0
+    assert len(opened) == 2 and all(file.closed for file in opened)
+
+
 def test_send_accounts_exact_encoded_body_before_any_write():
     class Socket:
         written = b''

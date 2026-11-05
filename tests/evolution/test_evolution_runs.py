@@ -13,9 +13,8 @@ OWNER = 123
 
 @pytest.fixture
 def runtime(monkeypatch, request):
-    from lib.storage import storage_status
-    if not storage_status().get('ready'):
-        request.getfixturevalue('chat_sidecar')
+    from tests._chat_sidecar import require_authority_for_owner
+    require_authority_for_owner(request, OWNER)
     from tests.conftest import _assert_isolated_storage
     _assert_isolated_storage('evolution durable stage fixture')
     from tests.support.evolution_store import install_store

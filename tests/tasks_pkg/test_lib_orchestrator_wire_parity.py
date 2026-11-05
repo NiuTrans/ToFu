@@ -119,47 +119,36 @@ def test_finalize_and_turn_submodule_names_present():
 #     event only when this is a VU sub-task's startup window.
 #   * ``_probe_external_edits(task, project_path)`` — the daemon-thread
 #     target that runs the FUSE external-edit probe.
-# Both moved to ``lib.tasks_pkg.orchestrator._vu_startup``. _run.py imports
+# Common preparation lives in ``_startup``; role phases live in ``_vu_startup``. _run.py imports
 # them + calls them at the same source sites.
 
 @_unit
-def test_vu_startup_submodule_exists_and_exposes_helpers():
-    """Slice 2 (pt_03f4cdf1): the new ``_vu_startup`` submodule must
-    exist and expose ``_vu_phase`` + ``_probe_external_edits`` as
-    module-level callables (not closures). Regression tripwire for
-    anyone removing or renaming these during a future re-organisation."""
-    import importlib
-    mod = importlib.import_module('lib.tasks_pkg.orchestrator._vu_startup')
-    for name in ('_vu_phase', '_probe_external_edits'):
-        assert hasattr(mod, name), (
-            f'lib.tasks_pkg.orchestrator._vu_startup missing {name}')
-        assert callable(getattr(mod, name)), (
-            f'lib.tasks_pkg.orchestrator._vu_startup.{name} is not callable '
-            f'(got {type(getattr(mod, name)).__name__})')
+def test_invocation_uses_shared_project_startup_and_role_phase_adapter():
+    from lib.tasks_pkg.orchestrator import _run, _startup, _vu_startup
+
+    assert _run.setup_project_context is _startup.setup_project_context
+    assert _run._emit_startup_phase is _startup.emit_startup_phase
+    assert _run.make_vu_phase is _vu_startup.make_vu_phase
 
 
 @_unit
-def test_run_py_imports_the_extracted_vu_startup_helpers():
-    """Slice 2 (pt_03f4cdf1): _run.py must actually IMPORT the extracted
-    helpers from lib.tasks_pkg.orchestrator._vu_startup. A future
-    accidental un-import (helpers still resident in _vu_startup.py but
-    _run.py silently reverted to its own inline closures) would break
-    the strangler-fig invariant that there's ONE definition of each.
-    """
-    import os
-    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    with open(os.path.join(root, 'lib/tasks_pkg/orchestrator/_run.py'),
-              encoding='utf-8') as f:
-        src = f.read()
-    assert 'from lib.tasks_pkg.orchestrator._vu_startup import' in src, (
-        '_run.py must import from lib.tasks_pkg.orchestrator._vu_startup '
-        '(slice 2 pt_03f4cdf1). The absence of this import means either '
-        'the slice never landed, or _run.py was reverted to inline the '
-        'closures again — either way, the extraction has been undone.')
-    for name in ('_vu_phase', '_probe_external_edits'):
-        assert name in src, (
-            f'_run.py must reference {name} (as an imported callable '
-            f'now, no longer as a nested def)')
+def test_bound_vu_phase_retains_role_and_localized_fields():
+    from lib.tasks_pkg.orchestrator import _vu_startup
+
+    from pytest import MonkeyPatch
+
+    with MonkeyPatch.context() as monkeypatch:
+        frames = []
+        monkeypatch.setattr(_vu_startup, 'append_event',
+                            lambda task, event: frames.append((task, event)))
+        task = {'id': 'phase-task', '_vu_subtask': True}
+        phase = _vu_startup.make_vu_phase(task)
+        task['_vu_subtask'] = False
+        phase('Preparing', detail_key='startup.test', detail_args={'count': 2})
+        assert len(frames) == 1
+        assert frames[0][0] is task
+        assert frames[0][1]['detailKey'] == 'startup.test'
+        assert frames[0][1]['detailArgs'] == {'count': 2}
 
 
 @_unit
@@ -331,14 +320,14 @@ def test_prefetch_only_submits_project_rules_io():
 # this block — it runs once at task start).
 
 @_unit
-def test_setup_project_context_present_on_vu_startup():
+def test_setup_project_context_present_on_startup():
     """Slice 4 (pt_03f4cdf1): ``setup_project_context`` exposed by
-    ``lib.tasks_pkg.orchestrator._vu_startup`` as a module-level
+    ``lib.tasks_pkg.orchestrator._startup`` as a module-level
     callable. Regression tripwire for future extraction moves."""
     import importlib
-    mod = importlib.import_module('lib.tasks_pkg.orchestrator._vu_startup')
+    mod = importlib.import_module('lib.tasks_pkg.orchestrator._startup')
     assert hasattr(mod, 'setup_project_context'), (
-        'lib.tasks_pkg.orchestrator._vu_startup missing setup_project_context')
+        'lib.tasks_pkg.orchestrator._startup missing setup_project_context')
     assert callable(mod.setup_project_context), (
         f'setup_project_context is not callable '
         f'(got {type(mod.setup_project_context).__name__})')
@@ -361,7 +350,7 @@ def test_run_py_calls_setup_project_context():
     # inline pattern below returns — that would defeat the extraction.
     assert 'from lib.project_mod import ensure_project_state' not in src, (
         '_run.py must NOT contain the inline ensure_project_state import '
-        '(slice 4: that import belongs to _vu_startup.setup_project_context)')
+        '(slice 4: that import belongs to _startup.setup_project_context)')
 
 
 @_unit
@@ -371,7 +360,7 @@ def test_setup_project_context_disabled_path_is_no_op():
     ensure_project_state, no presence announce, no probe spawn.
     Byte-identical to the pre-slice ``if project_enabled and
     project_path:`` gate."""
-    import lib.tasks_pkg.orchestrator._vu_startup as vus
+    import lib.tasks_pkg.orchestrator._startup as vus
 
     calls = []
 
@@ -673,13 +662,13 @@ if __name__ == '__main__':
         test_run_task_api_points_to_the_concrete_owner,
         test_build_body_binding_has_one_explicit_injection_owner,
         test_finalize_and_turn_submodule_names_present,
-        test_vu_startup_submodule_exists_and_exposes_helpers,
-        test_run_py_imports_the_extracted_vu_startup_helpers,
+        test_invocation_uses_shared_project_startup_and_role_phase_adapter,
+        test_bound_vu_phase_retains_role_and_localized_fields,
         test_vu_phase_behavior_gated_on_vu_startup_flag,
         test_prefetch_submodule_exists_and_exposes_start_prefetches,
         test_run_py_imports_the_extracted_prefetch_helper,
         test_prefetch_only_submits_project_rules_io,
-        test_setup_project_context_present_on_vu_startup,
+        test_setup_project_context_present_on_startup,
         test_run_py_calls_setup_project_context,
         test_setup_project_context_disabled_path_is_no_op,
         test_teardown_submodule_exists_and_exposes_finalize_task_lane,

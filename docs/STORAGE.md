@@ -51,30 +51,54 @@ Framed writes submit length, body and CRC together using three borrowed I/O slic
 
 The SQL Sidecar releases serialized-frame admission after sending a response, then half-closes its write side and reads at most one byte to observe client EOF under the existing five-second socket timeout. This keeps queued trailing reply bytes alive through normal client receipt. It admits no additional request, does not extend RPC deadlines, and retains exact active-handler accounting without a count quota. Client frame validation and command receipts remain the acknowledgement authority.
 
+**Managed native engine identity.** Problem: checking a mutable checkout's source
+on every daemon recycle can reject the same engine already admitted by the
+running application and exhaust recovery into permanent fencing. Decision:
+the supervisor records its first admitted daemon path and full SHA-256, and
+recovery rechecks those exact bytes plus the declared content pin. Checkout edits
+and resolver environment changes do not select an upgrade during recovery;
+replaced bytes refuse even with a new pin. A new application process performs
+the original source-freshness admission. Alternatives rejected: dropping content
+verification accepts artifact drift; comparing recovery against current disk
+sources treats unrelated development as a failed authority upgrade. The witness
+is one path/digest pair in memory, with no copied engine or persistent state.
+Verify `tests/storage/test_storage_supervisor_restart_identity.py`.
+
 **Managed-child liveness.** Problem: waiting only for process exit leaves a
 live but non-serving authority ready indefinitely. Decision: bounded health
 probes (`TOFU_STORAGE_LIVENESS_*`, `lib/storage/supervisor.py`), matching the
-external monitor; three consecutive failures (default ~4.5 s) trigger bounded
+external monitor; at least three consecutive failures spanning
+`TOFU_STORAGE_LIVENESS_UNRESPONSIVE_SECONDS` (default 120 s) trigger bounded
 owner-channel EOF → SIGTERM → SIGKILL. Exit fences readiness and the restart
 loop replaces the child. Alternatives rejected: RPC errors alone do not trigger
 recovery; bounded engine shutdown alone cannot recover a child wedged elsewhere.
 
 Problem: failure counts alone confuse starvation with a wedge and cause
 cold-start storms. Decision: `_host_overload_detail` and
-`TOFU_STORAGE_LIVENESS_OVERLOAD_*` suppress recycling while cgroup memory is
-at least 92% or loadavg1 is at least 2× effective CPUs, resetting the streak.
+`TOFU_STORAGE_LIVENESS_OVERLOAD_*` suppress recycling while the cgroup memory
+working set (usage minus inactive file cache) is at least 92% or loadavg1 is
+at least 2× effective CPUs, resetting the streak.
 Normal termination resumes once pressure clears. Suppression is bounded:
 `TOFU_STORAGE_LIVENESS_OVERLOAD_MAX_SUPPRESS` (default 60 probes) forces one
 recycle, with exponential `TOFU_STORAGE_LIVENESS_OVERLOAD_RECYCLE_COOLDOWN_SECONDS`
-(default 300 s, cap 1800 s); any served probe clears the cooldown. Observation
-failure falls back to healthy/fail-fast. Restart backoff caps at 60 s.
-Alternatives rejected: unlimited tolerance leaves wedges unrecovered; larger
-fixed failure thresholds delay genuine recovery but still storm under sustained
-pressure; `/proc` process states cannot reliably separate starvation and wedges.
+(default 300 s, cap 1800 s); any served probe clears the cooldown and the
+suppression count. Observation failure falls back to healthy. Restart backoff
+caps at 60 s. Alternatives rejected: unlimited tolerance leaves wedges
+unrecovered; a larger failure count instead of overload attribution still
+storms under sustained pressure; `/proc` process states cannot reliably
+separate starvation and wedges. The time budget complements attribution, it
+does not replace it: once page cache stopped counting as overload, a ~4.5 s
+count-only verdict would kill engines that recover by themselves within a
+minute (2026-10-26), and wedge recovery stays bounded at about two minutes
+([STORAGE_OPERATIONS.md](STORAGE_OPERATIONS.md#admitted-engines-start-refusals-and-liveness)).
 
 Daemon, embedded and external monitors share `_liveness_probe_config`; one slow
 probe never fences readiness. Recovery remains distinct: managed termination,
-embedded fencing/full in-process restart, or external detach/reattach. Embedded
+embedded fencing/full in-process restart, or external detach/reattach. Daemon
+and external monitors also share the unresponsiveness budget and overload
+attribution (`_LivenessStreak`); an external attachment detaches at once when
+its published PID/start identity has exited, and one without such an identity
+(a SQL co-container) keeps the plain consecutive-failure verdict. Embedded
 probes use one worker per handle (probe deadline + 2 s join); FFI wedges fence
 through the driver crash callback because engine state is unknown.
 The runtime restart loop is bounded by a sliding-window breaker
@@ -84,20 +108,95 @@ crash/startup-failure storms enter a terminal `degraded` state that
 stops spawning, keeps writes fenced, surfaces in `status()`, and logs
 CRITICAL once plus a periodic reminder. The fast first restart is
 unchanged; leaving `degraded` requires a process restart.
-`auto_restart=False` runtimes never trip the breaker.
+`auto_restart=False` runtimes and attachments to an engine another process
+owns never trip the breaker; a deterministic `StorageStartRefused` reports
+`refused` and is rechecked every 30 s without counting as a crash.
 
 Problem: a bounded restart can still drop task frames and produce avoidable
 503s. Decision: `StorageRuntime.client()` waits on readiness while a restart
 worker lives, bounded by `_FENCE_RESTART_WAIT_CAP_S` (default 30 s); degraded,
-stopping and never-started states still fail fast. The storage.v2 client retries
+refused, stopping and never-started states still fail fast. The storage.v2 client retries
 `database_unavailable` before the first response byte with the same
-(tenant, owner, command_id) receipt identity and bounded
-`_COMMAND_MIN_RETRY_BUDGET_S`, preventing duplicate mutations. Provider ingress
+(tenant, owner, command_id) identity and bounded
+`_COMMAND_MIN_RETRY_BUDGET_S`. A receipt-backed command replays its recorded
+outcome and never applies twice; a receipt-free command is re-executed, so its
+operation must be idempotent under re-execution. Provider ingress
 retries persist→push inline (`_DELIVERY_MAX_ATTEMPTS`, backoff capped by
 `_DELIVERY_RETRY_MAX_DELAY_S`); flush completion does not abort a retry, but stale
 attempts, aborts and detach do. Alternatives rejected: slower liveness recovery
 prolongs wedges; a separate replay queue duplicates ordering machinery; immediate
 user-visible failure drops frames during otherwise recoverable restart windows.
+
+Problem: `turn.delete` and `turn.branch.delete` were receipt-free, yet
+re-executing a committed delete finds no rows. During a storage stall a delete
+committed, its ACK was lost, and the same-ID replay answered
+`database_not_found`; native echoes that code as the message, so the browser
+toasted `database_not_found` for a delete that had succeeded. Decision: both
+deletes are receipt-backed.
+Callers name one delete intent with a SHA-256 identity (conversation plus sorted
+turn IDs; conversation, parent and lane), within the 200-character receipt and
+256-byte wire command-ID bounds, and `turn.delete` sends its IDs in that sorted
+order so a reordered repeat replays instead of conflicting. Both engines mint
+turn IDs as fresh UUIDs and never reissue a lane ID (a UUID in SQL; on native a
+digest of a branch command fenced by the parent's strictly increasing
+projection revision), so a receipt cannot absorb a later delete. Growth: each
+delete retains one receipt. A SQLite measurement stored 541 B for a two-turn
+delete, 697 B for four turns, and 6,363 B for a branch delete whose response
+carries its 5,983 B parent Turn; the deleted rows themselves are removed.
+Alternatives rejected: answering an absent turn as already deleted also hides
+wrong IDs and needs new native and SQL semantics; refusing every ambiguous
+receipt-free replay in the client discards the re-execution idempotency other
+turn commands rely on and turns recoverable stalls into user-visible failures;
+the former joined-ID identity exceeded those bounds for larger deletes. Specs:
+the lost-ACK delete replay cases in
+`tests/storage/test_storage_authority_sql_contract.py` and
+`tests/tofudb/test_tofudb_differential.py`.
+
+Problem: a storage-layer failure was classified as `server_busy`, whose hint
+blames local admission capacity (task slots, memory headroom). A fenced
+authority — whose only recovery is a process restart — then read as "server
+busy, retry shortly" and stayed unrecovered for hours (2026-10-22: a degraded
+sidecar served `database_unavailable` for 9.5 h under capacity wording).
+Decision: `database_busy` / `database_unavailable` classify as
+`storage_unavailable`; `server_busy` keeps its capacity meaning (memory-pressure
+admission, event-delivery backpressure). The storage hint names the storage
+layer and the restart recovery, and never points at keys or models. A degraded
+runtime raises a non-retryable error whose text names the terminal state and
+the required process restart, so the UI stops offering a futile Retry.
+Alternatives rejected: keeping one kind cannot describe two recoveries; a new
+kind per storage code multiplies the public taxonomy without changing any
+recovery path; hint-only edits leave the machine-readable kind lying about the
+subsystem.
+
+Problem: the deployed engine and its content pin can drift apart, and the
+supervisor then refuses to launch it — a deterministic refusal that the crash
+breaker counts as repeated failed starts until the runtime latches `degraded`
+(2026-10-22). Decision: `scripts/deploy_tofudb_engine.py` is the only writer of
+`packages/tofu-db/target/certified/`; it installs the artifact by rename,
+writes the `<binary>.sha256` sidecar the supervisor verifies, and records
+provenance in `build.json`. Hand copies desynchronize artifact and pin (and
+must never truncate the mmap'ed `libtofu_db.so` in place), and the supervisor
+fails closed rather than launching unverified bytes. While the authority runs,
+the managed-child monitor re-checks the deployed artifact against that pin
+(`StorageSupervisor.check_verified_artifact`, every 60 probes): the check reads
+a bounded head+tail sample and re-verifies the full file only when the sample
+changed, so an out-of-band replacement is reported as CRITICAL instead of
+surviving until the next application restart needs the pin (restarts of the
+running engine keep its admitted private copy). Alternatives rejected: silently
+re-pinning at start would trust whatever is on disk; a runtime backend switch
+would invent a second authority; skipping the pin check removes the only drift
+detector.
+
+Problem: a native engine crash yields an exit signal, an uptime and — until the
+host keeps a core — no faulting stack. Decision: engine stderr is mirrored
+through `tofu.storage.engine` (`storage child pid=… stderr:`), so a panic or
+engine log line reaches `logs/app.log`; the supervisor records exit
+code/signal/uptime for every crash; a collected core is inspected read-only
+with `python3 scripts/inspect_native_crash.py --core <path> --executable
+packages/tofu-db/target/certified/tofu-db`. Alternatives rejected: attaching a
+debugger to a live authority mutates the process under investigation; enabling
+core dumps globally on a shared host is a host-policy decision this repository
+does not own.
 
 Supervision logs spawn identity, ready handshake, probe failures, termination,
 exit code/signal/uptime, restart scheduling and degraded transitions via business
@@ -246,7 +345,10 @@ with an explicit `modelContinuationStatus` in the terminal attempt event and
 an existing checkpoint. Queue draining and terminal delivery follow this commit.
 Standalone `put` remains an explicit settled-import compatibility seam, not the
 live task publication path.
-Each value is capped at 8 MiB, 16,384 model messages and 4,096 Turn witnesses.
+Each value is capped at 8 MiB and 16,384 model messages. A proof checkpoint
+carries one terminal witness and has no Turn-count bound; only legacy per-Turn
+witness lists keep their 4,096-witness cap (see
+[long-horizon context reads](TOFUDB_CONTEXT_READ.md#streamed-proof-walks-without-a-turn-ceiling)).
 Conversation deletion/purge and Turn deletion remove the derived continuation.
 The selected authority validates ownership and the settled frontier witness;
 authority-derived ordinal CAS rejects stale writers and equal-frontier changes.
@@ -568,12 +670,27 @@ Conversation Sync v3 owns turn commands, snapshots, and replay; see
   Batches still compose at most 500 events / 60 MiB below the storage.v1 frame.
 - Event serialization and individual frame bounds are validated before
   acceptance. Confirmation/flush expiry removes only unclaimed work and closes
-  its representation; claimed work retains exact ambiguous-commit ownership
-  and natural-key deduplication by `(task_id, sequence)`. The 1 ms gather window
-  preserves concurrent-stream amortization and commit-before-visibility.
+  its representation. A claimed event's producer awaits its batch's outcome,
+  bounded by the batch RPC's own deadline (or the worker's exit), so a row is
+  never re-sent while its batch is in flight; after a settled failure the one
+  `event.append` fallback
+  relies on natural-key deduplication by `(task_id, sequence)`. The 1 ms gather
+  window preserves concurrent-stream amortization and commit-before-visibility.
 - Commands use `BEGIN IMMEDIATE`, caller-bounded waits, and progress-handler
   deadlines. Rollback precedes error classification. A COMMIT failure may replay only with a durable receipt or a still-active transaction observed before successful rollback; absent transaction evidence means unknown delivery. Batch failures retain the exact uncertain segment: its receipt-free jobs fail once, while receipt-backed and later unexecuted jobs retain service. Raw callbacks have no implicit replay.
   Diagnostics publish the current `begin` / `execute` / `commit` / `rollback` / `post_commit` phase. Problem: rollback after a completed COMMIT cannot undo its effects. Decision: carry receipt authority and inspect transaction state before rollback. Alternatives: unconditional batch fallback can duplicate mutations; disabling all retries would also discard proven rollback and durable-receipt recovery. See [SQLite transaction semantics](https://www.sqlite.org/lang_transaction.html) and `test_sqlite_commit_delivery.py`.
+  **Batched failures wait for their segment.** Problem: a group-commit member
+  that failed inside its savepoint (for example a `record.put` version
+  conflict against an earlier member's still-uncommitted write) was answered
+  before the segment committed. Its caller could read the pre-segment state
+  through the query pool (an evolution reconcile then re-raised the conflict
+  as unexplained), and if the segment rolled back the conflict was spurious.
+  Decision: a failed member's error is delivered with its segment's COMMIT;
+  when the segment rolls back, the member stays pending and the batch retry or
+  per-job fallback re-evaluates it against durable state (its savepoint left no
+  effects). Alternatives rejected: re-reading on the client after a conflict
+  only narrows the window and leaves the spurious-conflict case; disabling
+  group commit for CAS writes reintroduces one fsync per write.
   A failed ROLLBACK on the sole writer is a writer-fatal event: it logs
   ERROR, fences the writer (new submissions and queued jobs fail fast with
   retryable `database_unavailable` "poisoned"), counts
@@ -602,9 +719,15 @@ Conversation Sync v3 owns turn commands, snapshots, and replay; see
   reserves 1% of its capacity, clamped to 256 MiB..2 GiB. The Sidecar refuses
   startup below that floor; `TOFU_STORAGE_MIN_FREE_BYTES` is the explicit
   operator override.
-- FUSE is accepted only after lock, fsync, atomic-replace, WAL-recovery, and
-  latency preflight succeeds; durability is never weakened to accommodate a
-  mount.
+- FUSE is accepted only after lock, fsync, atomic-replace, and WAL-recovery
+  preflight succeeds; durability is never weakened to accommodate a mount.
+  Preflight latency is reported as `fsync_ms` and never refuses startup: a
+  slow or loaded mount that passes these checks is still durable ("Hardware
+  never limits work", [RESOURCE_CONTROL.md](RESOURCE_CONTROL.md)), and the
+  statement deadlines and writer watchdog above bound individual stalls. A
+  startup latency threshold (formerly `TOFU_STORAGE_PREFLIGHT_MAX_MS`, now
+  ignored) is rejected: any threshold refuses all storage on a busier host,
+  and a default-off switch gets turned back on.
 - Before reclamation reaches the writer, the adapter checks the observed
   authority topology. Network, generic userspace, and unknown filesystems
   return `offline_required` without executing any SQLite statement: even one
@@ -880,6 +1003,18 @@ means “claim everything”. Every heartbeat, cancellation poll and settlement
 proves task/holder/token and an unexpired lease; expiry revokes the old fence.
 Redis may wake claimers but never decides state or correctness.
 
+`worker_job.claim_horizon` is the read-only half of a claim. For the same
+explicit kinds and the same authority clocks it answers `claimableInMs`: 0 when
+`claim_next` would claim now (a due queued/suspended job, an expired
+current-epoch lease, or a lease from another authority lifecycle), the delay to
+the earliest availability or current-epoch lease expiry, or null when no such
+job exists. Native TofuDB serves it on the snapshot query lane from the same
+bounded lease ranges and per-kind priority summary a claim reads, without the
+writer mutex or a WAL barrier; SQL runs the claim's indexed probes in a read
+transaction without row locks or a writer job. It grants nothing:
+`claim_next` stays the only claim and re-validates under the writer, so a stale
+answer costs at most one empty exclusive claim, never a second holder.
+
 `turn.attempt.dispatch_worker` atomically binds the accepted Attempt to a
 deterministic task, enqueues one `conversation-attempt` job and captures the
 running sync event. Payloads carry durable conversation/Turn/Attempt references
@@ -1047,9 +1182,22 @@ mutating authority. Only an exact guard echo lets a new manager cache the
 returned version and collapse later checkpoints from three RPCs to one; old
 managers retain the unguarded operation, and a new manager talking to an old
 Sidecar retains both compatibility reads. Reconstructible `running` snapshots
-get one 500 ms maintenance-priority writer admission. Pending birth and
+get one maintenance-priority writer admission. Pending birth and
 terminal snapshots keep user priority and five bounded attempts; admission or
 CAS pressure is never reported as an ownership fence.
+
+Problem: a constant checkpoint deadline below the authority's queue tail
+refused best-effort checkpoints under congestion, and the refusals repeated
+(`lib/storage/deadline_policy.py`). Decision: nonterminal checkpoints share
+one budget built from observed service time inside fixed bounds, 1-4 s for
+the write and 0.25-2 s for a preflight read. No hardware probe is read, and an
+observation only lengthens a budget above its fixed floor, so a slow host is
+never refused work that the fixed floor admits ("Hardware never limits work",
+`docs/RESOURCE_CONTROL.md`). Tests that assert the budget drop prior samples
+through `reset_storage_service_observations()` and pin the fixed floor.
+Alternatives rejected: a fixed constant brings the congestion refusals back;
+comparing against a recomputed policy answer let the asserted bound move
+with samples left by earlier tests (1 s idle, 4 s under load).
 
 The additive `tofu.task-results.checkpoint.cache-settings/v1` capability commits at most two bounded facts to owner-qualified conversation settings with the task snapshot; no new schema, wire fields or command receipt.
 - `cache_prefix_hwm` is positive and monotonic-max; `last_turn_cache_read` is nonnegative and LWW on a new task write. Observed zero/floor reads replace older warm baselines; missing/null/invalid usage omits the candidate.
@@ -1129,7 +1277,9 @@ SQLite / TofuDB 的固定样本均验证：16,800 字节原文只增加一个 28
 
 **Spill-origin persistence (decision 2026-09-22).** An oversized tool result is replaced at dispatch time by a v2 envelope whose `artifactRef` is a bare content digest — by construction it carries NO provenance. The in-task `_artifactProvenance` map (source round + tool display) lets a same-turn `read_tool_artifact`/`search_tool_artifact` row label itself `R54 compacted · web_search: …`, but that map dies with its turn, so a cross-turn read-back fell back to the opaque digest label. Problem: recover the origin after the source turn. Decision: mirror the tiny origin record through the GENERIC `record.put/get` store (namespace `tool_result_artifact_origin`, keyed by content digest, value carrying `user_id` + `expiresAtMs`); the read boundary (`artifact_provenance`) consults the in-task map first, then the durable record when an owner is resolvable. Alternatives considered: (a) a dedicated `tool_result_artifact_origin.*` operation pair + owner-keyed table was rejected — provenance is a reconstructible advisory read-model, and `record.*` already owns the dual-backend-certified "small JSON by key" contract on both TofuDB and the SQL sidecar, so a parallel table would re-implement that subset (and force an IR `logicalTables` bump + new semantic-executor layout + differential scripts) for zero behavioural gain; (b) embedding the origin inside the artifact body's envelope was rejected — it pollutes the evidence the model reads back and breaks the content-digest dedup (two turns spilling identical content must share one artifact row). The origin record is overwrite-on-respill (latest source wins) and lazily expires with its artifact's TTL; a store hiccup degrades to the in-task map only and never fails a tool settle. TODO(enterprise): `storage_records` has no `user_id` column, so owner isolation is carried inside the value and enforced at the read boundary (the `task_results` pattern); a second real user requires keeping that filter and moving to an owner-keyed store.
 
-**Model-facing semantic alias (decision 2026-09-22).** Problem: the sparse model projection of a spilled result quoted the raw `tool-result:<sha256>` pointer — 76 chars of random hex that tokenizes poorly and carries no meaning, and every `read_tool_artifact`/`search_tool_artifact` call had to re-quote it. Decision: storage keeps the bare digest as its ONLY key (CAS dedup, manifest children, signed cursor binding, and compaction anchors all depend on that shape), while the model-visible envelope projection carries a deterministic alias `tr:<slug>:<digest-prefix>` (semantic slug from the tool display, 8-hex digest prefix, schema stays within the 96-char ceiling). The alias is minted at settle time and persisted through the generic `record.*` store (namespace `tool_result_artifact_alias`, owner + lazy expiry in the value, same TODO(enterprise) caveat as the origin record); read/search handlers and the display relabel resolve it back to the digest BEFORE any storage call, so cursors keep binding the digest and a wrong alias fails loud (`artifact_unavailable`) instead of silently reading neighbouring evidence. Determinism keeps re-spills idempotent and replay/dedup projections stable; a same-slug same-prefix collision with different content lengthens the suffix (8/16/32/64, read-after-write verified, foreign rows never overwritten), so a wrong-content mapping is structurally impossible rather than merely unlikely. Mint/claim failures degrade to the digest projection, never failing a settle. Alternatives considered: (a) a truncated digest as the storage key was rejected — a collision would silently return the wrong evidence, strictly worse than a typed error, and would rewrite both backends' validators; (b) a monotonic short counter (`tr:7`) was rejected — it needs atomic counter state, is unstable across turns, breaks loop-breaker projection identity, and is no more memorable; (c) a bare semantic slug without hex was rejected — same-tool spills collide and a hallucinated slug cannot be distinguished from a wrong one; (d) re-encoding the digest (base32/base64) was rejected — ~20% shorter but still meaningless to BPE and to the model.
+**Model-facing semantic alias (decision 2026-09-22).** Problem: the sparse model projection of a spilled result quoted the raw `tool-result:<sha256>` pointer — 76 chars of random hex that tokenizes poorly and carries no meaning, and every `read_tool_artifact`/`search_tool_artifact` call had to re-quote it. Decision: storage keeps the bare digest as its ONLY key (CAS dedup, manifest children, signed cursor binding, and compaction anchors all depend on that shape), while the model-visible envelope projection carries a deterministic alias `tr:<slug>:<digest-prefix>` (semantic slug from the tool display, 8-hex digest prefix, schema stays within the 96-char ceiling). The alias is minted at settle time and persisted through the generic `record.*` store (namespace `tool_result_artifact_alias`, owner + lazy expiry in the value, same TODO(enterprise) caveat as the origin record); read/search handlers and the display relabel resolve it back to the digest BEFORE any storage call, so cursors keep binding the digest and a wrong alias fails loud (`artifact_unavailable`) instead of silently reading neighbouring evidence. Determinism keeps re-spills idempotent and replay/dedup projections stable; a same-slug same-prefix collision with different content lengthens the suffix (8/16/32/64; every claim is a version-guarded `record.put`, foreign or concurrently moved rows are never overwritten), so a wrong-content mapping is structurally impossible rather than merely unlikely. Mint/claim failures degrade to the digest projection, never failing a settle. Alternatives considered: (a) a truncated digest as the storage key was rejected — a collision would silently return the wrong evidence, strictly worse than a typed error, and would rewrite both backends' validators; (b) a monotonic short counter (`tr:7`) was rejected — it needs atomic counter state, is unstable across turns, breaks loop-breaker projection identity, and is no more memorable; (c) a bare semantic slug without hex was rejected — same-tool spills collide and a hallucinated slug cannot be distinguished from a wrong one; (d) re-encoding the digest (base32/base64) was rejected — ~20% shorter but still meaningless to BPE and to the model.
+
+**Alias claim cost (decision 2026-10-28).** Problem: the claim sat on the settle path as get → put → read-after-write get, and the per-result and round-aggregate budgets minted the same alias twice, so one spilled result cost seven alias round trips plus the artifact put before the model could see it (`benchmarks/tool_dispatch_overhead.py`: 9 synchronous non-event storage operations per spilled `search_files`). Decision: a fresh alias is one `record.put` with `expected_version: 0` (both authorities treat an absent row as version 0); on conflict the row is read once and only our own (refresh) or an expired row is replaced at exactly the observed version, otherwise the suffix lengthens; a re-mint in the same task reuses its own claim while that claim keeps at least half its TTL. The same benchmark measures 4 operations per spilled result. Alternatives considered: (a) keeping read-before-write and dropping only the verify still costs two round trips and needs the verify to close the race; (b) minting asynchronously after settle was rejected because the collision check decides the alias text the model sees. Expected CAS conflicts (cross-turn identical re-spills) appear in the SQLite sidecar's writer log at WARNING.
 
 ## Failure contract
 
@@ -1144,8 +1294,27 @@ are:
   `database_busy`;
 - `database_unavailable`, `database_timeout`;
 - `database_integrity`, `database_protocol_error`, `database_internal`;
+- `database_invalid_payload`;
 - `conversation_authority_conflict`, `storage_payload_too_large`;
 - `plugin_storage_incompatible`.
+
+**Search input classification (decision 2026-11-01).** Problem: both
+authorities answered a rejected `conversation.search` cursor with
+`database_protocol_error`, which the HTTP boundary answers as a server fault
+([API_CONTRACT.md](contracts/API_CONTRACT.md) §2.3), so a browser holding a
+stale or damaged continuation got a 500. Decision: a search cursor that is over
+`cursorBytes`, undecodable, or bound to another authority, owner or query fails
+as `database_invalid_payload`, the storage code answered as the caller's typed
+400. A query over `queryCharacters`/`queryTerms` or containing NUL and a
+non-boolean `page` flag (`contracts/conversation_search_v2.json`) stay
+`database_protocol_error`: the application boundary
+(`lib/conversations/search.py`) rejects those before dispatch, so storage sees
+them only from a broken caller. Both authorities agree, pinned on both lanes by
+`test_search_v2_pages_preserve_title_sources_and_long_message_tail` in
+`tests/tofudb/test_tofudb_differential.py`. Alternatives rejected: making query
+or page faults `database_invalid_payload` would report the calling
+application's validation bug as the end user's mistake; leaving cursors a
+protocol error turns an ordinary stale continuation into a server failure.
 
 Busy/unavailable/timeout may be retried only where the operation contract says
 the write is idempotent. The synchronous client grants commands its existing
@@ -1178,6 +1347,87 @@ identity and budget. Authority busy retains fast WAL retries. The native client
 has no pool-size or long-request admission refusal; its pool size controls idle
 reuse ([session lifecycle](STORAGE_NATIVE_SESSIONS.md)). Alternatives rejected:
 shrinking deadlines churns sessions and discards block-cache warming.
+
+**Writer budgets follow the observed authority service time (decision
+2026-10-22).** The native authority admits foreground work through one FIFO
+queue in front of one exclusive authority mutex and charges that queue wait
+against the caller's deadline, so a writer's budget has to cover the
+authority's end-to-end service time, queue wait included. The nonterminal
+task checkpoint carried a fixed 0.5 s budget for its whole read/write
+sequence, and the measured client-side latency of that operation against the
+live authority put its p98.8 at exactly 500 ms: roughly one percent of
+checkpoints were refused with `deadline_elapsed` — reported by the client as
+`database_timeout` — and the refusal repeated instead of clearing, because the
+availability backoff only engages for a caller whose aggregate budget can
+afford the wait (a 0.5 s per-attempt budget leaves 1.0 s, below the 4x
+patience rule), so every attempt of one episode re-entered the same
+congestion. The ghost then migrates from writer to writer: `credential.touch`
+(2026-10-14, 53 refusals in one day, later eliminated) was followed by
+`task_results.checkpoint` (48 in five days, growing to 21 on 2026-10-22).
+`lib/storage/deadline_policy.py` is now the one owner of that budget: it
+records the authority's observed service time per operation (bounded recent
+window, pooled fallback for a cold operation) and answers how long a writer
+may ask the authority to take; the checkpoint's read and its write each get
+their own budget, and the total remains bounded. The estimate is the
+observed tail scaled by a factor, clamped into the caller's floor and ceiling,
+so the budget tracks the authority in use and returns to it when the
+authority gets faster. Measurement against the live authority (2026-10-22,
+10 h uptime, 321k calls): the authority itself is healthy — 400 serial
+foreground writes measured p99 32 ms, a 64-way concurrent burst p99 104 ms,
+no refusals, and `system.health` reports no authority wedge — while the
+daemon's own counters show the queue, not the work, is the cost
+(`authority_wait` 469k acquisitions / 9,671 s against `command_execute`
+217k calls / 1,618 s). Alternatives considered: (a) raising the constant was
+rejected — it re-breaks on the next slower authority and never scales with
+the host; (b) a per-writer constant was rejected — the ghost migrates from
+writer to writer, which is what this class of fix has done for a week;
+(c) a priority lane in the native authority was deferred — the storage.v2
+wire carries no priority field, so the client's `priority` argument never
+reaches the daemon (the SQL sidecar honors `user`/`event`/`maintenance`
+through one fair priority writer), and the native admission is a single FIFO
+queue, so a turn-critical writer cannot yet overtake a bulk one; that gap
+needs an engine change and is not a client-side decision. The authority's
+long foreground-holding phases (overlay drain 16.1 s, catalog publication
+2.5 s) stay above the checkpoint's 4 s ceiling, so a checkpoint that lands
+inside one still fails — the ceiling, not the budget, is the remaining
+bound.
+
+**Event appends follow the writer budget and never race their own batch
+(decision 2026-11-01).** Problem: the standalone event path kept per-writer
+constants. `event.append_batch` asked for 2 s per attempt, and a producer
+waited 5 s for its batched row before sending the same row again as
+`event.append` with a 5 s deadline. Under congestion the batch's attempts
+were refused (`deadline_elapsed`) while the batch was still in flight, so
+every producer that gave up queued a second copy of its row beside the
+retrying batch, adding load exactly when the authority's queue is the
+bottleneck (2026-10-31: at least ten `event.append` refusals and an 11-minute
+event barrier on one task). Decision: the batch RPC, a producer's wait for
+dispatch, the flush barrier and the `event.append` fallback all take their
+budget from `storage_write_deadline`, with each path's existing budget as the
+floor (the batcher's 2 s, the event log's 5 s), so observed service time only
+raises them. A row still queued when the wait expires is withdrawn and takes
+the single natural-key fallback, as before. A dispatched row's producer awaits
+the batch outcome, bounded by the batch RPC's own deadline or the worker's
+exit, and falls back only after that batch settled with a failure; the
+persistence wait still retries transient failures. Alternatives considered:
+(a) keeping the in-flight fallback: natural-key deduplication keeps it
+correct, but it doubles queue load under congestion; (b) reconciling through
+an `event.list` read: one more request in the same congested queue, and it
+cannot see a row whose batch has not committed yet; (c) the policy's 1 s
+default floor: it lowered this path's cold-start budget, and a cold 200-event
+batch on a loaded test host expired before it reached the writer.
+Measurement (`benchmarks/event_append_congestion.py`; FIFO authority with
+foreign 750 ms writers through the same client, four CPU-bound threads, both
+trees on local disk, medians of three alternating fresh runs): with four
+foreign writers and a warm policy, 8 lanes × 5 events took 58 → 10 event RPCs,
+18 → 0 refusals, 2.58 → 1.00 sends per durable row, 37 → 0 concurrent
+duplicate sends and p50/p95 latency 8.6/9.3 s → 7.2/7.6 s; with no prior
+observations the first batch's three attempts are still refused at the 2 s
+floor and its rows fall back only after it settles (63 → 18 RPCs, 45 → 0
+duplicates). With eight foreign writers (queue wait above both old
+deadlines) the old path made no row durable within 180 s (120 refused event
+RPCs, 32 persistence retries); the new path committed all 12 rows with 6
+batch RPCs.
 
 **Request-oversize classification (decision 2026-09-22).** Both storage.v2
 transports enforce the per-operation request payload bound (8 MiB minus
@@ -1259,7 +1509,7 @@ hydration. Missing, malformed or stale summaries use the original complete read;
 active work still passes the existing durable startup reconciliation.
 
 Legacy summaries are filled on the existing maintenance worker, at most 1,000
-index rows and one historical projection per round. It reads a pinned replica
+documents and one historical projection per round. It reads a pinned replica
 outside the writer lock, then rechecks the exact header and owner cursor before
 publishing. Summary and cursor commit atomically through maintenance writes and do
 not generate logical-outbox business events. There is one bounded cursor per
@@ -1270,6 +1520,39 @@ fence could hide newly active work; rewriting every old document on startup repe
 the delay; deferring active settlement beyond readiness admits orphaned work.
 Verification: `project_brain` lifecycle/relink/outbox tests and recovery-summary
 stale-source, cancellation, cross-owner and commit-fault tests.
+
+Project-document recovery walk — **Problem:** on 2026-10-29 one restart spent
+82.6 s of a 101.5 s storage-recovery phase in 24 recovery pages that returned one
+active project. Older generations had left one `project_brain_by_updated_desc` row
+per historical save, so a few summary-less inactive projects recurred on every
+index page. Deduplication was page-local and a slow hydration ends a page at the
+one-second yield, so the same projects were hydrated again on almost every page.
+The backfill walked the same index, and its permanent completion marker never
+revisited a project whose summary was missing or stale after its pass.
+**Decision:** the restart walk and the backfill iterate the digest-keyed
+`project_brain_documents` namespace: one row per project, whose scanned envelope is
+the exact header its summary must match. The continuation is the last scanned
+project (`ownerUserId`, `projectKey`), so settling or updating a project never moves
+it across the cursor, and a complete walk hydrates each summary-less project at most
+once and a negatively summarized project never. Update-index rows are not read; a
+digest that differs from the envelope's recorded key fails closed. The backfill
+keeps its source fence and one-projection rounds but uses a new cursor
+(`backfill:documents`), so every project left without a valid summary gets one
+pass; the completing round deletes the superseded `backfill` cursor in the same
+transaction. A legacy project hydrated by one restart therefore gets a background
+summary on the existing worker, and later restarts skip it once that is published. The SQL authority pages its one
+row per project in primary-key order with the same cursor shape.
+**Alternatives rejected:** a cross-page seen-set would have to travel in the
+client-held cursor, grows with the project count and needs tamper protection;
+skipping index rows whose timestamp differs from the document would hide a project
+whose current row is missing; publishing summaries from the recovery read would put
+writes back on its writer-free replica lane; raising the yield target only shortens
+the page count on fast mounts. Measurement (`restart_walk_hydrates_each_project_at_most_once_despite_legacy_index_rows`,
+5 projects, 1,500 repeated legacy rows, hot caches disabled): a walk that yields
+after each hydration went from 1,204 hydrations, 1,204 pages, 301 returns of the one
+active project and 23,268 VFS reads to 4 hydrations, 5 pages, 1 return and 41 reads;
+without yields, 8 hydrations and 86 reads became 4 and 29. This is a deterministic
+work count, not a production timing.
 
 ## Operations and verification
 

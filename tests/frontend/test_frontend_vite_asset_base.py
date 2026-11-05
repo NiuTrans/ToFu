@@ -9,6 +9,8 @@ from urllib.parse import urljoin
 
 import pytest
 
+from tests._jsdom import require_node_modules
+
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
@@ -16,6 +18,7 @@ _AUDIT_SYNTHETIC_REPO_PATHS = {'static/vite/assets/main-hash.js'}
 
 
 def test_vite_build_uses_a_relative_asset_base():
+    require_node_modules('vite')
     probe = subprocess.run(
         [
             'node', '--input-type=module', '-e',

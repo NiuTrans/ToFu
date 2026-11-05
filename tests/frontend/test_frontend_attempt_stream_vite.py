@@ -61,7 +61,6 @@ def test_runtime_store_is_published_before_reentrant_initial_health(
               attempts: [],
             };
           },
-          eventsUrl() { return '/unused'; },
         },
         onHealth(conversationId, health) {
           if (health.state !== 'idle' || idleHealthCount > 0) return;
@@ -126,7 +125,6 @@ def test_snapshot_flight_is_claimed_before_reentrant_health_callback(
               attempts: [],
             };
           },
-          eventsUrl() { return '/unused'; },
         },
         onSnapshot() { projectionCount += 1; },
         onAttemptEvent() { return true; },
@@ -198,7 +196,6 @@ def test_snapshot_tool_segment_references_materialize_before_publication(
         conversationId: wireSnapshot.conversationId,
         api: {
           async snapshot() { return wireSnapshot; },
-          eventsUrl() { return '/unused'; },
         },
         onSnapshot(snapshot) { published = snapshot; },
         onAttemptEvent() { return true; },
@@ -241,9 +238,9 @@ def test_conversation_sync_owns_cursor_ordering_and_snapshot_recovery(
     result = page.evaluate(r"""
     async () => {
       class FakeEventSource extends EventTarget {
-        constructor(url) {
+        constructor(request) {
           super();
-          this.url = url;
+          this.request = request;
           this.closed = false;
           this.onopen = null;
           this.onmessage = null;
@@ -283,15 +280,12 @@ def test_conversation_sync_owns_cursor_ordering_and_snapshot_recovery(
             turns: [], attempts: [],
           };
         },
-        eventsUrl(conversationId, after) {
-          return `/conversations/${conversationId}/events?after=${after}`;
-        },
       };
       const coordinator = new window.ConversationSyncCoordinator({
         conversationId: 'conv-a',
         api,
-        eventSourceFactory(url) {
-          const source = new FakeEventSource(url);
+        eventSourceFactory(request) {
+          const source = new FakeEventSource(request);
           sources.push(source);
           return source;
         },
@@ -347,8 +341,8 @@ def test_conversation_sync_owns_cursor_ordering_and_snapshot_recovery(
       coordinator.close();
 
       return {
-        firstUrl: first.url,
-        secondUrl: second.url,
+        firstStream: [first.request.conversationId, first.request.after],
+        secondStream: [second.request.conversationId, second.request.after],
         eventTypes: events.map(event => event.type),
         receiptPublishedAt: eventReceipts[0]?.serverPublishedAt,
         receiptHasBrowserClock: Number.isFinite(eventReceipts[0]?.receivedAt)
@@ -366,8 +360,8 @@ def test_conversation_sync_owns_cursor_ordering_and_snapshot_recovery(
     """)
 
     assert result == {
-        'firstUrl': '/conversations/conv-a/events?after=cursor-2',
-        'secondUrl': '/conversations/conv-a/events?after=cursor-10',
+        'firstStream': ['conv-a', 'cursor-2'],
+        'secondStream': ['conv-a', 'cursor-10'],
         'eventTypes': ['projection_updated'],
         'receiptPublishedAt': 3,
         'receiptHasBrowserClock': True,
@@ -520,9 +514,9 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
     result = page.evaluate(r"""
     async () => {
       class FakeEventSource extends EventTarget {
-        constructor(url) {
+        constructor(request) {
           super();
-          this.url = url;
+          this.request = request;
           this.closed = false;
           this.onopen = null;
           this.onmessage = null;
@@ -582,9 +576,6 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
           };
         },
         async createAttempt() { throw Error('not used'); },
-        eventsUrl(conversationId, after) {
-          return `/conversations/${conversationId}/events?after=${after}`;
-        },
         async updateTurn() { throw Error('not used'); },
         async createLane() { throw Error('not used'); },
         async deleteLane() { throw Error('not used'); },
@@ -593,8 +584,8 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
       };
       const runtime = window.createConversationTurnRuntime({
         api,
-        eventSourceFactory(url) {
-          const source = new FakeEventSource(url);
+        eventSourceFactory(request) {
+          const source = new FakeEventSource(request);
           sources.push(source);
           return source;
         },
@@ -671,7 +662,7 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
         nestedSettings: submitted[0].payload.conversation.settings,
         nestedTitle: submitted[0].payload.conversation.title,
         requestSignalPreserved: submitted[0].requestOptions.signal === signal,
-        sourceUrl: source.url,
+        sourceStream: [source.request.conversationId, source.request.after],
         sourceClosed: source.closed,
         turnIds: finalTurns.map(turn => turn.turnId),
         turnContents: finalTurns.map(turn => turn.projection.content),
@@ -703,7 +694,7 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
         'nestedSettings': {'search': True},
         'nestedTitle': 'Typed',
         'requestSignalPreserved': True,
-        'sourceUrl': '/conversations/conv-1/events?after=cursor-1',
+        'sourceStream': ['conv-1', 'cursor-1'],
         # This harness has no active-view callback; once its only turn settles,
         # the runtime pauses the conversation stream until the view resumes it.
         'sourceClosed': True,
@@ -730,32 +721,47 @@ def test_native_turn_runtime_does_not_probe_an_unsaved_conversation(
 
     result = page.evaluate(r"""
     async () => {
-      let snapshotCalls = 0;
+      let snapshotCallsBeforeCreate = 0;
+      let snapshotCallsAfterCreate = 0;
       let submitCalls = 0;
       let submittedTitle = null;
+      let created = false;
+      const conversationId = 'local-only-conversation';
+      const turn = {
+        conversationId, turnId:'assistant-local', presentationId:'assistant-local',
+        laneId:'main', ordinal:1, actor:'assistant', kind:'reply', runId:'',
+        status:'completed', currentAttemptId:null, projectionRevision:1,
+        projection:{content:'done'}, settlement:{}, createdAt:10, updatedAt:10,
+      };
       const runtime = window.createConversationTurnRuntime({
         api: {
           async snapshot() {
-            snapshotCalls += 1;
-            throw Error('must not probe');
+            if (!created) {
+              snapshotCallsBeforeCreate += 1;
+              throw Error('must not probe before creation');
+            }
+            snapshotCallsAfterCreate += 1;
+            return {
+              ok:true, contract:'tofu.conversation-sync.snapshot/v1',
+              scope:{kind:'conversation',ownerId:7,threadId:conversationId},
+              conversationId, conversationRevision:1, syncSeq:1, cursor:'cursor-1',
+              serverBootId:'test', heartbeatIntervalMs:15000,
+              settings:{}, turns:[turn], attempts:[], queueItems:[],
+            };
           },
           async createTurn(conversationId, payload) {
             submitCalls += 1;
             submittedTitle = payload.conversation.title;
+            created = true;
             return {
               ok: true,
               conversationId,
               conversationRevision: 1,
-              turn: {
-                conversationId, turnId:'assistant-local', laneId:'main', ordinal:1,
-                actor:'assistant', kind:'reply', status:'completed',
-                projectionRevision:1, projection:{content:'done'},
-              },
+              turn,
               attempt: {attemptId:'', turnId:'assistant-local', status:'completed'},
             };
           },
           async createAttempt() { throw Error('not used'); },
-          eventsUrl() { throw Error('not used'); },
           async updateTurn() { throw Error('not used'); },
           async createLane() { throw Error('not used'); },
           async deleteLane() { throw Error('not used'); },
@@ -763,24 +769,40 @@ def test_native_turn_runtime_does_not_probe_an_unsaved_conversation(
           async abortAttempt() { throw Error('not used'); },
         },
         isActive: () => true,
+        eventSourceFactory() {
+          const source = new EventTarget();
+          source.readyState = 1;
+          source.close = () => { source.readyState = 2; };
+          return source;
+        },
       });
       const conversation = {
-        id:'local-only-conversation', title:'New Chat', createdAt:10,
+        id:conversationId, title:'New Chat', createdAt:10,
         _localOnly:true,
       };
-      await runtime.submitConversation(conversation, 'question', {}, {});
-      return {
-        snapshotCalls, submitCalls, submittedTitle,
-        localOnly:conversation._localOnly,
-      };
+      try {
+        await runtime.submitConversation(conversation, 'question', {}, {});
+        // Once creation succeeds the coordinator needs its authoritative cursor.
+        await runtime.wakeConversation(conversation);
+        return {
+          snapshotCallsBeforeCreate, submitCalls, submittedTitle,
+          hydratedAfterCreate:snapshotCallsAfterCreate > 0,
+          localOnly:conversation._localOnly,
+          content:runtime.readRuntimeState(conversationId).turnsById[turn.turnId].projection.content,
+        };
+      } finally {
+        runtime.disposeConversation(conversationId);
+      }
     }
     """)
 
     assert result == {
-        'snapshotCalls': 0,
+        'snapshotCallsBeforeCreate': 0,
         'submitCalls': 1,
         'submittedTitle': '',
+        'hydratedAfterCreate': True,
         'localOnly': False,
+        'content': 'done',
     }
 
 
@@ -805,13 +827,13 @@ def test_native_turn_runtime_wake_skips_local_only_draft(
           },
           async createTurn() { throw Error('not used'); },
           async createAttempt() { throw Error('not used'); },
-          eventsUrl() { throw Error('not used'); },
           async updateTurn() { throw Error('not used'); },
           async createLane() { throw Error('not used'); },
           async deleteLane() { throw Error('not used'); },
           async deleteTurns() { throw Error('not used'); },
           async abortAttempt() { throw Error('not used'); },
         },
+        eventSourceFactory() { throw Error('not used'); },
       });
       const conversation = {
         id:'local-only-wake', title:'New Chat', createdAt:10,
@@ -1204,7 +1226,6 @@ def test_projection_edit_restores_lazy_tool_lanes_with_one_owner_read(page, asse
       let reads=0,writes=0,saved=null,error='';
       class IdleSource extends EventTarget { readyState=0; close(){this.readyState=2;} }
       const runtime=window.createConversationTurnRuntime({eventSourceFactory:()=>new IdleSource(),api:{
-        eventsUrl(){return '/unused-test-stream';},
         async snapshot(){return{ok:true,contract:'tofu.conversation-sync.snapshot/v1',
           scope:{kind:'conversation',ownerId:1,threadId:'c'},conversationId:'c',conversationRevision:1,
           syncSeq:0,cursor:'cursor-0',serverBootId:'test',heartbeatIntervalMs:15000,settings:{},

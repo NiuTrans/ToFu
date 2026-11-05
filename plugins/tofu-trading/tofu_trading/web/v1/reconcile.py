@@ -7,7 +7,7 @@ by the other v1 shells.
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.log import get_logger
 

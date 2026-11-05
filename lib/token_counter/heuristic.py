@@ -90,10 +90,15 @@ def cheap_estimate_text(text: str) -> int:
     return cjk + dense_chars + (other // 3 + 1 if other else 0)
 
 
-def cheap_estimate(messages: list, system: Any = None, tools: Any = None) -> int:
-    """Cheap estimate for a full request."""
+def cheap_estimate(messages: list, system: Any = None, tools: Any = None, *,
+                   estimate_text=cheap_estimate_text) -> int:
+    """Cheap estimate for a full request.
+
+    ``estimate_text`` may reuse remembered per-text values; it must return
+    exactly ``cheap_estimate_text(text)``.
+    """
     text_tokens = sum(
-        cheap_estimate_text(t)
+        estimate_text(t)
         for t in iter_message_texts(messages, system, tools)
     )
     image_tokens = count_images(messages) * _IMAGE_TOKENS_DEFAULT
@@ -116,6 +121,10 @@ class HeuristicCounter(TokenCounter):
         precomputed = kwargs.get('cheap_estimate_tokens')
         if isinstance(precomputed, int) and precomputed >= 0:
             return precomputed
+        from .tiktoken_counter import request_text_count_view
+        view = request_text_count_view(kwargs.get('text_count_memo'))
+        if view is not None:
+            return view.cheap_estimate(messages, system, tools)
         return cheap_estimate(messages, system=system, tools=tools)
 
 

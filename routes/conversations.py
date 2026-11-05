@@ -22,6 +22,7 @@ from collections.abc import Mapping
 
 from quart import Response, request
 
+from lib.api_v4 import raw_success_response
 from lib.api_response import (
     api_bad_request,
     api_conflict,
@@ -30,8 +31,12 @@ from lib.api_response import (
     api_ok,
 )
 from lib.conv_config import resolve_conv_settings
-from lib.conversation_sync.settings_policy import public_conversation_settings
+from lib.conversation_sync.settings_policy import (
+    CATALOG_SETTING_KEYS,
+    public_conversation_settings,
+)
 from lib.conversations.catalog import list_conversation_metadata_page
+from lib.error_envelope import BadRequest
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import async_parse_body, optional_dict, optional_list
@@ -46,24 +51,6 @@ logger = get_logger(__name__)
 _MAX_LIST_LIMIT = 1_000
 _MAX_WINDOW = 500
 _SIDEBAR_DEFAULT_LIMIT = 500
-_SIDEBAR_SETTING_KEYS = frozenset({
-    "pinned",
-    "pinnedAt",
-    "folderId",
-    "source",
-    "clonedFrom",
-    "lastMsgRole",
-    "lastMsgTimestamp",
-    "lastFinishReason",
-    "lastMsgError",
-    "lastMsgHasOutput",
-    "activeTaskId",
-
-    "_coordinatorSource",
-    "projectPath",
-    "projectPaths",
-    "readOnlyPaths",
-})
 _MESSAGE_ACTIVITY_FIELDS = (
     "segments",
     "toolRounds",
@@ -113,7 +100,7 @@ def _metadata(document: Mapping | None, *, sidebar: bool = False) -> dict:
     if sidebar:
         settings = {
             key: settings[key]
-            for key in _SIDEBAR_SETTING_KEYS
+            for key in CATALOG_SETTING_KEYS
             if key in settings
         }
     count = int(metadata.get("msg_count") or 0)
@@ -290,7 +277,7 @@ async def list_convs():
         folder_id=folder_id or None,
         before_updated_at=before,
         before_id=before_id if before is not None else "",
-        settings_keys=sorted(_SIDEBAR_SETTING_KEYS),
+        settings_keys=sorted(CATALOG_SETTING_KEYS),
     )
     page_items = [
         _metadata({"metadata": metadata}, sidebar=True)
@@ -459,15 +446,15 @@ async def get_conv_diagnostic(conv_id: str):
     if "source_token" in request.args:
         options["source_token"] = request.args["source_token"]
     user_id = _owner_id()
+    for name in ("revision", "index", "offset", "limit"):
+        raw = request.args.get(name)
+        if raw is not None:
+            if not raw.isascii() or not raw.isdecimal() or len(raw) > 18:
+                return api_bad_request(f"{name} must be a non-negative integer")
+            options[name] = int(raw)
     try:
-        for name in ("revision", "index", "offset", "limit"):
-            raw = request.args.get(name)
-            if raw is not None:
-                if not raw.isascii() or not raw.isdecimal() or len(raw) > 18:
-                    raise ValueError(f"{name} must be a non-negative integer")
-                options[name] = int(raw)
         diagnostic_payload(conv_id, user_id=user_id, **options)
-    except ValueError as exc:
+    except BadRequest as exc:
         return api_bad_request(str(exc))
     try:
         result = await asyncio.to_thread(
@@ -590,11 +577,66 @@ async def debug_messages(conv_id: str):
 
 @conversations_bp.route("/api/v1/conversations/<conv_id>/export", methods=["GET"])
 @require_scope("conversations")
+@api_meta(
+    summary="Export one conversation as a complete Markdown transcript",
+    tags=["conversations"],
+    scope="conversations",
+)
+@raw_success_response
 async def export_conv(conv_id: str):
+    """Export a whole conversation for the user who asked for it.
+
+    ``format=markdown`` (the download) pages the authority and renders EVERY
+    message. It is the recovery path for a transcript the atomic clone cannot
+    copy, so it must never inherit the model-facing reference's HEAD+TAIL
+    window and character clamp — that silently dropped messages from a file
+    the user saved as a record (2026-10-22 report).
+
+    The default stays the bounded prose reference used by ``@``-mention
+    injection, whose consumer is a prompt, not a file.
+    """
     from lib.conv_ref import get_conversation
 
     include_details = (request.args.get("include_tool_details", "1").lower()
                        not in {"0", "false", "no"})
+    export_format = (request.args.get("format") or "text").strip().lower()
+    if export_format not in {"text", "markdown"}:
+        return api_bad_request(
+            "format must be one of text, markdown", field="format",
+        )
+    if export_format == "markdown":
+        from lib.conv_ref import TranscriptExportError, render_full_transcript
+
+        try:
+            text, message_count = await asyncio.to_thread(
+                render_full_transcript,
+                conv_id,
+                user_id=_owner_id(),
+                include_tool_details=include_details,
+            )
+        except TranscriptExportError as exc:
+            code = str(exc)
+            if code == "conversation_missing":
+                return api_not_found("Conversation not found")
+            if code == "conversation_changed_during_export":
+                return api_conflict("conversation_changed_during_export")
+            logger.error(
+                "[export_conv] markdown export refused conv=%s code=%s",
+                conv_id[:8], code,
+            )
+            return api_internal_error("conversation_export_failed")
+        audit_log(
+            "conversation_exported", conv_id=conv_id, messages=message_count,
+        )
+        return Response(
+            text,
+            mimetype="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=\"{conv_id}.md\""
+                ),
+            },
+        )
     text = await asyncio.to_thread(
         get_conversation,
         conversation_id=conv_id,
@@ -751,6 +793,7 @@ def _conv_has_live_task(conv_id: str, *, user_id) -> bool:
     scope="conversations",
 )
 async def delete_conv(conv_id: str):
+    from lib.desktop.device_waits import cancel_conversation_waits
     from lib.tasks_pkg.manager import abort_running_tasks_for_conv
 
     owner_id = _owner_id()
@@ -770,6 +813,8 @@ async def delete_conv(conv_id: str):
     _notify_conv_changed(
         conv_id, deleted=True, rev=None, user_id=owner_id
     )
+    # A trashed conversation is never woken; restoring it does not revive waits.
+    await asyncio.to_thread(cancel_conversation_waits, owner_id, conv_id)
     audit_log("conversation_deleted", conv_id=conv_id, recoverable=True)
     return api_ok(recoverable=True, deletedAt=result.get("deletedAt"))
 

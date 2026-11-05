@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 
 import tempfile
@@ -24,10 +23,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 SRC = os.path.join(JS_DIR, 'ui', 'conversation_list.js')
-
-
-def _node_available() -> bool:
-    return bool(shutil.which('node'))
 
 
 def _extract_flags(src_text: str) -> str:
@@ -142,7 +137,6 @@ def _run(flags_js_text: str) -> str:
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{proc.stdout}'
     return proc.stdout.strip()
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_settled_facts_classify_stripped_shell():
     with open(SRC, encoding='utf-8') as f:
         flags = _extract_flags(f.read())
@@ -152,7 +146,6 @@ def test_settled_facts_classify_stripped_shell():
     assert output.count('PASS') >= 7, f'expected >=7 PASS lines:\n{output}'
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_fallback_branch_is_load_bearing_neuter():
     """Delete the messages-stripped fallback branch → the interrupted shell
     must go incomplete===false (the pre-fix bug), proving the branch bites."""

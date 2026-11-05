@@ -201,8 +201,6 @@ def _run_harness(
             pass
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_report_tab_shows_other_generated_language():
     proc = _run_harness(PAPER_JS)
     out = proc.stdout.strip()
@@ -212,8 +210,6 @@ def test_report_tab_shows_other_generated_language():
     assert out.count('PASS') >= 6, f'expected >=6 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_source_level_negative_control_without_cache_adoption_shows_prompt():
     """Remove typed cache adoption and prove fallback is hidden by the prompt.
 

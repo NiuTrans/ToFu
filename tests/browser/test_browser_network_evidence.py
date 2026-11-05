@@ -213,13 +213,18 @@ def test_explicit_data_mode_names_the_extension_upgrade_boundary(monkeypatch):
     from lib.browser.handlers import _handle_read_page
     from lib.browser.tool_runtime import BrowserToolRuntime
 
+    _allow_only_friday(monkeypatch)
     runtime = BrowserToolRuntime(
         owner_user_id='41', client_id='network-body-missing-test',
         sender=lambda *args, **kwargs: (_friday_payload(), None),
     )
     out = _handle_read_page({'tabId': 7, 'mode': 'data'}, runtime)
+    # Embedded page data needs no capture capability, so the read continues
+    # and names the missing capability instead of using captured bodies.
+    assert out.startswith('Browser content: ')
     assert 'upgrade required' in out
     assert 'network_body' in out
+    assert 'friday-skill-a' not in out
 
 
 def test_explicit_data_mode_returns_only_ranked_api_evidence(monkeypatch):

@@ -902,16 +902,12 @@
   .pm-browser-pane,.pm-rail{flex:1 1 auto;min-height:0}
   .pm-workbench[data-pm-view="browse"] .pm-rail{display:none}
   .pm-workbench[data-pm-view="workspace"] .pm-browser-pane{display:none}
-  .pm-browser-pane .folder-browser-list{min-height:0;max-height:none;flex:1 1 auto}
   .pm-rail{gap:var(--space-3)}
   .pm-rail-workspace{max-height:none;flex:1 1 auto}
   .pm-rail .recent-paths{flex:0 0 auto;max-height:40%}
   .pm-workbench .modal-actions{padding:var(--space-3) 14px}
   .pm-workbench #projectModalStatus:not(:empty){margin:0 14px}
 
-  /* Memory modal */
-  .memory-modal{max-width:100%}
-  .memory-list{max-height:50dvh;max-height:calc(var(--vh100,100dvh)*0.5)}
 
   /* --- Debug panel: full width bottom --- */
   .debug-panel{right:0;left:0;bottom:0;width:100%;max-width:100%;border-radius:12px 12px 0 0;max-height:50dvh;max-height:calc(var(--vh100,100dvh)*0.5);padding-bottom:env(safe-area-inset-bottom,0px)}

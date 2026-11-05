@@ -75,6 +75,39 @@ def test_reaper_failure_does_not_break_cleanup(monkeypatch):
     _maintenance.cleanup_old_tasks()
 
 
+def test_storage_outage_in_cleanup_step_is_logged_without_traceback(
+        monkeypatch, caplog):
+    """A fenced authority fails the same steps every 60 s tick; only a
+    non-storage failure is a bug worth a traceback."""
+    import logging
+
+    import lib.tasks_pkg.manager._maintenance as _maintenance
+    from lib.storage.errors import StorageError
+
+    def _fenced():
+        raise StorageError(
+            'database_unavailable', 'Storage runtime recovery is stopped',
+            retryable=False)
+
+    def _broken():
+        raise RuntimeError('reaper bug')
+
+    monkeypatch.setattr(_maintenance, '_next_orphan_result_report_monotonic', 0.0)
+    monkeypatch.setattr(_maintenance, 'report_orphan_running_results', _fenced)
+    monkeypatch.setattr(_maintenance, 'reap_stuck_running_tasks', _broken)
+    with caplog.at_level(logging.WARNING, logger=_maintenance.logger.name):
+        _maintenance.cleanup_old_tasks()
+
+    failures = {
+        record.getMessage().split(' failed:')[0]: record
+        for record in caplog.records
+        if record.name == _maintenance.logger.name
+        and ' failed:' in record.getMessage()
+    }
+    assert not failures['[Manager] report_orphan_running_results'].exc_info
+    assert failures['[Manager] reap_stuck_running_tasks'].exc_info
+
+
 def test_terminal_persistence_retry_is_bounded_and_clears_debt(monkeypatch):
     import lib.tasks_pkg.manager._maintenance as _maintenance
 

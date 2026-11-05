@@ -215,7 +215,7 @@ checkpoint alone does not advertise a repository-ready survey artifact.
 
 ## Durable run records and reopening
 
-`contracts/research_record_v1.schema.json` owns run snapshots. The repository `lib/research/records.py` writes through existing Sidecar `record.*` operations in owner-prefixed `research.runs.v1` / `research.run_index.v1` namespaces; no parallel local database is opened. Start acknowledgement requires a durable record before spawning. Snapshot/index writes require exact readback; response-shape-only ACK was rejected. Lost responses recover only identical content (1 MiB write+confirm medians: SQLite 15.85 ms/native 116.36 ms, five private samples). Business receipts (stage boundaries and individual harvest results) replace the snapshot before live publication. Write refusal stops execution with an error, never clean success. If terminal persistence also fails, the last committed snapshot remains recoverable as interrupted. When a progress/receipt write is refused mid-run, the run aborts and the terminal record names the persistence failure itself (`error_context: research:persistence`) rather than whichever stage observed the abort flag first; storage write-refusal envelopes classify by the stable StorageError code (`database_busy`/`database_unavailable` → retryable `server_busy`, `database_timeout` → retryable `timeout`), never as an upstream LLM failure.
+`contracts/research_record_v1.schema.json` owns run snapshots. The repository `lib/research/records.py` writes through existing Sidecar `record.*` operations in owner-prefixed `research.runs.v1` / `research.run_index.v1` namespaces; no parallel local database is opened. Start acknowledgement requires a durable record before spawning. Snapshot/index writes require exact readback; response-shape-only ACK was rejected. Lost responses recover only identical content (1 MiB write+confirm medians: SQLite 15.85 ms/native 116.36 ms, five private samples). Business receipts (stage boundaries and individual harvest results) replace the snapshot before live publication. Write refusal stops execution with an error, never clean success. If terminal persistence also fails, the last committed snapshot remains recoverable as interrupted. When a progress/receipt write is refused mid-run, the run aborts and the terminal record names the persistence failure itself (`error_context: research:persistence`) rather than whichever stage observed the abort flag first; storage write-refusal envelopes classify by the stable StorageError code (`database_busy`/`database_unavailable` → retryable `storage_unavailable`, `database_timeout` → retryable `timeout`), never as an upstream LLM failure. `storage_unavailable` names the storage layer and the process-restart recovery of a fenced authority; `server_busy` is reserved for local admission capacity (task slots, memory headroom) and must never stand in for a storage failure.
 
 Snapshots retain up to 200 captured paper metadata rows, bounded titles/errors, progress and acknowledged pipeline checkpoints; each record caps at 8 MiB. Token deltas and heartbeats do not cause durable writes. The compact index is separate from checkpoint bodies and lists at most 200 newest-created runs. Index and snapshot commits are sequential, not atomic; an index-write failure can leave the snapshot addressable by task ID before it appears in the list. Run records have no TTL; task replay and local workdirs remain separate runtime resources. Original paper content stays in the owner-scoped paper library. Research started as an Evolution run preserves its immutable `evolution_run_id` in task metadata, record and compact index; the private request and local manifest retain the full server binding. Distinct runs cannot deduplicate onto each other's same-direction worker. The workbench retains the returned run ID and restores it from exact task/record projections; Stop uses the owning run's cancellation API. Missing bound cancellation capability fails visibly instead of using a bare-task fallback. Legacy genuinely unbound tasks retain generic cancellation. After a terminal research record commits, the worker invokes the existing Evolution terminal receiver. Callback failure leaves durable evidence for the existing sweep, which also consumes cancelled runs with unsettled episodes.
 
@@ -885,6 +885,48 @@ truncating overflow were rejected because they lose or misattribute pending work
 
 Unpaged runs still reject 64-receipt overflow atomically. ReceiptPages stores owner/run/basis-bound immutable pages of at most 32 receipts/128 KiB, without a total history ceiling. Workspace CAS publishes verified prefixes; raw pointers and tail-only settlement are refused. Complete reads verify every page via disk reversal and clean up on every exit. Workers activate paging for pending runs. Problem: paged terminal results could not enter decisions or scientific audits. Decision: typed terminal ports recheck owner/basis/revision and complete job state; success recomputes full receipt_evidence bound to the immutable run, pages and tail. Alternative: model/tail summaries were rejected because they lose earlier failures. Oversized science resolves an owner/basis/tool/call-bound journal original; hashes and parts verify before reuse. Missing legacy originals stay incomplete; ambiguity/corruption fail. Original recovery 24455 chars/3.73 ms; successful 66-source settlement 206 ms. Workspace CAS binds receipt_progress source/job indexes to exact receipt heads; updates verify only new pages. Native: after 82 rows, commit/checkpoint read 23.88 ms; poll medians 79.71→4.68 ms (seven each). Workers and read-only execution inspection use published indexes; After snapshot load, 1,026-row inspection needs at most three checkpoint/root reads (SQLite/native), zero page reads. Legacy scans and full terminal rechecks remain.
 
+
+Immutable index preparation and storage work
+--------------------------------------------
+
+Problem: persisting every path-copy root writes nodes superseded before the
+workspace can publish them, multiplying storage waits and retained bytes.
+Completed-source writes also accepted success-shaped acknowledgments without
+confirming storage, and a cached node could conceal an unresolved write.
+
+Decision: the existing `ReceiptSourceIndex` owns exact node readback for pending
+and consumed sources. It evicts the candidate hash before issuing a write,
+validates the stored schema/version/content hash and compares the exact node;
+only storage can resolve a lost or malformed ACK. `PreparedSourceIndex` uses the
+same assignment algorithm in call-local scratch and persists only nodes reachable
+from the selected candidate root, children before parent. Workspace CAS remains
+the sole publication point; original observations, historical roots, node formats,
+namespaces and idempotency identities remain authoritative.
+
+Preparation flushes every 1,024 receipts and at settled-run boundaries. This bounds
+scratch lifetime without truncating, refusing or limiting a history. Independent
+changed children of the hexadecimal root use the shared `owned_results` executor
+with copied caller context. There is no per-node worker, nested pool or machine
+capacity rule. Every started branch joins before the parent root is acknowledged
+or scratch is discarded. Cache locks protect only local lookup/eviction; they
+never hold across storage I/O. Failures retain the old published root and allow
+exact idempotent preparation retries; unpublished immutable fragments grant no
+evidence or replay authority.
+
+Retention measurement: 1,024 synthetic receipts alternating one job's state with
+an explicit 65-node lookup cache retain 1,390 final nodes / 276,573 canonical value
+bytes, versus 3,957 nodes / 2,483,077 bytes for sequential path persistence.
+Writes fall from 4,979 to 1,390; exact reads from 6,242 to 1,390. This counts
+logical node values, excluding record envelopes, receipts and physical blocks.
+Earlier nodes and failed-preparation fragments are not reclaimed automatically;
+no durable observation is deleted. See `test_research_index_preparation.py` and
+[measurement qualification](RESEARCH_EVALUATION.md#long-history-preparation-qualification).
+
+Alternatives considered: a cache-only ACK weakens durability; unchecked bulk
+publication loses fault isolation; a new storage operation would require another
+cross-backend contract. Reusing immutable nodes and the joined executor removes
+intermediate work while keeping the existing semantic storage commands.
+
 Consumed receipt identity across settlement
 -------------------------------------------
 
@@ -941,7 +983,12 @@ revision before task birth; the worker still rechecks before executing. Existing
 deduplicated task identities remain readable. Alternatives: worker-only rejection
 was safe before provider dispatch but created avoidable failed tasks and delayed
 feedback to an orchestration caller. This check is not a workspace lock: concurrent
-edits remain governed by worker checks and the existing save CAS.
+edits remain governed by worker checks and the existing save CAS. The start-time
+refusal is the typed conflict `research_workspace_stale` (`LifecycleConflict`),
+which `POST /api/v1/tasks/start` answers with 409 like the workspace PUT's CAS
+conflict; an experiment whose selected idea source no longer exists is the typed
+not-found 404 described under workspace selection; caller input faults are
+field-named `BadRequest` 400s and any other starter exception remains a redacted 500.
 
 Problem: simultaneous research-action starts could both miss the task index and
 create separate workers for the same owned action and workspace revision.
@@ -1066,6 +1113,8 @@ Research creation accepts optional model-only `execution_limits`: validate befor
 Protocol draft requests may bind `source_task_id` to the original owned completed research record. The workbench sends the currently opened task identity; draft reading uses that record's accepted idea, survey and gap map rather than latest per-direction publication. A missing, foreign, incomplete or mismatched source refuses before model dispatch, with no latest-artifact fallback. Calls omitting the optional field retain direction-based drafting. Problem: repeated directions and reused idea IDs could mix a historical candidate with newer evidence. Decision: explicit original-task binding; alternative rejected: infer source from direction/idea ID alone. The request field is declared by the route's OpenAPI metadata; drafts expose the bound task ID without granting experiment authority. Verify draft protocol tests and the live source-binding browser journey. No additional durable record, worker or timer is introduced.
 
 Workspace selection retains optional `selected_idea_source_task_id` through promotion and protocol drafting. New/changed selections resolve one exact accepted idea in an owned completed record before workspace publication; source validation is repeated at experiment admission and worker entry. Existing selection pointers survive clients that omit the field, and unchanged pointers do not force receipt-publication writes to reread discovery material. The shared hypothesis identity includes the original task and idea ID when bound; action freeze checks and run validity use the same payload. Empty/omitted legacy selections retain their original hashes. Problem: drafting carried a source only transiently, so saving/experiment execution could lose its origin. Decision: persist source selection and bind it to experiment identity. Alternatives rejected: browser-only provenance and replacing legacy basis hashes. This is provenance, not evidence of scientific validity or permission to replay. One bounded ASCII task identity (at most 160 characters) is added to the existing workspace; no new journal, worker, timer or cache is introduced. Verify selection source tests, the local action chain on both stores, and the live draft/save browser journey.
+
+A source with no owned record (deleted, never saved, or another owner's, which stays indistinguishable from none) raises the typed `LifecycleNotFound` from `records.load_completed_idea_source`. Workspace PUT, manuscript scaffold, protocol draft, action resume and `POST /api/v1/tasks/start` answer it with the research 404 (`api_not_found`, v4 problem code `not_found`) and its message; the refusal publishes no workspace revision and starts no action or model call. An existing record whose stored snapshot is unreadable or invalid remains a redacted 500. Problem: absence and corruption shared one builtin `ValueError`, so a deleted source surfaced as an opaque 500 on experiment start and workspace PUT. Decision: classify absence at the reader that owns completed selection reads. Alternatives rejected: matching error text in routes, and answering every source `ValueError` with a 4xx, which would report corrupt records as caller faults. Verify the selection source route specs, `tests/api/test_research_error_taxonomy.py` and the per-starter specs in `tests/api_keys/test_production_start_route.py`.
 
 Research-action context resolves bound selections through `records.load_idea_source`, the drafting/workspace authority. It carries the complete original survey/gaps and exactly the selected candidate, including candidates beyond the twelve-idea preview. Final wire admission counts messages/tools and reserves output against the selected model's context window. Oversized bound evidence uses the existing owner-scoped artifact repository as an exact JSON original and `read_tool_artifact` cursors, with source task/digest/length in the input descriptor. A reference is not observed evidence; unread portions remain unverified. Missing reader, failed retention or an oversized remaining workspace still refuses before dispatch. Raw JSON avoids backend differences in canonical-result manifest expansion. The existing 24-hour artifact TTL applies; equal originals reuse the content address. The Unicode round-trip fixture retains 480,119 UTF-8 bytes with a descriptor under 1 KiB (excluding storage overhead); foreign owners cannot read its body. Durable research records remain original authority, and source retention failure never grants replay or scientific support. Before a bound source read, one bounded probe checks availability. Missing cache is reconstructed from the owned original only when task ID, digest and length match; returned content address must also match. Drift or storage failure refuses restoration. Signed cursor authorization is not renewed: retain its ordinary error and instruct the model to start a fresh query on the same source. Restoration notice is added once, without rerunning the producer or resetting its budget. Problem: TTL interrupted long tasks; rejected: unbounded retention, producer replay and bypassing expired cursors. Verify source-continuation and local-action-chain tests on both stores. No new cache or worker is added. Verify source-continuation tests on both stores. Unbound directional previews keep the 16,000-character/twenty-gap bounds and report omissions and a half-open gap range. Problem: fixed previews withheld evidence even when the execution model could fit it. Decision: exact bound sources plus model-capacity admission; rejected: universal preview caps and silently fitting by truncation. Sources retain the existing 8 MiB record bound; no resident cache/store/worker is added. Verify context-budget and local-action-chain tests. These prove grounding/lifecycle, not research quality.
 

@@ -28,10 +28,6 @@ class RegistryFrozenError(RuntimeError):
     (startup completion and plugin lifecycle), never per request.
     """
 
-# NOTE: Do NOT re-export _lib.FETCH_* as module-level copies here.
-# Module-level copies become stale after reload_config() — always read
-# from _lib.<VAR> at call time to pick up hot-reloaded values.
-
 # ══════════════════════════════════════════════════════════
 #  ToolRegistry — formal registry pattern for tool dispatch
 # ══════════════════════════════════════════════════════════

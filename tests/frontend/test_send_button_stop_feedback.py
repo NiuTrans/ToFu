@@ -34,7 +34,6 @@ MOBILE_CSS = os.path.join(
     '15-queue-mobile-my-day.css',
 )
 _NODE = shutil.which('node')
-_ESBUILD = os.path.isfile(os.path.join(ROOT, 'node_modules', '.bin', 'esbuild'))
 
 
 @lru_cache(maxsize=1)
@@ -292,6 +291,29 @@ global.ConversationTurnRead = {
   composerInput.value = '';
   composerInput.emit('input');
 
+  /* Send-time translation runs inside the same generation-start lease: one
+   * Stop ends that startup, so a second click cannot re-enter startup Stop and
+   * fire another conversation abort while the send recovers. */
+  let translationAborts = 0;
+  const translationController = {abort(){ translationAborts += 1; }};
+  current = {id:'translating', _translating:true,
+    _genStartCtrl:translationController, _translateAbortCtrl:translationController};
+  const abortsBeforeTranslation = abortConvCalls;
+  button.className = '';
+  updateSendButton();
+  const translatingProjection = button.className;
+  button.onclick();
+  await Promise.resolve();
+  const translating = {
+    projection: translatingProjection,
+    controllerAborts: translationAborts,
+    serverAborts: abortConvCalls - abortsBeforeTranslation,
+    released: current._genStartCtrl === null,
+    stoppedByUser: current._genStartStop === translationController,
+    translateAborted: current._translateAborted === true,
+    buttonClass: button.className,
+  };
+
   current = {id:'unknown', _forceBusy:true};
   button.className = '';
   updateSendButton();
@@ -312,13 +334,11 @@ global.ConversationTurnRead = {
   handleKeyDown(keyEvent);
   const keyboard = {calls:keyboardCalls, prevented:keyEvent.prevented};
 
-  process.stdout.write(JSON.stringify({main, branch, startup, unknown, keyboard}));
+  process.stdout.write(JSON.stringify({main, branch, startup, translating, unknown, keyboard}));
 })().catch((error) => { console.error(error); process.exit(1); });
 """
 
 
-@pytest.mark.skipif(not _NODE or not _ESBUILD,
-                    reason='node + esbuild not available')
 def test_stop_click_feedback_and_idempotency():
     proc = subprocess.run(
         [_NODE, '-e', _HARNESS, SEND_BUTTON, _composer_controls_bundle(),
@@ -398,11 +418,19 @@ def test_stop_click_feedback_and_idempotency():
         'released': True,
         'buttonClass': 'send-btn',
     }
+    assert result['translating'] == {
+        'projection': 'send-btn stop-btn',
+        'controllerAborts': 1,
+        'serverAborts': 1,
+        'released': True,
+        'stoppedByUser': True,
+        'translateAborted': True,
+        'buttonClass': 'send-btn',
+    }
     assert result['unknown'] == {'hydrated': True}
     assert result['keyboard'] == {'calls': 1, 'prevented': True}
 
 
-@pytest.mark.skipif(not _ESBUILD, reason='esbuild not available')
 def test_busy_draft_single_stop_control_fits_390px(browser):
     css = '\n'.join(
         open(path, encoding='utf-8').read()

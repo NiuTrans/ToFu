@@ -241,6 +241,18 @@
         },
         "executor_schema_budget_tokens": {
           "$ref": "urn:tofu:evolution-run:v1#/$defs/executor_schema_budget_tokens"
+        },
+        "skill_selection": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/skill_selection"
+        },
+        "skill_bindings": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/skill_bindings"
+        },
+        "research_context": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/research_context"
+        },
+        "executor_restrictions": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/executor_restrictions"
         }
       },
       "required": [
@@ -1382,6 +1394,449 @@
           "pattern": "^[0-9a-f]{64}$"
         }
       }
+    },
+    "chat_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conversation_id",
+        "turn_id"
+      ],
+      "properties": {
+        "conversation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        }
+      }
+    },
+    "chat_create_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "objective"
+      ],
+      "properties": {
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "pattern": "\\S"
+        },
+        "acceptance": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600,
+            "pattern": "\\S"
+          },
+          "maxItems": 16,
+          "minItems": 1
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/step"
+          },
+          "minItems": 1
+        },
+        "skill_selection": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/skill_selection"
+        },
+        "research_context": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/research_context"
+        },
+        "model": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/model_ref"
+        },
+        "role_models": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/role_models"
+        },
+        "budget": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/requested_budget"
+        },
+        "review_reserve": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/review_reserve"
+        },
+        "auto_replan": {
+          "type": "boolean",
+          "description": "New programs default to automatic diagnosis after definitive reviewed failure. Omitted max_attempts uses three attempts per technique, with no program-wide attempt ceiling; explicit 0/null remains unlimited. Legacy programs without this field require manual retry."
+        },
+        "advance_mode": {
+          "$ref": "#/$defs/advance_mode"
+        }
+      }
+    },
+    "chat_read": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "program_id": {
+          "type": "string",
+          "pattern": "^program-[a-f0-9]{32}$"
+        },
+        "view": {
+          "enum": [
+            "status",
+            "experiments",
+            "catalog"
+          ]
+        },
+        "after": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "cursor": {
+          "type": "string",
+          "pattern": "^program-[a-f0-9]{32}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "view": {
+                "const": "catalog"
+              }
+            },
+            "required": [
+              "view"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "program_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "after"
+                  ]
+                }
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "program_id"
+            ],
+            "not": {
+              "required": [
+                "cursor"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "chat_write": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "create",
+            "command",
+            "append",
+            "guide"
+          ]
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "program_id": {
+          "type": "string",
+          "pattern": "^program-[a-f0-9]{32}$"
+        },
+        "request": {
+          "$ref": "#/$defs/chat_create_request"
+        },
+        "start": {
+          "type": "boolean"
+        },
+        "command": {
+          "$ref": "#/$defs/chat_control"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/step"
+          },
+          "minItems": 1
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expected_run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "create"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "request",
+              "idempotency_key"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "program_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "command"
+                  ]
+                },
+                {
+                  "required": [
+                    "steps"
+                  ]
+                },
+                {
+                  "required": [
+                    "content"
+                  ]
+                },
+                {
+                  "required": [
+                    "expected_version"
+                  ]
+                },
+                {
+                  "required": [
+                    "expected_run_id"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "command"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "program_id",
+              "command",
+              "expected_version"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "idempotency_key"
+                  ]
+                },
+                {
+                  "required": [
+                    "request"
+                  ]
+                },
+                {
+                  "required": [
+                    "start"
+                  ]
+                },
+                {
+                  "required": [
+                    "steps"
+                  ]
+                },
+                {
+                  "required": [
+                    "content"
+                  ]
+                },
+                {
+                  "required": [
+                    "expected_run_id"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "append"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "program_id",
+              "steps",
+              "idempotency_key"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "request"
+                  ]
+                },
+                {
+                  "required": [
+                    "start"
+                  ]
+                },
+                {
+                  "required": [
+                    "command"
+                  ]
+                },
+                {
+                  "required": [
+                    "content"
+                  ]
+                },
+                {
+                  "required": [
+                    "expected_version"
+                  ]
+                },
+                {
+                  "required": [
+                    "expected_run_id"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "guide"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "program_id",
+              "content",
+              "idempotency_key",
+              "expected_run_id"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "request"
+                  ]
+                },
+                {
+                  "required": [
+                    "start"
+                  ]
+                },
+                {
+                  "required": [
+                    "command"
+                  ]
+                },
+                {
+                  "required": [
+                    "steps"
+                  ]
+                },
+                {
+                  "required": [
+                    "expected_version"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "chat_control": {
+      "type": "object",
+      "description": "Start is idempotent initial activation: after activation it only returns the snapshot. Resume separately authorizes continuation. Legacy programs without started_at may start only from ready with no current intent or settled experiments; ambiguous paused legacy states require explicit resume. Legacy creation-time accounting and frozen intents remain unchanged.",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "start",
+            "pause",
+            "resume",
+            "retry",
+            "cancel",
+            "set_pacing"
+          ]
+        },
+        "advance_mode": {
+          "$ref": "#/$defs/advance_mode"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "if": {
+        "properties": {
+          "action": {
+            "const": "set_pacing"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "advance_mode"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "advance_mode"
+          ]
+        }
+      }
     }
   },
   "additionalProperties": false,
@@ -1477,6 +1932,18 @@
         },
         "executor_schema_budget_tokens": {
           "$ref": "urn:tofu:evolution-run:v1#/$defs/executor_schema_budget_tokens"
+        },
+        "skill_selection": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/skill_selection"
+        },
+        "skill_bindings": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/skill_bindings"
+        },
+        "research_context": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/research_context"
+        },
+        "executor_restrictions": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/executor_restrictions"
         }
       },
       "required": []
@@ -1580,6 +2047,9 @@
     },
     "research_source": {
       "$ref": "#/$defs/research_source"
+    },
+    "chat_source": {
+      "$ref": "#/$defs/chat_source"
     }
   }
 }

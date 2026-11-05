@@ -252,8 +252,8 @@ def _cutover_lock(data_dir: Path):
     except FileExistsError as exc:
         try:
             age = time.time() - lock.stat().st_mtime
-        except OSError as exc:
-            logger.debug('cannot stat existing cutover lock %s: %s', lock, exc)
+        except OSError as stat_exc:
+            logger.debug('cannot stat existing cutover lock %s: %s', lock, stat_exc)
             age = 0
         hint = ('; lock is stale and may be reviewed manually'
                 if age > _LOCK_STALE_S else '')

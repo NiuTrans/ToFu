@@ -100,7 +100,7 @@ async def run_native_prepared_task(client,repository,selection,configuration,*,
             if result is not None:raise TypeError('native terminal projector must return None')
             if candidate.event.get('status')=='done':
                 from lib.tasks_pkg.orchestrator._finalize import _maybe_append_sources_footer
-                try:_maybe_append_sources_footer(task,request.all_search_results_text)
+                try:_maybe_append_sources_footer(task)
                 except Exception as error:
                     from lib.log import get_logger
                     get_logger(__name__).warning('native sources-footer backstop failed: %s',error)

@@ -27,10 +27,18 @@ _API_MESSAGE_FIELDS = frozenset({
                                             # Anthropic proxy can re-attach a signed
                                             # thinking block to the assistant turn.
     'reasoning_details',                    # OpenRouter-style reasoning array — the
-                                            # OpenAI-compat shape the sankuai gateway
+                                            # OpenAI-compat shape the example-corp gateway
                                             # uses to round-trip a signed Claude
                                             # thinking block (reconstructed in build_body).
     'cache_control',                        # Anthropic prompt caching
+})
+
+# These values belong to one exact assistant message, including empty values.
+# Moving prose across that boundary can invalidate signed/native replay or
+# discard the next message's reasoning. Tool calls have their own adjacency rule.
+_ASSISTANT_REPLAY_FIELDS = frozenset({
+    'reasoning_content', 'thinking_signature', 'reasoning_details',
+    '_responses_items', '_anthropic_content_blocks', '_reasoning_continuity',
 })
 
 
@@ -38,14 +46,18 @@ _API_MESSAGE_FIELDS = frozenset({
 # They are NOT provider fields.  The opt-in field-strip path collapses them to
 # one short-lived boolean so the final structural merge can classify the
 # ORIGINAL adjacency after frontend metadata has been removed.  The merge
-# consumes and deletes this hint on every output path.
+# consumes and deletes this hint on every output path.  ``_replyDropped`` is
+# stamped by history projection on a user request whose empty reply row
+# (interrupted or failed Turn) was dropped, so it meets the next request.
 _SAME_ROLE_SEAM_SOURCE_FIELDS = frozenset({
     '_contextComposer',
     '_isMeta',
     '_isVuDirective',
     '_isObjectiveAnchor',
+    '_replyDropped',
 })
 _SAME_ROLE_SEAM_HINT_FIELD = '_tofuSameRoleSeam'
+_IMMUTABLE_WIRE_TYPES = frozenset({str, int, float, bool, type(None)})
 
 
 def _copy_wire_value(value, memo=None):
@@ -57,25 +69,31 @@ def _copy_wire_value(value, memo=None):
     No serialization, numeric conversion or caller-owned mutation is involved.
     """
     value_type = type(value)
-    if value_type in (str, int, float, bool, type(None)):
+    if value_type in _IMMUTABLE_WIRE_TYPES:
         return value
     if memo is None:
         memo = {}
     identity = id(value)
     if identity in memo:
         return memo[identity]
+    # Immutable leaves are their own copy; only containers recurse.
     if value_type is list:
         result = []
         memo[identity] = result
-        result.extend(_copy_wire_value(item, memo) for item in value)
+        result.extend([
+            item if type(item) in _IMMUTABLE_WIRE_TYPES
+            else _copy_wire_value(item, memo)
+            for item in value])
         return result
     if value_type is dict:
         result = {}
         memo[identity] = result
         for key, item in value.items():
             # Match deepcopy's value-before-key evaluation for custom hooks.
-            copied_item = _copy_wire_value(item, memo)
-            result[_copy_wire_value(key, memo)] = copied_item
+            copied_item = (item if type(item) in _IMMUTABLE_WIRE_TYPES
+                           else _copy_wire_value(item, memo))
+            result[key if type(key) in _IMMUTABLE_WIRE_TYPES
+                   else _copy_wire_value(key, memo)] = copied_item
         return result
     return copy.deepcopy(value, memo)
 
@@ -94,12 +112,12 @@ def _strip_non_api_fields(
     Does NOT mutate the original messages — nested mutable values (``content``
     block lists, ``tool_calls``, …) are DEEP-copied, not shared by reference.
     This isolation matters because downstream build_body steps mutate the
-    cleaned messages in place — ``_validate_image_blocks`` /
-    ``_downscale_oversized_images`` rewrite ``block['image_url']['url']`` and
-    ``_inject_gemini_thought_signatures`` writes into ``tool_calls[0]``. With a
-    shallow copy those writes would leak back into the caller's persistent
-    messages, changing the prefix bytes on the next round (a prompt-cache miss
-    for image conversations). Immutable scalars (role/name strings, and the big
+    cleaned messages in place — ``_sanitize_messages`` and
+    ``_strip_empty_text_blocks`` rewrite text blocks,
+    ``_inject_claude_reasoning_details`` writes reasoning fields and
+    ``canonicalize_messages_inplace`` reorders keys. With a shallow copy those
+    writes would leak back into the caller's persistent messages, changing the
+    prefix bytes on the next round (a prompt-cache miss). Immutable scalars (role/name strings, and the big
     base64 payloads inside content — deepcopy returns immutables as-is) are not
     duplicated, so the copy stays cheap on the hot path.
 

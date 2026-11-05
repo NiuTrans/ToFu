@@ -2,7 +2,9 @@
 
 Public transport owner for application adapters and independent harnesses.
 No application imports, process launch, database paths, or automatic replay.
-An optional orjson encoder accelerates compatible large JSON payloads.
+An optional orjson encoder accelerates compatible large request payloads; the
+optional orjson decoder parses each response once with results identical to
+the stdlib decoder (``_response_json``).
 
 Protocol source of truth: ``contracts/storage_v2.json`` and
 ``packages/tofu-db/src/protocol.rs`` / ``daemon.rs`` / ``server.rs``.
@@ -21,7 +23,6 @@ from .generated_v2 import COMMITTED_EVENTS_CONTRACT, MAX_COMMIT_NOTICE_KEYS
 
 import hashlib
 import json
-import re
 import select
 import socket
 
@@ -36,6 +37,7 @@ try:
     import orjson as _fast_json
 except ImportError:
     _fast_json = None
+_fast_json_fragment = getattr(_fast_json, 'Fragment', None)
 
 
 # ── Contract constants (contracts/storage_v2.json) ──────────────────────
@@ -120,27 +122,62 @@ class StorageV2AdmissionRejected(Exception):
 _JSON_ACCELERATOR_MIN_TEXT_CHARACTERS = 8192
 _JSON_ACCELERATOR_MAX_VALUES = 4096
 _JSON_ACCELERATOR_MAX_DEPTH = 32
-# Rejection-only probe: common metadata floats make the exact-number fast path
-# ineligible. Inspect bounded response edges before allocating a decoded tree.
-_JSON_NUMBER_PREFLIGHT_EDGE_BYTES = 8192
-_JSON_FLOAT_MEMBER = re.compile(
-    br'(?<!\\)"[ \t\r\n]*:[ \t\r\n]*-?(?:0|[1-9][0-9]*)'
-    br'(?:\.[0-9]+(?:[eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)'
-    br'(?=[ \t\r\n,}\]])'
-)
+
+# Responses decode with orjson whenever its result provably equals the stdlib
+# fallback json.loads(payload.decode("utf-8")). Measured on orjson 3.12
+# (docs/RESOURCE_CONTROL.md, "Large snapshot JSON decoding"), the two decoders
+# return different values in exactly two cases, both visible as decimal digit
+# runs: integer literals outside int64/uint64 (19+ digits) become floats, and
+# float mantissas beyond 768 significant digits are truncated before rounding.
+# Every other difference is an orjson JSONDecodeError (NaN/Infinity tokens,
+# unpaired surrogate escapes, overflow to infinity, nesting beyond 1024 levels)
+# that falls back to stdlib, which then returns or raises exactly as before.
+_EXACT_DECODE_INTEGER_DIGITS = 19
+# A mantissa has at most two digit runs (integer and fraction part), so every
+# float that reaches orjson carries at most 254 digits, far below 768.
+_EXACT_DECODE_MAX_DIGIT_RUN = 128
+_DIGIT_RUN_MASK = bytes(0x30 if 0x30 <= byte <= 0x39 else 0 for byte in range(256))
+_DIGIT_RUN_PROBE = b"0" * _EXACT_DECODE_INTEGER_DIGITS
+_INT64_MIN_MAGNITUDE = 1 << 63
+_UINT64_LIMIT = 1 << 64
 
 
-def _has_float_member_near_response_edges(payload: bytes | bytearray) -> bool:
-    """Decline a speculative decoder; never admit or validate a response.
+def _digit_run_may_differ(payload: bytes | bytearray, start: int, end: int) -> bool:
+    """Whether the maximal digit run ``payload[start:end]`` can decode differently.
 
-    Escaped quotes in JSON text are skipped. A missed float, array value, or
-    ambiguous slice still crosses the existing decoded-value compatibility
-    check. A false positive only selects the original stdlib parser.
+    The run's JSON role is inferred from adjacent bytes only. String text that
+    resembles a number token is a false positive, which merely selects stdlib.
     """
-    bound = _JSON_NUMBER_PREFLIGHT_EDGE_BYTES
-    if _JSON_FLOAT_MEMBER.search(payload[:bound]) is not None:
+    if end - start >= _EXACT_DECODE_MAX_DIGIT_RUN:
         return True
-    return len(payload) > bound and _JSON_FLOAT_MEMBER.search(payload[-bound:]) is not None
+    if end < len(payload) and payload[end] in b".eE":
+        return False  # mantissa digits of a float token
+    negative = start > 0 and payload[start - 1] == 0x2D  # "-"
+    if end - start <= 20:
+        magnitude = int(payload[start:end])
+        fits_64_bits = (magnitude <= _INT64_MIN_MAGNITUDE) if negative else (magnitude < _UINT64_LIMIT)
+        if fits_64_bits:
+            return False
+    # Beyond 64 bits only an integer literal in value position differs; string
+    # text, fraction digits and exponent digits do not. A whitespace gap longer
+    # than the inspected window is treated as a value position.
+    before = start - 2 if negative else start - 1
+    preceding = payload[max(0, before - 63):before + 1].rstrip(b" \t\r\n")
+    return not preceding or preceding[-1] in b"[,:"
+
+
+def _accelerated_decode_may_differ(payload: bytes | bytearray) -> bool:
+    """C-speed scan for digit runs of 19+ digits; each is classified in place."""
+    mask = payload.translate(_DIGIT_RUN_MASK)
+    start = mask.find(_DIGIT_RUN_PROBE)
+    while start >= 0:
+        end = mask.find(b"\0", start + _EXACT_DECODE_INTEGER_DIGITS)
+        if end < 0:
+            end = len(mask)
+        if _digit_run_may_differ(payload, start, end):
+            return True
+        start = mask.find(_DIGIT_RUN_PROBE, end)
+    return False
 
 
 def _stdlib_payload_bytes(payload: Any) -> bytes:
@@ -150,6 +187,11 @@ def _stdlib_payload_bytes(payload: Any) -> bytes:
 def _payload_bytes(payload: Any) -> bytes:
     if _fast_json is None or type(payload) is not dict:
         return _stdlib_payload_bytes(payload)
+    if _fast_json_fragment is not None and any(
+            type(value) is _fast_json_fragment for value in payload.values()):
+        # Top-level values a caller already encoded once (orjson.Fragment);
+        # every replay splices those exact bytes.
+        return _fast_json.dumps(payload)
     remaining = _JSON_ACCELERATOR_MAX_VALUES
     text_characters = 0
 
@@ -183,41 +225,17 @@ def _payload_bytes(payload: Any) -> bytes:
 
 
 def _response_json(payload: bytes | bytearray) -> Any:
-    """Decode large responses without a full UTF-8 copy, preserving stdlib numbers.
+    """Decode one response exactly as ``json.loads(payload.decode("utf-8"))``.
 
-    orjson may coerce integers beyond 64 bits to float. A bounded edge probe
-    declines known float-bearing responses before speculative decoding. Any
-    float, deep shape, or rejected encoding still takes the original parser;
-    no user number is rounded
-    merely to enable this optional optimization.
+    orjson parses once, without a UTF-8 text copy, unless the digit-run scan
+    finds a literal it could decode differently. Its JSONDecodeError selects
+    the stdlib parser, which then returns or raises exactly as before.
     """
-    if (_fast_json is not None
-            and len(payload) >= _JSON_ACCELERATOR_MIN_TEXT_CHARACTERS
-            and not _has_float_member_near_response_edges(payload)):
+    if _fast_json is not None and not _accelerated_decode_may_differ(payload):
         try:
-            decoded = _fast_json.loads(payload)
+            return _fast_json.loads(payload)
         except _fast_json.JSONDecodeError:
             pass
-        else:
-            remaining = _JSON_ACCELERATOR_MAX_VALUES
-
-            def compatible(value: Any, depth: int) -> bool:
-                nonlocal remaining
-                remaining -= 1
-                if remaining < 0 or depth > _JSON_ACCELERATOR_MAX_DEPTH:
-                    return False
-                kind = type(value)
-                if kind is float:
-                    return False
-                if kind is dict:
-                    return all(compatible(item, depth + 1) for item in value.values())
-                if kind is list:
-                    return all(compatible(item, depth + 1) for item in value)
-                return True
-
-            if compatible(decoded, 0):
-                return decoded
-            del decoded  # Do not retain two large trees during the fallback parse.
     return json.loads(payload.decode("utf-8"))
 
 
@@ -460,15 +478,16 @@ def encode_message(fields: dict[int, Any]) -> bytes:
 
 # ── MessagePack subset decoder (responses) ──────────────────────────────
 class _Decoder:
-    def __init__(self, data: bytes):
+    def __init__(self, data: memoryview):
         self._data = data
         self._offset = 0
 
     def _take(self, count: int) -> bytes:
-        chunk = self._data[self._offset : self._offset + count]
-        if len(chunk) != count:
+        end = self._offset + count
+        if end > len(self._data):
             raise StorageV2ProtocolError("truncated storage.v2 frame body")
-        self._offset += count
+        chunk = bytes(self._data[self._offset : end])
+        self._offset = end
         return chunk
 
     def value(self) -> Any:
@@ -522,10 +541,17 @@ class _Decoder:
         return self._offset == len(self._data)
 
 
-def decode_message(body: bytes) -> dict[int, Any]:
-    decoder = _Decoder(body)
-    value = decoder.value()
-    if not isinstance(value, dict) or not decoder.finished():
+def decode_message(body: bytes | bytearray) -> dict[int, Any]:
+    """Decode one frame body into owned values; no view of ``body`` escapes.
+
+    Any buffer is accepted, including a received bytearray or an overflow
+    mapping that closes after decoding.
+    """
+    with memoryview(body) as view:
+        decoder = _Decoder(view)
+        value = decoder.value()
+        finished = decoder.finished()
+    if not isinstance(value, dict) or not finished:
         raise StorageV2ProtocolError("storage.v2 frame body is not one flat map")
     return value
 
@@ -534,17 +560,21 @@ def pack_frame(body: bytes) -> bytes:
     return struct.pack(">I", len(body)) + body + struct.pack(">I", crc32c(body))
 
 
-def _read_exact(sock: socket.socket, count: int, *, frame_start: bool = False) -> bytes:
-    chunks = bytearray()
-    while len(chunks) < count:
-        piece = sock.recv(count - len(chunks))
-        if not piece:
-            if frame_start and not chunks:
-                raise StorageV2ConnectionClosedError(
-                    "storage.v2 peer closed the connection at a frame boundary")
-            raise StorageV2ProtocolError("storage.v2 peer closed mid-frame")
-        chunks += piece
-    return bytes(chunks)
+def _read_exact(sock: socket.socket, count: int, *, frame_start: bool = False) -> bytearray:
+    # One buffer of the declared size: recv() would allocate the remaining size
+    # on every call, and appending pieces would copy each frame again.
+    buffer = bytearray(count)
+    with memoryview(buffer) as view:
+        offset = 0
+        while offset < count:
+            received = sock.recv_into(view[offset:], count - offset)
+            if not received:
+                if frame_start and not offset:
+                    raise StorageV2ConnectionClosedError(
+                        "storage.v2 peer closed the connection at a frame boundary")
+                raise StorageV2ProtocolError("storage.v2 peer closed mid-frame")
+            offset += received
+    return buffer
 
 
 def recv_frame(

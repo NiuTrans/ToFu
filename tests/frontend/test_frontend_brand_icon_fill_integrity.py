@@ -248,12 +248,13 @@ def test_referenced_icon_keys_resolve():
     """Every retained template brand must exist in the icon registry."""
     icons = _brand_icons()
     referenced: dict[str, str] = {}
-    templates_src = open(
-        os.path.join(ROOT, 'frontend', 'src', 'runtime', 'sections',
-                     'settings', 'provider_templates.js'),
-        encoding='utf-8').read()
-    for key in re.findall(r"brand: '([^']+)'", templates_src):
-        referenced.setdefault(key, 'provider_templates.js')
+    templates_src = '\n'.join(
+        open(os.path.join(ROOT, 'lib', 'model_info', 'data', filename), encoding='utf-8').read()
+        for filename in sorted(os.listdir(os.path.join(ROOT, 'lib', 'model_info', 'data')))
+        if filename.endswith('.json')
+    )
+    for key in re.findall(r'"brand"\s*:\s*"([^"]+)"', templates_src):
+        referenced.setdefault(key, 'lib/model_info/data/*.json')
     missing = sorted(k for k in referenced if k not in icons)
     assert not missing, (
         f'icon keys referenced but missing from MODEL_BRAND_ICONS: '

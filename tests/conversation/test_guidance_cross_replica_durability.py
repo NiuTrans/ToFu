@@ -42,7 +42,7 @@ def registry_pair(monkeypatch):
     from lib.tasks_pkg import human_gate_registry as gates
     from lib.tasks_pkg import human_guidance as guidance
     from lib.runtime import runtime_state_store
-    store = Flags(); first = gates.OwnedHumanGateRegistry(4); second = gates.OwnedHumanGateRegistry(4)
+    store = Flags(); first = gates.OwnedHumanGateRegistry(); second = gates.OwnedHumanGateRegistry()
     monkeypatch.setattr(gates, '_distributed_mode', lambda: True)
     monkeypatch.setattr(runtime_state_store, 'get_store', lambda: store)
     monkeypatch.setattr(guidance, 'human_gate_registry', first)

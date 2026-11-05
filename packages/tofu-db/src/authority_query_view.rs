@@ -38,6 +38,7 @@ impl ReadOptions {
             preparation: None,
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
+            search_invalidations: Default::default(),
             published_query_options: None,
             published_query_results: None,
         }
@@ -51,22 +52,24 @@ pub(crate) struct PublishedQueryView {
 }
 pub(crate) struct CachedQueryResult {
     response: Arc<crate::transaction_ir::IrResponse>,
-    foreground_admissions: Arc<std::sync::atomic::AtomicU64>,
 }
 impl CachedQueryResult {
     pub(crate) fn into_response(self) -> crate::transaction_ir::IrResponse {
-        self.foreground_admissions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         (*self.response).clone()
     }
 }
+// Published replicas and answers never advance the authority's foreground
+// progress: they take no authority mutex, so they cannot prove that a holder
+// released it, and counting them would hide a wedged holder from the watch.
 impl PublishedQueryView {
     pub(crate) fn try_cached(&self, key: crate::query_result_cache::Lookup<'_>) -> Option<CachedQueryResult> {
         // Empty, uncacheable and evicted keys avoid health/publication locks.
         // The owned candidate is never an answer until live generation proof.
         let (stored, response) = self.results.candidate(key)?;
-        let options = self.options.try_read().ok()?;
+        // Contended or poisoned configuration refuses the candidate.
+        let _options = self.options.try_read().ok()?;
         if !self.entities.with_healthy_current_snapshot(|snapshot| snapshot == stored)? { return None; }
-        Some(CachedQueryResult { response, foreground_admissions: Arc::clone(&options.foreground_admissions) })
+        Some(CachedQueryResult { response })
     }
     pub(crate) fn remember(&self, request: &crate::protocol::Request,
         snapshot: crate::entity::EntitySnapshot, response: &crate::server::response::DispatchedResponse) {
@@ -81,9 +84,6 @@ impl PublishedQueryView {
         // optional mirror uses the original authority path, never stale data.
         let options = self.options.try_read().ok()?;
         let result = self.entities.try_build()?;
-        options
-            .foreground_admissions
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(result.map(|entities| options.build(entities)))
     }
     pub(crate) fn observer(&self) -> PublishedQueryObserver {

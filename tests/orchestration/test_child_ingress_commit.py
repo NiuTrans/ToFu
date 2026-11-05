@@ -34,7 +34,7 @@ def test_disposed_child_is_denied_at_real_commit(boundary, monkeypatch):
     fence = children.ChildPublicationFence()
     lock = BlockingLock()
     events, durable, failures = [], [], []
-    parent = {'content': 'next phase', 'thinking': '', 'toolRounds': [],
+    parent = {'id': 'parent', 'content': 'next phase', 'thinking': '', 'toolRounds': [],
               'content_lock': lock, 'events_lock': lock, 'events': []}
     if boundary == 'runtime':
         runtime = TaskRuntime(kind='ingress-commit-test')
@@ -53,14 +53,15 @@ def test_disposed_child_is_denied_at_real_commit(boundary, monkeypatch):
         monkeypatch.setattr('lib.swarm.registry.scope_tools_for_role', lambda *args: [])
         monkeypatch.setattr('lib.swarm.registry.get_role_system_suffix', lambda role: '')
         def create(parent, *, event_sink, **kwargs):
-            return {'sink': lambda event: fence.deliver(event_sink, event)}
+            return {'id': 'child', '_invocationPublicationFence': fence,
+                    'sink': lambda event: fence.deliver(event_sink, event)}
         monkeypatch.setattr(children, 'create_child_invocation', create)
         event = ({'type': 'delta', 'content': 'stale'} if boundary == 'goal_delta'
                  else {'type': 'tool_start', 'toolCallId': 'late', 'roundNum': 1})
         monkeypatch.setattr(children, 'run_child_invocation',
                             lambda child: child['sink'](event))
         runner = OrchestrationInvocationRunner(
-            OrchestrationAgentRunnerConfig(parent_task={'id': 'parent'},
+            OrchestrationAgentRunnerConfig(parent_task=parent,
                                            model='fixture', model_routing_policy='selected'),
             emit=lambda event: FlowExecutor._emit(executor, event),
             abort_check=lambda: False)

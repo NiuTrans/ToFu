@@ -127,8 +127,9 @@ def test_subscription_probe_failure_is_debug_but_request_failure_warns(caplog):
                            jitter=lambda value: value)
     try:
         with caplog.at_level(logging.DEBUG):
+            # A fresh route's probe snapshot: (topology generation, request revision 0).
             manager._run_probe('https://chatgpt.com/x', 'chatgpt.com', route,
-                               manager._generation)
+                               (manager._generation, 0))
         assert not any(rec.levelno >= logging.WARNING and
                        '[SubscriptionRoute]' in rec.message
                        for rec in caplog.records)
@@ -195,3 +196,90 @@ def test_conversation_affinity_is_scoped_by_logical_route():
         'conv-a', route_key='kimi-k3') == 'main-key'
     assert affinity.get_preferred_key(
         'conv-a', route_key='gpt-5.6-luna') == 'aux-key'
+
+
+def test_reaper_nested_in_a_dispatch_never_waits_on_its_own_lock(monkeypatch):
+    """create_turn -> _throttled_cleanup_old_tasks -> cleanup_old_tasks ->
+    reap_expired_queue_leases runs on the thread that already holds the
+    non-reentrant _dispatch_lock. A 5 s acquire there can only time out: it
+    added a guaranteed 5 s stall to that turn start (on boot, inside the
+    readiness-blocking recovery phase). The nested reaper must skip at once.
+    """
+    import time as real_time
+
+    import lib.message_queue as queue_mod
+
+    monkeypatch.setattr(queue_mod, '_reaper_max_dispatch_per_tick', lambda: 8)
+    monkeypatch.setattr(queue_mod, '_conv_has_live_task', lambda *_a, **_k: False)
+    monkeypatch.setattr(queue_mod, '_reap_queue_leases', lambda **_kw: None)
+    monkeypatch.setattr(queue_mod, 'next_dispatchable_turn', lambda *_a, **_k: {'queueId': 'q'})
+    monkeypatch.setattr(queue_mod, 'dequeue_next', lambda *_a, **_k: {
+        'queueId': 'q', 'kind': 'user', 'payload': {'text': 'hi'}, 'config': {}})
+
+    class Client:
+        def query(self, _operation, _payload):
+            return [{'convId': 'conv-other', 'userId': 1}]
+
+    monkeypatch.setattr(queue_mod, '_queue_client', lambda **_kw: Client())
+    nested = {}
+
+    def dispatch_turn_that_runs_maintenance(*_args, **_kwargs):
+        # Same thread, lock held: the throttled maintenance sweep fires here.
+        started = real_time.monotonic()
+        nested['result'] = queue_mod.reap_expired_queue_leases()
+        nested['elapsed'] = real_time.monotonic() - started
+        return 'attempt-outer'
+
+    monkeypatch.setattr(queue_mod, '_dispatch_queued_turn',
+                        dispatch_turn_that_runs_maintenance)
+
+    assert queue_mod.dispatch_next_queued('conv-outer', user_id=1) == 'attempt-outer'
+    assert nested['result'] == []
+    assert nested['elapsed'] < 1.0, (
+        f"nested reaper waited {nested['elapsed']:.1f}s on its own lock")
+    # The ownership marker never outlives the dispatch.
+    assert queue_mod._dispatch_lock.acquire(timeout=1)
+    queue_mod._dispatch_lock.release()
+    assert queue_mod._dispatch_owner is None
+
+
+def test_reaper_still_waits_briefly_for_another_threads_dispatch(monkeypatch):
+    """A different thread's in-flight dispatch keeps the bounded wait."""
+    import threading
+
+    import lib.message_queue as queue_mod
+
+    monkeypatch.setattr(queue_mod, '_reaper_max_dispatch_per_tick', lambda: 8)
+    monkeypatch.setattr(queue_mod, '_conv_has_live_task', lambda *_a, **_k: False)
+    monkeypatch.setattr(queue_mod, '_reap_queue_leases', lambda **_kw: None)
+    waits = []
+    real_dispatch = queue_mod.dispatch_next_queued
+
+    def recording_dispatch(conv_id, *, user_id, _wait=None):
+        waits.append(_wait)
+        return None
+
+    class Client:
+        def query(self, _operation, _payload):
+            return [{'convId': 'conv-other', 'userId': 1}]
+
+    monkeypatch.setattr(queue_mod, '_queue_client', lambda **_kw: Client())
+    monkeypatch.setattr(queue_mod, 'dispatch_next_queued', recording_dispatch)
+    holder_ready = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with queue_mod._dispatch_lock:
+            holder_ready.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert holder_ready.wait(5)
+        queue_mod.reap_expired_queue_leases()
+    finally:
+        release.set()
+        holder.join(5)
+    assert waits == [5]
+    assert real_dispatch is not recording_dispatch

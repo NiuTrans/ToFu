@@ -168,41 +168,26 @@ def test_template_never_names_a_font_the_renderer_cannot_resolve():
 
 # ── 4. The engine actually CONSULTS the real gates ────────
 
-def test_engine_records_gate_findings_on_the_quality_axis():
-    """A scene that fails the real gates must not ship as a clean success.
-
-    Asserts the wiring exists at the call site (charter: testing the helper is
-    not testing the wiring) — the compose stage must call the real-gate helper
-    and feed its findings into both the emitted event and the degraded axis.
-    """
-    import ast
+def test_engine_records_gate_findings_on_the_quality_axis(tmp_path, monkeypatch):
+    """Real scene gates propagate defects to the persisted quality axis."""
+    import json
     from pathlib import Path
-
+    from lib import motion_video as mv
     from lib.motion_video import engine
+    from tests.motion_video.test_motion_video_workflow import _film
 
-    # Assert the worktree wiring, independent of a behavioural test that may
-    # temporarily replace the imported function object in the shared module.
-    module_src = Path(engine.__file__).read_text(encoding='utf-8')
-    tree = ast.parse(module_src)
-    node = next(n for n in tree.body
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and n.name == 'run_motion_task')
-    src = ast.get_source_segment(module_src, node) or ''
-    assert '_scene_gate_findings(' in src, (
-        'the compose stage no longer runs the real gates — the regex gate '
-        'alone cannot see fonts, contrast, runtime errors or overflow')
-    assert 'scene_gate_issues' in src
-    # …and the findings must reach the QUALITY axis, not just a log line.
-    # Driven through the real verdict function rather than grepped, so
-    # reformatting the expression cannot turn this green (and a genuine
-    # removal cannot stay green by keeping the words around).
-    verdict = engine._quality_verdict(
-        degraded_narration=False,
-        scene_gate_issues={'scene-002': ['text overflows its container']},
-        authoring=True, authored=8, total=8)
-    assert verdict['degraded'] is True, (
-        'gate findings are collected but never reported as degraded')
-    assert 'scene-002' in verdict['reason']
+    task, _ = _film(tmp_path, monkeypatch)
+    finding = 'fixture text overflows its container'
+    monkeypatch.setattr(mv, 'check_project', lambda *args, **kwargs: {
+        'ok': False, 'category': 'lint', 'errors': [finding]})
+    engine.run_motion_task(task)
+    assert task['status'] == 'done', task.get('error')
+    gates = [event for event in task['events'] if event['type'] == 'scene_gate']
+    assert gates and all(finding in event['findings'] for event in gates)
+    assert task['artifact_quality']['degraded'] is True
+    assert all(event['scene_id'] in task['artifact_quality']['reason'] for event in gates)
+    manifest = json.loads((Path(task['workdir']) / 'job.json').read_text())
+    assert manifest['artifact_quality'] == task['artifact_quality']
 
 
 def test_a_film_with_no_defects_is_not_marked_degraded():
@@ -341,66 +326,6 @@ def test_author_prompt_carries_the_vendored_craft_guide():
         'the author is not warned which references the gate rejects')
 
 
-# ── 6. The DEFAULT path is the good one ───────────────────
-
-def test_default_produce_video_call_enables_the_scene_author():
-    """The measured defect: every default film used the template path.
-
-    ``visual_quality`` defaulted to ``'template'`` → ``job['scene_author']``
-    False → ``scene_author_enabled()`` False, so all the authoring machinery
-    was unreachable unless the caller opted in by name. Asserting on the
-    RESOLVED job flag (not on the literal default string) keeps this true if
-    the argument is renamed or re-plumbed.
-    """
-    from lib.motion_video._scene_author import scene_author_enabled
-
-    job = _job_for_tool_args({'topic': 't'})
-    assert scene_author_enabled(job) is True, (
-        'a plain produce_video call must author its scenes; the template is '
-        'the fallback we are replacing, not the default deliverable')
-
-
-def test_template_is_still_reachable_when_asked_for_by_name():
-    """Complement: the fast path must not be deleted, only demoted.
-
-    Without this, "always author" would also pass the test above while
-    removing the user's ability to trade looks for speed.
-    """
-    from lib.motion_video._scene_author import scene_author_enabled
-
-    job = _job_for_tool_args({'topic': 't', 'visual_quality': 'template'})
-    assert scene_author_enabled(job) is False
-
-
-def _job_for_tool_args(fn_args: dict) -> dict:
-    """Resolve tool args → job flags using the SHIPPED handler statement.
-
-    Charter forbids hand-copying a production predicate into a harness, so the
-    two assignment lines are spliced out of the real handler at run time and
-    executed here. Three-state: missing → the implementation moved (a real
-    regression); duplicated → the single source was copied; one → re-point.
-    """
-    import inspect
-    import re
-
-    from lib.tasks_pkg.handlers import motion_video as h
-
-    src = inspect.getsource(h._handle_produce_video)
-    m = re.findall(
-        r"^\s*(visual = str\(fn_args\.get\('visual_quality'\).*?\n"
-        r"\s*job\['scene_author'\] = .*?)$",
-        src, re.M | re.S)
-    assert m, ('the visual_quality → scene_author resolution is gone from '
-               '_handle_produce_video — did the default move elsewhere?')
-    assert len(m) == 1, 'more than one resolution site; single source copied'
-    job: dict = {}
-    scope: dict = {'fn_args': fn_args, 'job': job}
-    exec(compile(inspect.cleandoc(m[0]), '<handler>', 'exec'), scope)
-    return job
-
-
-# ── 7. Wholesale fallback is a FAILED artifact ────────────
-
 def test_all_scenes_falling_back_is_reported_as_degraded():
     """One scene degrading is by design; every scene degrading is a failure.
 
@@ -454,9 +379,9 @@ def test_a_partly_authored_film_is_not_marked_degraded_for_that():
 # through to `scene_author_enabled`'s own default, which was still OFF. The
 # quality flip was invisible to every real user.
 #
-# Enumerating the construction sites (rather than listing the three we happen
-# to know about) is the point: a FOURTH entry point added later is caught by
-# the same assertion instead of silently shipping template cards.
+# Real HTTP, paper and Chat entry configurations are exercised in
+# test_motion_video_admission.py. The static guard below prevents copying the
+# scene author's shared default into an individual caller.
 
 
 def _source_python_files(root: str) -> list[str]:
@@ -475,95 +400,6 @@ def _source_python_files(root: str) -> list[str]:
                   for rel in discovered]
     return [rel for rel in normalized
             if rel.endswith('.py') and os.path.isfile(os.path.join(root, rel))]
-
-
-def _motion_task_construction_sites() -> list[tuple[str, str]]:
-    """Every ``_new_motion_task(...)`` call site, as (file, enclosing func).
-
-    AST-derived from the current source-owner roots — never a hand-written
-    list (which would not grow when a new entry point lands) and never
-    ``os.walk`` (which times out on this FUSE mount, charter note).
-    """
-    import ast
-    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    sites: list[tuple[str, str]] = []
-    for rel in _source_python_files(root):
-        try:
-            with open(os.path.join(root, rel), encoding='utf-8') as f:
-                tree = ast.parse(f.read())
-        except (OSError, SyntaxError) as e:
-            print(f'[scan] skipped {rel}: {e}')
-            continue
-        for fn in ast.walk(tree):
-            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for node in ast.walk(fn):
-                if not isinstance(node, ast.Call):
-                    continue
-                name = (getattr(node.func, 'id', None)
-                        or getattr(node.func, 'attr', None))
-                if name == '_new_motion_task':
-                    sites.append((rel, fn.name))
-                    break
-    return sites
-
-
-def test_the_construction_site_scan_actually_finds_the_known_entry_points():
-    """Verify the SCAN SURFACE before trusting any assertion built on it.
-
-    Charter: a scan-based guard fails silently when its input set is empty or
-    partial — the assertions then pass over nothing. This pins the surface
-    itself, so a scan that stops seeing the call sites reports THAT rather
-    than going quietly green.
-    """
-    sites = _motion_task_construction_sites()
-    files = {f for f, _ in sites}
-    assert len(sites) >= 5, (
-        f'the scan found only {len(sites)} construction site(s) — it is '
-        f'no longer seeing the real ones: {sorted(sites)}')
-    for expected in ('lib/paper/video_abstract.py',
-                     'routes/api_v1/motion.py',
-                     'lib/tasks_pkg/handlers/motion_video.py'):
-        assert expected in files, (
-            f'{expected} builds motion tasks but the scan missed it; every '
-            f'assertion below would skip that entry point')
-
-
-#: Sites that legitimately do NOT author, with the reason each is exempt.
-#: Keyed on the enclosing FUNCTION (a semantic unit), never a line number.
-_NON_AUTHORING_SITES = {
-    # Re-renders ONE scene from its existing index.html; there is no
-    # composition to author, and authoring here would silently discard the
-    # composition the user is asking to re-render.
-    'regen_scene': 'scene regen reuses the existing composition',
-    # Crash-resume restores the ORIGINAL job's persisted scene_author value
-    # (see _MANIFEST_FIELDS); imposing a default would change a resumed job's
-    # quality tier mid-flight.
-    '_respawn': 'resume restores the persisted flag verbatim',
-}
-
-
-def test_every_entry_point_defaults_to_an_authored_film(monkeypatch):
-    """A job spawned with no stated preference must author its scenes.
-
-    Drives the REAL predicate against the task shape each site produces. The
-    paper panel and the bare REST POST both build a task WITHOUT a
-    ``scene_author`` key — which is precisely how they kept shipping template
-    cards after the tool-path default was flipped.
-    """
-    monkeypatch.delenv('TOFU_MOTION_SCENE_AUTHOR', raising=False)
-    from lib.motion_video._scene_author import scene_author_enabled
-
-    authoring_sites = [(f, fn) for f, fn in _motion_task_construction_sites()
-                       if fn not in _NON_AUTHORING_SITES]
-    assert authoring_sites, 'every site got exempted — the guard is a no-op'
-
-    # The shape those sites hand to the engine when the caller said nothing.
-    unstated_task: dict = {'task_id': 't', 'workdir': '/tmp/x'}
-    assert scene_author_enabled(unstated_task) is True, (
-        f'a job built by {[f"{f}::{fn}" for f, fn in authoring_sites]} with '
-        f'no stated preference resolves to the TEMPLATE path — the default '
-        f'must live in scene_author_enabled, not be re-stated per caller')
 
 
 def test_no_entry_point_hand_copies_the_default(monkeypatch):

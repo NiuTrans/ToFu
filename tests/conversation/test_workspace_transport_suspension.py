@@ -4,11 +4,14 @@ import json
 import subprocess
 import pytest
 
+from tests._jsdom import require_node_modules
+
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def run_node(tmp_path, source, harness):
+    require_node_modules('vite')
     built = tmp_path / 'owner.cjs'
     result = subprocess.run([
         str(ROOT / 'scripts/vite_test_bundle.mjs'), str(ROOT / source),
@@ -25,7 +28,7 @@ const assert = require('node:assert/strict');
 global.window = globalThis;
 const streams = [];
 class Source extends EventTarget {
-  constructor(url) { super(); this.url = url; this.closed = false; streams.push(this); }
+  constructor(request) { super(); this.request = request; this.closed = false; streams.push(this); }
   close() { this.closed = true; }
 }
 const snapshot = id => ({
@@ -45,10 +48,9 @@ const { ConversationSyncCoordinator } = require(BUILT);
   let gate = Promise.resolve();
   const coordinator = new ConversationSyncCoordinator({
     conversationId:'one',
-    api:{snapshot:async id => { reads++; await gate; return snapshot(id); },
-         eventsUrl:(id,cursor) => `${id}/${cursor}`},
+    api:{snapshot:async id => { reads++; await gate; return snapshot(id); }},
     onSnapshot(){}, onAttemptEvent(){return true;}, onTurnDelta(){return true;},
-    eventSourceFactory:url => new Source(url),
+    eventSourceFactory:request => new Source(request),
   });
   await coordinator.resume();
   assert.equal(streams.length, 1);
@@ -60,7 +62,8 @@ const { ConversationSyncCoordinator } = require(BUILT);
   assert.equal(reads, 1);
   coordinator.setSuspended(false);
   assert.equal(streams.length, 2);
-  assert.equal(streams[1].url, 'one/cursor-7');
+  assert.equal(streams[1].request.conversationId, 'one');
+  assert.equal(streams[1].request.after, 'cursor-7');
   assert.equal(reads, 1, 'resume must use replay cursor without redundant snapshot');
   gate = new Promise(resolve => {release = resolve;});
   const hydration = coordinator.hydrate(true);
@@ -84,9 +87,8 @@ const { createConversationTurnRuntime } = require(BUILT);
 (async () => {
   let reads = 0;
   const runtime = createConversationTurnRuntime({
-    api:{snapshot:async id => {reads++; return snapshot(id);},
-         eventsUrl:(id,cursor) => `${id}/${cursor}`},
-    eventSourceFactory:url => new Source(url), isActive:() => true,
+    api:{snapshot:async id => {reads++; return snapshot(id);}},
+    eventSourceFactory:request => new Source(request), isActive:() => true,
   });
   for(let index=0; index<6; index++) await runtime.hydrateConversation({id:`conv-${index}`});
   assert.equal(streams.length, 6);

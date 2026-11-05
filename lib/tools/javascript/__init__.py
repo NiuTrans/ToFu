@@ -124,11 +124,12 @@ def _compile():
             config = wasmtime.Config()
             config.consume_fuel = True
             config.epoch_interruption = True
-            # A single 637 KiB module compiles once. Avoid retaining a global
-            # Rayon compiler pool after this optional first-use operation.
+            # A cache miss compiles the 637 KiB module once. Avoid retaining a
+            # global Rayon compiler pool after this optional first-use operation.
             config.parallel_compilation = False
             engine = wasmtime.Engine(config)
-            module = wasmtime.Module(engine, data)
+            from .compiled_module import load_compiled_module
+            module = load_compiled_module(wasmtime, engine, data, WASM_SHA256)
             from .execution_clock import ExecutionClock
             clock = ExecutionClock(engine)
             atexit.register(_dispose_compiled, module, engine, clock)
@@ -167,6 +168,13 @@ class _Program:
         self.host_seconds = 0.0
         self.store = self.w.Store(self.engine)
         try:
+            # A fresh Store keeps Wasmtime's default epoch deadline, which is
+            # already expired once the shared ticker advances the engine epoch.
+            # Instantiation is the program's first WASM entry, so arm the budget
+            # here rather than at the first exported call; otherwise a host whose
+            # instantiation path enters guest code traps with an interrupt before
+            # any guest time is spent and reports it as an exhausted budget.
+            self.arm_guest_deadline()
             self.clock.acquire()
         except BaseException:
             self.store.close()

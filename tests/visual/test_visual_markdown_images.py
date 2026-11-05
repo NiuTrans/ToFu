@@ -384,9 +384,16 @@ def test_markdown_click_reaches_existing_preview_modal_and_restores_focus(markdo
     assert modal.get_attribute('role') == 'dialog'
     assert page.locator('#previewBody .preview-image').evaluate('image => image.src') == image.evaluate('image => image.src')
     close = modal.locator('.preview-close-btn')
+    preview = page.locator('#previewBody .preview-image')
     assert close.evaluate('button => document.activeElement === button')
+    # The previewed bitmap is itself a zoom control, so it joins the trap's
+    # cycle; focus must never leave the dialog in either direction.
+    page.keyboard.press('Tab')
+    assert preview.evaluate('image => document.activeElement === image')
     page.keyboard.press('Tab')
     assert close.evaluate('button => document.activeElement === button')
+    page.keyboard.press('Shift+Tab')
+    assert preview.evaluate('image => document.activeElement === image')
     page.keyboard.press('Shift+Tab')
     assert close.evaluate('button => document.activeElement === button')
     page.keyboard.press('Escape')
@@ -400,3 +407,108 @@ def test_markdown_click_reaches_existing_preview_modal_and_restores_focus(markdo
     assert image.evaluate('image => document.activeElement === image')
     page.wait_for_timeout(350)
     assert modal.locator('.preview-image').count() == 0
+def test_preview_modal_opens_large_enough_and_toggles_actual_size(markdown_image_page):
+    """Clicking a body image must enlarge it, not shrink it.
+
+    Regression: the overlay only capped max-height, so a tall page render was
+    scaled DOWN below the size it already had in the message body and there was
+    no way to reach 1:1. The modal now opens fit-to-viewport (never smaller than
+    the inline render) inside a scrolling body, and click/Enter toggles to
+    actual pixels.
+    """
+    page = markdown_image_page
+    page.set_viewport_size({'width': 1280, 'height': 900})
+    messages = json.loads((
+        ROOT / 'frontend/src/i18n/locales/en.json').read_text())
+    page.evaluate('options => mountMarkdownImages(options)', {
+        'theme': 'tofu', 'language': 'en', 'messages': messages,
+    })
+    page.add_script_tag(content=runtime_section('upload_preview.js', scope_prelude=False))
+    page.evaluate(r'''() => {
+      const modal = document.createElement('div'); modal.id='previewModal';
+      modal.className='preview-modal'; modal.innerHTML='<div id="previewBody" class="preview-body"></div>';
+      document.body.append(modal);
+      const canvas = document.createElement('canvas');
+      canvas.width = 1024; canvas.height = 2600;
+      const context = canvas.getContext('2d');
+      context.fillStyle = '#ffffff'; context.fillRect(0, 0, 1024, 2600);
+      context.fillStyle = '#111111'; context.font = '20px sans-serif';
+      for (let y = 40; y < 2600; y += 40) context.fillText(`line ${y}`, 20, y);
+      window.tallImage = canvas.toDataURL('image/png');
+      const host = document.getElementById('markdown-image-host');
+      imageSurface.dispose();
+      window.imageSurface = createConversationSurface(host, {
+        onPreviewImage: source => openImagePreview(source),
+      });
+      const content = document.createElement('div'); content.className = 'md-content';
+      content.id = 'tall-render';
+      content.innerHTML = imageRenderer.render(`![Page](${window.tallImage})`);
+      imageSurface.root.append(content);
+      modal.addEventListener('click', event => {
+        if (event.target.closest('.preview-close-btn')) closePreview();
+      });
+      modal.addEventListener('keydown', event => {
+        if (event.key === 'Escape') { closePreview(); event.preventDefault(); }
+      });
+    }''')
+    page.wait_for_function(
+        "() => { const i = document.querySelector('#tall-render img');"
+        " return i && i.naturalHeight > 0; }", timeout=10000)
+    inline = page.locator('#tall-render img').evaluate(
+        'image => image.getBoundingClientRect().width')
+
+    page.locator('#tall-render img').click()
+    opened = page.locator('#previewBody .preview-image').evaluate('''image => ({
+      width: image.getBoundingClientRect().width,
+      height: image.getBoundingClientRect().height,
+      naturalWidth: image.naturalWidth,
+      naturalHeight: image.naturalHeight,
+      cursor: getComputedStyle(image).cursor,
+      role: image.getAttribute('role'),
+      tabindex: image.getAttribute('tabindex'),
+    })''')
+    assert opened['naturalWidth'] == 1024 and opened['naturalHeight'] == 2600
+    # Enlarged: at least as wide as the inline render, never upscaled past 1:1.
+    assert opened['width'] > inline + 1, (opened, inline)
+    assert opened['width'] == pytest.approx(1024, abs=1), opened
+    assert opened['cursor'] == 'zoom-in'
+    assert opened['role'] == 'button' and opened['tabindex'] == '0'
+    # Taller than the viewport: the body scrolls to the rest instead of shrinking.
+    scrolls = page.locator('#previewBody').evaluate('''body => ({
+      clientHeight: body.clientHeight,
+      scrollHeight: body.scrollHeight,
+      overflowY: getComputedStyle(body).overflowY,
+      canScroll: (() => { body.scrollTop = 400; const moved = body.scrollTop; body.scrollTop = 0; return moved; })(),
+    })''')
+    assert scrolls['overflowY'] in ('auto', 'scroll'), scrolls
+    assert scrolls['scrollHeight'] > scrolls['clientHeight'], scrolls
+    assert scrolls['canScroll'] > 0, scrolls
+
+    page.locator('#previewBody .preview-image').click()
+    whole = page.locator('#previewBody .preview-image').evaluate('''image => {
+      const rect = image.getBoundingClientRect();
+      return {
+        width: rect.width, height: rect.height,
+        cursor: getComputedStyle(image).cursor,
+        whole: image.classList.contains('preview-image--whole'),
+      };
+    }''')
+    assert whole['whole'] is True and whole['cursor'] == 'zoom-out'
+    # Whole-image overview keeps every pixel on screen (only the aspect ratio fit).
+    assert whole['height'] <= 900 and whole['width'] <= 1280, whole
+    assert whole['width'] == pytest.approx(1024 * whole['height'] / 2600, rel=.02), whole
+
+    # Enter toggles as well, so the zoom is keyboard reachable.
+    page.locator('#previewBody .preview-image').focus()
+    page.keyboard.press('Enter')
+    back = page.locator('#previewBody .preview-image').evaluate('''image => ({
+      width: image.getBoundingClientRect().width,
+      whole: image.classList.contains('preview-image--whole'),
+    })''')
+    assert back['whole'] is False
+    assert back['width'] == pytest.approx(opened['width'], abs=1), back
+
+    page.keyboard.press('Escape')
+    # The modal clears its body on the 300ms close fence.
+    page.wait_for_timeout(400)
+    assert page.locator('#previewBody .preview-image').count() == 0

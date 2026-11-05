@@ -37,6 +37,8 @@ class ToolExecutionContext:
     started_monotonic: float = field(default_factory=time.monotonic)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     _cancel_callbacks: dict[int, CancelCallback] = field(default_factory=dict, repr=False)
+    _resource_cancel_event: threading.Event = field(
+        default_factory=threading.Event, repr=False)
     _next_callback_id: int = field(default=1, repr=False)
     _terminal_state: str | None = field(default=None, repr=False)
     _progress_sink: Any = field(default=None, repr=False)
@@ -66,8 +68,14 @@ class ToolExecutionContext:
             return event
 
     @property
+    def resource_cancel_event(self) -> threading.Event:
+        """Per-call cancellation, separate from the whole task's Stop signal."""
+        return self._resource_cancel_event
+
+    @property
     def cancellation_requested(self) -> bool:
-        return bool(self.task.get('aborted')) or self.abort_event.is_set()
+        return (bool(self.task.get('aborted')) or self.abort_event.is_set()
+                or self._resource_cancel_event.is_set())
 
     @property
     def deadline_exceeded(self) -> bool:
@@ -104,6 +112,7 @@ class ToolExecutionContext:
 
     def request_resource_cancellation(self) -> tuple[int, tuple[Exception, ...]]:
         """Invoke every currently registered scoped callback at most once."""
+        self._resource_cancel_event.set()
         with self._lock:
             callbacks = tuple(self._cancel_callbacks.values())
             self._cancel_callbacks.clear()
@@ -207,8 +216,16 @@ def close_tool_result_publication(task, *, round_num, tool_call_id, round_entry,
         context = active_context_for_call(
             task, round_num=round_num, tool_call_id=tool_call_id,
             round_entry=round_entry)
+        if context is not None:
+            # The worker outlives its published verdict and may still write
+            # this row after it unregisters, so the row never settles.
+            task.setdefault(LATE_WORKER_ROWS_KEY, set()).add(id(round_entry))
     if context is not None:
         context.result_publication.close()
+
+
+# Task key: ids of tool rows whose worker outlived result publication.
+LATE_WORKER_ROWS_KEY = '_toolRowsWithLateWorkers'
 
 
 def active_context_for_call(
@@ -259,6 +276,7 @@ def cancel_task_contexts(task: dict[str, Any]) -> tuple[int, tuple[Exception, ..
 
 
 __all__ = [
+    'LATE_WORKER_ROWS_KEY',
     'ToolCancelled', 'ToolExecutionContext', 'active_context_for_call',
     'cancel_task_contexts', 'close_tool_result_publication',
     'context_for_task', 'unregister_context',

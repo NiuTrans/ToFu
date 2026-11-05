@@ -43,9 +43,11 @@ def test_assembled_shell_has_one_copy_of_each_agent_mode_control():
     for element_id in (
         "submenuAgentMode",
         "agentModeStandard",
+        "delegateModeToggle",
         "planModeToggle",
         "autopilotToggle",
         "mobileAgentModeStandard",
+        "mobileDelegateMode",
         "mobilePlanMode",
         "mobileAutopilot",
     ):

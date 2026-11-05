@@ -190,6 +190,23 @@ def test_disjoint_submissions_merge_then_promote_stable(
         use_cache=False)['refs']['candidateAheadStable'] == 0
 
 
+def test_workspace_creation_retires_candidate_from_rewritten_history(
+        repository: Path) -> None:
+    empty_tree = _run(repository, 'git', 'hash-object', '-t', 'tree', '-w', '/dev/null')
+    abandoned = _run(repository, 'git', 'commit-tree', empty_tree, '-m', 'abandoned history')
+    for ref in ('refs/tofu/candidate', 'refs/tofu/stable'):
+        _run(repository, 'git', 'update-ref', ref, abandoned)
+    head = _run(repository, 'git', 'rev-parse', 'HEAD')
+
+    created = control.create_workspace(str(repository), 'after-rewrite', user_id=1)
+
+    # Seeded from the current history, never from the abandoned tree.
+    assert (Path(created['workspacePath']) / 'shared.txt').read_text(encoding='utf-8') == 'base\n'
+    assert _run(repository, 'git', 'rev-parse', 'refs/tofu/candidate', 'refs/tofu/stable').split() == [head, head]
+    assert _run(repository, 'git', 'for-each-ref', '--format=%(objectname)',
+                'refs/tofu/retired').split() == [abandoned, abandoned]
+
+
 def test_prune_removes_only_metadata_for_missing_worktree(
         repository: Path, tmp_path: Path) -> None:
     live = _worktree(repository, tmp_path / 'live-writer')
@@ -564,6 +581,22 @@ def test_malformed_project_gate_command_quarantines_with_configuration_error(
     assert 'No closing quotation' in row['error']
 
 
+def _legacy_merge_tree(args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Answer ``merge-tree --write-tree ...`` exactly as Git < 2.38 does.
+
+    Legacy merge-tree takes exactly ``<base-tree> <branch1> <branch2>``: any
+    other operand count prints its usage (exit 129), and three operands make
+    it resolve ``--write-tree`` as the base revision (exit 128).
+    """
+    operands = args[1:]
+    if len(operands) != 3:
+        return subprocess.CompletedProcess(
+            ['git', *args], 129, '',
+            'usage: git merge-tree <base-tree> <branch1> <branch2>\n')
+    return subprocess.CompletedProcess(
+        ['git', *args], 128, '', f'fatal: unknown rev {operands[0]}\n')
+
+
 def test_git_211_scratch_merge_fallback_preserves_both_trees(
         repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     first = _worktree(repository, tmp_path / 'legacy-first')
@@ -582,8 +615,7 @@ def test_git_211_scratch_merge_fallback_preserves_both_trees(
 
     def legacy_git(cwd, args, **kwargs):
         if args[:2] == ['merge-tree', '--write-tree']:
-            return subprocess.CompletedProcess(
-                ['git', *args], 129, '', 'error: unknown option `write-tree`')
+            return _legacy_merge_tree(args)
         return real_git(cwd, args, **kwargs)
 
     monkeypatch.setattr(control, '_git', legacy_git)
@@ -682,7 +714,8 @@ def test_worker_loop_survives_unexpected_error(monkeypatch):
 def test_worker_idle_poll_does_not_repeat_writer_claim(monkeypatch):
 
     from lib.project_mod import delivery as integration_delivery
-    monkeypatch.setattr(integration_delivery, 'resume_pending_workspace_deliveries', lambda: False)
+    monkeypatch.setattr(integration_delivery, 'resume_pending_workspace_deliveries',
+                        lambda **_kwargs: False)
     monkeypatch.delenv('TOFU_INTEGRATION_IDLE_POLL_BASE_SECONDS', raising=False)
     monkeypatch.delenv('TOFU_INTEGRATION_IDLE_POLL_MAX_SECONDS', raising=False)
     calls = {'n': 0}

@@ -62,14 +62,8 @@ LOCAL_TOOL_SEARCH_TERM_CACHE_MAX_INPUT_CHARS = 1024
 # Model-facing retrieval output is a directory, not a dump of every owning
 # contract. Keep it bounded even when a plugin contributes a very wide schema.
 LOCAL_TOOL_SEARCH_MAX_RESULT_CHARS = 24_000
-# Authoring contract for the full search/execute gateway pair. The pair is
-# never compacted at runtime (rewriting its bytes breaks the provider
-# prompt-cache prefix); this target is enforced by tests and drift past it
-# only logs a warning. Measured at ~522-544 tokens across supported
-# tokenizers.
-LOCAL_GATEWAY_MAX_TOKENS = 600
 CODE_CORE_DIRECT_TOOL_NAMES = frozenset({
-    'read_files', 'grep_search', 'find_files', 'edit_file', 'run_command',
+    'read_files', 'search_files', 'find_files', 'edit_file', 'run_command',
 })
 
 ToolIsolationReporter = Callable[[dict[str, Any]], None]
@@ -862,7 +856,7 @@ def _normalize_provider_tool_schema(
     tool: Mapping[str, Any], *, model: str = '',
 ) -> tuple[Mapping[str, Any], tuple[str, ...], str]:
     """Return the model-specific provider projection for one tool schema."""
-    from lib.model_info import is_gpt, is_kimi
+    from lib.model_info import is_claude, is_gpt, is_kimi
 
     kimi = is_kimi(model)
     # OpenAI's tool-parameter validator rejects any root combinator outright
@@ -871,7 +865,13 @@ def _normalize_provider_tool_schema(
     # hard-400'd every gpt-* slot. The same sound root relaxation used for
     # Kimi applies; only the MFJS dialect rewrites stay Kimi-specific.
     gpt = is_gpt(model)
-    if not (kimi or gpt):
+    # The Messages API rejects the same root shape even more bluntly —
+    # "input_schema does not support oneOf, allOf, or anyOf at the top level"
+    # — so every Anthropic-protocol slot (Claude + Fable, including
+    # AWS/Vertex-prefixed aliases) needs the identical relaxation. Nested
+    # combinators stay untouched: only the root is restricted.
+    anthropic = is_claude(model)
+    if not (kimi or gpt or anthropic):
         return tool, (), ''
     function = tool.get('function')
     if isinstance(function, Mapping):
@@ -1295,17 +1295,11 @@ def fit_tool_schema_budget(
             continue
         values.append(tool)
     budget = max(0, int(budget_tokens or 0))
+    # The gateway pair is never compacted or dropped, whatever its size:
+    # rewriting its bytes broke the provider prompt-cache prefix whenever PTC
+    # activation flipped.
     gateway = [tool for tool in values
                if _schema_name(tool) in GATEWAY_TOOL_NAMES]
-    gateway_tokens = tool_schema_tokens(gateway, model=model)
-    if gateway and gateway_tokens > LOCAL_GATEWAY_MAX_TOKENS:
-        # The target is an authoring contract guarded by tests, not a reason
-        # to rewrite the pair at runtime: compacted gateway bytes broke the
-        # provider prompt-cache prefix whenever PTC activation flipped.
-        logger.warning(
-            '[ToolGateway] gateway schemas exceed cost target: tokens=%d '
-            'target=%d; request continues with byte-stable schemas',
-            gateway_tokens, LOCAL_GATEWAY_MAX_TOKENS)
     if not budget or tool_schema_tokens(values, model=model) <= budget:
         return values
     direct = [(index, tool) for index, tool in enumerate(values)
@@ -1823,12 +1817,6 @@ def ptc_local_wire_tools(
             controls = [tool for tool in catalog or []
                         if isinstance(tool, dict) and _schema_name(tool) in BACKGROUND_TOOL_NAMES]
             return controls + [compiled]
-    projected_tokens = tool_schema_tokens([search_tools_schema(), execute])
-    if projected_tokens > LOCAL_GATEWAY_MAX_TOKENS:
-        logger.warning(
-            '[ToolGateway] fixed PTC gateway exceeds cost target: tokens=%d '
-            'target=%d; request continues with byte-stable schemas',
-            projected_tokens, LOCAL_GATEWAY_MAX_TOKENS)
     gateway_only = str(exposure or '').strip().lower() == 'gateway_only'
     out = []
     for tool in catalog or []:
@@ -3160,7 +3148,7 @@ def normalize_execute_request(
 
 __all__ = [
     'EXECUTE_TOOLS_NAME', 'EXECUTE_PROGRAM_NAME', 'GATEWAY_TOOL_NAMES', 'SEARCH_TOOLS_NAME',
-    'CODE_CORE_DIRECT_TOOL_NAMES', 'LOCAL_GATEWAY_MAX_TOKENS',
+    'CODE_CORE_DIRECT_TOOL_NAMES',
     'LOCAL_TOOL_SEARCH_MAX_RESULT_CHARS',
     'catalog_index', 'full_wire_tools',
     'execute_tools_schema',

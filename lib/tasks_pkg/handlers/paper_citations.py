@@ -40,6 +40,8 @@ def _error_text(exc) -> str:
         return '引用存储暂不可用（%s）：%s' % (exc.code, exc)
     hints = {
         'citation_backend': '文献服务（OpenAlex/Crossref）暂不可用，请稍后重试。',
+        'citation_cursor': '请使用上次审计返回的 cursor；重新开始时省略该参数。',
+        'citation_source_changed': '文稿或文献表已变化，请省略 cursor 从头核验新版本。',
         'citation_query': '请检查标识符或检索词（DOI / OpenAlex ID / arXiv ID）。',
         'citation_not_found': '该标识符在公开索引中不存在；请用 '
                               'paper_cite_search 重新检索真实文献。',
@@ -132,12 +134,13 @@ def _insert_verdict(base: str, main_file: str, fn_args, task,
     return '\n'.join(lines), 'done'
 
 
-def _audit_verdict(base: str, main_file: str) -> tuple[str, str]:
-    report = citations.audit_document(base, main_file=main_file)
+def _audit_verdict(base: str, main_file: str, *, cursor: str = '') -> tuple[str, str]:
+    report = citations.audit_document(base, main_file=main_file, cursor=cursor)
     if not report['bib_files'] and not report['tex_files']:
         return '文档根目录下没有 .tex/.bib 文件可审计。', 'error'
     rows = report['verifications']
     counts = {name: 0 for name in _STATUS_LABEL}
+    coverage = report['coverage']
     for row in rows:
         counts[row['status']] = counts.get(row['status'], 0) + 1
     lines = ['引用审计：%d 个 .bib 文件 / %d 条条目，%d 个 .tex 文件。'
@@ -147,6 +150,14 @@ def _audit_verdict(base: str, main_file: str) -> tuple[str, str]:
              '跳过 %d。' % (counts.get('verified', 0), counts.get('mismatch', 0),
                           counts.get('not_found', 0), counts.get('retracted', 0),
                           counts.get('skipped', 0))]
+    lines.append('本批范围：[%d, %d) / %d；source_digest: %s'
+                 % (coverage['start'], coverage['end'], report['entries_total'], report['source_digest']))
+    if report['next_cursor']:
+        lines.append('继续核验：再次调用 paper_citation_audit，沿用 path，传入 cursor。'
+                     '\nnext_cursor: %s' % report['next_cursor'])
+    if report['retry_cursor']:
+        lines.append('本批有未核验条目，服务恢复后用此 cursor 重试本批。'
+                     '\nretry_cursor: %s' % report['retry_cursor'])
     shown = 0
     for row in rows:
         if row['status'] == 'verified' and len(rows) > _LISTED_AUDIT_ROWS:
@@ -185,6 +196,16 @@ def _audit_verdict(base: str, main_file: str) -> tuple[str, str]:
                      '+ paper_cite_insert 换成真实文献；撤稿文献禁止引用。'
                      '修复后运行 paper_build 复验。')
         return '\n'.join(lines), 'error'
+    if not report['entries_total']:
+        lines.append('没有可进行外部核验的文献条目；此结果不确认论文的引用充分性或真实性。')
+        return '\n'.join(lines), 'done'
+    if not coverage['complete']:
+        lines.append('引用核验未完成：本批跳过 %d 条，后续待核验 %d 条。'
+                     '当前结果仅覆盖本批；请继续 next_cursor，并补齐 retry_cursor，'
+                     '汇总同一 source_digest 下所有批次的结果后再判断整篇引用。'
+                     '到达末页不证明先前批次已通过；paper_build 只能检查编译。'
+                     % (counts['skipped'], coverage['remaining']))
+        return '\n'.join(lines), 'done'
     lines.append('全部已核验条目均为真实文献。投稿/提交前可用 paper_build '
                  '做最终编译验证。')
     return '\n'.join(lines), 'done'
@@ -225,7 +246,7 @@ def _handle_paper_citations_tool(task, tc, fn_name, tc_id, fn_args, rn,
                         content, status = _insert_verdict(
                             base, main_file, fn_args, task, conv_id)
                     else:
-                        content, status = _audit_verdict(base, main_file)
+                        content, status = _audit_verdict(base, main_file, cursor=fn_args.get('cursor', ''))
         except (BuildError, StorageError) as exc:
             content = _error_text(exc)
             status = 'error'

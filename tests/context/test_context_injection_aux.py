@@ -75,3 +75,81 @@ def test_dependency_renderer_preserves_explicit_user_context():
     evidence = StreamingScheduler._inject_deps_locked(scheduler, spec)
     assert spec.context == 'explicit user context'
     assert 'confirmed evidence' in evidence
+
+
+def _run_binding(agent_id):
+    return {'owner': 1, 'tenant': '', 'conversationId': 'conv-1', 'projectPath': '',
+            'swarmKey': 'swarm-1', 'swarmRunId': 'run-1', 'agentId': agent_id,
+            'retainedAgentId': '', 'retainedRunId': '', 'retainedScope': ''}
+
+
+def _sibling_messages(agent_id, objective, checkpoint=None):
+    from lib.tasks_pkg.child_invocation import build_child_messages
+    if checkpoint is None:
+        checkpoint = build_child_messages(objective=objective, system_prompt='Inherited',
+                                          role_policy='Role policy')
+    return build_child_messages(objective=objective, system_prompt='Inherited',
+                                role_policy='Role policy', checkpoint_messages=checkpoint,
+                                swarm_message_binding=_run_binding(agent_id))
+
+
+def _system_wire(messages):
+    return [(m['role'], m['content']) for m in messages if m['role'] == 'system']
+
+
+def test_sibling_run_identity_ends_each_workers_system_contract():
+    # Concurrent same-role siblings that shared a byte-identical tools+system
+    # prefix lost their own cached history to other upstream cache domains;
+    # each sibling's system contract names its run identity instead
+    # (docs/LLM_COST_OPTIMIZATION.md, "Sibling cache affinity").
+    first = _sibling_messages('agent-a', 'Objective A')
+    second = _sibling_messages('agent-bbbb', 'Objective B')
+
+    assert _system_wire(first) != _system_wire(second)
+    policy = next(m for m in first if m.get('_contextInjectionId') == 'worker_policy')
+    assert policy['role'] == 'system'
+    text = policy['content']
+    assert 'Team communication: your assignment ID is "agent-a"' in text
+    assert (text.index('Role policy') < text.index('Team communication')
+            < text.index('Work only on the delegated objective'))
+    assert sum('assignment ID' in str(m.get('content')) for m in first) == 1
+    assert not any(m.get('_contextInjectionId') == 'worker_team' for m in first)
+
+
+def test_worker_without_run_binding_keeps_the_role_system_contract():
+    from lib.tasks_pkg.child_invocation import build_child_messages
+    plain = build_child_messages(objective='Objective A', system_prompt='Inherited',
+                                 role_policy='Role policy')
+    other = build_child_messages(objective='Objective B', system_prompt='Inherited',
+                                 role_policy='Role policy')
+    assert _system_wire(plain) == _system_wire(other)
+    assert not any('assignment ID' in str(m.get('content')) for m in plain)
+
+
+def test_checkpoint_rebuild_replaces_the_run_identity():
+    original = _sibling_messages('agent-a', 'Objective A')
+    # A checkpoint written while the identity rode the retired worker_team carrier.
+    append_injection(original, 'worker_team',
+                     'Team communication: your assignment ID is "agent-a"')
+    rebuilt = _sibling_messages('agent-c', 'Objective A', checkpoint=original)
+    identities = [m for m in rebuilt if 'assignment ID' in str(m.get('content'))]
+    assert len(identities) == 1
+    assert identities[0]['_contextInjectionId'] == 'worker_policy'
+    assert '"agent-c"' in identities[0]['content'] and '"agent-a"' not in identities[0]['content']
+
+
+def test_worker_run_passes_identity_as_binding_not_role_policy(monkeypatch):
+    captured = {}
+
+    def capture(*_args, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError('captured')
+
+    monkeypatch.setattr('lib.tasks_pkg.child_invocation.create_child_invocation', capture)
+    agent = SubAgent(SubTaskSpec(id='aux-team', role='general', objective='obj'),
+                     parent_task={'id': 'parent', 'config': {}}, all_tools=[],
+                     model='test-model', system_prompt_base='', thinking_enabled=False)
+    agent._assignment_message_binding = _run_binding('aux-team')
+    agent.run()
+    assert captured['swarm_message_binding']['agentId'] == 'aux-team'
+    assert 'Team communication' not in captured['role_policy']

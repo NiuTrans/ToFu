@@ -68,6 +68,9 @@ def test_progress_backlog_uses_one_atomic_batch_and_retries_exact_frames(
         rows = storage.client.query('event.list', {'task_id': task['id'], 'after_sequence': -1, 'limit': 100})
         assert [row['sequence'] for row in rows] == list(range(64))
         assert [row['event']['content'] for row in rows] == [str(i) + ' ' for i in range(64)]
+        # The drained lane keeps only its structural source for reuse.
+        assert owner.snapshot()['pending_bytes'] == lane.projection.source_bytes > 0
+        owner.release_projection(lane)
         assert owner.snapshot()['pending_bytes'] == 0
     finally:
         release.set()

@@ -124,6 +124,10 @@ _NON_PHASE_EVENT_VALUES: dict[str, str] = {
     'timeout': 'swarm agent row phase',
     'no_progress': 'swarm agent row phase',
     'running': 'swarm_agent_phase / swarm agent row',
+    # A worker's first reasoning / answer delta ends its model wait on the
+    # card (lib/swarm/agent.py _restate_card_phase), never a chat PHASE push.
+    'thinking': 'swarm_agent_phase row: worker streams reasoning',
+    'writing': 'swarm_agent_phase row: worker streams its answer',
     'done': 'swarm agent row / video_analysis store record',
     # swarm_phase top-level orchestration event.
     'spawning': 'swarm_phase event',
@@ -145,6 +149,12 @@ _NON_PHASE_EVENT_VALUES: dict[str, str] = {
     'serving': 'server_boot lock state',
     'error': 'swarm agent row / event phase',
     'begin': 'SQLite writer transaction state',
+    'raw': 'SQLite writer transaction state (raw job without BEGIN)',
+    # Swarm tool error envelopes name the launch stage that failed
+    # (_swarm_tool_error(..., phase=...)); a tool result, not a PHASE push.
+    'preparation': 'swarm tool error envelope stage',
+    'validation': 'swarm tool error envelope stage',
+    'dispatch': 'swarm tool error envelope stage',
     # File-transfer and storage-copy records expose their own lifecycle field
     # named ``phase``; none of these dictionaries rides EventType.PHASE.
     'completed': 'browser file-transfer record state',
@@ -152,6 +162,11 @@ _NON_PHASE_EVENT_VALUES: dict[str, str] = {
     'copying': 'storage fastpath copy state',
     'copying_database': 'storage shipper copy state',
     'database_complete': 'storage shipper copy state',
+    # Native fastpath planned-exit journal (fastpath state ``exit.phase``):
+    # a durable resume marker for an interrupted export/swap, never pushed
+    # on EventType.PHASE.
+    'exporting': 'native fastpath planned-exit journal state',
+    'swapping': 'native fastpath planned-exit journal state',
     # Browser timing metrics rows carry their own phase bucket
     # (navigation/read/interaction/cleanup/other) — a samples record, not an
     # EventType.PHASE emission.
@@ -192,6 +207,16 @@ _FRONTEND_PHASE_EXEMPTIONS: dict[str, str] = {
     # flow_iteration branches in the typed conversation projection.
     'planning': 'flow_iteration.phase branch',
     'reviewing': 'flow_iteration.phase branch',
+    # Goal and usage recovery notices keep their own request state machine
+    # (RecoveryNoticeState.phase / usage-recovery Phase) for the resume and
+    # continue buttons; the backend never pushes these values.
+    'idle': 'client-local recovery notice request state',
+    'checking': 'client-local recovery notice request state',
+    'submitting': 'client-local recovery notice request state',
+    'accepted': 'client-local recovery notice request state',
+    'refused': 'client-local recovery notice request state',
+    'blocked': 'client-local recovery notice request state',
+    'unknown': 'client-local recovery notice request state',
 }
 
 # Frontend files whose ``.phase ===`` branches consume the chat PHASE event.

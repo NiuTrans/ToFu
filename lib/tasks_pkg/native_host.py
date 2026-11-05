@@ -13,6 +13,9 @@ import threading
 
 from lib.agent_core.native_image import NativeArchiveImage, NativeExecutableImage
 from lib.agent_core.native_process import Budget, NativeProcessClient, NativeConfigurationError, _joined
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 
 async def _close_on_worker(close):
@@ -21,6 +24,7 @@ async def _close_on_worker(close):
         try:
             await asyncio.to_thread(close)
         except BaseException as failure:
+            logger.debug('native close failure handled: %s', type(failure).__name__)
             return failure
         return None
 
@@ -109,17 +113,17 @@ class NativeHost:
             self.image.prepare()
         loop.call_soon_threadsafe(prepare)
 
-    def enable_worker_reuse(self,launch_policy):
+    def enable_worker_reuse(self,idle_workers):
         # Preparation runs on the existing sync executor; this step owns no IO.
         # Actual process/image acquisition binds to the serving loop later.
-        from collections.abc import Mapping
-        if not isinstance(launch_policy,Mapping) or type(launch_policy.get('root_maximum')) is not int or launch_policy['root_maximum']<=0:
-            raise NativeConfigurationError('native reuse requires issued idle capacity policy')
+        # idle_workers only bounds retained idle processes, never active runs.
+        if type(idle_workers) is not int or idle_workers<=0:
+            raise NativeConfigurationError('native reuse requires a positive idle worker hint')
         with self._reuse_lock:
             if self._closed:raise NativeConfigurationError('native application host is closed')
             if self._worker_pool is None:
                 from lib.agent_core.native_worker_pool import NativeWorkerPool
-                self._worker_pool=NativeWorkerPool(image=self.image,idle_workers=launch_policy['root_maximum'])
+                self._worker_pool=NativeWorkerPool(image=self.image,idle_workers=idle_workers)
 
     @asynccontextmanager
     async def client(self,principal,*,budget:Budget):
@@ -151,6 +155,7 @@ class NativeHost:
         except BaseException as failure:
             # gather creates a Task per client. Control exceptions must reach
             # the aggregate owner as data so sibling cleanup can still finish.
+            logger.debug('native client close failure handled: %s', type(failure).__name__)
             return failure
         self._clients.pop(client,None)
         return None

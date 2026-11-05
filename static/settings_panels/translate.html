@@ -4,13 +4,12 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px;opacity:.65"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg>
             <span data-i18n="settings.mtService">机器翻译服务</span>
           </div>
-          <p class="settings-desc" data-i18n-html="settings.mtServiceDesc">配置专用机器翻译 API，比 LLM 翻译更快、更便宜。<br>未配置或关闭时，翻译将自动使用 LLM cheap 模型。</p>
 
           <div class="settings-group">
             <div class="settings-toggle-row">
               <div>
                 <span class="settings-toggle-label" data-i18n="settings.mtEnable">启用机器翻译</span>
-                <div class="settings-toggle-desc" data-i18n="settings.mtEnableDesc">开启后，翻译将优先使用机器翻译 API，失败时自动回退到 LLM</div>
+                <div class="settings-toggle-desc" data-i18n="settings.mtEnableDesc">优先使用机器翻译 API，失败时回退到模型翻译。</div>
               </div>
               <label class="stg-toggle">
                 <input type="checkbox" id="settingMtEnabled">

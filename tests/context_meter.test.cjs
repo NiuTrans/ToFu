@@ -4,13 +4,19 @@ const fs = require('node:fs');
 const path = require('node:path');
 const ts = require('typescript');
 const { JSDOM } = require('jsdom');
+// Relative imports resolve like the bundler: `<name>.ts`, else `<name>/index.ts`.
+function resolveTs(fromFile, name) {
+  const base = path.resolve(path.dirname(fromFile), name);
+  return fs.existsSync(base + '.ts') ? base + '.ts' : path.join(base, 'index.ts');
+}
 function load(file) {
   const result = { exports: {} };
   const source = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
-  new Function('require', 'module', 'exports', source)((name) => name.startsWith('.') ? load(path.resolve(path.dirname(file), name + '.ts')) : require(name), result, result.exports);
+  new Function('require', 'module', 'exports', source)((name) => name.startsWith('.') ? load(resolveTs(file, name)) : require(name), result, result.exports);
   return result.exports;
 }
 const { createContextMeter } = load(path.resolve('frontend/src/features/conversation-bar/context-meter.ts'));
+const { cancelledCompactionNotice, createScheduledCompactions, readCancelledCompaction, scheduledCompactionNotice } = load(path.resolve('frontend/src/features/conversation-bar/scheduled-compaction.ts'));
 function setup(overrides = {}) {
   const dom = new JSDOM('<div id="convStatusStrip"><button id="projectBar">Project</button><div id="bgActivity"></div><button id="turnNav">Turns</button></div><button id="outside">Outside</button>');
   const doc = dom.window.document;
@@ -64,8 +70,12 @@ test('unknown and busy details stay reachable; navigation, outside focus and des
   const { meter, doc, update } = setup({ used: 0, limit: null, known: false, busy: true, hasHistory: false, zone: 'unknown' });
   meter.el.click();
   assert.deepEqual([...doc.querySelectorAll('dd')].map(el => el.textContent), ['Unknown', 'Unknown', '3']);
-  assert.equal(doc.activeElement, doc.querySelector('.ctx-pop-close'));
-  assert.equal(doc.querySelector('.ctx-pop-compact').disabled, true);
+  // A running task schedules the compaction for its next model call instead of refusing it.
+  const action = doc.querySelector('.ctx-pop-compact');
+  assert.equal(doc.activeElement, action);
+  assert.equal(action.disabled, false);
+  assert.equal(action.textContent, 'Compact at the next model call');
+  assert.equal(doc.querySelector('.ctx-pop-status').hidden, true);
   update({ convId: 'c2' });
   assert.equal(doc.querySelector('#ctxBarPopover'), null);
   meter.el.click();
@@ -103,6 +113,7 @@ test('manual command deduplicates POSTs and offscreen summary events cannot reop
   };
   const sandbox = vm.createContext({
     runtimeScope, window:dom.window, document:doc, createContextMeter,
+    createScheduledCompactions, scheduledCompactionNotice, readCancelledCompaction, cancelledCompactionNotice,
     getConvById:id => conversations.find(c => c.id === id), activeConvId:'a',
     config:{ model:'test' }, convIsBusy:() => false,
     requestAnimationFrame:callback => callback(), console,
@@ -138,5 +149,112 @@ test('manual command deduplicates POSTs and offscreen summary events cannot reop
   assert.equal(doc.querySelector('#contextHealthBar').dataset.compacting,'1');
   requests[1].resolve({ok:false,code:'nothing_to_compact'}); await second;
   assert.equal(doc.querySelector('.ctx-live-summary'),null);
+  dom.window.close();
+});
+
+test('a protected conversation shows its scheduled compaction until the next run settles', async () => {
+  const vm = require('node:vm');
+  const { dom, doc } = setup();
+  doc.querySelector('#contextHealthBar').remove();
+  const toasts = [], reloads = [];
+  const conversation = { id:'router', busy:false, turns:[{}, {}] };
+  const runtimeScope = {
+    ConversationTurnRead:{ state:() => ({}), ordered:conv => conv.turns },
+    requestAuthoritativeConversationRender() { reloads.push('render'); },
+    getCompactionHistory:() => [],
+  };
+  const sandbox = vm.createContext({
+    runtimeScope, window:dom.window, document:doc, createContextMeter,
+    createScheduledCompactions, scheduledCompactionNotice, readCancelledCompaction, cancelledCompactionNotice,
+    getConvById:id => (id === 'router' ? conversation : null), activeConvId:'router',
+    config:{ model:'test' }, convIsBusy:conv => Boolean(conv && conv.busy),
+    requestAnimationFrame:callback => callback(), console,
+    hydrateConversationRuntime:async () => { reloads.push('hydrate'); },
+    Api:{compactions:{compactNow:async () => ({ ok:true, scheduled:true, alreadyScheduled:false,
+      requestId:'r1', requestedAt:1, protection:'coordinator', appliesAt:'next_reply' })}},
+    showToast:(...args) => toasts.push(args),
+  });
+  vm.runInContext(fs.readFileSync('frontend/src/runtime/sections/context-bar.js','utf8'),sandbox);
+  await runtimeScope.runManualCompaction('router');
+  // Nothing was rewritten: no reload, one informational toast.
+  assert.deepEqual(reloads, []);
+  assert.equal(toasts.length, 1);
+  assert.match(toasts[0][0], /^Compaction scheduled/);
+  assert.equal(toasts[0][1], 'info');
+  const bar = doc.querySelector('#contextHealthBar');
+  assert.equal(bar.dataset.compactionScheduled, '1');
+  bar.click();
+  const action = doc.querySelector('.ctx-pop-compact');
+  assert.equal(doc.querySelector('.ctx-pop-status').textContent, 'Compaction scheduled for the next reply');
+  assert.equal(action.textContent, 'Cancel scheduled compaction');
+  assert.equal(action.disabled, false);
+  conversation.busy = true; conversation.turns.push({}, {}); runtimeScope.updateContextBar();
+  assert.equal(bar.dataset.compactionScheduled, '1');
+  conversation.busy = false; runtimeScope.updateContextBar();
+  assert.equal(bar.dataset.compactionScheduled, undefined);
+  assert.equal(action.textContent, 'Compact context now');
+  dom.window.close();
+});
+
+test('a busy conversation schedules for the next model call and can withdraw it', async () => {
+  const vm = require('node:vm');
+  const { dom, doc } = setup();
+  doc.querySelector('#contextHealthBar').remove();
+  const toasts = [], posts = [], cancels = [];
+  const conversation = { id:'worker', busy:true, turns:[{}, {}] };
+  let cancelReply = { ok:true, cancelled:true, applying:false };
+  const runtimeScope = {
+    ConversationTurnRead:{ state:() => ({}), ordered:conv => conv.turns },
+    requestAuthoritativeConversationRender() {},
+    getCompactionHistory:() => [],
+  };
+  const sandbox = vm.createContext({
+    runtimeScope, window:dom.window, document:doc, createContextMeter,
+    createScheduledCompactions, scheduledCompactionNotice, readCancelledCompaction, cancelledCompactionNotice,
+    getConvById:id => (id === 'worker' ? conversation : null), activeConvId:'worker',
+    config:{ model:'test' }, convIsBusy:conv => Boolean(conv && conv.busy),
+    requestAnimationFrame:callback => callback(), console:{ ...console, warn() {} },
+    Api:{compactions:{
+      compactNow:async id => { posts.push(id); return { ok:true, scheduled:true, alreadyScheduled:false,
+        requestId:'r2', requestedAt:1, protection:null, appliesAt:'next_model_call' }; },
+      cancelScheduled:async (id, requestId) => {
+        cancels.push([id, requestId]);
+        if (cancelReply instanceof Error) throw cancelReply;
+        return cancelReply;
+      },
+    }},
+    showToast:(...args) => toasts.push(args),
+  });
+  vm.runInContext(fs.readFileSync('frontend/src/runtime/sections/context-bar.js','utf8'),sandbox);
+  runtimeScope.updateContextBar();
+  const bar = doc.querySelector('#contextHealthBar');
+  bar.click();
+  const action = doc.querySelector('.ctx-pop-compact');
+  assert.equal(action.textContent, 'Compact at the next model call');
+  action.click();
+  await new Promise(resolve => setImmediate(resolve));
+  // The running Turn is never refused or reloaded; the request waits on the server.
+  assert.deepEqual(posts, ['worker']);
+  assert.match(toasts[0][0], /before its next model call/);
+  assert.equal(bar.dataset.compactionScheduled, '1');
+  assert.match(bar.getAttribute('aria-label'), /scheduled for the next model call/);
+  bar.click();
+  assert.equal(doc.querySelector('.ctx-pop-status').textContent, 'Compaction scheduled for the next model call');
+  assert.equal(action.textContent, 'Cancel scheduled compaction');
+  // A failed cancellation keeps the acknowledgment and says so.
+  cancelReply = new Error('offline');
+  action.click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(toasts.at(-1), ['Could not cancel the scheduled compaction', 'error']);
+  assert.equal(bar.dataset.compactionScheduled, '1');
+  cancelReply = { ok:true, cancelled:true, applying:false };
+  bar.click(); action.click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(cancels, [['worker', 'r2'], ['worker', 'r2']]);
+  assert.deepEqual(toasts.at(-1), ['Scheduled compaction cancelled', 'success']);
+  assert.equal(bar.dataset.compactionScheduled, undefined);
+  bar.click();
+  assert.equal(action.textContent, 'Compact at the next model call');
+  assert.equal(doc.querySelector('.ctx-pop-status').hidden, true);
   dom.window.close();
 });

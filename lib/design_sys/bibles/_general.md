@@ -11,6 +11,20 @@ understands / believes / decides / does X". A page without an answer is
 decoration. The page TITLE states the conclusion or the question — never a
 bare section label like "Overview" or "Background".
 
+Explicit user templates, institutional styles and approved branding take
+precedence over the aesthetic defaults below. Preserve the reference's visual
+language instead of imposing a new palette.
+
+## Evidence discipline
+
+- Never fabricate data, citations, cases, or sources. Missing material is
+  marked as a placeholder / assumption / to-be-supplied — visibly.
+- Every external fact carries its source close by (small source line, fixed
+  position). Charts are self-standing: axes, units, legend, source,
+  measurement basis.
+- De-default every chart: restyle series into the theme palette, remove
+  heavy frames and gridlines, label key values directly on the chart.
+
 ## Rhythm across the artefact
 
 Alternate dense evidence pages with breathing pages (cover, section divider,
@@ -36,16 +50,6 @@ answering the opening question — never with a lone "Thank you".
 5. **One accent color.** Everything else is the structural color, ink, and
    neutrals. The accent appears at most once per page — a number, a bar, a
    word, a node on the critical path.
-
-## Evidence discipline
-
-- Never fabricate data, citations, cases, or sources. Missing material is
-  marked as a placeholder / assumption / to-be-supplied — visibly.
-- Every external fact carries its source close by (small source line, fixed
-  position). Charts are self-standing: axes, units, legend, source,
-  measurement basis.
-- De-default every chart: restyle series into the theme palette, remove
-  heavy frames and gridlines, label key values directly on the chart.
 
 ## Type discipline
 

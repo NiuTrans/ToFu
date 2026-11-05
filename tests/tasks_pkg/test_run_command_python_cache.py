@@ -16,6 +16,7 @@ import pytest
 from lib.project_mod import portable_sandbox
 from lib.project_mod import python_bytecode_cache as cache
 from lib.storage_authority_sql.storage_capabilities import MountDescription
+from serverctl_pkg.python_bytecode_cache import RUN_NAMESPACE_NAME, reclaim_namespaces
 
 
 pytestmark = pytest.mark.unit
@@ -34,17 +35,21 @@ def _mount(storage_class: str) -> MountDescription:
     )
 
 
-def _policy(root: Path, *, max_bytes: int = 8 * 1024 * 1024) \
-        -> cache.PythonBytecodeCachePolicy:
+def _policy(root: Path) -> cache.PythonBytecodeCachePolicy:
     return cache.PythonBytecodeCachePolicy(
         mode="on",
         cache_root=str(root),
-        max_bytes=max_bytes,
-        max_files=10_000,
-        max_namespaces=8,
-        reserve_bytes=0,
         ttl_seconds=3600,
     )
+
+
+@pytest.fixture(autouse=True)
+def sweep_requests(monkeypatch):
+    """Record detached sweep requests instead of spawning sweepers."""
+    requests = []
+    monkeypatch.setattr(cache, "request_bytecode_sweep",
+                        lambda root, name, **_kwargs: requests.append((str(root), name)))
+    return requests
 
 
 def _environment() -> dict[str, str]:
@@ -266,61 +271,62 @@ def test_owner_changes_select_a_different_namespace(tmp_path, monkeypatch):
             cache.release_python_bytecode_cache(activation)
 
 
-def test_over_budget_namespace_is_reclaimed_after_last_active_user(
-        tmp_path, monkeypatch):
+def test_a_large_namespace_survives_release_and_requests_a_sweep(
+        tmp_path, monkeypatch, sweep_requests):
+    """Size never removes bytecode that can still be used."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _make_network_local_probe(monkeypatch, workspace)
-    policy = _policy(tmp_path / "cache", max_bytes=2 * 1024 * 1024)
-    first = cache.prepare_python_bytecode_cache(
+    policy = _policy(tmp_path / "cache")
+    activation = cache.prepare_python_bytecode_cache(
         f"{sys.executable} script.py",
         str(workspace),
         {"_userId": 31},
         _environment(),
         policy=policy,
     )
-    second = cache.prepare_python_bytecode_cache(
-        f"{sys.executable} script.py",
-        str(workspace),
-        {"_userId": 31},
-        _environment(),
-        policy=policy,
-    )
-    assert first is not None and second is not None
-    namespace = Path(first.namespace)
-    (Path(first.pycache_prefix) / "oversized.pyc").write_bytes(
-        b"x" * (3 * 1024 * 1024))
+    assert activation is not None
+    namespace = Path(activation.namespace)
+    with (Path(activation.pycache_prefix) / "large.pyc").open("wb") as handle:
+        handle.truncate(300 * 1024 * 1024)
 
-    cache.release_python_bytecode_cache(first)
-    assert namespace.exists(), "one concurrent user still owns the namespace"
-    cache.release_python_bytecode_cache(second)
-    assert not namespace.exists(), "disposable bytes must return below the cap"
+    cache.release_python_bytecode_cache(activation)
+
+    assert (Path(activation.pycache_prefix) / "large.pyc").exists()
+    assert sweep_requests == [(activation.cache_root, namespace.name)]
 
 
-def test_entry_budget_and_ttl_reclaim_inactive_namespaces(
+def test_a_removed_workspace_frees_its_namespace_at_the_next_reclaim(
         tmp_path, monkeypatch):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    _make_network_local_probe(monkeypatch, workspace)
-    policy = replace(
-        _policy(tmp_path / "cache"),
-        max_files=4,
-        ttl_seconds=1,
-    )
+    removed = tmp_path / "removed-worktree"
+    kept = tmp_path / "workspace"
+    for workspace in (removed, kept):
+        workspace.mkdir()
+    remote = {os.path.realpath(removed), os.path.realpath(kept)}
+    monkeypatch.setattr(cache, "describe_mount", lambda path: _mount(
+        "network-filesystem" if os.path.realpath(path) in remote else "local-block"))
+    policy = _policy(tmp_path / "cache")
     first = cache.prepare_python_bytecode_cache(
-        f"{sys.executable} script.py",
-        str(workspace),
-        {"_userId": 32},
-        _environment(),
-        policy=policy,
-    )
+        f"{sys.executable} script.py", str(removed), {"_userId": 36},
+        _environment(), policy=policy)
     assert first is not None
-    first_namespace = Path(first.namespace)
-    (Path(first.pycache_prefix) / "one.pyc").write_bytes(b"x")
     cache.release_python_bytecode_cache(first)
-    assert not first_namespace.exists(), "entry ceiling is enforced post-run"
+    removed.rmdir()
 
-    ttl_policy = replace(policy, max_files=10_000)
+    second = cache.prepare_python_bytecode_cache(
+        f"{sys.executable} script.py", str(kept), {"_userId": 36},
+        _environment(), policy=policy)
+
+    assert second is not None
+    assert not Path(first.namespace).exists()
+    cache.release_python_bytecode_cache(second)
+
+
+def test_ttl_reclaims_inactive_namespaces(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _make_network_local_probe(monkeypatch, workspace)
+    ttl_policy = replace(_policy(tmp_path / "cache"), ttl_seconds=1)
     stale = cache.prepare_python_bytecode_cache(
         f"{sys.executable} script.py",
         str(workspace),
@@ -358,6 +364,7 @@ def test_disk_reserve_failure_leaves_python_environment_unchanged(
         used = 1023
         free = 1
 
+    # The shared placement reserve probes the volume at call time.
     monkeypatch.setattr(cache.shutil, "disk_usage", lambda _path: Usage())
     activation = cache.prepare_python_bytecode_cache(
         f"{sys.executable} script.py",
@@ -387,11 +394,14 @@ def test_cross_process_lease_blocks_cleanup_while_command_is_active(
     assert activation is not None
     root = Path(activation.cache_root)
     namespace = Path(activation.namespace)
+    expired = time.time() - 7200
+    os.utime(namespace / ".last-used", (expired, expired))
 
-    assert not cache._safe_remove_namespace(root, namespace)
+    # Another process reclaiming the same root sees only the flock lease.
+    assert reclaim_namespaces(root, pattern=RUN_NAMESPACE_NAME, ttl_seconds=3600) == 0
     assert namespace.exists()
     cache.release_python_bytecode_cache(activation)
-    assert cache._safe_remove_namespace(root, namespace)
+    assert not namespace.exists(), "released and expired: the release's reclaim frees it"
 
 
 def test_run_command_passes_one_mutated_environment_and_releases(

@@ -13,20 +13,28 @@ import {
   type ConversationRoundDirectory,
   type ConnectionHealth,
   type TurnProjectionChange,
+  type TurnRecord,
 } from '../api/conversation-sync.generated';
 import {
   materializeSnapshotReferences,
 } from '../conversation/domain/tool-segment-references';
 import { createLifecycleScope, type LifecycleScope } from '../lifecycle';
 import { conversationConnectionHealth } from './connection-health';
+import {
+  CONVERSATION_STREAM_EVENT_NAMES,
+  conversationStreamRetryDelayMs,
+  type ConversationEventSource,
+  type ConversationEventSourceFactory,
+} from './conversation-event-multiplexer';
 import { notifyObserver } from './observer';
 
-import { conversationLoadBudget, type ConversationSnapshotViewport } from './conversation-load-budget';
+import {
+  conversationLoadBudget, nextHistoryPageBytes, type ConversationSnapshotViewport,
+} from './conversation-load-budget';
 type JsonRecord = Record<string, unknown>;
 
 export interface ConversationSyncCoordinatorOptions {
   conversationId: string;
-  streamClientId?: string;
 
   snapshotViewport?(): ConversationSnapshotViewport;
   api: ConversationSyncApi;
@@ -45,13 +53,20 @@ export interface ConversationSyncCoordinatorOptions {
   onDebugFrame?(conversationId: string, frame: JsonRecord): void;
   onTurnDelta(delta: JsonRecord): boolean;
   onProtocolError?(error: Error): void;
-  onHealth?(conversationId: string, health: ConnectionHealth): void;
+  /** A heartbeat may request repair without an accompanying canonical change.
+   * Ordered changes already carry their own Store/Surface demand. */
+  onHealth?(conversationId: string, health: ConnectionHealth, demand?: 'heartbeat'): void;
   /* Server-stamped delivery-wedge signal (sync heartbeat/snapshot
    * `pushWithheld`): the live task's authoritative frames are withheld on a
    * storage-write wedge. Rides read-side frames because withheld frames can
    * never carry it. */
   onPushWithheld?(withheld: boolean): void;
-  eventSourceFactory?: (url: string) => EventSource;
+  /** A new source now carries this replica's replay head, so reads fenced to
+   * that head (such as re-reading Turns retained below a tail window) can run.
+   * Best-effort: the owner must tolerate the source closing again. */
+  onStreamOpened?(): void;
+  /** This conversation's ordered replay; the page shares one response. */
+  eventSourceFactory: ConversationEventSourceFactory;
 }
 
 export interface ConversationSyncConnection {
@@ -71,51 +86,50 @@ export interface ConversationSyncConnection {
  * composer. */
 const SNAPSHOT_FETCH_TIMEOUT_MS = 30_000;
 
-const CHANGE_EVENT_NAMES = [
-  'turn.upsert',
-  'turn.patch',
-  'turn.deleted',
-  'attempt.event',
-  'conversation.activity',
-  'sync.heartbeat',
-  'sync.reset_required',
-] as const;
-
 function record(value: unknown): JsonRecord {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as JsonRecord : {};
 }
 
-/* `turnPage` fences the page against the applied replay head and answers 409
- * (`history_page_stale`) when a write committed past it. That is a routine
- * race while an attempt streams, not a broken projection: repair the head from
- * one authoritative snapshot and retry the same cursor. Without this, the
- * Surface kept retrying a sequence the server had already left behind, so
- * earlier turns stayed unreachable until the page was reloaded. A wedged
- * stream (no frames, so no sequence advance) is exactly the case that never
- * self-healed. Bounded because each repair is a full snapshot read. */
+/* `turnPage` reads against this replica's applied replay head. A streaming
+ * reply commits an attempt event every few hundred milliseconds and this
+ * replica trails the server by the stream latency, so the server answers at
+ * the newest head that is not older than ours (`syncSeq` names it). A page
+ * read ahead of the replica publishes when the live stream applies exactly
+ * that head, so it never runs ahead of replay. Streamed attempt events patch
+ * only the live Turn, never older Turns or lane membership: only a Turn
+ * change or snapshot (`roundRevision`) applied after the page's head
+ * overtakes it. A 409 (`history_page_stale`, carrying the server head) is
+ * left for a head that kept moving through the server's bounded re-reads or
+ * that this replica is ahead of. A head the live stream is about to deliver
+ * is awaited and the read repeated, with no snapshot: a repair snapshot also
+ * replaces every loaded history page, including the one a jump is hydrating.
+ * Only a head the stream cannot deliver (paused, wedged, unreported) is
+ * repaired from one authoritative snapshot; a wedged stream is exactly the
+ * case that never self-healed. Both budgets are bounded: a racing head
+ * converges, a broken one never. */
 const HISTORY_HEAD_REPAIR_ATTEMPTS = 3;
+const HISTORY_HEAD_CATCH_UP_ATTEMPTS = 8;
+const HISTORY_HEAD_CATCH_UP_MS = 2_000;
+
+/** A Turn change or snapshot reached the replica after the page's head. */
+class HistoryPageOvertaken extends Error {
+  constructor() { super('Conversation history page is stale'); }
+}
+
+/** The live stream did not apply the head a page was read at in time. */
+class HistoryHeadUndelivered extends Error {
+  constructor() { super('Conversation history page is ahead of the replay stream'); }
+}
 
 function historyPageIsStale(cause: unknown): boolean {
   return Boolean(cause && typeof cause === 'object'
     && (cause as { status?: unknown }).status === 409);
 }
 
-async function readWithRepairedHead<T>(
-  read: () => Promise<T>,
-  repair: () => Promise<unknown>,
-  closed: () => boolean,
-): Promise<T> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await read();
-    } catch (cause) {
-      if (closed() || !historyPageIsStale(cause)
-          || attempt >= HISTORY_HEAD_REPAIR_ATTEMPTS) throw cause;
-      await repair();
-      if (closed()) throw cause;
-    }
-  }
+function staleHistoryHead(cause: unknown): number {
+  const head = Number(record(record(cause).body).currentSyncSeq);
+  return Number.isSafeInteger(head) && head > 0 ? head : 0;
 }
 
 /**
@@ -127,17 +141,17 @@ let roundDirectoryScope = 0;
 
 export class ConversationSyncCoordinator implements ConversationSyncConnection {
   private readonly options: ConversationSyncCoordinatorOptions;
-  private source: EventSource | null = null;
+  private source: ConversationEventSource | null = null;
   private sourceScope: LifecycleScope | null = null;
   private snapshotPromise: Promise<ConversationSyncSnapshot> | null = null;
   // A reset is an obligation to replace the projection, not a cursor ACK.
   // Keep this barrier across read failures, transport wakes and suspension.
   private snapshotRequired = true;
   private readonly reads = new AbortController();
-  private turnPageFlight: {
+  private readonly turnPageFlights = new Map<'continuous' | 'detached', {
     key: string;
     promise: Promise<ConversationTurnPage>;
-  } | null = null;
+  }>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private silenceTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
@@ -147,11 +161,19 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
   private retryCount = 0;
   private sequence = 0;
   private cursorValue = '';
+  private serverBootId = '';
+  private lastFrameAt: number | undefined;
+  private sourceOpenedAt = 0;
   private roundRevision = 0;
   private readonly roundScope = ++roundDirectoryScope;
   private roundOwner = 0;
 
   get roundDirectoryRevision(): string { return `${this.roundScope}:${this.roundOwner}:${this.roundRevision}`; }
+  // History reads awaiting a head the live stream reports; one per read flight.
+  private readonly headWaiters = new Set<{ sequence: number; settle(reached: boolean): void }>();
+  /* Byte budget for the continuous page that chains from the last published
+   * one; any other read starts from the viewport budget. */
+  private historyChain: { laneId: string; beforeOrdinal: number | null; windowBytes: number } | null = null;
   private hasPublishedHealth = false;
 
   constructor(options: ConversationSyncCoordinatorOptions) {
@@ -204,44 +226,53 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
    * A healthy source is retained; a stale or missing source reopens from the
    * last durable cursor. The server remains responsible for proving cursor
    * expiry with sync.reset_required, which then performs one recovery snapshot.
+   * The same reset re-anchors a cursor whose missed changes would cost more
+   * than one snapshot of this viewport's window.
    */
   async wake(): Promise<void> {
     if (this.closed) return;
     this.shouldConnect = true;
     if (this.suspended) return;
-    const health = conversationConnectionHealth.get(this.options.conversationId);
-    const frameAge = Date.now() - Number(health?.lastFrameAt || 0);
-    // A source opened by an immediately preceding wake has not had a chance
-    // to publish its first frame yet. Keep that connecting generation; using
-    // the pre-sleep lastFrameAt to judge it stale would churn one EventSource
-    // per pageshow/online hint after a long browser suspension.
-    if (this.source && health?.state !== 'connecting' && frameAge
-        > Number(CONVERSATION_SYNC_STREAM_POLICY.reconnectGraceMs) / 2) {
-      this.closeSource();
-    }
+    this.retireSilentSource();
     await this.resume();
   }
 
   async hydrate(connect = true): Promise<ConversationSyncSnapshot> {
     this.shouldConnect = this.shouldConnect || connect;
     const snapshot = await this.fetchSnapshot('hydrate');
-    if (this.shouldConnect) this.open();
+    if (this.shouldConnect) this.open('snapshot');
     return snapshot;
+  }
+
+  /** Complete projection for an explicit edit; shares owned read cancellation. */
+  async loadCompleteTurn(turnId: string): Promise<TurnRecord> {
+    if (this.closed) throw new DOMException('Conversation was disposed during Turn read.', 'AbortError');
+    const response = await this.options.api.turn(this.options.conversationId, turnId, {
+      timeout: SNAPSHOT_FETCH_TIMEOUT_MS, signal: this.reads.signal,
+    });
+    if (this.closed) throw new DOMException('Conversation was disposed during Turn read.', 'AbortError');
+    if (response.turn.conversationId !== this.options.conversationId || response.turn.turnId !== turnId) {
+      throw new Error('Turn read identity is mismatched.');
+    }
+    return response.turn;
   }
 
   async recover(reason = 'snapshot-recovery'): Promise<ConversationSyncSnapshot> {
     this.shouldConnect = true;
     const snapshot = await this.fetchSnapshot(reason);
-    this.open();
+    this.open('snapshot');
     return snapshot;
   }
 
   /**
-   * Fetch one older lane page against the exact locally-applied replay head.
-   * Equal callers share one request. A different overlapping page is rejected
-   * so user input cannot grow a hidden request queue. Publication stays inside
-   * the sequence check's synchronous turn: no stream/snapshot microtask can
-   * advance local authority between validation and Store ingestion.
+   * Fetch one older lane page read at a head not older than the locally
+   * applied one. Equal callers share one request. A different overlapping
+   * page of the same mode is rejected so user input cannot grow a hidden
+   * request queue; the continuous window and detached jumps hold one slot
+   * each, so a jump never fails against the Surface's own history read.
+   * Publication stays inside the fence check's synchronous turn: no
+   * stream/snapshot microtask can advance local authority between validation
+   * and Store ingestion.
    */
   async loadTurnPage(
     laneId: string,
@@ -263,19 +294,19 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       throw new Error('Conversation history has an invalid page limit');
     }
     const key = `${normalizedLaneId}:${beforeOrdinal ?? 'head'}:${limit}:${mode}`;
-    if (this.turnPageFlight) {
-      if (this.turnPageFlight.key === key) return this.turnPageFlight.promise;
+    const inFlight = this.turnPageFlights.get(mode);
+    if (inFlight) {
+      if (inFlight.key === key) return inFlight.promise;
       throw new Error('A different conversation history page is already loading');
     }
-    const request = readWithRepairedHead(
+    const request = this.readHistory(
       () => this.readTurnPage(normalizedLaneId, beforeOrdinal, limit, mode),
-      () => this.hydrate(false), () => this.closed,
     ).catch((cause: unknown) => {
       this.protocolError(cause);
       throw cause;
     });
-    const flight = request.finally(() => { this.turnPageFlight = null; });
-    this.turnPageFlight = { key, promise: flight };
+    const flight = request.finally(() => { this.turnPageFlights.delete(mode); });
+    this.turnPageFlights.set(mode, { key, promise: flight });
     return flight;
   }
 
@@ -286,9 +317,14 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     mode: 'continuous' | 'detached',
   ): Promise<ConversationTurnPage> {
     const expectedSequence = this.sequence;
-    const expectedGeneration = this.generation;
+    const ranks = this.roundDirectoryRevision;
+    const viewportBytes = conversationLoadBudget(this.options.snapshotViewport?.()).windowBytes;
+    const chain = this.historyChain;
+    const windowBytes = mode === 'continuous' && chain?.laneId === laneId
+        && chain.beforeOrdinal === (beforeOrdinal ?? null)
+      ? Math.max(viewportBytes, chain.windowBytes) : viewportBytes;
     /* Same wedged-flight guard as fetchSnapshot: an unbounded stalled page
-     * read kept `turnPageFlight` forever, rejecting every later page with
+     * read kept its flight slot forever, rejecting every later page with
      * "already loading" until reload. */
     return this.options.api.turnPage(
       this.options.conversationId,
@@ -296,42 +332,127 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       expectedSequence,
       beforeOrdinal,
       limit,
-      { timeout: SNAPSHOT_FETCH_TIMEOUT_MS, signal: this.reads.signal, query: {
-        windowBytes: conversationLoadBudget(this.options.snapshotViewport?.()).windowBytes,
-      } },
-    ).then((wirePage) => {
+      { timeout: SNAPSHOT_FETCH_TIMEOUT_MS, signal: this.reads.signal, query: { windowBytes } },
+    ).then(async (wirePage) => {
       if (this.closed) throw new Error('Conversation sync coordinator is closed');
       const page = materializeSnapshotReferences(wirePage);
       if (page.conversationId !== this.options.conversationId
           || page.laneId !== laneId) {
         throw new Error('Conversation history page identity mismatch');
       }
-      if (page.syncSeq !== expectedSequence || this.sequence !== expectedSequence
-          || this.generation !== expectedGeneration
+      if (page.syncSeq < expectedSequence
           || (beforeOrdinal !== undefined && page.beforeOrdinal !== beforeOrdinal)) {
         throw new Error('Conversation history page is stale');
       }
+      /* The page reflects every Turn change up to its head. A page read ahead
+       * of this replica is fenced when the stream applies exactly that head,
+       * so a continuous page never moves the lane window or conversation
+       * revision ahead of deltas still in flight; one this replica already
+       * reached is fenced where its read began. */
+      const fence = page.syncSeq > this.sequence
+        ? await this.awaitExactHead(page.syncSeq) : ranks;
+      if (this.closed) throw new Error('Conversation sync coordinator is closed');
+      if (fence === null) throw new HistoryHeadUndelivered();
+      if (this.roundDirectoryRevision !== fence) throw new HistoryPageOvertaken();
       this.options.onTurnPage?.(page, mode);
+      if (mode === 'continuous') {
+        this.historyChain = { laneId, beforeOrdinal: page.nextBeforeOrdinal ?? null,
+          windowBytes: nextHistoryPageBytes(viewportBytes, {
+            windowBytes, turns: page.turns.length, limit, hasMore: page.hasMore }) };
+      }
       return page;
     });
   }
 
+  private async readHistory(
+    read: () => Promise<ConversationTurnPage>,
+  ): Promise<ConversationTurnPage> {
+    for (let repairs = 1, catchUps = 0; ;) {
+      try {
+        return await read();
+      } catch (cause) {
+        const overtaken = cause instanceof HistoryPageOvertaken;
+        const undelivered = cause instanceof HistoryHeadUndelivered;
+        if (this.closed || !(overtaken || undelivered || historyPageIsStale(cause))) throw cause;
+        // An undelivered page head was already awaited for the whole window.
+        const head = overtaken ? this.sequence : undelivered ? 0 : staleHistoryHead(cause);
+        if (head > 0 && catchUps < HISTORY_HEAD_CATCH_UP_ATTEMPTS
+            && await this.awaitAppliedHead(head)) {
+          catchUps += 1;
+        } else {
+          if (repairs >= HISTORY_HEAD_REPAIR_ATTEMPTS) throw cause;
+          repairs += 1;
+          await this.hydrate(false);
+        }
+        if (this.closed) throw cause;
+      }
+    }
+  }
+
+  /** Whether this replica applies `sequence` through its live stream in time. */
+  private awaitAppliedHead(sequence: number): Promise<boolean> {
+    if (this.sequence >= sequence) return Promise.resolve(true);
+    return this.awaitHead(sequence, reached => reached);
+  }
+
+  /** The round revision at the moment the live stream applies exactly
+   * `sequence`, read before any later frame can apply; null when the stream
+   * does not apply exactly that head in time. */
+  private awaitExactHead(sequence: number): Promise<string | null> {
+    return this.awaitHead(sequence, reached =>
+      reached && this.sequence === sequence ? this.roundDirectoryRevision : null);
+  }
+
+  private awaitHead<T>(sequence: number, observe: (reached: boolean) => T): Promise<T> {
+    if (this.closed || !this.source) return Promise.resolve(observe(false));
+    return new Promise((resolve) => {
+      const waiter = {
+        sequence,
+        settle: (reached: boolean) => {
+          clearTimeout(timer);
+          this.headWaiters.delete(waiter);
+          resolve(observe(reached));
+        },
+      };
+      const timer = setTimeout(() => waiter.settle(false), HISTORY_HEAD_CATCH_UP_MS);
+      this.headWaiters.add(waiter);
+    });
+  }
+
+  private settleHeadWaiters(streamLost = false): void {
+    for (const waiter of [...this.headWaiters]) {
+      if (this.sequence >= waiter.sequence) waiter.settle(true);
+      else if (streamLost || this.closed) waiter.settle(false);
+    }
+  }
+
+  /**
+   * Exact input ranks for the reader. Ranks can change only with
+   * `roundRevision` (every Turn change or replacement snapshot), while the
+   * replay head also advances on every streamed attempt event, faster than
+   * one read's round trip. The server therefore answers at the newest head
+   * not older than ours, and a page stays current until a Turn change is
+   * applied here; one it already includes reaches this replica through the
+   * stream, and the reader's key change re-reads its view.
+   */
   async loadRoundDirectory(
     laneId: string, offset = 0, limit = 50, anchorTurnId?: string,
   ): Promise<ConversationRoundDirectory> {
+    // A replacement in flight answers the reader once applied; its failure
+    // leaves the barrier below to report.
+    if (this.snapshotPromise) await this.snapshotPromise.catch(() => undefined);
     if (this.closed || this.snapshotRequired || !this.cursorValue || !this.roundOwner) {
       throw new Error('Round directory requires an active snapshot with owner scope');
     }
     const expected = this.sequence;
-    const expectedGeneration = this.generation;
+    const revision = this.roundDirectoryRevision;
     const owner = this.roundOwner;
     const page = await this.options.api.roundDirectory(
       this.options.conversationId, laneId, expected, offset, limit, anchorTurnId,
       { timeout: SNAPSHOT_FETCH_TIMEOUT_MS, signal: this.reads.signal },
     );
-    if (this.closed || this.generation !== expectedGeneration
-        || this.roundOwner !== owner || page.ownerId !== owner
-        || this.sequence !== expected || page.stale || page.syncSeq !== expected
+    if (this.closed || this.roundDirectoryRevision !== revision || page.ownerId !== owner
+        || page.stale || page.syncSeq < expected
         || page.conversationId !== this.options.conversationId || page.laneId !== laneId
         || page.offset !== offset) throw new Error('Round directory is stale or mismatched');
     return page;
@@ -339,13 +460,18 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
 
   invalidate(_cursorHint?: string): void {
     if (this.closed || this.suspended || !this.shouldConnect) return;
-    const health = conversationConnectionHealth.get(this.options.conversationId);
-    const frameAge = Date.now() - Number(health?.lastFrameAt || 0);
-    if (this.source && health?.state !== 'connecting' && frameAge
-        > Number(CONVERSATION_SYNC_STREAM_POLICY.reconnectGraceMs) / 2) {
+    this.retireSilentSource();
+    if (!this.source) this.scheduleReconnect('invalidation-wakeup', 0);
+  }
+
+  /** Wakes may run before a throttled browser timer, but share its deadline.
+   * A new source receives its own grace even after a native reconnect error;
+   * the previous generation's last frame cannot expire its replacement. */
+  private retireSilentSource(): void {
+    if (this.source && Date.now() - Math.max(this.sourceOpenedAt, this.lastFrameAt ?? 0)
+        >= Number(CONVERSATION_SYNC_STREAM_POLICY.reconnectGraceMs)) {
       this.closeSource();
     }
-    if (!this.source) this.scheduleReconnect('invalidation-wakeup', 0);
   }
 
   pause(): void {
@@ -403,12 +529,14 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
               if (this.closed) throw new Error('Conversation sync coordinator is closed');
               this.sequence = snapshot.syncSeq;
               this.cursorValue = snapshot.cursor;
+              this.serverBootId = snapshot.serverBootId;
               this.snapshotRequired = false;
               // Generated clients validate scope. Keep legacy injected snapshot
               // ports usable, but never admit their unscoped rank navigation.
               this.roundOwner = Number(snapshot.scope?.ownerId || 0);
               if (!Number.isSafeInteger(this.roundOwner) || this.roundOwner <= 0) this.roundOwner = 0;
               this.roundRevision++;
+              this.settleHeadWaiters();
               notifyObserver('conversation-push-withheld', this.options.onPushWithheld,
                 snapshot.pushWithheld === true);
               if (this.closed) return snapshot;
@@ -439,22 +567,24 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     return flight;
   }
 
-  private open(): void {
+  /** `snapshot` marks a cursor just minted by the snapshot this source follows:
+   * its first connection replays that round trip without the catch-up budget.
+   * Every other open resumes a retained cursor, whose missed changes the
+   * server replays only while they cost less than this viewport's snapshot. */
+  private open(cursorSource?: 'snapshot'): void {
     if (this.closed || this.suspended || !this.shouldConnect || this.source
         || this.snapshotPromise || this.snapshotRequired) return;
     this.clearReconnectTimer();
     this.generation += 1;
     const sourceGeneration = this.generation;
-    const factory = this.options.eventSourceFactory
-      ?? ((url: string) => new EventSource(url));
-    let source: EventSource;
+    let source: ConversationEventSource;
     try {
-      source = factory(this.options.api.eventsUrl(
-        this.options.conversationId,
-        this.cursorValue,
-        this.options.streamClientId,
-        this.options.streamClientId ? sourceGeneration : 0,
-      ));
+      source = this.options.eventSourceFactory({
+        conversationId: this.options.conversationId,
+        after: this.cursorValue,
+        windowBytes: conversationLoadBudget(this.options.snapshotViewport?.()).windowBytes,
+        ...(cursorSource ? { cursorSource } : {}),
+      });
     } catch (error) {
       this.retryCount += 1;
       this.protocolError(error);
@@ -463,6 +593,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     }
     const scope = createLifecycleScope();
     this.source = source;
+    this.sourceOpenedAt = Date.now();
     this.sourceScope = scope;
     scope.add(() => {
       source.onopen = null;
@@ -492,13 +623,13 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
 
     source.onopen = () => {
       if (sourceGeneration !== this.generation) return;
-      this.publishHealth('live');
+      this.publishHealth('connecting');
       // Opening a socket is not receipt of a valid frame. Neither repeated
       // opens nor errors may postpone the existing last-frame deadline.
       this.armSilenceTimer(false);
     };
     source.onmessage = ingest as (event: MessageEvent) => void;
-    for (const name of CHANGE_EVENT_NAMES) {
+    for (const name of CONVERSATION_STREAM_EVENT_NAMES) {
       scope.listen(source, name, ingest as EventListener);
     }
     source.onerror = () => {
@@ -522,7 +653,9 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       this.armSilenceTimer(false);
     };
     this.publishHealth('connecting');
-    if (sourceGeneration === this.generation) this.armSilenceTimer(false);
+    if (sourceGeneration !== this.generation) return;
+    this.armSilenceTimer(false);
+    notifyObserver('conversation-stream-opened', this.options.onStreamOpened);
   }
 
   private ingest(
@@ -536,10 +669,16 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       return;
     }
     const generation = this.generation;
-    this.touchFrame();
+    if (event.type === 'sync.heartbeat' && (event.cursor !== this.cursorValue
+        || event.serverBootId !== this.serverBootId)) {
+      // Liveness is not a projection acknowledgement. A skipped suffix or
+      // restarted source cannot move the only recovery cursor past the Store.
+      void this.recover('heartbeat-cursor-mismatch').catch(() => undefined);
+      return;
+    }
+    this.touchFrame(event.type !== 'sync.heartbeat');
     if (this.closed || generation !== this.generation) return;
     if (event.type === 'sync.heartbeat') {
-      this.cursorValue = event.cursor;
       /* pushWithheld marks a WRITE-side wedge (authoritative pushes withheld
        * on storage retries) — distinct from the read-side degradation that
        * `degraded` alone has always meant. Both stall delivery, so both map
@@ -547,7 +686,8 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       const wedged = event.pushWithheld === true;
       this.publishHealth(event.degraded || wedged ? 'degraded' : 'live',
         wedged ? 'storage-write-wedged'
-          : event.degraded ? 'storage-read-degraded' : undefined);
+          : event.degraded ? 'storage-read-degraded' : undefined, 'heartbeat');
+      if (this.closed || generation !== this.generation) return;
       notifyObserver('conversation-push-withheld', this.options.onPushWithheld, wedged);
       return;
     }
@@ -590,6 +730,10 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
           receivedAt,
           Number(event.occurredAt || 0),
         );
+        // Streamed progress patches only the live Turn; related Turns the
+        // attempt announces (critic, virtual user) are Turn changes.
+        const related = record(attemptEvent.payload).turns;
+        if (applied && Array.isArray(related) && related.length) this.roundRevision++;
         if (this.closed || generation !== this.generation) return;
         const debugFrame = record(record(attemptEvent.payload).event);
         if (typeof debugFrame.type === 'string' && debugFrame.type) {
@@ -618,7 +762,9 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
         this.protocolError(error);
         applied = false;
       }
-      if (applied && event.type !== 'turn.patch') this.roundRevision++;
+      // Every Turn change, not only creation or deletion: a projection patch
+      // can also delete Turns, and it overtakes a detached page read before it.
+      if (applied) this.roundRevision++;
       if (applied) applied = this.options.onTurnDelta({
         conversationRevision: Number(payload.conversationRevision || 0),
         turns: Array.isArray(payload.turns) ? payload.turns : [],
@@ -639,12 +785,17 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     }
     this.sequence = event.syncSeq;
     this.cursorValue = lastEventId;
+    this.settleHeadWaiters();
     this.publishHealth('live');
   }
 
-  private touchFrame(): void {
+  private touchFrame(announceLive: boolean): void {
+    this.lastFrameAt = Date.now();
     this.retryCount = 0;
-    this.publishHealth('live');
+    // Heartbeats publish their final live/degraded verdict once below. An
+    // intermediate live callback duplicates Surface repair demand and can
+    // momentarily erase a storage-wedge notice on every degraded heartbeat.
+    if (announceLive) this.publishHealth('live');
     this.armSilenceTimer();
   }
 
@@ -664,7 +815,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
 
   private scheduleReconnect(reason: string, delay?: number): void {
     if (this.closed || this.suspended || !this.shouldConnect || this.reconnectTimer) return;
-    const backoff = delay ?? Math.min(500 * (2 ** Math.min(this.retryCount, 5)), 15_000);
+    const backoff = delay ?? conversationStreamRetryDelayMs(this.retryCount);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       // Wakes and retries use the same snapshot barrier as explicit resume.
@@ -690,14 +841,14 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     scope?.destroy();
     if (this.silenceTimer) clearTimeout(this.silenceTimer);
     this.silenceTimer = null;
+    this.settleHeadWaiters(true);
   }
 
   private publishHealth(
-    state: ConnectionHealth['state'], reason?: string,
+    state: ConnectionHealth['state'], reason?: string, demand?: 'heartbeat',
   ): void {
     if (this.closed && state !== 'closed') return;
     this.hasPublishedHealth = true;
-    const previous = conversationConnectionHealth.get(this.options.conversationId);
     const now = Date.now();
     const health: ConnectionHealth = {
       state,
@@ -705,12 +856,12 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       observedAt: now,
       generation: this.generation,
       retryCount: this.retryCount,
-      lastFrameAt: state === 'live' ? now : previous?.lastFrameAt,
+      lastFrameAt: this.lastFrameAt,
       reason,
     };
     conversationConnectionHealth.set(this.options.conversationId, health);
     if (!this.closed || state === 'closed') {
-      notifyObserver('conversation-health', this.options.onHealth, this.options.conversationId, health);
+      notifyObserver('conversation-health', this.options.onHealth, this.options.conversationId, health, demand);
     }
   }
 

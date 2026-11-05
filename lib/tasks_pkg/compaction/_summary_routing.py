@@ -152,6 +152,36 @@ def _project_cost(profile, input_tokens, output_tokens):
     }
 
 
+def _project_route_cost(declared, *, provider_id, model_id, input_tokens, output_tokens):
+    """Project a route at its request-name rate card, else at its model price.
+
+    Owner decision 2026-11-02: an Offering without its own rate card is priced at
+    the model's maintained price through the verified lookup that summary
+    settlement and main-route economics share, so a quote matches the booked
+    cost. Unknown stays None, never free.
+    """
+    if declared:
+        return _project_cost({'providerId': provider_id, 'declaredPricing': declared},
+                             input_tokens, output_tokens)
+    from lib.pricing import get_pricing_data
+    from lib.tasks_pkg.compaction._summary_cost import (
+        _lookup_verified_pricing, _verified_rates)
+    try:
+        pricing = _lookup_verified_pricing(model_id, provider_id, prompt_tokens=input_tokens)
+        rates = _verified_rates(pricing, usd_to_cny=get_pricing_data().get('usdToCny'))
+    except ValueError:
+        return None
+    projected = _project_cost({'providerId': provider_id, 'declaredPricing': {
+        'unit': 'per_million_tokens', 'currency': rates['currency'],
+        **{key: rates[key] for key in ('input', 'output', 'cacheReadMul', 'cacheWriteMul')},
+    }}, input_tokens, output_tokens)
+    if projected is None:
+        return None
+    cost, basis = projected
+    return cost, {**basis, 'source': rates['source'],
+                  'tierId': (pricing.get('selectedTier') or {}).get('id')}
+
+
 def _authorized_buckets(dispatcher, profiles, *, owner, tenant, pin, provider,
                         allow_mixed_scope=False):
     """Every slot reachable by the returned model+pin must pass the join.
@@ -235,7 +265,9 @@ def _fits(bucket, input_tokens, output_tokens):
 
 
 def _bucket_prices(bucket, input_tokens, output_tokens):
-    prices = [_project_cost(profile, input_tokens, output_tokens)
+    prices = [_project_route_cost(profile.get('declaredPricing'),
+                                  provider_id=profile['providerId'], model_id=profile['modelId'],
+                                  input_tokens=input_tokens, output_tokens=output_tokens)
               for _, profile in bucket['members']]
     return prices if prices and all(price is not None for price in prices) else []
 
@@ -261,7 +293,7 @@ def _parent_route_identities(bucket):
 
 
 def select_summary_route(task, input_tokens, output_tokens, *,
-                         capacity_output_tokens=None):
+                         capacity_output_tokens=None, excluded_routes=()):
     """Return route, projected cost and optional AA selection evidence.
 
     Legacy providerId is an execution pin. requestOwned routes carry stable
@@ -353,6 +385,10 @@ def select_summary_route(task, input_tokens, output_tokens, *,
         if any(value and value not in allowed_parent_providers for value in restrictions):
             result['reason'] = 'conflicting_provider_pins'
             return result
+        main_prices = _bucket_prices(main, input_tokens, output_tokens)
+        main_cost = min(price[0] for price in main_prices) if main_prices else None
+        main_serves_summary = (not main.get('nativeOnly')
+                               and _fits(main, input_tokens, output_tokens))
         if main['scope'][2] != 'token_api':
             result.update(reason='subscription_route_preserved',
                           costBasis={'source': 'subscription_unpriced'})
@@ -371,13 +407,12 @@ def select_summary_route(task, input_tokens, output_tokens, *,
                                          for _, profile in main['members']},
 
                     parent_route_identities=_parent_route_identities(main),
-                    paid_ceiling=_number(_mapping(config.get('compaction')).get(
-                        'summaryMaxCostUsd', 0.05)))
+                    main_cost=main_cost, main_serves_summary=main_serves_summary,
+                    excluded_routes=excluded_routes)
             except Exception as exc:
                 logger.debug('[SummaryRoute] Auxiliary authority unavailable: %s',
                              type(exc).__name__)
                 return result
-        main_prices = _bucket_prices(main, input_tokens, output_tokens)
         if main_prices:
             cost, basis = max(main_prices, key=lambda price: price[0])
             result.update(projectedCostUsd=cost, costBasis=basis)
@@ -387,7 +422,9 @@ def select_summary_route(task, input_tokens, output_tokens, *,
         if policy == _MAIN:
             return result
         # Native owner authority expands supply beyond the parent group's pin.
-        # The parent need not fit or have API pricing to use an authorized resource.
+        # A paid parent that can serve the summary is the paid baseline: only a
+        # strictly cheaper paid route replaces it and owner resources are never
+        # borrowed. Otherwise the cheapest known-price paid route leads.
         # Legacy/direct callers without that authority retain the AA API policy.
         try:
             from lib.tasks_pkg.compaction._auxiliary_route import select_auxiliary_route
@@ -395,19 +432,23 @@ def select_summary_route(task, input_tokens, output_tokens, *,
                 dict(result), profiles, owner=owner, tenant=tenant,
                 input_tokens=input_tokens, output_tokens=output_tokens,
                 capacity_output_tokens=capacity_output_tokens,
-                paid_ceiling=_number(_mapping(config.get('compaction')).get(
-                    'summaryMaxCostUsd', 0.05)),
                 subscription_main=False,
 
                 parent_route_identities=_parent_route_identities(main),
                 parent_offering_ids={profile['provenance']['offeringId']
                                      for _, profile in main['members']},
-                main_cost=min(price[0] for price in main_prices) if main_prices else None)
+                main_cost=main_cost, excluded_routes=excluded_routes,
+                main_serves_summary=main_serves_summary)
             if native.get('requestOwned'):
                 return native
+            if native.get('_requestRoute'):
+                result['_requestRoute'] = native['_requestRoute']
         except Exception as exc:
             logger.debug('[SummaryRoute] Native auxiliary authority unavailable: %s',
                          type(exc).__name__)
+        if excluded_routes:
+            result['reason'] = 'no_remaining_authorized_auxiliary_route'
+            return result
         if main.get('nativeOnly'):
             result['reason'] = 'main_route_unresolved'
             return result
@@ -433,13 +474,7 @@ def select_summary_route(task, input_tokens, output_tokens, *,
             # Compare worst reachable candidate cost against best reachable
             # main cost, since a provider pin cannot select one credential.
             cost, basis = max(prices, key=lambda price: price[0])
-
-            if 'summaryMaxCostUsd' in compaction:
-                ceiling = _number(compaction['summaryMaxCostUsd'])
-                maximum_prices = _bucket_prices(bucket, input_tokens, capacity_output_tokens)
-                if ceiling is None or not maximum_prices or max(price[0] for price in maximum_prices) > ceiling:
-                    continue
-            if cost < min(price[0] for price in main_prices):
+            if cost < main_cost:
                 candidates.append((cost, aa[0], key, basis, aa[1]))
         if not candidates:
             result['reason'] = 'no_eligible_cheaper_aa_route'

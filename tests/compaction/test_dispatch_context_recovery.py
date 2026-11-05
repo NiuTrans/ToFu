@@ -1,4 +1,6 @@
 """Final admission and Continue preserve observations without context explosion."""
+
+import lib.tasks_pkg.llm_fallback._recovery as _fallback_recovery
 from copy import deepcopy
 import json
 import threading
@@ -80,7 +82,7 @@ def test_reactive_body_rebuild_cannot_calibrate_the_original_request(monkeypatch
     model = task['config']['model']
     update_and_stash_sample(task, model=model, raw_estimate=100_000, method='tiktoken')
     monkeypatch.setattr(_usage, 'append_event', lambda *a, **k: None)
-    _call._record_reactive_usage(task, {'prompt_tokens': 20_000}, model, 0, {}, [])
+    _fallback_recovery._record_reactive_usage(task, {'prompt_tokens': 20_000}, model, 0, {}, [])
     update_and_stash_sample(task, model=model, raw_estimate=30_000, method='tiktoken')
     assert calibration_ratio(task, model=model, method='tiktoken') is None
 
@@ -195,7 +197,7 @@ def test_continue_uses_accepted_archive_and_only_replays_new_suffix(monkeypatch)
     task['messages'] = deepcopy(messages)
     task['_attemptId'] = 'new-continue-attempt'  # same Turn, legitimate new attempt
     apply_resume_state(task=task, cfg=config, messages=messages,
-                       model='gpt-6-astra', tid='resume')
+                       tid='resume')
     assert messages == post + _reconstruct_tool_call_messages(suffix)
     assert len(messages) < len(_reconstruct_tool_call_messages(old + suffix))
     assert len(task['_checkpointToolRounds']) == 520
@@ -337,7 +339,7 @@ def test_continue_keeps_fresh_non_tool_suffix_after_accepted_archive(monkeypatch
     before = deepcopy(fresh)
     monkeypatch.setattr(pipeline, 'recompose_context_after_compaction', lambda *a, **k: None)
     apply_resume_state(task=task, cfg=config, messages=messages,
-                       model='gpt-6-astra', tid='resume', original_messages=base)
+                       tid='resume', original_messages=base)
     assert messages == post + _reconstruct_tool_call_messages(suffix) + fresh
     assert fresh == before
     assert task['_compactionResumeStatus'] == 'restored'
@@ -370,7 +372,7 @@ def test_continue_unproved_or_media_input_never_disappears_into_archive(monkeypa
     monkeypatch.setattr(pipeline, 'recompose_context_after_compaction',
                         lambda *a, **k: pytest.fail('unproved archive was recomposed'))
     apply_resume_state(task=task, cfg=config, messages=messages,
-                       model='gpt-6-astra', tid='resume', original_messages=base)
+                       tid='resume', original_messages=base)
     assert not task.get('_compactionResumeStatus')
     assert not calls
     if change == 'cancel':
@@ -398,7 +400,7 @@ def test_successful_continue_can_publish_a_fresh_completed_prefix(monkeypatch, m
     task['messages'] = deepcopy(base)
     messages = deepcopy(base)
     monkeypatch.setattr(pipeline, 'recompose_context_after_compaction', lambda *a, **k: None)
-    apply_resume_state(task=task, cfg=config, messages=messages, model=task['model'], tid='resume',
+    apply_resume_state(task=task, cfg=config, messages=messages, tid='resume',
                        original_messages=base)
     assert task['_resumeContextHydrated'] is True
     task['content'] = 'complete verified continued answer'

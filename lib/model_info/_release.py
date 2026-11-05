@@ -35,6 +35,8 @@ _RULES: tuple[tuple[str, str], ...] = (
     # ── OpenAI ───────────────────────────────────────────────────
     # https://learn.chatgpt.com/docs/changelog (checked 2026-09-30).
     ('gpt-6-1-sol', '2026-09-29'),
+    # Same changelog + deploymentsafety.openai.com index (checked 2026-10-28).
+    ('gpt-6-1-terra', '2026-10-26'),
     # GPT-6 Sol/Luna GA 2026-09-22 (developers.openai.com model pages +
     # openai.com/index/introducing-gpt-6-sol-and-luna). Order: astra last so
     # the bare 'gpt-6' substring never steals a dated sibling's rule.
@@ -74,6 +76,8 @@ _RULES: tuple[tuple[str, str], ...] = (
     ('gemini-2-5-pro', '2025-06'),
     ('gemini-2-5-flash', '2025-06'),
     # ── DeepSeek ─────────────────────────────────────────────────
+    # V4.1 Flash 1017 is a dated checkpoint of the rolling Flash alias.
+    ('deepseek-v4-1-flash-1017', '2026-10-17'),
     # V4.1 Flash GA (2026-09-10); canonical id. The legacy v4-flash ids
     # route to it; V4 Pro remains a separate, available model.
     ('deepseek-v4-1-flash', '2026-09-10'),
@@ -91,15 +95,22 @@ _RULES: tuple[tuple[str, str], ...] = (
     ('glm-5-1', '2026-04'),
     ('glm-5v-turbo', '2026-05'),
     # ── Moonshot Kimi ────────────────────────────────────────────
-    # kimi-k3 was live on the sankuai gateway by 2026-07-17
+    # kimi-k3 was live on the example-corp gateway by 2026-07-17
     # (lib/model_info/_max_output.py).
     ('kimi-k2-7-code', '2026-06'),
+    # kimi-k3.1-pro (+ -highspeed) launched 2026-10-23 US time (10-24 Beijing):
+    # Kimi blog "available today" on the API; OpenRouter dated slug
+    # moonshotai/kimi-k3.1-pro-20261023.
+    ('kimi-k3-1', '2026-10-23'),
     ('kimi-k3', '2026-07'),
     ('kimi-k2-6', '2026-03'),
     ('kimi-k2-thinking', '2025-11'),
     # ── Alibaba Qwen ─────────────────────────────────────────────
     # qwen3.8-omni-flash GA 2026-09-18 (qwen.ai/blog + qwencloud model page).
     ('qwen3-8-omni-flash', '2026-09-18'),
+    # qwen3.8-27b on Model Studio (Beijing + Singapore) 2026-08-17 per the
+    # official newly-released-models notes; open weights 2026-08-14.
+    ('qwen3-8-27b', '2026-08-17'),
     ('qwen3-8-max', '2026-08'),
     ('qwen3-8-flash', '2026-08'),
     ('qwen3-7-plus', '2026-05'),
@@ -127,7 +138,7 @@ _RULES: tuple[tuple[str, str], ...] = (
     # ── Tencent Hunyuan ──────────────────────────────────────────
     ('hy4-preview', '2026-07'),
     ('hy3-preview', '2026-04'),
-    # ── Meituan LongCat ──────────────────────────────────────────
+    # ── YourProvider LongCat ──────────────────────────────────────────
     # 2601/2603 in the flash ids are the vendor iteration stamps.
     ('longcat-2-0', '2026-06'),
     ('longcat-flash-omni-2603', '2026-03'),
@@ -136,6 +147,9 @@ _RULES: tuple[tuple[str, str], ...] = (
     # muse-spark-1.3 was listed on the Meta Model API catalogue
     # 2026-09-02 (standard + contributor SKUs same day).
     ('muse-spark-1-3', '2026-09-02'),
+    # ── StepFun ──────────────────────────────────────────────────────
+    # Step 5 Preview opened to all API users 2026-09-20 (stepfun.com news).
+    ('step-5-preview', '2026-09-20'),
     # ── Mistral ────────────────────────────────────────────────────
     # Mistral Large 4 Public Preview 2026-10-06 (docs model page, v26.10).
     ('mistral-large-4-0', '2026-10-06'),

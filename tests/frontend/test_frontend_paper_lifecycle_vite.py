@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -56,8 +55,6 @@ global._destroyBabelRuntime = () => { calls.babelDestroy++; };
 global._destroyPaperQA = () => { calls.qaDestroy++; };
 global._destroyPaperPdfViewer = () => { calls.pdfDestroy++; };
 global._destroyResearchRuntime = () => { calls.researchDestroy++; };
-global._pcStopPolling = () => { calls.podcastStop++; };
-global._pvStopPolling = () => { calls.videoStop++; };
 
 (0, eval)(fs.readFileSync(BUILT, 'utf8'));
 // Rollup's single-file fixture initializes lazy dependencies while assembling
@@ -65,6 +62,10 @@ global._pvStopPolling = () => { calls.videoStop++; };
 __setFeatureService('_syncZoomUI', () => { calls.zoom++; });
 __setFeatureService('_renderAllPages', () => { calls.render++; });
 __setFeatureService('_destroyPaperPdfViewer', () => { calls.pdfDestroy++; });
+const podcast = { taskId: 'podcast', sleepTimerId: 0 };
+const video = { taskId: 'video', regenTaskId: 'revision' };
+__setFeatureService('_podcast', podcast);
+__setFeatureService('_pvideo', video);
 _installPaperLifecycle();
 document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
 
@@ -112,7 +113,7 @@ function dropPdf() {
   await new Promise((resolve) => setTimeout(resolve, 30));
 
   console.log(JSON.stringify({ calls, beforeDestroy, afterSessionDestroy,
-    staleRecommendDidNotClobber,
+    staleRecommendDidNotClobber, mediaStopped: !podcast.taskId && !video.taskId && !video.regenTaskId,
     secondReadyDidNotDuplicate,
     scale: _paperScale, noListenersAfterDestroy:
       calls.key === beforeDestroy.key &&
@@ -122,11 +123,6 @@ function dropPdf() {
 """
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD)
-    or not os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom')),
-    reason='node/jsdom/esbuild dev dependencies required',
-)
 def test_native_lifecycle_is_idempotent_and_releases_every_listener(tmp_path):
     built = tmp_path / 'paper-lifecycle.js'
     compiled = compile_feature_owner(ESBUILD, SOURCE, built, tmp_path)
@@ -151,8 +147,7 @@ def test_native_lifecycle_is_idempotent_and_releases_every_listener(tmp_path):
     assert after_session['qaDestroy'] == 1
     assert after_session['pdfDestroy'] == 1
     assert after_session['researchDestroy'] == 1
-    assert after_session['podcastStop'] == 1
-    assert after_session['videoStop'] == 1
+    assert result['mediaStopped'] is True
     assert after_session['babelDestroy'] == 1
     assert result['scale'] > 1
     assert result['noListenersAfterDestroy'] is True

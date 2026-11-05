@@ -161,10 +161,13 @@ jsonschema>=4.18
 # >=0.12.13: preserve HTTP response status and bounded Retry-After diagnostics.
 # SOFT floor for startup; older fetches lack the evidence needed to avoid an
 # unhelpful second asset download and supply accurate recovery instructions.
-# >=0.12.17: share multilingual passage selection with host extraction.
+# >=0.12.25: preserve mixed-script fetched evidence and owned local workers.
 # HARD floor for the extraction path: fallback_edges is a package-owned option;
 # an older package cannot supply the bounded source windows requested by Tofu.
-tofu-search>=0.12.17
+# The optional AuthSourceProvider.bind hook (0.12.26) is backward compatible:
+# this host supplies a stateless implementation without calling the base hook.
+# Keep the published floor until release; workspace/export builds use the member.
+tofu-search>=0.12.25
 trafilatura>=2.3.1
 # playwright is mandatory for slide preview/layout rendering and also powers
 # the JS-rendered fallback in tofu_search.fetch. Slide admission smoke-launches
@@ -175,8 +178,15 @@ trafilatura>=2.3.1
 #                 (atk-1.0, xorg-libxcomposite, mesa-libgbm-cos7-x86_64, …) and
 #                 tofu_search/fetch/playwright_pool.py auto-augments LD_LIBRARY_PATH.
 playwright>=1.40
-Pillow>=10.0
+Pillow>=13.0.0
 python-pptx>=0.6.21
+# defusedxml — native PPTX export re-reads the finished package and parses every
+# XML part through defusedxml before publication (lib/slides/pptx_qa.py), so
+# entity-expansion and external-entity payloads never reach a parser. Without
+# it export fails only after research, authoring and rendering have completed;
+# lib/slides/readiness.py therefore refuses the slide run up front instead.
+# Pure Python, no dependencies.
+defusedxml>=0.7.1
 # fontTools — CFF→glyf conversion for PPTX font embedding (lib/slides/
 # export_pptx.py, P4). Without it the export deliberately degrades to NO
 # embedded fonts (PowerPoint then substitutes the typeface), which read as a
@@ -245,6 +255,14 @@ mcp>=2,<3
 # name: mcp 2.x pulls the httpx2 FORK, which does NOT provide the `httpx`
 # module — the two are different distributions.
 httpx>=0.28
+# zstandard — Codex subscription /responses bodies use Codex CLI's zstd request
+# encoding (lib/llm/request_encoding.py). Python 3.14+ ships compression.zstd;
+# without a codec the request is sent uncompressed.
+zstandard>=0.23; python_version < '3.14'
+# websockets — Responses WebSocket transport (lib/llm/responses_websocket.py),
+# Codex CLI's default for the ChatGPT backend. 15.0 adds the sync client's proxy
+# support. Without it every Responses request uses HTTP SSE.
+websockets>=15.0
 # orjson — fast C JSON encoder. REQUIRED (not optional): routes/chat.py's SSE
 # state snapshot serializes the ENTIRE conversation (content+thinking+toolRounds,
 # 10+ MB for long convs). Plain json.dumps holds the GIL for the whole call, so
@@ -302,7 +320,7 @@ PyYAML>=6.0
 # uv powers several MCP servers (via `uvx`) — see lib/mcp/client.py. Installing
 # it here guarantees uvx is on PATH inside the conda env without requiring a
 # separate curl|sh bootstrap.
-uv>=0.4
+uv>=0.13.4
 # zhconv — pure-Python (MediaWiki tables, MIT) Traditional↔Simplified Chinese
 # converter. Used by lib/transcription/_zh.py as a FAIL-SAFE last gate on voice
 # transcripts: Whisper-family / omni-chat ASR models emit Mandarin as Traditional
@@ -315,12 +333,12 @@ zhconv>=1.4
 
 # repo_map — compact structural outline of a codebase for the agent
 # (lib/repo_map + tools/repo_map.py). grep-ast extracts definitions via
-# tree-sitter (needs tree-sitter-language-pack for non-Python files);
-# networkx runs the aider-style PageRank over the reference graph; pathspec
-# honors .gitignore. All four are imported lazily by lib/repo_map; declared
-# here so `install.sh` always provisions them.
+# tree-sitter (needs tree-sitter-language-pack for non-Python files); pathspec
+# honors .gitignore. All three are imported lazily by lib/repo_map; declared
+# here so `install.sh` always provisions them. The aider-style PageRank is
+# dependency-free (lib/repo_map/_python_rank.py), so neither networkx nor SciPy
+# is a runtime dependency.
 grep-ast>=0.9
-networkx>=3.0
 pathspec>=0.12
 tree-sitter-language-pack>=0.10
 # qrcode — QR symbol encoder used by lib/qr.py to turn a scan-to-login URL

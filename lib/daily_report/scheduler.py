@@ -43,6 +43,20 @@ def _backfill_yesterday_if_missing(*, principal: PrincipalContext):
     try:
         convs = _extract_convs_for_date(
             yesterday, owner_user_id=owner_user_id)
+    except Exception as e:
+        # Not an empty day: nothing is saved, so the date stays missing and
+        # every later backfill run for it retries the extraction.
+        logger.error('[DailyReport] Auto-backfill %s: conversation extraction '
+                     'failed; no report recorded: %s',
+                     yesterday, e, exc_info=True)
+        return {
+            'ok': False,
+            'status': 'extraction_failed',
+            'date': yesterday,
+            'streams': 0,
+            'error': str(e)[:300],
+        }
+    try:
         if not convs:
             logger.info('[DailyReport] No conversations found for %s, skipping', yesterday)
             return {

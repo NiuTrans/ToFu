@@ -1,7 +1,8 @@
 """Shared immutable JSON files and physical worker ownership.
 
 JsonFrameStore encodes publications once on demand workers. Ordered transport
-references pin anonymous file segments until delivery/withdrawal. File rotation
+references pin anonymous file segments until delivery/withdrawal; values that
+are encoded only when sent use ``encode`` and need no file range. File rotation
 and idle worker reuse are caller-injected hints, never admission limits. The
 module depends only on the standard library and tofu_workers.executor.
 """
@@ -18,6 +19,13 @@ from dataclasses import dataclass
 from concurrent.futures import Future
 
 from .executor import DemandThreadPoolExecutor
+
+
+def _json_text(frame: dict) -> str:
+    # Standard-library output avoids retaining orjson's oversized backing
+    # allocations while concurrent writers own large encoded payloads.
+    return json.dumps(frame, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+
 
 class _FrameFile:
     def __init__(self):
@@ -94,7 +102,7 @@ class JsonFrameStore:
         """Own associated blocking transport I/O under the same joined close."""
         return self._submit(function, *args)
 
-    def prepare(self, frame: dict) -> Future:
+    def prepare(self, frame: dict) -> Future[StoredJsonFrame]:
         try:
             return self._submit(self._encode, copy.deepcopy(frame))
         except Exception as error:
@@ -105,13 +113,28 @@ class JsonFrameStore:
             failed.set_exception(error)
             return failed
 
-    def read(self, frame: StoredJsonFrame, *, encoded: bool = False) -> Future:
+    def read(self, frame: StoredJsonFrame, *, encoded: bool = False) -> Future[dict | str]:
         return self._submit(frame.text if encoded else frame.decode)
 
+    def encode(self, frame: dict, *, encoded: bool = True) -> Future[dict | str]:
+        """Serialize a caller-owned frame on a worker, without a file range.
+
+        The caller transfers ``frame``: it is not deep-copied. It serves values
+        encoded when they are sent, which leave no queued bytes to spool.
+        ``encoded=False`` returns the parsed JSON image instead of its text.
+        """
+        def serialize():
+            text = _json_text(frame)
+            return text if encoded else json.loads(text)
+        try:
+            return self._submit(serialize)
+        except Exception as error:
+            failed = Future()
+            failed.set_exception(error)
+            return failed
+
     def _encode(self, frame: dict) -> StoredJsonFrame:
-        # Standard-library output avoids retaining orjson's oversized backing
-        # allocations while concurrent writers own large encoded payloads.
-        raw = json.dumps(frame, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')
+        raw = _json_text(frame).encode('utf-8')
         with self._append_lock:
             owner = self._current() if self._current is not None else None
             if owner is None or owner.byte_count + len(raw) > self._segment_bytes:

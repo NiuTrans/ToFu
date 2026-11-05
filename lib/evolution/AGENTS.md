@@ -12,6 +12,7 @@ Design authority: `docs/EVOLUTION_DESIGN.md`; wire authority:
   The serving-loop reaper owns progression, including durable background waits
   and one reviewed join (`test_evolution_background_wait.py`), never a new model
   loop or timer.
+- `chat_programs.py` adapts current human Chat to the same programme/coordination owners; `chat_read`/`chat_write` in the programme schema own tool inputs. Verify human-source, idempotency, versioned controls and notebook return with `test_evolution_chat_programs.py` and `test_evolution_program_browser.py`.
 - `exploration_tools.py` authorizes current experiment executors against both
   run and program records. Structured problem/scenario/mechanism proposals
   extend the frontier under CAS; archive recall is cursor/chunk bounded. Exact
@@ -211,3 +212,8 @@ plumbing changes.
 - `mutation_versions.py` reserves owner/kind versions with storage CAS before
   proposal publication. Its durable head survives publication failure; verify
   `test_evolution_mutation_versions.py` for contention, ACK ambiguity and restart.
+
+- `execution_capabilities.py` adapts shared skill selection and research binding
+  validation into existing run requirements. Programmes retain original guide
+  hashes/protocol inputs; runs and independent reviews reuse the context composer
+  and ordinary acceptance. Verify `test_evolution_execution_capabilities.py`.

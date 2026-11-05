@@ -41,6 +41,7 @@ import json
 import time
 
 from lib.llm.responses_outbound._message_phase import capture_phase_messages
+from lib.llm.responses_replay import capture_replay_order
 from lib.llm.responses_outbound._reasoning import (
     ReasoningSummaryError,
     ReasoningSummaryReconciler,
@@ -60,6 +61,14 @@ _KNOWN_IGNORED_EVENTS = frozenset({
     'response.content_part.added', 'response.content_part.done',
     'response.output_text.done', 'response.refusal.done',
     'response.function_call_arguments.done',
+    # Gateway liveness frame sent while the model is still working; it
+    # carries no output and only proves the stream is alive.
+    'keepalive',
+    # ChatGPT-backend (Codex) side channel: prompt-moderation, verification
+    # and safety-buffering metadata, never generated output. Tofu has no
+    # consumer for it; completion, refusal and rejection stay authoritative
+    # on their own events.
+    'response.metadata',
 })
 _KNOWN_PROGRESS_PREFIXES = (
     'response.tool_search_call.', 'response.web_search_call.',
@@ -273,6 +282,12 @@ class ResponsesSSETranslator:
                     self._response_item_positions[position_key] = len(
                         self.response_items)
                 self.response_items.append(saved)
+
+    def finalized_response_items(self, message: dict) -> list[dict]:
+        """Bind terminal native order after canonical calls/text are assembled."""
+        return capture_replay_order(
+            self.response_output, message, self.response_items,
+            tool_name_reverse=self.tool_name_reverse)
 
     def _observe_item_type(self, item) -> None:
         if not isinstance(item, dict):

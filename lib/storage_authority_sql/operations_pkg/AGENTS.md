@@ -21,6 +21,12 @@ by application/route code.
 - Preserve fault-injection points and ensure every exception rolls back before
   typed classification.
 
+`_papers.py` keeps report metadata validation, owner locks and atomic writes;
+`lib.paper.report_metadata` owns the dependency-free usage and recorded-cost
+projection shared by merge/accumulate and application recovery. Do not import
+pricing services or worker lifecycle into a storage operation. Verify atomic
+second-pass, owner-isolation, replay and metadata projection contracts.
+
 `_runs.py` serializes event append, Goal MAX(seq) allocation, status transition
 and deletion on the owner/tenant/run row. Lock before reading authority or
 deleting events; otherwise concurrent PostgreSQL writers can overwrite terminal
@@ -32,6 +38,16 @@ backends and the neighboring orchestration/Goal contracts.
 Run the exact Sidecar contract tests for the operation, including owner
 isolation, pre-limit filtering, idempotency, conflict, rollback, receipt, and
 backend parity. Add migration/index tests for schema changes.
+
+## Billing operation owners
+
+`_billing_wallets.py` owns wallet/ledger mutations and reservation fences;
+`_billing_redeem.py` and `_billing_payments.py` reuse its atomic wallet application.
+`_billing_values.py` supplies scalar validation and raw-document decoding without
+IO. `operation_domains/billing.py` only registers these implementations. Native
+checkpoint settlement imports the wallet owner directly. Verify billing/payment
+contracts on SQLite, PostgreSQL and both native transports, including rollback
+and lost-acknowledgement replay; keep fault points in their transaction owners.
 
 ## Turn operation module layout
 

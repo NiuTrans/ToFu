@@ -7,7 +7,7 @@ public struct ServerCardUiState: Equatable, Sendable {
     public let failureText: String?
     public let showTransitioning: Bool
     public let showUnreachable: Bool
-    public let capabilities: CardCapabilities
+    public let capabilities: ServerCapabilities
 }
 
 /// The test-double seam for the real server list: identical invariants to

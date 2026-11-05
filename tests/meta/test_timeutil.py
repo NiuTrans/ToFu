@@ -11,6 +11,8 @@ import pytest
 
 from lib import timeutil
 
+pytestmark = pytest.mark.unit
+
 
 def test_now_ms_returns_int_milliseconds():
     before = int(time.time() * 1000)

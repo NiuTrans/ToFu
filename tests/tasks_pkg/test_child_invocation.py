@@ -69,11 +69,11 @@ def test_native_child_owns_route_after_parent_settles(monkeypatch):
     from lib.agent_core.execution_session import (
         ExecutionPhase, execution_session_for_task,
     )
-    from lib.llm_dispatch.provider_pin import get_pinned_provider
+    from lib.llm_dispatch.conv_affinity import clear_conv_affinity
+    from lib.llm_dispatch.provider_pin import clear_pinned_provider, get_pinned_provider
     from lib.model_routing import ModelRoutingError
     from lib.tasks_pkg.manager import create_task
     from lib.tasks_pkg.orchestrator._provider_binding import bind_provider_and_affinity
-    from lib.llm_dispatch.provider_pin import set_pinned_provider
     import lib.model_routing as routing
 
     groups = []
@@ -116,9 +116,40 @@ def test_native_child_owns_route_after_parent_settles(monkeypatch):
             assert error.value.kind == 'model_route_unavailable'
             assert len(groups) == 2
         finally:
-            set_pinned_provider('')
+            # The binding ran on this test thread; pair it with the lane
+            # teardown so no later test inherits the child's route.
+            clear_pinned_provider()
+            clear_conv_affinity()
             _discard(child)
         assert disposed == groups
+    finally:
+        _discard(parent)
+
+
+def test_child_inherits_admitted_route_while_parent_round_runs_on_fallback(monkeypatch):
+    import lib.model_routing as routing
+    from lib.identity import PrincipalContext
+    from lib.model_routing import ModelRoutingError
+    from lib.tasks_pkg.child_invocation import resolve_child_config
+    from lib.tasks_pkg.manager import create_task
+
+    monkeypatch.setattr(routing, 'mint_routed_slot_group', lambda *args, **kwargs: SimpleNamespace(
+        pin_id='fallback-parent-pin', candidates=[SimpleNamespace(offering={})]))
+    monkeypatch.setattr(routing, 'dispose_routed_slot_group', lambda group: None)
+    ref = {'creator_id': 'creator', 'model_id': 'fixture-model'}
+    principal = PrincipalContext.user(subject_id='test:owner', owner_user_id=71)
+    parent = create_task('fallback-parent', [{'role': 'user', 'content': 'parent'}],
+                         {'modelRef': ref, 'model': 'fixture-model'},
+                         principal=principal, transient=True)
+    try:
+        # A successful fallback round stamps its live model on the task;
+        # config keeps the admitted selection that children inherit.
+        parent['model'] = 'fallback-model'
+        cfg = resolve_child_config(parent, model=parent['config']['model'])
+        assert (cfg['model'], cfg['modelRef']) == ('fixture-model', ref)
+        with pytest.raises(ModelRoutingError) as error:
+            resolve_child_config(parent, model='other-model')
+        assert error.value.kind == 'model_route_unavailable'
     finally:
         _discard(parent)
 
@@ -225,7 +256,9 @@ def test_child_routing_and_diagnostic_scope_is_local_and_released(monkeypatch, f
     child = _child()
     scope = invocation.invocation_affinity_id(child)
     parent_scope = child['convId']
-    with affinity.isolated_conv_affinity(parent_scope):
+    # The simulated parent is a ROOT invocation: its scope is the conversation
+    # itself, so its routing entries must NOT be discarded at scope exit.
+    with affinity.isolated_conv_affinity(parent_scope, ephemeral=False):
         affinity.record_conv_key(parent_scope, 'parent-key')
         affinity.record_pick_decision(preferred_key='parent-key', chosen_key='parent-key', fell_back=False)
         parent_pick = dict(affinity.get_pick_decision())
@@ -306,21 +339,34 @@ def test_child_evidence_failure_never_cancels_parent_or_sibling():
         _discard(sibling)
 
 
-def test_inspector_persists_before_required_sink_and_uses_exact_owner(monkeypatch):
+def test_inspector_evidence_uses_exact_owner_and_never_delays_the_required_sink(monkeypatch):
+    from lib.tasks_pkg.event_delivery import flush_task_events
     from lib.tasks_pkg.manager import append_event
     import lib.tasks_pkg.event_log as log
     order = []
+    entered, release = threading.Event(), threading.Event()
     child = _child(sink=lambda event: order.append(('sink', event['seq'])))
     # This spec owns evidence ordering, not durable archive registration.
     child['_invocationStorageFree'] = False
-    monkeypatch.setattr(log, 'append_persistent_event',
-                        lambda task, seq, event: order.append(('persist', task, seq)))
+
+    def held_append(task, seq, event):
+        entered.set()
+        assert release.wait(10)
+        order.append(('persist', task, seq))
+
+    monkeypatch.setattr(log, 'append_persistent_event', held_append)
     try:
         append_event(child, {'type': 'messages_snapshot', 'kind': 'request',
                              'roundNum': 1, 'model': 'fixture-model', 'label': 'Request',
                              'messages': [{'role': 'user', 'content': 'go'}]})
-        assert order == [('persist', child['_inspectorTaskId'], 0), ('sink', 0)]
+        # The handoff returned while its durable append is still held.
+        assert entered.wait(2) and order == [('sink', 0)]
+        release.set()
+        flush_task_events(child)
+        assert order == [('sink', 0), ('persist', child['_inspectorTaskId'], 0)]
     finally:
+        release.set()
+        invocation.settle_invocation_evidence(child)
         _discard(child)
 
 
@@ -338,35 +384,49 @@ class _NeverAbort:
         self.set_calls += 1
 
 
-def test_child_evidence_append_transient_stall_retries_before_sink(monkeypatch):
+def test_child_evidence_transient_stall_retries_on_its_lane_without_poisoning(monkeypatch):
     """A deadline_elapsed from the authority must not poison the invocation.
 
     The append is idempotent on its natural (task, sequence) key, so the
-    bounded replay runs before the ordered sink handoff — the observed
-    2026-09-19 cascade killed a healthy 15-round conversation at round 16
-    from a single transient storage stall.
+    bounded replay runs on the child's evidence lane after the sink handoff —
+    the observed 2026-09-19 cascade killed a healthy 15-round conversation at
+    round 16 from a single transient storage stall.
     """
     import lib.tasks_pkg.event_log as log
     from lib.storage.errors import StorageError
+    from lib.tasks_pkg.event_delivery import flush_task_events
     order = []
-    child = _child(sink=lambda event: order.append(('sink', event['seq'])))
+    delivered = threading.Event()
+
+    def sink(event):
+        if event['type'] == 'messages_snapshot':
+            order.append(('sink', event['seq']))
+            delivered.set()
+
+    child = _child(sink=sink)
     child['_invocationStorageFree'] = False
     child['abort_event'] = _NeverAbort()
     attempts = []
     def flaky_append(task_id, seq, event):
         attempts.append(seq)
         if len(attempts) == 1:
+            assert delivered.wait(2)
             raise StorageError('database_timeout', 'deadline_elapsed', False)
         order.append(('persist', task_id, seq))
     monkeypatch.setattr(log, 'append_persistent_event', flaky_append)
+    monkeypatch.setattr('lib.tasks_pkg.persistence_wait._BASE_DELAY_SECONDS', 0)
     try:
         invocation.deliver_invocation_event(
             child, {'type': 'messages_snapshot', 'seq': 7})
+        flush_task_events(child)
         assert attempts == [7, 7]
-        assert order == [('persist', child['_inspectorTaskId'], 7), ('sink', 7)]
+        assert order == [('sink', 7), ('persist', child['_inspectorTaskId'], 7)]
         assert not child['aborted']
         assert child.get('_invocationDeliveryError') is None
+        # Child evidence is never a withheld push frame.
+        assert '_pushWithheldAt' not in child
     finally:
+        invocation.settle_invocation_evidence(child)
         _discard(child)
 
 
@@ -383,21 +443,27 @@ def test_child_evidence_append_long_pressure_does_not_poison_invocation(monkeypa
             raise StorageError('database_timeout', 'deadline_elapsed', False)
     monkeypatch.setattr(log, 'append_persistent_event', pressured)
     monkeypatch.setattr('lib.tasks_pkg.persistence_wait._BASE_DELAY_SECONDS', 0)
+    from lib.tasks_pkg.event_delivery import flush_task_events
     try:
         invocation.deliver_invocation_event(
             child, {'type': 'messages_snapshot', 'seq': 3})
-        assert attempts == [3] * 21
-        assert not child['aborted'] and child['abort_event'].set_calls == 0
-        assert not child.get('_invocationDeliveryError')
         invocation.deliver_invocation_event(
             child, {'type': 'messages_snapshot', 'seq': 4})
-        assert attempts[-1] == 4 and len(attempts) == 22
+        flush_task_events(child)
+        # The head's exact append is retried; its follower never overtakes it.
+        assert attempts == [3] * 21 + [4]
+        assert not child['aborted'] and child['abort_event'].set_calls == 0
+        assert not child.get('_invocationDeliveryError')
     finally:
+        invocation.settle_invocation_evidence(child)
         _discard(child)
 
 
-def test_child_evidence_append_non_transient_failure_is_not_retried(monkeypatch):
+def test_child_evidence_refusal_is_not_retried_in_place_and_refuses_the_next_paid_call(
+        monkeypatch):
     import lib.tasks_pkg.event_log as log
+    from lib.tasks_pkg.event_delivery import EventDeliveryError, coordinator, task_event_backlog
+    from lib.tasks_pkg.persistence_wait import checkpoint_model_dispatch
     child = _child()
     child['_invocationStorageFree'] = False
     child['abort_event'] = _NeverAbort()
@@ -407,11 +473,19 @@ def test_child_evidence_append_non_transient_failure_is_not_retried(monkeypatch)
         raise RuntimeError('attempt is no longer live')
     monkeypatch.setattr(log, 'append_persistent_event', verdict)
     try:
-        with pytest.raises(RuntimeError, match='no longer live'):
-            invocation.deliver_invocation_event(
-                child, {'type': 'messages_snapshot', 'seq': 5})
+        invocation.deliver_invocation_event(
+            child, {'type': 'messages_snapshot', 'seq': 5})
+        owner = coordinator()
+        with owner.condition:
+            assert owner.condition.wait_for(lambda: task_event_backlog(child).failed, timeout=2)
         assert attempts == [5]
+        # The next paid call repairs the exact head once, then is refused.
+        with pytest.raises(EventDeliveryError) as refused:
+            checkpoint_model_dispatch(child, [], 0)
+        assert 'no longer live' in str(refused.value.__cause__)
+        assert attempts == [5, 5]
     finally:
+        invocation.settle_invocation_evidence(child)
         _discard(child)
 
 
@@ -427,13 +501,15 @@ def test_empty_child_capabilities_never_assemble_root_tools(monkeypatch):
         _discard(child)
 
 
-def test_conversation_child_keeps_root_tool_discovery_but_not_human_approval(monkeypatch):
+@pytest.mark.parametrize('programmatic', [None, 'off'])
+def test_conversation_child_keeps_root_tool_discovery_but_not_human_approval(monkeypatch, programmatic):
     from lib.tasks_pkg.orchestrator import _tool_assembly_prep as assembly
     from lib.tasks_pkg.tool_dispatch._labels import _known_tool_names
     def tool(name):
         return {'type': 'function', 'function': {'name': name, 'parameters': {'type': 'object'}}}
     visible = [tool('read_files'), tool('spawn_agents')]
     config = {
+        **({'tools': {'programmaticCalling': programmatic}} if programmatic else {}),
         'compaction': {'steps': ['compact_tool_results']},
         '_executableToolCatalog': visible + [tool('fixture_hidden'), tool('ask_human')],
         '_toolSearchMode': 'on', '_toolExecutionScope': 'available',
@@ -451,12 +527,12 @@ def test_conversation_child_keeps_root_tool_discovery_but_not_human_approval(mon
     try:
         returned, enabled = assembly.assemble_round_tools(child['config'], child, {})
         assert enabled and returned == visible
+        # The child inherits the parent's program policy: the default tier adds
+        # the code action, while an explicit off withholds it.
+        program = set() if programmatic == 'off' else {'execute_program'}
         assert _known_tool_names(child) == {
             'read_files', 'spawn_agents', 'fixture_hidden', 'search_tools',
-            'execute_tools'}
-        # Program execution requires the declared program tier; ordinary tool
-        # discovery does not grant it implicitly to a child.
-        assert 'execute_program' not in _known_tool_names(child)
+            'execute_tools', *program}
         assert child['_toolSearchMode'] == 'on'
         assert child['_toolScriptSafeByName']['fixture_hidden']
         assert child['_executableToolNamespaceByName']['fixture_hidden'] == 'fixture'

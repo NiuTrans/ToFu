@@ -80,6 +80,33 @@ def test_page_html_served_on_demand(flask_client, deck_job):
         '/api/v4/slides/slides_ghost/pages/1.html').status_code == 404
 
 
+def _csp_directives(policy):
+    parsed = {}
+    for part in policy.split(';'):
+        tokens = part.split()
+        if tokens:
+            parsed[tokens[0].lower()] = tokens[1:]
+    return parsed
+
+
+def test_page_html_cannot_execute_model_markup(flask_client, deck_job):
+    """Rich text markup passes through to the same-origin editor frame, so the
+    page document itself must refuse every script, handler and javascript: URL."""
+    page = deck_job / 'deck' / 'pages' / '01.page'
+    page.write_text(_PAGE.replace(
+        '<p>编辑器标题</p>',
+        '<span>x</span><img src=x onerror="parent.fetch(\'/api/v4/credentials\')">'
+        '<script>parent.document.title = document.cookie</script>'),
+        encoding='utf-8')
+    r = flask_client.get('/api/v4/slides/slides_edit1/pages/1.html')
+    assert r.status_code == 200
+    assert 'onerror=' in r.get_data(as_text=True)
+    policy = _csp_directives(r.headers.get('Content-Security-Policy', ''))
+    assert policy.get('script-src') == ["'none'"]
+    # The editor canvas reads contentDocument; the page must stay same-origin.
+    assert 'sandbox' not in policy
+
+
 def test_page_elements_inventory(flask_client, deck_job):
     r = flask_client.get('/api/v4/slides/slides_edit1/pages/1/elements')
     assert r.status_code == 200

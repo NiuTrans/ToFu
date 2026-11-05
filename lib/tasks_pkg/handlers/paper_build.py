@@ -161,8 +161,8 @@ def _page_count(owner_user_id: int, document_id: str, build_id: str) -> int:
                                            build_id, 'document.synctex.gz') as artifact:
             stream, _size = artifact
             from lib.paper.latex_layout import parse_synctex
-            from lib.paper.builds.synctex import _decode
-            return int(parse_synctex(_decode(stream)).get('max_page') or 0)
+            from lib.paper.builds.synctex import _decoded_lines
+            return int(parse_synctex(_decoded_lines(stream)).get('max_page') or 0)
     except Exception as _e:
         logger.debug('count pdf pages failed: %s', _e)
         # Page count is advisory garnish on the verdict; a cache/parse quirk

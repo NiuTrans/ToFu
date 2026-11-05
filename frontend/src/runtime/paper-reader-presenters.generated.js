@@ -3,7 +3,8 @@
 import { featureRegistry as runtimeScope } from '../feature-registry';
 import { _i18nLang, t } from '../i18n/index';
 import { escapeHtml } from '../html-safety';
-import { enhanceReportArticle, buildReportTableOfContents, mountReportArticle, releaseReportArticle } from '../features/paper/report-article/index';
+import { enhanceReportArticle, buildReportTableOfContents, mountReportArticle, releaseReportArticle, syncReportFinishTag } from '../features/paper/report-article/index';
+import { createReportEventProjection, reportSegmentsForRender } from '../features/paper/report-events';
 
 const Api = runtimeScope.Api;
 if (!Api || typeof Api !== 'object') throw new Error('paper-reader-presenters runtime dependency is unavailable: Api');
@@ -11,10 +12,6 @@ const Icon = runtimeScope.Icon;
 if (typeof Icon !== 'function') throw new Error('paper-reader-presenters runtime dependency is unavailable: Icon');
 const debugLog = runtimeScope.debugLog;
 if (typeof debugLog !== 'function') throw new Error('paper-reader-presenters runtime dependency is unavailable: debugLog');
-const pushSubscribe = runtimeScope.pushSubscribe;
-if (typeof pushSubscribe !== 'function') throw new Error('paper-reader-presenters runtime dependency is unavailable: pushSubscribe');
-const pushUnsubscribe = runtimeScope.pushUnsubscribe;
-if (typeof pushUnsubscribe !== 'function') throw new Error('paper-reader-presenters runtime dependency is unavailable: pushUnsubscribe');
 const renderMarkdown = runtimeScope.renderMarkdown;
 if (typeof renderMarkdown !== 'function') throw new Error('paper-reader-presenters runtime dependency is unavailable: renderMarkdown');
 const renderToolRoundsHTML = runtimeScope.renderToolRoundsHTML;
@@ -47,10 +44,11 @@ if (typeof apiUrl !== 'function') throw new Error('paper-reader-presenters runti
 
    Extracted verbatim from frontend/src/runtime/paper-reader.js (2026-07-11, Epic E
    cut #6 — the biggest, ~2400 L). The Tab-2 Report AND Review-Mode stack:
-   event apply/paint (parameterized by _reportView `kind`), model+venue
+   paint (parameterized by _reportView `kind`), model+venue
    dropdowns, glossary cards, zoomable figures, export. The typed report owner
    owns start/restart, polling, reopen, preferences, snapshots, and anchors.
-   Article decoration/navigation/interactions live in typed report-article owners.
+   Event mutation lives in typed report-events; article decoration/navigation/
+   interactions live in typed report-article owners.
    Retained document listeners close model and venue dropdowns only.
    Retained renderer state (_paperReportCache/_paperReviewCache/_paperReportStream
    /_paperReportMeta/_paperReportModel/_paperImages/_paperHash)
@@ -134,480 +132,25 @@ function _renderReportSkeleton(container, lang, view) {
     '</div>';
 }
 
-/** Segment-timeline builders (chat-shaped). The report engine emits its
- *  thinking / delta / tool events in strict order (seq-cursor polling), each
- *  tagged with the 0-based dispatch round that produced it (`llmRound`).
- *  Folding them into per-round segments is what lets the report stream render
- *  through the chat inline tool timeline instead of the old three-zone layout.
- *  Events lacking `llmRound` (an older server mid-upgrade) fall back to
- *  order-based inference — thinking/delta before a tool_start belong to the
- *  round that tool_start opens. */
-function _segRoundOf(s, ev) {
-  return (typeof ev.llmRound === 'number') ? ev.llmRound : s._segInferRound;
-}
-
-function _segAppendProse(s, type, delta, llmRound) {
-  if (!delta) return;
-  var last = s.segments[s.segments.length - 1];
-  if (last && last.type === type && last.llmRound === llmRound) {
-    last.text += delta;
-  } else {
-    s.segments.push({ type: type, text: delta, llmRound: llmRound });
-  }
-}
-
-function _segApplyToolStart(s, ev) {
-  var r = _segRoundOf(s, ev);
-  s.segments.push({ type: 'tool_use', id: ev.toolCallId || '', llmRound: r });
-  // Prose that arrives after this tool belongs to the NEXT dispatch round.
-  s._segInferRound = r + 1;
-}
-
-function _segApplyDeltaReset(s, ev) {
-  // The backend discards a tool round's interim DRAFT (the terminal round
-  // rewrites the whole report), so its narration segment goes with it — a
-  // discarded draft must not linger next to the tools. Thinking is never
-  // reset, so thinking segments are kept.
-  var r = _segRoundOf(s, ev);
-  s.segments = s.segments.filter(function (seg) {
-    return !(seg.type === 'text' && seg.llmRound === r);
-  });
-}
-
-/** Segments for the timeline render. Text (narration) segments render ONLY
- *  for rounds that actually called tools — the terminal tool-less round's
- *  text IS the report body, which the caller renders separately below the
- *  panel; letting it into the timeline would double it (mirrors the chat
- *  timeline, which skips `deliverable` segments). */
-function _reportSegmentsForRender(s) {
-  var withTools = {};
-  var i, seg;
-  for (i = 0; i < s.segments.length; i++) {
-    seg = s.segments[i];
-    if (seg.type === 'tool_use') withTools[seg.llmRound] = true;
-  }
-  return s.segments.filter(function (sg) {
-    return sg.type !== 'text' || withTools[sg.llmRound];
-  });
-}
-
-/** Bind the 'paper' push channel to a report stream ().
- *
- * ── The asymmetry this closes ──
- * The BACKEND has always been ready: ``lib/paper/report_runtime.py`` builds its
- * TaskRuntime with ``push_channel='paper'``, so every ``_append_report_event``
- * is broadcast on the unified /api/push WebSocket the moment it is appended,
- * and ``report_engine._execute_tool`` appends ``tool_done`` the instant the
- * tool returns. The report view simply never listened: its only transport was
- * ``setTimeout(runtimeScope._pollReportTask, 1200)``. So a search that finished at t=0 kept
- * its spinner until somewhere in t+1.2s…t+3s for no reason other than that
- * nobody subscribed to the channel already carrying the news.
- *
- * The native Paper research runtime uses the same mechanism;
- * this is the same layering: push is the ACCELERATOR, the poll stays as the
- * floor (a WS-blocked client must still converge, so the poll is never
- * removed).
- *
- * De-duplication between the two transports is the seq gate in
- * ``_applyReportEvent`` — this function does not need to coordinate with the
- * poll beyond handing frames to the same gate.
- *
- * Safe to call repeatedly for the same stream (idempotent per task id).
- */
-function _attachReportPush(view, s) {
-  if (!view || !s || !s.taskId) return;
-  if (typeof pushSubscribe !== 'function') return;   // push module not loaded
-  if (s._pushTaskId === s.taskId) return;            // already bound
-  _detachReportPush(s);
-  var taskId = s.taskId;
-  try {
-    pushSubscribe('paper', taskId, function (ev) {
-      // Ignore frames for a stream this view has since replaced (paper switch,
-      // regenerate) — the same abandon guard the poll chain uses.
-      if (view.stream !== s) return;
-      if (!ev || !ev.type) return;
-      var dirty = _applyReportEvent(s, ev);
-
-      // Terminal frames settle the view AND release the subscription, so a
-      // long session does not accumulate live handlers for finished tasks.
-      if (ev.type === 'done' || ev.type === 'error' || ev.type === 'aborted') {
-        if (ev.type === 'done') {
-          s.status = 'done';
-          if (ev.report) s.fullText = ev.report;
-        } else if (ev.type === 'aborted') {
-          s.status = 'aborted';
-          if (typeof ev.partial === 'string' && ev.partial) {
-            s.fullText = ev.partial;
-            s.contentStarted = true;
-          }
-        } else {
-          s.status = 'error';
-        }
-        _detachReportPush(s);
-        // Let the poll do the authoritative terminal fetch (report body,
-        // meta, resolvedTitle, DB persistence side-effects). The push frame
-        // stops the spinner NOW; the poll fills in the rest.
-        if (typeof runtimeScope._pollReportTask === 'function') runtimeScope._pollReportTask(view);
-        dirty = true;
-      }
-      if (dirty && s.paperId === runtimeScope._activePaperId) _paintReportFromState(view);
-    });
-    s._pushTaskId = taskId;
-  } catch (e) {
-    // A failed subscription is NOT fatal: the poll floor still converges.
-    console.debug('[Paper:Report] push subscribe failed:', e);
-  }
-}
-
-/** Release a report stream's push subscription. */
-function _detachReportPush(s) {
-  if (!s || !s._pushTaskId) return;
-  try {
-    if (typeof pushUnsubscribe === 'function') pushUnsubscribe('paper', s._pushTaskId);
-  } catch (e) {
-    console.debug('[Paper:Report] push unsubscribe failed:', e);
-  }
-  s._pushTaskId = '';
-}
-
-
-/** Ordered, exactly-once ingest gate for report events ().
- *
- * ── Why this exists ──
- * The report view now has TWO transports feeding the same state:
- *   • the 'paper' push channel — frames arrive the instant the backend appends
- *     them (report_runtime sets push_channel='paper'), and
- *   • the 1.2s poll — the catch-up floor for a client whose WebSocket is
- *     blocked by a proxy, and the reconnect path after a refresh.
- * Both deliver the SAME events, so applying them naively would double-append
- * every delta (the report body rendered twice) and re-push tool rounds.
- *
- * Every event carries a monotonic ``seq`` (assigned in TaskRuntime.append_event),
- * which makes de-duplication exact rather than heuristic: apply an event only
- * when its seq advances the stream's high-water mark. That also keeps the two
- * transports ORDERED with respect to each other — a push frame that overtakes
- * the poll is applied once, and the poll's later replay of it is a no-op.
- *
- * An event with no seq (defensive: an older server, or a synthetic frame) is
- * applied unconditionally — dropping it would be worse than a rare duplicate.
- */
-function _applyReportEvent(s, ev) {
-  if (!s || !ev) return false;
-  var seq = ev.seq;
-  if (typeof seq === 'number') {
-    if (s._seqSeen == null) s._seqSeen = -1;
-    if (seq <= s._seqSeen) return false;     // already applied by the other transport
-    s._seqSeen = seq;
-  }
-  return _applyReportEventRaw(s, ev);
-}
-
-/* ── Versioned tool_progress replay safety (tofu.tool-progress/v1) ───────
- * ``tool_progress`` carries a monotonic per-call ``seq`` (1-based) alongside
- * the ordered ``chunk`` delta. The task-level seq gate in _applyReportEvent
- * already dedupes whole events across the push/poll transports; this gate is
- * the per-call defense — it rejects a duplicate or out-of-order chunk for the
- * same round so the bounded partial-output buffer never double-appends. A
- * legacy frame without seq still applies unconditionally. */
-var _REPORT_TOOL_PROGRESS_BOUNDED_CHARS = 100000;
-var _REPORT_TOOL_PROGRESS_TRUNCATION_MARKER =
-  '\n\n… [live output truncated] …\n\n';
-var _REPORT_TOOL_PROGRESS_TRUNCATION_TAIL_RE =
-  /… \[live output truncated[^\]]*\] …\n\n([\s\S]*)$/;
-
-function _reportProgressTail(value) {
-  var existing = typeof value === 'string' ? value : '';
-  var match = _REPORT_TOOL_PROGRESS_TRUNCATION_TAIL_RE.exec(existing);
-  return match ? match[1] : existing;
-}
-
-function _reportProgressStatus(truncated, spooling, reason) {
-  if (reason === 'cancelling') return 'cancelling';
-  if (reason === 'cancelled' || reason === 'cancelled-partial') {
-    return 'cancelled-partial';
-  }
-  if (truncated) return 'overflow-loss';
-  if (spooling) return 'spooling';
-  return 'running';
-}
-
-function _reportApplyToolProgress(round, ev) {
-  var seq = typeof ev.seq === 'number' ? ev.seq : null;
-  var lastSeq = typeof round._partialOutputSeq === 'number'
-    ? round._partialOutputSeq : 0;
-  if (seq !== null && seq <= lastSeq) return false;
-
-  var chunk = typeof ev.chunk === 'string' ? ev.chunk : '';
-  var existingTotal = typeof round._partialOutputTotalChars === 'number'
-    ? round._partialOutputTotalChars
-    : _reportProgressTail(round._partialOutput).length;
-  var totalChars = existingTotal + chunk.length;
-  var truncated = round._partialOutputTruncated === true
-    || ev.truncated === true
-    || totalChars > _REPORT_TOOL_PROGRESS_BOUNDED_CHARS;
-  var spooling = ev.spooling === true;
-  var reason = typeof ev.terminalReason === 'string' ? ev.terminalReason : '';
-
-  if (!truncated) {
-    round._partialOutput = (typeof round._partialOutput === 'string'
-      ? round._partialOutput : '') + chunk;
-  } else {
-    var suffixLimit = _REPORT_TOOL_PROGRESS_BOUNDED_CHARS
-      - Math.floor(_REPORT_TOOL_PROGRESS_BOUNDED_CHARS * 3 / 4);
-    var tail = (_reportProgressTail(round._partialOutput) + chunk)
-      .slice(-suffixLimit);
-    round._partialOutput = _REPORT_TOOL_PROGRESS_TRUNCATION_MARKER + tail;
-  }
-  round._partialOutputTotalChars = totalChars;
-  round._partialOutputTruncated = truncated;
-  round._partialOutputStatus = _reportProgressStatus(truncated, spooling, reason);
-  if (seq !== null) round._partialOutputSeq = seq;
-  if (ev.contractVersion != null) {
-    round._partialOutputContractVersion = String(ev.contractVersion);
-  }
-  if (ev.stream != null) round._partialOutputStream = String(ev.stream);
-  if (spooling) round._partialOutputSpooling = true;
-  if (reason) round._partialOutputTerminalReason = reason;
-  if (ev.grepSearchIntercepted === true) round.grepSearchIntercepted = true;
-  return true;
-}
-
-/** Apply a single event to the in-memory stream state. Returns dirty flag. */
-function _applyReportEventRaw(s, ev) {
-  switch (ev.type) {
-    case 'status':
-      s.status = ev.status || s.status;
-      return true;
-
-    case 'thinking':
-      s.thinkingText += (ev.delta || '');
-      _segAppendProse(s, 'thinking', ev.delta || '', _segRoundOf(s, ev));
-      return true;
-
-    case 'tool_start': {
-      // Chat-compatible round entry
-      s.toolRounds.push({
-        roundNum: ev.roundNum,
-        toolName: ev.toolName,
-        query: ev.query || ev.toolName,
-        toolCallId: ev.toolCallId || '',
-        toolArgs: ev.toolArgs || '',
-        attentionKind: ev.attentionKind || '',
-        parentToolCallId: ev.parentToolCallId || '',
-        status: 'searching',
-        results: null,
-      });
-      _segApplyToolStart(s, ev);
-      return true;
-    }
-
-    case 'tool_done': {
-      var r = null;
-      for (var i = 0; i < s.toolRounds.length; i++) {
-        if (s.toolRounds[i].roundNum === ev.roundNum) { r = s.toolRounds[i]; break; }
-      }
-      if (r) {
-        r.status = 'done';
-        if (typeof ev.elapsed === 'number') r._elapsed = ev.elapsed.toFixed(1) + 's';
-        if (ev.toolContent) r.toolContent = ev.toolContent;
-        if (ev.results) r.results = ev.results;
-        if (ev.searchDiag) r.searchDiag = ev.searchDiag;
-        if (ev.engineBreakdown) r.engineBreakdown = ev.engineBreakdown;
-        if (ev.vertical) r.vertical = ev.vertical;
-        if (ev.verticals) r.verticals = ev.verticals;
-        if (ev.cacheSource) r.cacheSource = ev.cacheSource;
-      }
-      return true;
-    }
-
-    case 'tool_progress': {
-      var rp = null;
-      for (var j = 0; j < s.toolRounds.length; j++) {
-        if (s.toolRounds[j].roundNum === ev.roundNum) { rp = s.toolRounds[j]; break; }
-      }
-      if (rp) {
-        _reportApplyToolProgress(rp, ev);
-      }
-      return true;
-    }
-
-    case 'delta':
-      s.fullText += (ev.delta || '');
-      s.contentStarted = true;
-      _segAppendProse(s, 'text', ev.delta || '', _segRoundOf(s, ev));
-      return true;
-
-    case 'delta_reset':
-      // The model emitted an interim draft alongside a tool call; the
-      // backend discards it and will rewrite the full report after the tool
-      // results land. Clear the accumulated text so the draft + final report
-      // don't concatenate (report rendered twice).
-      s.fullText = '';
-      s.contentStarted = false;
-      s._lastRenderedLen = -1;
-      // Resolve through the explicit window seam so native owners and
-      // fault-injection tests can replace the reducer without relying on
-      // bundler-specific top-level-name exposure.
-      (runtimeScope._segApplyDeltaReset || _segApplyDeltaReset)(s, ev);
-      return true;
-
-    case 'enriched':
-      s.fullText = ev.text || s.fullText;
-      // Only mutate global hash when this stream still belongs to the active paper —
-      // a stream that was started for paper A and is now polling in the background
-      // must not stomp paper B's hash.
-      if (ev.paperHash && s.paperId === runtimeScope._activePaperId) _paperHash = ev.paperHash;
-      return true;
-
-    case 'insight_start':
-      // The gated insight second-pass has begun (after the report `done`).
-      // Flag it so the reader can show a subtle "synthesizing insight…" hint;
-      // no body change yet.
-      s._insightRunning = true;
-      return true;
-
-    case 'insight': {
-      // v2 structured payload (grounded items with resolved anchor_idx) →
-      // the reading-xp rail distributes anchored cards instead of appending
-      // one end-of-report block. Legacy events (no items) fall through to
-      // the markdown-append path below.
-      if (typeof runtimeScope._paperXpHandleInsightEvent === 'function'
-          && runtimeScope._paperXpHandleInsightEvent(s, ev, _reportView(s.kind))) {
-        return true;
-      }
-      // The insight pass produced a grounded synthesis/transfer section. It is
-      // a self-contained Markdown block (## 💡 …) persisted separately under
-      // the `insight:<ui>` key; render it live by appending to the report body
-      // (and the cached snapshot) so it flows through the same markdown
-      // renderer + TOC. Guard against double-append on cursor replay.
-      s._insightRunning = false;
-      var _ins = ev.insight || '';
-      if (_ins && !s._insightApplied) {
-        s._insightApplied = true;
-        s.insightText = _ins;
-        s.fullText = (s.fullText || '').replace(/\s*$/, '') + '\n\n' + _ins + '\n';
-        s._lastRenderedLen = -1;   // force re-render
-        if (s.paperId === runtimeScope._activePaperId) {
-          var _vIns = _reportView(s.kind);
-          if (_vIns.cache) {
-            _vIns.cache = _vIns.cache.replace(/\s*$/, '') + '\n\n' + _ins + '\n';
-            runtimeScope._rememberReportSnapshot(_vIns, _vIns.cache, _vIns.meta || s.meta);
-          }
-        }
-      }
-      return true;
-    }
-
-    case 'insight_skipped':
-      // Gate withheld (report already insight-saturated) or nothing produced.
-      // No body change; just clear the running hint.
-      s._insightRunning = false;
-      return true;
-
-    case 'checkpoints':
-      // Per-section self-test flip cards (P2) — the reading-xp rail inserts
-      // them at section ends. No body change.
-      if (typeof runtimeScope._paperXpHandleCheckpointsEvent === 'function'
-          && runtimeScope._paperXpHandleCheckpointsEvent(s, ev, _reportView(s.kind))) {
-        return true;
-      }
-      return true;
-
-    case 'checkpoints_skipped':
-      return true;
-
-    case 'report_meta':
-      // Second-pass cost landed after `done` (design §3.3) — the reading-xp
-      // rail swaps the finish tag for one carrying the secondPasses breakdown.
-      if (typeof runtimeScope._paperXpApplyMetaEvent === 'function'
-          && runtimeScope._paperXpApplyMetaEvent(s, ev, _reportView(s.kind))) {
-        return true;
-      }
-      if (ev.meta) {
-        s.meta = ev.meta;
-        var _vRm = _reportView(s.kind);
-        if (s.paperId === runtimeScope._activePaperId) _vRm.meta = ev.meta;
-      }
-      return true;
-
-    case 'termfill': {
-      // The definition-backfill pass produced a gap-closing glossary addendum
-      // (a `## 📖 … (glossary backfill)` table), persisted separately under the
-      // `termfill:<ui>` key. Append it live so the reader sees the added
-      // definitions, and — because the re-audit proved the gaps are closed —
-      // downgrade the warning card: clear meta.terminologyAudit so
-      // _renderFinalReport stops rendering it (the glossary is now complete).
-      // Guard against double-append on cursor replay.
-      var _add = ev.addendum || '';
-      if (_add && !s._termfillApplied) {
-        s._termfillApplied = true;
-        s.termfillText = _add;
-        s.fullText = (s.fullText || '').replace(/\s*$/, '') + '\n\n' + _add + '\n';
-        if (s.meta && s.meta.terminologyAudit) s.meta.terminologyAudit = null;
-        s._lastRenderedLen = -1;   // force re-render (drops the warning card)
-        if (s.paperId === runtimeScope._activePaperId) {
-          var _vTf = _reportView(s.kind);
-          if (_vTf.meta && _vTf.meta.terminologyAudit) _vTf.meta.terminologyAudit = null;
-          if (_vTf.cache) {
-            _vTf.cache = _vTf.cache.replace(/\s*$/, '') + '\n\n' + _add + '\n';
-            runtimeScope._rememberReportSnapshot(_vTf, _vTf.cache, _vTf.meta || s.meta);
-          }
-        }
-      }
-      return true;
-    }
-
-    case 'termfill_skipped':
-      // No gap-closing addendum produced — the warning card stays as-is.
-      return true;
-
-    case 'done': {
-      s.status = 'done';
-      var _vDone = _reportView(s.kind);
-      if (ev.report) {
-        s.fullText = ev.report;
-        if (s.paperId === runtimeScope._activePaperId) {
-          _vDone.cache = ev.report;
-          runtimeScope._rememberReportSnapshot(_vDone, ev.report, ev.meta || s.meta);
-          _persistGeneratedReviewVenue(_vDone, _vDone.langKey(), s.paperId);
-        }
-      }
-      if (ev.meta) {
-        s.meta = ev.meta;
-        if (s.paperId === runtimeScope._activePaperId) _vDone.meta = ev.meta;
-      }
-      if (ev.paperHash && s.paperId === runtimeScope._activePaperId) _paperHash = ev.paperHash;
-      if (ev.resolvedTitle) _applyResolvedTitle(ev.resolvedTitle, s.paperId);
-      return true;
-    }
-
-    case 'aborted':
-      s.status = 'aborted';
-      // Keep whatever partial text was produced so the user sees how far the
-      // model got before they stopped it. The frontend renders it read-only
-      // under a "stopped" banner (never persisted / cached).
-      if (typeof ev.partial === 'string' && ev.partial) {
-        s.fullText = ev.partial;
-        s.contentStarted = true;
-      }
-      return true;
-
-    case 'error':
-      s.status = 'error';
-      // ev.error is a typed error envelope dict from routes/paper.py.
-      // Display surfaces use the short ``message`` field; keep the full
-      // envelope on s._errorEnv for future kind-aware rendering.
-      s._errorEnv = (typeof normalizeErrorEnvelope === 'function')
-        ? normalizeErrorEnvelope(ev.error)
-        : null;
-      s.error = (typeof errorEnvelopeMessage === 'function'
-                 ? errorEnvelopeMessage(ev.error) : '')
-                || (typeof ev.error === 'string' ? ev.error : '')
-                || 'Unknown error';
-      return true;
-  }
-  return false;
-}
+/* Temporary presenter bridge: the typed projection owns event mutation.
+ * Delete this adapter when report view/publication ports leave this section;
+ * transport and the authoritative terminal fetch belong to report-runtime. */
+const _applyReportEventRaw = createReportEventProjection({
+  isActivePaper: (paperId) => paperId === runtimeScope._activePaperId,
+  viewFor: (kind) => _reportView(kind),
+  setPaperHash: (hash) => { _paperHash = hash; },
+  rememberSnapshot: (view, text, meta) => runtimeScope._rememberReportSnapshot(view, text, meta),
+  persistReviewVenue: (view, lang, paperId) => _persistGeneratedReviewVenue(view, lang, paperId),
+  applyResolvedTitle: (title, paperId) => _applyResolvedTitle(title, paperId),
+  handleInsight: (s, ev) => typeof runtimeScope._paperXpHandleInsightEvent === 'function'
+    && runtimeScope._paperXpHandleInsightEvent(s, ev, _reportView(s.kind)),
+  handleCheckpoints: (s, ev) => typeof runtimeScope._paperXpHandleCheckpointsEvent === 'function'
+    && runtimeScope._paperXpHandleCheckpointsEvent(s, ev, _reportView(s.kind)),
+  normalizeError: (error) => typeof normalizeErrorEnvelope === 'function'
+    ? normalizeErrorEnvelope(error) : null,
+  errorMessage: (error) => typeof errorEnvelopeMessage === 'function'
+    ? errorEnvelopeMessage(error) : '',
+});
 
 /* ── Report render-layer enhancement ──────────────────────────────────
  * The report is plain Markdown rendered by renderMarkdown(). To make the
@@ -758,62 +301,6 @@ function _renderTerminologyAuditCard(audit) {
     '<p class="paper-cite-sub">' + escapeHtml(sub) + '</p>' +
     '<ul class="paper-cite-list">' + items.join('') + '</ul>' +
     '</aside>';
-}
-
-/** Build the "finish tag" badge: which model generated the report + its cost.
- *  Visually subtle, sits at the END of the report so it never disrupts content.
- *  `meta` is the server-supplied dict ({model, costCny, costUsd, promptTokens,
- *  completionTokens, rounds, elapsedSec}). Returns '' when meta is absent. */
-function _renderReportFinishTag(meta) {
-  if (!meta || !meta.model) return '';
-  var parts = [];
-  // Model — the headline of the tag.
-  parts.push('<span class="paper-finish-model" title="' +
-    escapeHtml(t('paper.finishModelTitle')) + '">' +
-    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0-3 3 3 3 0 0 0 0 6 3 3 0 0 0 3 3v1a3 3 0 0 0 6 0v-1a3 3 0 0 0 3-3 3 3 0 0 0 0-6 3 3 0 0 0-3-3V5a3 3 0 0 0-3-3z"/></svg>' +
-    escapeHtml(meta.model) + '</span>');
-  // Cost — prefer CNY (matches the rest of the app), fall back to USD.
-  // Cost visibility (design §3.3): when second passes billed extra, the
-  // headline figure is the TOTAL (body + passes) and the tooltip breaks it
-  // down per pass; with no passes the tag is byte-identical to before.
-  var costStr = '';
-  var costTitle = t('paper.finishCostTitle');
-  var _hasPasses = meta.secondPasses && typeof meta.totalCostCny === 'number'
-    && meta.totalCostCny > 0;
-  var _effCny = _hasPasses ? meta.totalCostCny : meta.costCny;
-  var _effUsd = _hasPasses ? meta.totalCostUsd : meta.costUsd;
-  if (typeof _effCny === 'number' && _effCny > 0) {
-    costStr = (typeof formatCny === 'function') ? formatCny(_effCny)
-      : ('¥' + _effCny.toFixed(4));
-  } else if (typeof _effUsd === 'number' && _effUsd > 0) {
-    costStr = '$' + _effUsd.toFixed(4);
-  }
-  if (_hasPasses && typeof runtimeScope._paperXpCostBreakdown === 'function') {
-    var _bd = runtimeScope._paperXpCostBreakdown(meta);
-    if (_bd) costTitle = _bd;
-  }
-  if (costStr) {
-    parts.push('<span class="paper-finish-cost" title="' +
-      escapeHtml(costTitle) +
-      '">' + escapeHtml(costStr) + '</span>');
-  }
-  // Tokens (compact) — secondary detail.
-  var inTok = meta.promptTokens || 0;
-  var outTok = meta.completionTokens || 0;
-  if (inTok || outTok) {
-    var fmt = function (n) {
-      if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-      if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
-      return String(n);
-    };
-    parts.push('<span class="paper-finish-tokens" title="' +
-      escapeHtml(t('paper.finishTokensTitle')) + '">' +
-      fmt(inTok) + ' \u2192 ' + fmt(outTok) + ' tok</span>');
-  }
-  var label = t('paper.finishGeneratedBy');
-  return '<div class="paper-report-finish-tag" role="contentinfo">' +
-    '<span class="paper-finish-label">' + escapeHtml(label) + '</span>' +
-    parts.join('') + '</div>';
 }
 
 /* ── Reading-time estimate + progress bar (Report tab) ───────────────────
@@ -1146,12 +633,7 @@ function _renderFinalReport(container, text, meta, view) {
     if (decHtml) article.insertAdjacentHTML('afterbegin', decHtml);
   }
   var entries = enhanceReportArticle(article, t);
-  var finishTag = _renderReportFinishTag(meta);
-  if (finishTag) {
-    var tagWrap = document.createElement('div');
-    tagWrap.innerHTML = finishTag;
-    if (tagWrap.firstChild) article.appendChild(tagWrap.firstChild);
-  }
+  syncReportFinishTag(article, meta);
   var tocHTML = buildReportTableOfContents(entries, t('paper.reportTocLabel'));
 
   // Inline tool timeline (live session only): a freshly finished generation
@@ -1164,7 +646,7 @@ function _renderFinalReport(container, text, meta, view) {
     var _st = view.stream;
     if (_st && _st.toolRounds && _st.toolRounds.length
         && typeof renderSegmentTimelineHTML === 'function') {
-        var _finalSegs = (runtimeScope._reportSegmentsForRender || _reportSegmentsForRender)(_st);
+        var _finalSegs = reportSegmentsForRender(_st);
       _timelineHtml = renderSegmentTimelineHTML(_finalSegs, { toolRounds: _st.toolRounds }, 0)
         || (typeof renderToolRoundsHTML === 'function'
             ? renderToolRoundsHTML(_st.toolRounds, false, _finalSegs) : '');
@@ -1234,6 +716,8 @@ function _paintReportFromState(view) {
       _renderFinalReport(container, s.fullText, undefined, view);
       s._lastRenderedLen = s.fullText.length;
       s._lastRenderedStatus = 'done';
+    } else {
+      syncReportFinishTag(container, view.meta || s.meta);
     }
     return;
   }
@@ -1294,7 +778,7 @@ function _paintReportFromState(view) {
         _openNoteKeys[key] = true;
       });
       if (toolCount > 0 && typeof renderSegmentTimelineHTML === 'function') {
-        var _segs = (runtimeScope._reportSegmentsForRender || _reportSegmentsForRender)(s);
+        var _segs = reportSegmentsForRender(s);
         toolZone.innerHTML =
           renderSegmentTimelineHTML(_segs, { toolRounds: s.toolRounds }, 0)
           || (typeof renderToolRoundsHTML === 'function'
@@ -1859,11 +1343,7 @@ document.addEventListener('click', function() {
 if (typeof window !== 'undefined') {
   // Domain bundles are free to isolate top-level declarations. Publish the
   // small renderer/reducer surface the native task owner deliberately calls.
-  runtimeScope._segApplyDeltaReset = _segApplyDeltaReset;
-  runtimeScope._reportSegmentsForRender = _reportSegmentsForRender;
   runtimeScope._applyReportEventRaw = _applyReportEventRaw;
-  runtimeScope._attachReportPush = _attachReportPush;
-  runtimeScope._detachReportPush = _detachReportPush;
   runtimeScope._paintReportFromState = _paintReportFromState;
   runtimeScope._persistGeneratedReviewVenue = _persistGeneratedReviewVenue;
   runtimeScope._populateReviewVenueDropdown = _populateReviewVenueDropdown;
@@ -1884,24 +1364,6 @@ if (typeof window !== 'undefined') {
   runtimeScope._togglePaperReviewExportMenu = _togglePaperReviewExportMenu;
   runtimeScope._togglePaperReviewModelDropdown = _togglePaperReviewModelDropdown;
   runtimeScope._toggleReviewVenueDropdown = _toggleReviewVenueDropdown;
-  // Backing refs: an accessor whose getter reads the property it defines
-  // is self-recursive — every read is RangeError (detonated at boot by the
-  // tail publish loop's key walk, 2026-08-15). The refs keep the
-  // override-without-rebinding semantics the table was after.
-  let _segApplyDeltaResetRef = _segApplyDeltaReset;
-  let _reportSegmentsForRenderRef = _reportSegmentsForRender;
-  Object.defineProperties(runtimeScope, {
-    _segApplyDeltaReset: {
-      configurable: true,
-      get: () => _segApplyDeltaResetRef,
-      set: (value) => { _segApplyDeltaResetRef = value; },
-    },
-    _reportSegmentsForRender: {
-      configurable: true,
-      get: () => _reportSegmentsForRenderRef,
-      set: (value) => { _reportSegmentsForRenderRef = value; },
-    },
-  });
 }
 /* ===== migrated source: paper-reader.js ===== */
 /* ═══════════════════════════════════════════
@@ -2205,8 +1667,8 @@ function _applyResolvedTitle(resolvedTitle, paperId) {
     _updatePaperTitles();
   }
   runtimeScope._renderPaperLibrary();
-  // Server healed the durable title; sync only lightweight client metadata.
-  if (pid === runtimeScope._activePaperId) runtimeScope._saveActivePaperState('metadata');
+  // The server already healed the durable title. Project that fact locally;
+  // replaying this browser's other library fields could overwrite newer edits.
 }
 
 function _updatePaperTitles() {
@@ -2440,16 +1902,10 @@ function _formatPaperBytes(n) {
 function _renderArxivFetchProgress(state) {
   var viewer = document.getElementById('paperPdfViewer');
   if (!viewer) return;
-  var isZh = (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh');
-  var labels = isZh
-    ? { resolving: '解析 arXiv 链接…', downloading: '下载 PDF…',
-        parsing: '解析 PDF 文本…', parsingImages: '提取图表…',
-        pageOf: '第 {done} / {total} 页',
-        cached: '已从缓存加载', pages: '页', chars: '字符' }
-    : { resolving: 'Resolving arXiv link…', downloading: 'Downloading PDF…',
-        parsing: 'Extracting PDF text…', parsingImages: 'Extracting figures…',
-        pageOf: 'page {done} / {total}',
-        cached: 'Loaded from cache', pages: 'pages', chars: 'chars' };
+  var labels = {
+    resolving: t('paper.arxivResolving'), downloading: t('paper.arxivDownloading'),
+    parsing: t('paper.arxivParsing'), parsingImages: t('paper.arxivParsingImages'),
+    cached: t('paper.arxivCached') };
 
   var title;
   if (state.stage === 'resolve') title = labels.resolving;
@@ -2482,15 +1938,16 @@ function _renderArxivFetchProgress(state) {
     var total = state.total_pages || 0;
     if (total > 0) {
       pct = Math.min(100, Math.round(done * 100 / total));
-      detail = labels.pageOf.replace('{done}', done).replace('{total}', total);
+      detail = t('paper.arxivPageOf', { done: done, total: total });
     } else {
       pct = -1;
       detail = '';
     }
   } else if (state.stage === 'parse_done') {
     pct = 100;
-    detail = (state.total_pages || 0) + ' ' + labels.pages +
-             ' · ' + (state.text_length || 0).toLocaleString() + ' ' + labels.chars;
+    detail = t('paper.arxivParsedSummary', {
+      pages: state.total_pages || 0,
+      chars: (state.text_length || 0).toLocaleString(document.documentElement.lang || undefined) });
   }
 
   var barStyle = (pct < 0)

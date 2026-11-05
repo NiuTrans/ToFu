@@ -58,6 +58,11 @@
   user-select: text;
 }
 
+.ptool-cmd-block .ptool-cmd-desc-command {
+  font-family: var(--font-mono), monospace;
+  font-weight: var(--weight-regular);
+}
+
 .ptool-cmd-verdict {
   display: inline-flex;
   align-items: center;

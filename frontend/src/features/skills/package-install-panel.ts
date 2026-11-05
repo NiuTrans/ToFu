@@ -1,18 +1,17 @@
 /** Skills-panel composition for the shared bounded package installer. */
 import { featureRegistry } from '../../feature-registry';
-import type { ChoiceDialogOptions } from '../../dialog-controller';
+import { chooseSkillDestination } from './library';
 import type { I18nKey } from '../../i18n';
 import {
   createSkillPackageInstaller,
   type SkillPackageInstallBody,
   type SkillPackageInstallResponse,
-  type SkillPackageScope,
 } from './package-installer';
 
 type SkillsInstallBindings = Window & {
   Api?: {
     skills?: {
-      install(form: FormData): Promise<SkillPackageInstallResponse | null>;
+      install(form: FormData, projectPath?: string): Promise<SkillPackageInstallResponse | null>;
     };
   };
   t?: (key: I18nKey, values?: Record<string, unknown>) => string;
@@ -22,9 +21,6 @@ type SkillsInstallBindings = Window & {
     text: string,
     duration?: number,
   ) => Element | null;
-  showChoice?: <V extends string>(
-    options: ChoiceDialogOptions<V>,
-  ) => Promise<V | null>;
   _populateSkillsTab?: () => Promise<void>;
   _skillsInstallFromInput?: (input: HTMLInputElement | null) => void;
 };
@@ -58,34 +54,6 @@ export function showSkillsToast(
   }
 }
 
-/** Ask where an install lands; null means the user dismissed the choice. */
-export async function promptInstallScope(
-  name: string,
-): Promise<SkillPackageScope | null> {
-  const chooser = bindings().showChoice;
-  if (!chooser) return 'global';
-  const choice = await chooser<SkillPackageScope | 'cancel'>({
-    title: translate('skills.installScopePromptTitle'),
-    message: name
-      ? translate('skills.installScopePromptMsg', { name }) : undefined,
-    dismissValue: 'cancel',
-    options: [
-      {
-        value: 'global',
-        label: translate('skills.scopeGlobal'),
-        subtitle: translate('skills.scopeGlobalSub'),
-        accent: true,
-      },
-      {
-        value: 'project',
-        label: translate('skills.scopeProject'),
-        subtitle: translate('skills.scopeProjectSub'),
-      },
-    ],
-  });
-  return choice === 'global' || choice === 'project' ? choice : null;
-}
-
 function installedMessage(body: SkillPackageInstallBody): string {
   const name = String(body.memory?.name || '');
   let message = translate('skills.installedToast', { name });
@@ -100,13 +68,18 @@ function installedMessage(body: SkillPackageInstallBody): string {
   return message;
 }
 
+let installProjectPath = '';
 const installer = createSkillPackageInstaller({
   install: (form) => {
     const api = bindings().Api?.skills;
     if (!api) throw new Error('Skills API is not ready');
-    return api.install(form);
+    return api.install(form, installProjectPath);
   },
-  pickScope: (file) => promptInstallScope(file.name),
+  pickScope: async (file) => {
+    const destination = await chooseSkillDestination(file.name);
+    installProjectPath = destination?.projectPath || '';
+    return destination?.scope || null;
+  },
   showInvalidFile: () => showSkillsToast(translate('skills.notZip'), 'error'),
   showInstalling: (file) => {
     showSkillsToast(translate('skills.installingFile', { name: file.name }));

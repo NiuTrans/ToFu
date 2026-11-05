@@ -9,6 +9,62 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_deepen_refreshes_only_its_original_report_without_reading_xp():
+    entry = """
+import * as deepen from './deepen';
+import { connectFeatureRuntime } from '../../feature-registry';
+connectFeatureRuntime(name => (window as any)[name], (name,value) => { (window as any)[name]=value; });
+Object.assign(window, { deepen });
+"""
+    harness = r"""
+const assert=require('node:assert/strict'),fs=require('fs');
+const {JSDOM}=require(process.argv[1]+'/node_modules/jsdom');
+const dom=new JSDOM('<div id="paperReportContent"><article class="paper-report-article"><h2>Evidence</h2><p>Body</p></article></div><div id="paperReviewContent"><article class="paper-report-article"><h2>Review</h2></article></div>',{url:'http://localhost'});
+const w=dom.window;global.window=w;global.document=w.document;global.localStorage=w.localStorage;
+let lang='en',resolvePoll,resolveMeta;
+const queries=[];
+const view={kind:'report',containerId:'paperReportContent',stream:{meta:null},langKey:()=>lang};
+w._reportView=()=>view;w._activePaperId='a';w._paperHash='hash-a';w.t=key=>key;
+w.formatCny=value=>'¥'+value.toFixed(4);
+w.Api={paper:{deepenStart:async()=>({ok:true,task_id:'deepen-task'}),
+  deepenPoll:()=>new Promise(resolve=>resolvePoll=resolve),deepenAbort:async()=>({ok:true}),
+  reportCache:query=>{queries.push(query);return new Promise(resolve=>resolveMeta=resolve);}}};
+(0,eval)(fs.readFileSync(process.argv[2],'utf8'));
+const owner=w.deepen,article=document.querySelector('#paperReportContent article');
+owner.paperDeepenAfterRender(article,document.getElementById('paperReportContent'),view);
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+(async()=>{
+  for(const drift of ['none','paper','hash','language','cancel']){
+    owner.cancelPaperDeepenJobs();w._activePaperId='a';w._paperHash='hash-a';lang='en';
+    const before=view.meta;
+    article.querySelector('.paper-deepen-btn').click();await tick();
+    resolvePoll({ok:true,json:async()=>({ok:true,status:'done',events:[{type:'done',content:'Section result'}]})});
+    await tick();
+    assert.deepEqual(queries.at(-1),{lang:'en',paper_hash:'hash-a'});
+    assert.equal(typeof resolveMeta,'function');
+    if(drift==='paper')w._activePaperId='b';
+    if(drift==='hash')w._paperHash='hash-b';
+    if(drift==='language')lang='zh';
+    if(drift==='cancel')owner.cancelPaperDeepenJobs();
+    const meta={model:'new-'+drift,costCny:0.02};
+    resolveMeta({ok:true,meta});await tick();
+    if(drift==='none'){
+      assert.equal(view.meta,meta);assert.equal(view.stream.meta,meta);
+      assert.equal(article.querySelector('.paper-finish-cost').textContent,'¥0.0200');
+    }else assert.equal(view.meta,before,'late metadata must not mutate a reused view: '+drift);
+    assert.equal(article.querySelector('.paper-finish-model').textContent,'new-none');
+    assert.equal(document.querySelector('#paperReportContent article'),article);
+    assert.equal(document.querySelector('#paperReviewContent .paper-report-finish-tag'),null);
+  }
+  owner.destroyPaperDeepen();dom.window.close();console.log('deepen metadata ownership verified');
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+    with compiled_typescript(ROOT / 'frontend/src/features/paper/deepen.ts', contents=entry) as bundle:
+        result = subprocess.run(['node', '-e', harness, str(ROOT), bundle],
+                                capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_notes_and_deepen_source_ownership_and_failed_mutations():
     entry = """
 import * as notes from './notes';

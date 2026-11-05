@@ -199,7 +199,12 @@ Safety and resource bounds:
   Neither relay recipes nor feed quotes become official Model `list_pricing`.
   An official operator hosting another creator's model also cannot set that
   creator's list price. Invalid/missing/all-zero feed prices stay unknown,
-  not falsely free.
+  not falsely free. Template compile binds each provider price through its
+  recipe's own wire ids (`request_ids`, else model ID plus aliases), never by
+  position: migration normalization reorders Offerings, and positional
+  binding once put 232 of 236 OpenRouter prices on another model's Offering.
+  Insert-only install and convergence never rewrite a stored price, so an
+  Offering installed before that fix keeps its misbound price until edited.
 - `retired_model_ids` remains the authored kill-switch. Cross-template
   authored retirement consistency and world-catalog pruning are pinned by
   `tests/model_routing/test_world_catalog_sync.py`; removing a stale provider seed is not
@@ -212,6 +217,35 @@ Do not confuse this layer with provider catalog sync (Lifecycle, step 6):
 the feed keeps the ONBOARDING catalog current from public data before any
 credential exists; catalog sync keeps a CONFIGURED provider current from its
 authenticated `/models`.
+
+## Providers without a bundled template
+
+Any OpenAI-compatible endpoint works without a catalog entry: choose
+**Custom (OpenAI-compatible)** on the first-run `/setup` page or
+**+ Custom Provider** in Settings → Providers. Both read the account's model
+list from the authenticated `/models` while saving. The published sidecar
+takes the same endpoint through `TOFU_AGENT_PROVIDER_BASE_URL`, `_API_KEY`
+and `_MODEL`.
+
+A reusable card needs no fork either: drop a v1 recipe into the user tier,
+`<data>/config/provider_templates/<key>.json` (beside `server_config.json`).
+It is hot-reloaded and wins by key over every earlier tier in both pickers.
+For an account-specific inventory, author `catalog_mode: discovery` with
+empty `offering_recipes`; the picker then lists the account's models with
+its credential before creating the access. A listing of any size is
+accepted: an oversized one imports a ranked part and the card's
+**Add model → Load all models** imports the rest
+([Oversized listings](MODEL_REGISTRATION.md#oversized-listings)).
+
+Problem: the stdlib `/setup` loader read only the three repository tiers, so
+a user-tier drop-in appeared in Settings but not in the first-run picker —
+the only picker before any provider exists, while pip and desktop installs
+cannot add package files. Decision: bootstrap locates the user tier through
+`_bootstrap_data_root()`, the stdlib twin of the runtime data root that
+already places the staged provider draft. Alternative rejected: importing
+`lib.config_dir` into bootstrap, which breaks its stdlib-only repair
+contract. Specification:
+`tests/providers/test_provider_template_recipes.py::test_user_tier_drop_in_reaches_both_pickers`.
 
 ## Bootstrap projection
 
@@ -227,6 +261,21 @@ After the user saves setup, bootstrap writes the credential to the existing
 startup imports the draft into the explicit personal-owner v2 repository,
 stores the credential through the repository secret channel, and consumes the
 draft. This works both before and after v2 has already been activated.
+
+The draft stages at most 1,024 catalog rows. The selected default model and
+pinned manual rows always survive that bound; unselected live rows fill the
+remaining room in catalogue order. Problem: the bound cut the list after the
+save handler had appended a typed model, and relay catalogues of 1,000+
+sorted ids also cut a late-sorting selection, so the saved default named a
+model the imported provider never received. Decision: the bound chooses which
+unselected rows to drop instead of where to cut. Alternative rejected:
+removing the bound, because staged rows are richer than raw `/models` rows
+and an unbounded draft can outgrow the importer's 4 MiB read limit.
+Specification:
+`tests/server/test_bootstrap_model_catalog.py::test_bootstrap_stage_bound_never_drops_the_chosen_models`.
+The importer then applies the same ranked part as Settings discovery, keeping
+the staged default and pinned rows
+([Oversized listings](MODEL_REGISTRATION.md#oversized-listings)).
 
 The recipe compiler uses `lib.model_registration.normalize_model_entry`, so it
 removes the obsolete blended `cost` hint, validates capabilities, context and
@@ -267,7 +316,10 @@ repository boundary; it is never included in the public template or bundle.
    catalog freshness, so re-enabling never reveals a stale list (a
    disabled connection or credential, a per-component revocation, stays
    untouched). It rides the shared local-endpoint monitor thread;
-   `TOFU_MODEL_CATALOG_SYNC=0` opts out.
+   `TOFU_MODEL_CATALOG_SYNC=0` opts out. The owner's explicit **Load all
+   models** (`import_listed_models`) shares the add-only append and ledger
+   for one provider, but neither automatic bound applies and it restores
+   models the sweep had dismissed; the opt-out does not disable it.
 7. Independently, `lib/model_routing/template_supply.py` converges every
    INSTALLED access that fingerprint-matches a template toward a fresh
    install of that template, so a card added last month picks up recipes
@@ -280,7 +332,8 @@ repository boundary; it is never included in the public template or bundle.
    missing recipe lands only after a live probe on the access's own
    credential proves the gateway serves it (`ok` / `rate_limited`, routed
    per recipe through `build_probe_work` so Claude candidates probe the
-   Anthropic face); `ok` deployments record passed evidence and rate-limited
+   Anthropic face and `face` / `request_faces` pins probe their own face);
+   `ok` deployments record passed evidence and rate-limited
    ones remain unprobed. Neither has a separate enablement state, and dead
    ids never resurrect. New rows reuse
    the compiled bundle verbatim with ids re-derived for the target access
@@ -333,6 +386,22 @@ repository boundary; it is never included in the public template or bundle.
    selector headers and envelope authentication therefore both reach the
    synthetic transport boundary in the offline specifications.
 
+   Problem: the probe plan unioned the headers of every Connection of the
+   access and sent them on every cell, and dropped the recipe's `face` /
+   `request_faces` pins. Every YourProvider card carries the kunlun Connection, so
+   all 136 cells of a stock card sent `x-context-provider: kunlun`, which aigc
+   rejects off that face (400 `该模型在 provider 下无可用账号`), while the pinned
+   alias was probed on the default face: missing recipes probed dead and were
+   never installed. Decision: a cell carries only its own face's headers — a
+   declared face's Connection headers plus the selector the template declares
+   for it (the `build_probe_work` cell context), the default Connection's
+   headers only on default-endpoint cells — and then the credential envelope;
+   recipe face pins reach `resolve_face` exactly as for the installed
+   Deployment. Alternative rejected: one access-wide header dictionary cannot
+   be right for a gateway whose faces select different serving providers.
+   Specification:
+   `tests/model_routing/test_template_supply_sync.py::test_template_probe_sends_each_face_only_its_own_headers`.
+
 ## CatPaw Credit-Hub gateway (catpaw.json)
 
 `catpaw.json` onboards the CatPaw CLI's `mcli.internal.example.com` gateway, which
@@ -349,6 +418,30 @@ fingerprints are applied at the wire boundary by
 internal CatPaw doc; probes verified 2026-09-09 for kimi-k3, glm-5.3 and
 deepseek-v4-pro over both streaming and non-streaming paths
 (`tests/llm/test_catpaw_gateway.py`).
+
+## DemonRoute relay (demonroute.json)
+
+DemonRoute is a third-party OpenAI-compatible gateway for open-weight models;
+`category: relay` classifies the operator and is not an endorsement. Its
+[docs](https://demonroute.com/docs) name the endpoint
+`https://api.demonroute.com/v1`; the gateway's public `/api/pricing` listed
+1,347 per-token chat models on 2026-10-31, while `/v1/models` requires a key.
+
+Problem: the vendor's proposal seeded models with copied prices. Decision: a
+curated recipe seeding the two proposed models that bind to registered Models
+(`Qwen/Qwen3-Coder-Next`, `openai/gpt-oss-120b`), text-only because
+reasoning-control pass-through is unverified, with no prices. Once a key is
+added, **Load all models** imports the rest of the listing. Alternatives
+rejected: discovery mode, which creates nothing until a key is entered and
+would still import only a ranked part of this listing, reaching the same
+inventory through Load all; carrying the proposed prices, because the template
+would never refresh them and one quoted price ($0.00 for
+`dphn/Dolphin3.0-Llama3.1-8B`) already disagreed with the live
+$0.80/$1.28 per million; seeding the proposed community fine-tunes, because
+catalog identity attributes `Ateron/Gemma-4-…` and `dphn/Dolphin…` to
+Google and Meta as creators and leaves `TheDrummer/Anubis-70B-v1` a pending
+identity.
+
 ## Migration guardrails
 
 - Keep `recipe_version` explicit.

@@ -10,7 +10,7 @@ Root cause chain:
     ``title: t('chat.newConversation')`` — the LOCALIZED display label —
     violating the "durable titles are language-neutral" rule documented in
     ``shell-localization.ts``.
-  * ``titleForTurnConversationCreate`` (turn-runtime.ts) only strips the
+  * ``titleForTurnConversationCreate`` (turn-command-execution.ts) only strips the
     neutral ``'New Chat'`` sentinel, so "新对话" was uploaded as a real title
     on the first Turn command.
   * The server's first-message derivation (command_service.py) only runs
@@ -39,7 +39,7 @@ from tests._runtime_sections import (
 
 pytestmark = pytest.mark.unit
 
-_TURN_RUNTIME = ROOT / 'frontend' / 'src' / 'core' / 'turn-runtime.ts'
+_TURN_COMMANDS = ROOT / 'frontend' / 'src' / 'core' / 'turn-command-execution.ts'
 
 # A title field fed from the i18n display label — the laundering shape.
 _LOCALIZED_TITLE_RE = re.compile(
@@ -77,7 +77,7 @@ def test_project_modal_shell_uses_neutral_sentinel():
 
 
 def test_turn_commands_strip_placeholder_on_both_create_paths():
-    src = _TURN_RUNTIME.read_text(encoding='utf-8')
+    src = _TURN_COMMANDS.read_text(encoding='utf-8')
     uses = src.count('title: titleForTurnConversationCreate(conversation)')
     assert uses == 2, (
         f'expected both Turn conversation payloads to strip the placeholder, '

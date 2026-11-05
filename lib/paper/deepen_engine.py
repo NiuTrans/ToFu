@@ -380,8 +380,8 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
         _usage_total['cache_write_tokens'] += _n['cache_write']
         _usage_total['reasoning_tokens'] += _n['thinking']
         _disp = usage.get('_dispatch') or {}
-        if _disp.get('model'):
-            _resolved_model = _disp['model']
+        if _disp.get('logical_model') or _disp.get('model'):
+            _resolved_model = _disp.get('logical_model') or _disp['model']
 
     def _dispatch(rnd, tools):
         _round['content'] = ''

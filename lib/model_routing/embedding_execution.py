@@ -11,6 +11,7 @@ from lib.agent_core.execution_session import (
     acquire_and_bind_admission,
     bind_model_route,
 )
+from lib.error_envelope import BadRequest
 from lib.http_transport.client import http_post
 from lib.ids import short_id
 from lib.log import get_logger
@@ -30,10 +31,6 @@ EMBEDDING_MAX_INPUT_CHARACTERS = 1_000_000
 EMBEDDING_TIMEOUT_SECONDS = 60
 
 
-class EmbeddingCapacityError(RuntimeError):
-    pass
-
-
 class EmbeddingUnavailableError(RuntimeError):
     pass
 
@@ -46,12 +43,14 @@ class EmbeddingUpstreamError(RuntimeError):
 
 def validate_embedding_inputs(inputs: list[str]) -> None:
     if len(inputs) > EMBEDDING_MAX_INPUT_ITEMS:
-        raise ValueError(
-            f"input supports at most {EMBEDDING_MAX_INPUT_ITEMS} items")
+        raise BadRequest(
+            f"input supports at most {EMBEDDING_MAX_INPUT_ITEMS} items",
+            field="input")
     total_characters = sum(len(value) for value in inputs)
     if total_characters > EMBEDDING_MAX_INPUT_CHARACTERS:
-        raise ValueError(
-            "embedding input exceeds the total character budget")
+        raise BadRequest(
+            "embedding input exceeds the total character budget",
+            field="input")
 
 
 def execute_embeddings(
@@ -88,9 +87,7 @@ def execute_embeddings(
             session,
             lambda: dispose_routed_slot_group(route_group),
         )
-        admission_lease = acquire_and_bind_admission(session, controller)
-        if admission_lease is None:
-            raise EmbeddingCapacityError("embedding execution is at capacity")
+        acquire_and_bind_admission(session, controller)
         session.mark_dispatch_started()
 
         from lib.llm_dispatch import get_dispatcher
@@ -147,7 +144,6 @@ __all__ = [
     "EMBEDDING_MAX_INPUT_CHARACTERS",
     "EMBEDDING_MAX_INPUT_ITEMS",
     "EMBEDDING_TIMEOUT_SECONDS",
-    "EmbeddingCapacityError",
     "EmbeddingUnavailableError",
     "EmbeddingUpstreamError",
     "execute_embeddings",

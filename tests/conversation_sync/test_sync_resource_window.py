@@ -9,11 +9,17 @@ from lib.storage.errors import StorageError
 pytestmark = pytest.mark.unit
 
 
+_LOAD_SHED = ("database_unavailable", "database_resource_exhausted", True)
+# A native response above its byte budget: domain_resource_bound, never retried.
+_RESPONSE_BOUND = ("database_resource_exhausted", "database_resource_exhausted", False)
+
+
 class WindowClient:
-    def __init__(self, result, *, capacity=24, error=None):
+    def __init__(self, result, *, capacity=24, error=None, refusal=_LOAD_SHED):
         self.result = result
         self.capacity = capacity
         self.error = error
+        self.refusal = refusal
         self.calls = []
 
     def query(self, operation, payload):
@@ -22,7 +28,7 @@ class WindowClient:
             raise self.error
         count = payload.get("turn_limit", payload.get("limit"))
         if count is None or count > self.capacity:
-            raise StorageError("database_unavailable", "database_resource_exhausted", True)
+            raise StorageError(*self.refusal)
         return self.result
 
 
@@ -45,9 +51,11 @@ def test_oversized_snapshot_keeps_storage_cursor_attempts_and_revision():
         assert payload["include_artifact_hint"] is True
 
 
-def test_oversized_history_page_preserves_exclusive_cursor_and_replay_fence():
+@pytest.mark.parametrize("refusal", [_LOAD_SHED, _RESPONSE_BOUND])
+def test_oversized_history_page_preserves_exclusive_cursor_and_replay_fence(
+        refusal):
     result = {"hasMore": True, "nextBeforeOrdinal": 35, "syncSequence": 78308}
-    client = WindowClient(result, capacity=16)
+    client = WindowClient(result, capacity=16, refusal=refusal)
     assert repository(client).turn_page("conversation", 7, lane_id="main",
         expected_sync_sequence=78308, before_ordinal=59, limit=64) is result
     assert [payload["limit"] for _, payload in client.calls] == [64, 32, 16]
@@ -75,9 +83,11 @@ def test_other_failures_are_propagated_without_page_retries(code, message):
     assert len(client.calls) == 1
 
 
+@pytest.mark.parametrize("refusal", [_LOAD_SHED, _RESPONSE_BOUND])
 @pytest.mark.parametrize("limit", [None, 0, 1, 96])
-def test_unbounded_or_irreducible_exhaustion_stays_loud_and_finite(limit):
-    error = StorageError("database_unavailable", "database_resource_exhausted", True)
+def test_unbounded_or_irreducible_exhaustion_stays_loud_and_finite(
+        limit, refusal):
+    error = StorageError(*refusal)
     client = WindowClient(None, error=error)
     with pytest.raises(StorageError) as raised:
         repository(client).snapshot("conversation", 7, turn_limit=limit)

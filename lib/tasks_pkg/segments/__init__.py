@@ -31,7 +31,7 @@ segments as seg_mod`` both keep working byte-identically):
   * ``_derive``   — derive_content / derive_thinking / derive_tool_rounds /
                     deliverable_text + _rounds_view_from_segments.
   * ``_project``  — reconstruct_tool_messages_from_segments /
-                    tool_history_from_segments / resume_prefill_from_segments.
+                    tool_history_from_segments.
   * ``_edit``     — apply_edited_deliverable.
   * ``_serde``    — segments_to_json / rehydrate_segments.
 
@@ -59,8 +59,10 @@ from lib.tasks_pkg.segments._types import (  # noqa: E402,F401
 
 from lib.tasks_pkg.segments._assemble import (  # noqa: E402,F401
     assemble_segments,
+    merge_injected_note_segments,
     record_continuation_prose,
     record_injected_note,
+    release_continuation_prose,
     tool_use_segment_from_round,
     _merged_rounds,
 )
@@ -76,7 +78,6 @@ from lib.tasks_pkg.segments._derive import (  # noqa: E402,F401
 from lib.tasks_pkg.segments._project import (  # noqa: E402,F401
     reconstruct_tool_messages_from_segments,
     tool_history_from_segments,
-    resume_prefill_from_segments,
 )
 
 from lib.tasks_pkg.segments._edit import (  # noqa: E402,F401
@@ -91,8 +92,10 @@ from lib.tasks_pkg.segments._serde import (  # noqa: E402,F401
 
 __all__ = [
     'assemble_segments',
+    'merge_injected_note_segments',
     'record_continuation_prose',
     'record_injected_note',
+    'release_continuation_prose',
     'tool_use_segment_from_round',
     'CONTINUATION_PROSE_FIELD',
     'INJECTED_NOTES_FIELD',
@@ -105,7 +108,6 @@ __all__ = [
     'derive_tool_rounds',
     'deliverable_text',
     'apply_edited_deliverable',
-    'resume_prefill_from_segments',
     'reconstruct_tool_messages_from_segments',
     'tool_history_from_segments',
     'segments_to_json',

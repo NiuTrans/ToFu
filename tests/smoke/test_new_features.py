@@ -301,7 +301,7 @@ class TestCacheTracking:
         state.call_count = 1
         _cache_states[_state_key(conv_id, user_id=1)] = state
         try:
-            assert get_cache_prefix_count(conv_id, user_id=1) == 4  # max(0, 6 - 2)
+            assert get_cache_prefix_count(conv_id, user_id=1) == 6  # whole sent request
         finally:
             _cache_states.pop(_state_key(conv_id, user_id=1), None)
 

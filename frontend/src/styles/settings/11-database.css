@@ -325,7 +325,7 @@
 #settingsTab_database .db-index-required {
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
+  background: var(--s-cream);
   color: var(--db-secondary);
   font-size: var(--font-size-xs);
   font-weight: var(--weight-medium);

@@ -58,9 +58,9 @@ A first draft lived at ``lib/chromium_env.py``; the guard in
 ``tests/browser/test_chromium_env.py`` caught that merely importing it executed
 ``lib/__init__.py``, which drags in ``requests`` (405 modules, 0.44 s) and
 touches the database — fatal for both callers above. Hence the root placement,
-next to the other pre-dependency modules. :func:`_log` resolves the logger
-lazily for the same reason: runtime diagnostics still reach the normal log
-files, but the import graph stays clean.
+next to the other pre-dependency modules. Environment preparation also stays
+stdlib-only: the named logger inherits application handlers once configured,
+without importing the application to emit a setup diagnostic.
 """
 
 import logging
@@ -92,19 +92,6 @@ _SENTINEL_LIBS = (
     'libgbm.so.1',
     'libxkbcommon.so.0',
 )
-
-
-def _log():
-    """Return the project logger, falling back to a stdlib one.
-
-    Resolved lazily — see the module docstring: importing ``lib.log`` at module
-    scope would execute ``lib/__init__``, which both callers must avoid.
-    """
-    try:
-        from lib.log import get_logger
-        return get_logger(__name__)
-    except Exception:
-        return logging.getLogger(__name__)
 
 
 def _dir_carries_gui_libs(path):
@@ -168,20 +155,53 @@ def chromium_lib_dirs(env_prefix=None):
     return dirs
 
 
-def fontconfig_paths(env_prefix=None):
-    """Return ``(fontconfig_dir, fontconfig_file)`` to use, or ``(None, None)``.
+def _fontconfig_supports_chinese(config_file):
+    """Ask an explicit fontconfig file whether it covers a Chinese character."""
+    if not sys.platform.startswith('linux'):
+        return False
+    command = shutil.which('fc-match')
+    if not command:
+        return False
+    child_env = dict(os.environ)
+    child_env['FONTCONFIG_FILE'] = config_file
+    child_env['FONTCONFIG_PATH'] = os.path.dirname(config_file)
+    try:
+        result = subprocess.run(
+            [command, '-f', '%{charset}', ':charset=4e2d'],
+            env=child_env, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    for value in result.stdout.split():
+        try:
+            bounds = [int(part, 16) for part in value.split('-')]
+        except ValueError:
+            continue
+        if 1 <= len(bounds) <= 2 and bounds[0] <= 0x4e2d <= bounds[-1]:
+            return True
+    return False
 
-    Returns ``(None, None)`` when the system config exists — a host with a real
-    ``/etc/fonts`` must keep using it; overriding it would be a regression.
-    """
-    if os.path.isdir('/etc/fonts'):
+
+def fontconfig_paths(env_prefix=None):
+    """Return an environment config only when the system lacks CJK coverage."""
+    if not sys.platform.startswith('linux'):
         return None, None
+    if os.path.isfile('/etc/fonts/fonts.conf') and _fontconfig_supports_chinese(
+            '/etc/fonts/fonts.conf'):
+        return None, None
+    fallback = None
     for prefix in _prefix_candidates(env_prefix):
         conf_dir = os.path.join(prefix, 'etc', 'fonts')
         conf_file = os.path.join(conf_dir, 'fonts.conf')
-        if os.path.isfile(conf_file):
+        if not os.path.isfile(conf_file):
+            continue
+        if _fontconfig_supports_chinese(conf_file):
             return conf_dir, conf_file
-    return None, None
+        if not os.path.isdir('/etc/fonts') and fallback is None:
+            fallback = (conf_dir, conf_file)
+    return fallback or (None, None)
 
 
 def ensure_chromium_env(env=None, env_prefix=None):
@@ -192,9 +212,10 @@ def ensure_chromium_env(env=None, env_prefix=None):
     that need nothing — a no-op then.
 
     ``LD_LIBRARY_PATH`` handling is Linux-only: macOS/Windows use different
-    mechanisms that Playwright's own bundled binaries already handle. The
-    fontconfig half is applied regardless, since it is keyed on the absence of
-    ``/etc/fonts`` rather than on the platform.
+    mechanisms that Playwright's own bundled binaries already handle. On Linux,
+    a system config remains authoritative when it covers Chinese; otherwise an
+    environment config with demonstrated CJK coverage prevents missing-glyph
+    boxes. Other platforms keep their native font resolution.
 
     Args:
         env: Mapping to mutate. Defaults to ``os.environ``.
@@ -229,12 +250,13 @@ def ensure_chromium_env(env=None, env_prefix=None):
     else:
         report['platform_skipped'] = True
 
-    # An operator-set FONTCONFIG_FILE always wins — hence setdefault semantics.
-    conf_dir, conf_file = fontconfig_paths(env_prefix)
-    if conf_file and not target.get('FONTCONFIG_FILE'):
-        target['FONTCONFIG_PATH'] = conf_dir
-        target['FONTCONFIG_FILE'] = conf_file
-        report['fontconfig'] = conf_file
+    # Explicit selections are authoritative and need no capability probe.
+    if not target.get('FONTCONFIG_FILE') and not target.get('FONTCONFIG_PATH'):
+        conf_dir, conf_file = fontconfig_paths(env_prefix)
+        if conf_file:
+            target['FONTCONFIG_PATH'] = conf_dir
+            target['FONTCONFIG_FILE'] = conf_file
+            report['fontconfig'] = conf_file
 
     # A provisioned Node can support old Linux hosts, but an executable file
     # can still fail to load glibc. Export only a runnable automatic choice,
@@ -259,8 +281,9 @@ def ensure_chromium_env(env=None, env_prefix=None):
                     target['PLAYWRIGHT_NODEJS_PATH'] = local_node
 
     if report['lib_dirs_added'] or report['fontconfig']:
-        _log().debug('[ChromiumEnv] libs=%s fontconfig=%s',
-                     report['lib_dirs_added'], report['fontconfig'])
+        logging.getLogger(__name__).debug(
+            '[ChromiumEnv] libs=%s fontconfig=%s',
+            report['lib_dirs_added'], report['fontconfig'])
     return report
 
 
@@ -314,26 +337,52 @@ _SYSTEM_BROWSERS = ('google-chrome', 'google-chrome-stable', 'chromium',
 
 
 def browsers_root():
-    """Return Playwright browser-cache roots to search, most-authoritative first.
+    """Return Playwright's browser registry as ``[dir]``, or ``[]`` if absent.
 
-    ``PLAYWRIGHT_BROWSERS_PATH`` is an OVERRIDE, not an extra candidate — that
-    is Playwright's own semantics, verified 2026-07-29 by pointing it at an
-    EMPTY directory: ``chromium.executable_path`` still resolved inside that
-    directory and never fell back to ``~/.cache/ms-playwright``. Searching both
-    would make us report a browser from a cache Playwright will not actually
-    launch from.
+    Playwright launches from exactly one registry, so searching any other
+    cache would report a browser it will not launch. This mirrors
+    ``registryDirectory`` in its driver (``playwright/driver/package/lib/
+    coreBundle.js``, read at playwright 1.62 and checked against its
+    ``chromium.executable_path``):
 
-    The special value ``'0'`` means "store inside the pip package", not a
-    directory, so it is ignored rather than treated as a path.
+      * ``PLAYWRIGHT_BROWSERS_PATH`` is an OVERRIDE, not an extra candidate —
+        pointed at an EMPTY directory, ``chromium.executable_path`` still
+        resolves inside it (verified 2026-07-29). ``'0'`` selects
+        ``.local-browsers`` inside the installed package's driver.
+      * Otherwise the per-user cache plus ``ms-playwright``:
+        ``$XDG_CACHE_HOME`` or ``~/.cache`` on Linux, ``~/Library/Caches`` on
+        macOS (no XDG), ``%LOCALAPPDATA%`` or ``~/AppData/Local`` on Windows.
+        Playwright supports no other platform.
+
+    A relative registry resolves against the working directory; npm-run-only
+    spellings (``npm_config_*``, ``INIT_CWD``) are not consulted.
     """
-    env_root = (os.environ.get('PLAYWRIGHT_BROWSERS_PATH') or '').strip()
-    if env_root and env_root != '0':
-        return [env_root] if os.path.isdir(env_root) else []
+    override = os.environ.get('PLAYWRIGHT_BROWSERS_PATH')
     home = os.path.expanduser('~')
-    roots = [os.path.join(home, '.cache', 'ms-playwright'),
-             os.path.join(home, 'Library', 'Caches', 'ms-playwright'),
-             os.path.join(home, 'AppData', 'Local', 'ms-playwright')]
-    return [r for r in roots if os.path.isdir(r)]
+    if override == '0':
+        import importlib.util
+        spec = importlib.util.find_spec('playwright')
+        if spec is None or not spec.origin:
+            return []
+        registry = os.path.join(os.path.dirname(spec.origin), 'driver',
+                                'package', '.local-browsers')
+    elif override:
+        registry = override
+    elif sys.platform.startswith('linux'):
+        registry = os.path.join(
+            os.environ.get('XDG_CACHE_HOME') or os.path.join(home, '.cache'),
+            'ms-playwright')
+    elif sys.platform == 'darwin':
+        registry = os.path.join(home, 'Library', 'Caches', 'ms-playwright')
+    elif sys.platform == 'win32':
+        registry = os.path.join(
+            os.environ.get('LOCALAPPDATA')
+            or os.path.join(home, 'AppData', 'Local'),
+            'ms-playwright')
+    else:
+        return []
+    registry = os.path.abspath(registry)
+    return [registry] if os.path.isdir(registry) else []
 
 
 def _build_revision(name):
@@ -365,7 +414,8 @@ def chromium_binaries(include_system=True):
         try:
             entries = os.listdir(root)
         except OSError as e:
-            _log().debug('[ChromiumEnv] cannot list %s: %s', root, e)
+            logging.getLogger(__name__).debug(
+                '[ChromiumEnv] cannot list %s: %s', root, e)
             continue
         # Rank by (capability tier, revision) so a full build beats the shell at
         # the SAME revision, and a newer build beats an older one regardless of
@@ -483,7 +533,13 @@ def describe_chromium_env(env_prefix=None):
             'no /etc/fonts and no fontconfig config in the env prefix — '
             'Chromium will render every glyph as nothing (blank-but-styled '
             'screenshots). Install: conda install -c conda-forge fontconfig '
-            'font-ttf-dejavu-sans-mono')
+            'font-ttf-dejavu-sans-mono font-ttf-noto-cjk')
+    elif not conf_file and not _fontconfig_supports_chinese('/etc/fonts/fonts.conf'):
+        issues.append(
+            'the system fontconfig has no Chinese font coverage — rendered '
+            'screenshots will show missing-glyph boxes. Install: conda install '
+            '-c conda-forge fontconfig font-ttf-noto-cjk, or with root: '
+            'apt-get install fonts-noto-cjk')
     return {'lib_dirs': lib_dirs, 'fontconfig': conf_file,
             'system_fontconfig': system_fc, 'executable': executable,
             'headed_executable': headed, 'binaries': binaries,

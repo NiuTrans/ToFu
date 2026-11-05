@@ -28,6 +28,9 @@ def test_saved_final_answer_after_poll_survives_replay(frontend_visual_page, wid
     assert answer.is_visible()
     assert 'Saved final answer after Poll.' in answer.inner_text()
     assert answer.count() == 1
+    # A settled reply keeps its calls in a closed tool panel above the prose.
+    assert page.locator('[data-block-id="poll"]').count() == 0
+    page.locator('.conversation-tool-panel__toggle').click()
     assert page.locator('[data-block-id="poll"]').is_visible()
     page.evaluate('state = JSON.parse(JSON.stringify(state)); render()')
     assert answer.count() == 1

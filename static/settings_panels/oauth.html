@@ -2,43 +2,6 @@
           <div class="settings-section-title" data-i18n="settings.oauthTitle">订阅登录</div>
           <p class="settings-desc" data-i18n="settings.oauthPageDesc">连接已有的 Claude 或 ChatGPT 订阅，无需填写 API Key。</p>
 
-          <div class="oauth-responsibility" role="note">
-            <div class="oauth-responsibility-item is-user">
-              <span class="oauth-responsibility-label" data-i18n="settings.oauthYourPart">你需要做的</span>
-              <strong data-i18n="settings.oauthUserRole">只需在官方页面完成登录和授权</strong>
-            </div>
-            <div class="oauth-responsibility-item is-system">
-              <span class="oauth-responsibility-label" data-i18n="settings.oauthTofuPart">Tofu 负责</span>
-              <strong data-i18n="settings.oauthSystemRole">自动完成连接、模型接入、刷新与故障恢复</strong>
-            </div>
-          </div>
-
-          <div class="oauth-steps">
-            <div class="oauth-step">
-              <span class="oauth-step-num">1</span>
-              <div class="oauth-step-text">
-                <div class="oauth-step-title" data-i18n="settings.oauthStep1">点击连接</div>
-                <div class="oauth-step-sub" data-i18n="settings.oauthStep1Sub">Tofu 打开官方授权页</div>
-              </div>
-            </div>
-            <span class="oauth-step-arrow">→</span>
-            <div class="oauth-step">
-              <span class="oauth-step-num">2</span>
-              <div class="oauth-step-text">
-                <div class="oauth-step-title" data-i18n="settings.oauthStep2">完成授权</div>
-                <div class="oauth-step-sub" data-i18n="settings.oauthStep2Sub">在官方页面确认账号</div>
-              </div>
-            </div>
-            <span class="oauth-step-arrow">→</span>
-            <div class="oauth-step">
-              <span class="oauth-step-num">3</span>
-              <div class="oauth-step-text">
-                <div class="oauth-step-title" data-i18n="settings.oauthStep3">自动完成</div>
-                <div class="oauth-step-sub" data-i18n="settings.oauthStep3Sub">其余步骤由 Tofu 处理</div>
-              </div>
-            </div>
-          </div>
-
           <div class="oauth-provider-card" id="oauthClaudeCard">
             <div class="oauth-provider-header">
               <img src="static/icons/claude.svg" width="20" height="20" style="vertical-align:-3px" alt="Claude">
@@ -128,7 +91,7 @@
                 <button class="btn-small btn-danger" id="oauthCatpawDisconnectBtn" data-tofu-action="_catpawDisconnect()" style="display:none" data-i18n="settings.oauthDisconnect">断开连接</button>
               </div>
             </div>
-            <p class="oauth-provider-desc" data-i18n="settings.oauthCatpawDesc">CatPaw 是 relay 网关，使用个人 Credit Hub 每日额度。无需填 Key — 自动读取本机 CatPaw CLI 凭证。</p>
-            <p class="oauth-manual-hint" id="oauthCatpawHint" style="display:none" data-i18n="settings.oauthCatpawHint">未检测到本机 CatPaw CLI 凭证。请先按学城 CatPaw 文档安装并登录 CLI（mc --code），再回到此页一键接入。</p>
+            <p class="oauth-provider-desc" data-i18n="settings.oauthCatpawDesc">使用个人 Credit Hub 每日额度，自动读取本机 CatPaw CLI 凭证。</p>
+            <p class="oauth-manual-hint" id="oauthCatpawHint" style="display:none" data-i18n="settings.oauthCatpawHint">请先安装并登录 CatPaw CLI（mc --code）。</p>
           </div>
         </div>

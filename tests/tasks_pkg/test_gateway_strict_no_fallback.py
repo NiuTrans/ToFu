@@ -26,6 +26,12 @@ Run:  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/tasks_pkg/test_gateway_stric
 """
 from __future__ import annotations
 
+import lib.tasks_pkg.llm_fallback._pool as _fallback_pool
+import lib.tasks_pkg.llm_fallback._retry as _fallback_retry
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+import lib.tasks_pkg.llm_fallback._usage as _fallback_usage
+import lib.tasks_pkg.manager._events as _fallback_events
+
 import json
 import os
 import pathlib
@@ -145,10 +151,10 @@ class TestOnRetryGatewayLegacyDetail(unittest.TestCase):
         self.assertIn('kimi-k3', ev['detail'])
         self.assertIn('不会自动切换', ev['detail'])
 
-    def test_display_label_strips_gateway_prefix(self):
+    def test_display_label_keeps_full_model_id(self):
         ev = self._drive_retry('Upstream error', 503,
                                model='aws.claude-opus-4.8')
-        self.assertEqual(ev['detailArgs']['model'], 'claude-opus-4.8')
+        self.assertEqual(ev['detailArgs']['model'], 'aws.claude-opus-4.8')
 
     def test_non_gateway_reason_untouched(self):
         """The generic reason branch keeps its pre-existing shape — only the
@@ -190,15 +196,15 @@ class TestGatewayNeverSwitchesModel(unittest.TestCase):
             calls['rescues'] += 1
             return None
 
-        _orig = (fb_pkg.stream_llm_response, fb_pkg._get_fallback_model,
-                 fb_pkg._flag_empty_stop_for_retry, fb_pkg._emit_round_usage,
-                 fb_pkg.append_event, call_mod._attempt_pool_rescue)
-        fb_pkg.stream_llm_response = _fake_stream
-        fb_pkg._get_fallback_model = lambda task: 'claude-opus-5'
-        fb_pkg._flag_empty_stop_for_retry = lambda *a, **kw: False
-        fb_pkg._emit_round_usage = lambda *a, **kw: None
-        fb_pkg.append_event = lambda task, ev: events.append(ev)
-        call_mod._attempt_pool_rescue = _no_rescue
+        _orig = (_fallback_transport.stream_llm_response, _fallback_retry._get_fallback_model,
+                 _fallback_retry._flag_empty_stop_for_retry, _fallback_usage._emit_round_usage,
+                 _fallback_events.append_event, _fallback_pool._attempt_pool_rescue)
+        _fallback_transport.stream_llm_response = _fake_stream
+        _fallback_retry._get_fallback_model = lambda task: 'claude-opus-5'
+        _fallback_retry._flag_empty_stop_for_retry = lambda *a, **kw: False
+        _fallback_usage._emit_round_usage = lambda *a, **kw: None
+        _fallback_events.append_event = lambda task, ev: events.append(ev)
+        _fallback_pool._attempt_pool_rescue = _no_rescue
         try:
             task = _make_task()
             res = _llm_call_with_fallback(
@@ -206,9 +212,9 @@ class TestGatewayNeverSwitchesModel(unittest.TestCase):
                 True, None, [{'role': 'user', 'content': 'hi'}],
                 'low', False, {}, [])
         finally:
-            (fb_pkg.stream_llm_response, fb_pkg._get_fallback_model,
-             fb_pkg._flag_empty_stop_for_retry, fb_pkg._emit_round_usage,
-             fb_pkg.append_event, call_mod._attempt_pool_rescue) = _orig
+            (_fallback_transport.stream_llm_response, _fallback_retry._get_fallback_model,
+             _fallback_retry._flag_empty_stop_for_retry, _fallback_usage._emit_round_usage,
+             _fallback_events.append_event, _fallback_pool._attempt_pool_rescue) = _orig
 
         self.assertEqual(calls['streams'], 1,
                          'a second (fallback) stream call happened')
@@ -230,15 +236,15 @@ class TestGatewayNeverSwitchesModel(unittest.TestCase):
 
         events = []
         exc = _gateway_exc(503)
-        _orig = (fb_pkg.stream_llm_response, fb_pkg._get_fallback_model,
-                 fb_pkg._flag_empty_stop_for_retry, fb_pkg._emit_round_usage,
-                 fb_pkg.append_event)
-        fb_pkg.stream_llm_response = (
+        _orig = (_fallback_transport.stream_llm_response, _fallback_retry._get_fallback_model,
+                 _fallback_retry._flag_empty_stop_for_retry, _fallback_usage._emit_round_usage,
+                 _fallback_events.append_event)
+        _fallback_transport.stream_llm_response = (
             lambda *a, **kw: (_ for _ in ()).throw(exc))
-        fb_pkg._get_fallback_model = lambda task: 'claude-opus-5'
-        fb_pkg._flag_empty_stop_for_retry = lambda *a, **kw: False
-        fb_pkg._emit_round_usage = lambda *a, **kw: None
-        fb_pkg.append_event = lambda task, ev: events.append(ev)
+        _fallback_retry._get_fallback_model = lambda task: 'claude-opus-5'
+        _fallback_retry._flag_empty_stop_for_retry = lambda *a, **kw: False
+        _fallback_usage._emit_round_usage = lambda *a, **kw: None
+        _fallback_events.append_event = lambda task, ev: events.append(ev)
         try:
             task = _make_task()
             with self.assertRaises(RateLimitError) as ei:
@@ -247,9 +253,9 @@ class TestGatewayNeverSwitchesModel(unittest.TestCase):
                     False, None, [{'role': 'user', 'content': 'hi'}],
                     'low', False, {}, [])
         finally:
-            (fb_pkg.stream_llm_response, fb_pkg._get_fallback_model,
-             fb_pkg._flag_empty_stop_for_retry, fb_pkg._emit_round_usage,
-             fb_pkg.append_event) = _orig
+            (_fallback_transport.stream_llm_response, _fallback_retry._get_fallback_model,
+             _fallback_retry._flag_empty_stop_for_retry, _fallback_usage._emit_round_usage,
+             _fallback_events.append_event) = _orig
         self.assertIs(ei.exception, exc, 'must re-raise the ORIGINAL error')
         env = getattr(exc, '_user_message', None)
         self.assertIsNotNone(env, 'typed envelope must ride the exception')
@@ -278,15 +284,15 @@ class TestGatewayNeverSwitchesModel(unittest.TestCase):
             calls['rescues'] += 1
             return None
 
-        _orig = (fb_pkg.stream_llm_response, fb_pkg._get_fallback_model,
-                 fb_pkg._flag_empty_stop_for_retry, fb_pkg._emit_round_usage,
-                 fb_pkg.append_event, call_mod._attempt_pool_rescue)
-        fb_pkg.stream_llm_response = _fake_stream
-        fb_pkg._get_fallback_model = lambda task: 'claude-opus-5'
-        fb_pkg._flag_empty_stop_for_retry = lambda *a, **kw: False
-        fb_pkg._emit_round_usage = lambda *a, **kw: None
-        fb_pkg.append_event = lambda task, ev: events.append(ev)
-        call_mod._attempt_pool_rescue = _no_rescue
+        _orig = (_fallback_transport.stream_llm_response, _fallback_retry._get_fallback_model,
+                 _fallback_retry._flag_empty_stop_for_retry, _fallback_usage._emit_round_usage,
+                 _fallback_events.append_event, _fallback_pool._attempt_pool_rescue)
+        _fallback_transport.stream_llm_response = _fake_stream
+        _fallback_retry._get_fallback_model = lambda task: 'claude-opus-5'
+        _fallback_retry._flag_empty_stop_for_retry = lambda *a, **kw: False
+        _fallback_usage._emit_round_usage = lambda *a, **kw: None
+        _fallback_events.append_event = lambda task, ev: events.append(ev)
+        _fallback_pool._attempt_pool_rescue = _no_rescue
         try:
             task = _make_task()
             res = _llm_call_with_fallback(
@@ -294,9 +300,9 @@ class TestGatewayNeverSwitchesModel(unittest.TestCase):
                 True, None, [{'role': 'user', 'content': 'hi'}],
                 'low', False, {}, [])
         finally:
-            (fb_pkg.stream_llm_response, fb_pkg._get_fallback_model,
-             fb_pkg._flag_empty_stop_for_retry, fb_pkg._emit_round_usage,
-             fb_pkg.append_event, call_mod._attempt_pool_rescue) = _orig
+            (_fallback_transport.stream_llm_response, _fallback_retry._get_fallback_model,
+             _fallback_retry._flag_empty_stop_for_retry, _fallback_usage._emit_round_usage,
+             _fallback_events.append_event, _fallback_pool._attempt_pool_rescue) = _orig
         self.assertEqual(calls['rescues'], 0, 'pool rescue was attempted')
         self.assertEqual(res['_loop_action'], 'break')
         self.assertEqual(task['error']['kind'], 'upstream_error')
@@ -316,21 +322,21 @@ class TestGatewayNeverSwitchesModel(unittest.TestCase):
         exc = PermissionError_('401 invalid app id')
         calls = {'rescues': 0}
 
-        _orig = (fb_pkg.stream_llm_response, fb_pkg._get_fallback_model,
-                 fb_pkg._flag_empty_stop_for_retry, fb_pkg._emit_round_usage,
-                 fb_pkg.append_event, call_mod._attempt_pool_rescue)
-        fb_pkg.stream_llm_response = (
+        _orig = (_fallback_transport.stream_llm_response, _fallback_retry._get_fallback_model,
+                 _fallback_retry._flag_empty_stop_for_retry, _fallback_usage._emit_round_usage,
+                 _fallback_events.append_event, _fallback_pool._attempt_pool_rescue)
+        _fallback_transport.stream_llm_response = (
             lambda *a, **kw: (_ for _ in ()).throw(exc))
-        fb_pkg._get_fallback_model = lambda task: None
-        fb_pkg._flag_empty_stop_for_retry = lambda *a, **kw: False
-        fb_pkg._emit_round_usage = lambda *a, **kw: None
-        fb_pkg.append_event = lambda task, ev: events.append(ev)
+        _fallback_retry._get_fallback_model = lambda task: None
+        _fallback_retry._flag_empty_stop_for_retry = lambda *a, **kw: False
+        _fallback_usage._emit_round_usage = lambda *a, **kw: None
+        _fallback_events.append_event = lambda task, ev: events.append(ev)
 
         def _rescue(*a, **kw):
             calls['rescues'] += 1
             return None
 
-        call_mod._attempt_pool_rescue = _rescue
+        _fallback_pool._attempt_pool_rescue = _rescue
         try:
             task = _make_task()
             with self.assertRaises(PermissionError_):
@@ -339,9 +345,9 @@ class TestGatewayNeverSwitchesModel(unittest.TestCase):
                     False, None, [{'role': 'user', 'content': 'hi'}],
                     'low', False, {}, [])
         finally:
-            (fb_pkg.stream_llm_response, fb_pkg._get_fallback_model,
-             fb_pkg._flag_empty_stop_for_retry, fb_pkg._emit_round_usage,
-             fb_pkg.append_event, call_mod._attempt_pool_rescue) = _orig
+            (_fallback_transport.stream_llm_response, _fallback_retry._get_fallback_model,
+             _fallback_retry._flag_empty_stop_for_retry, _fallback_usage._emit_round_usage,
+             _fallback_events.append_event, _fallback_pool._attempt_pool_rescue) = _orig
         self.assertEqual(calls['rescues'], 1,
                          'non-gateway errors must keep the 2026-08-03 rescue')
 

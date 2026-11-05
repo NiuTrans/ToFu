@@ -537,6 +537,26 @@ def test_api_error_with_bad_request_emits_string():
     _ok('api_error(BadRequest) emits string (not envelope)')
 
 
+# ─── decode_proxy_json_value (VS Code proxy re-encoded JSON args) ─────
+
+@pytest.mark.parametrize('proxy_layers', [0, 1, 2])
+def test_decode_proxy_json_value_undoes_every_proxy_layer(proxy_layers):
+    from urllib.parse import quote
+    from lib.request_parser import decode_proxy_json_value
+    # The value as the route reads it, after Quart's single decode.
+    text = '[{"conversationId":"c1","after":"c1.ed92.21b","note":"100% done"}]'
+    value = text
+    for _ in range(proxy_layers):
+        value = quote(value, safe='')
+    assert decode_proxy_json_value(value) == text
+
+
+@pytest.mark.parametrize('value', ['%zz', '%', 'not json', ''])
+def test_decode_proxy_json_value_leaves_other_values_to_the_parser(value):
+    from lib.request_parser import decode_proxy_json_value
+    assert decode_proxy_json_value(value) == value
+
+
 # ─── decode_proxy_path_arg (VS Code proxy double-encode fix) ─────
 
 def _decode_arg_via_query(qs, name='path'):

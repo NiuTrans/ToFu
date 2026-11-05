@@ -36,6 +36,8 @@ store lives in temp files (module-level paths monkeypatched).
 
 from __future__ import annotations
 
+import lib.server.server_reexec as reexec
+
 pytest_plugins = ('tests._credential_sidecar',)
 
 import asyncio
@@ -73,7 +75,7 @@ def test_restart_preparation_failure_is_visible(monkeypatch, caplog):
     monkeypatch.setattr(
         'serverctl_pkg.application_restart.run_application_restart_control', fail_prepare)
     with caplog.at_level(logging.WARNING, logger='routes.api_v1.update'):
-        failure = update_route._prepare_server_reexec_frontend()
+        failure = reexec.prepare_server_reexec_frontend()
     assert failure == 'synthetic frontend preparation failure'
     assert failure in caplog.text
 
@@ -127,7 +129,7 @@ class UpdateRestartGuardTest(unittest.TestCase):
             if os.path.exists(path):
                 os.unlink(path)
         self._restart_preflight = patch(
-            'routes.api_v1.update._prepare_server_reexec_frontend',
+            'lib.server.server_reexec.prepare_server_reexec_frontend',
             return_value='',
         )
         self._restart_preflight.start()
@@ -351,7 +353,7 @@ class UpdateRestartGuardTest(unittest.TestCase):
         with patch('lib.tasks_pkg.manager.list_running_tasks', return_value=[]), \
              patch('routes.api_v1.update._deferred_reexec') as reexec, \
              patch(
-                 'routes.api_v1.update._prepare_server_reexec_frontend',
+                 'lib.server.server_reexec.prepare_server_reexec_frontend',
                  return_value='stale locale artifact'):
             r = self._post({'approvalId': token})
 
@@ -385,7 +387,7 @@ class UpdateRestartGuardTest(unittest.TestCase):
         with patch('lib.tasks_pkg.manager.list_running_tasks', return_value=[]), \
              patch('routes.api_v1.update._deferred_reexec') as reexec, \
              patch('routes.api_v1.update.time', SimpleNamespace(monotonic=lambda: clock[0], time=time.time)), \
-             patch('routes.api_v1.update._prepare_server_reexec_frontend', side_effect=preflight):
+             patch('lib.server.server_reexec.prepare_server_reexec_frontend', side_effect=preflight):
             result = self._post({'approvalId': token}, path='/api/v4/update/restart')
         self.assertEqual(result.status_code, 409)
         self.assertEqual([record['preparation']['phase'] for record in snapshots], list(phases))
@@ -403,7 +405,7 @@ class UpdateRestartGuardTest(unittest.TestCase):
         with patch('lib.tasks_pkg.manager.list_running_tasks', return_value=[]), \
              patch('routes.api_v1.update._deferred_reexec') as reexec, \
              patch(
-                 'routes.api_v1.update._prepare_server_reexec_frontend',
+                 'lib.server.server_reexec.prepare_server_reexec_frontend',
                  return_value='stale locale artifact'):
             r = self._post({'approvalId': token}, path='/api/v4/update/restart')
 

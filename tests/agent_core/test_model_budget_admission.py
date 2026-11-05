@@ -547,6 +547,7 @@ def test_websocket_pre_send_failure_reuses_one_lease_for_real_sse(provider, monk
     url, bodies, _ = provider;owner = task(50)
     def unavailable(*args):raise ws.ResponsesWebSocketUnavailable('Socket unavailable before create')
     monkeypatch.setattr(ws, '_open_session', unavailable);ws._sessions().clear()
+    ws.release_task_websockets('budget-websocket')
     body = request(owner)
     body.update({'model': 'gpt-5.6-sol', '_task_id': 'budget-websocket', '_responses_feature_profile': 'openai',
                  '_responses_transport': 'websocket'})
@@ -564,9 +565,11 @@ def test_websocket_failed_send_is_ambiguous_and_not_replayed_on_sse(provider, mo
     class Connection:
         def send(self, payload):sent.append(payload);raise OSError('Socket dropped during send')
         def close(self):pass
-    def open_session(plan, key):
+    def open_session(plan, key, *_handshake):
         session = ws._Session(connection=Connection());ws._sessions()[key] = session;return session
     monkeypatch.setattr(ws, '_open_session', open_session);ws._sessions().clear()
+    # A task id is unique per task in production; this file reuses one.
+    ws.release_task_websockets('budget-websocket')
     body = request(owner)
     body.update({'model': 'gpt-5.6-sol', '_task_id': 'budget-websocket', '_responses_feature_profile': 'openai',
                  '_responses_transport': 'websocket'})

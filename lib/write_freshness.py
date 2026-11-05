@@ -20,13 +20,10 @@ optimistic-concurrency token:
     touched the file → the write is refused with a re-read instruction
     instead of silently clobbering the sibling's change.
 
-Owned command mutations may advance an EXISTING matched content token with
-``capture_owned_write`` / ``reconcile_owned_write``. The command admission
-owner retains exact target exclusion through supervised process quiescence;
-entry-identity CAS prevents overwriting an interleaved observation. An already
-stale, missing or metadata-only preimage never gains ownership. Pure append
-uses its live preimage inside the file transaction rather than stale replacement
-knowledge; replacement and anchor edits retain their checks.
+A shell command never advances a token: after any command writes a file,
+the next edit must re-read it. Pure append uses its live preimage inside the
+file edit mutex rather than stale replacement knowledge; replacement and
+anchor edits retain their checks.
 
 Deliberate failure directions:
 
@@ -76,7 +73,7 @@ Restart persistence (): the store is in-memory, so
 any restart used to wipe every token and leave the gate fail-open until
 each conversation's next read — the auto-restart watcher made that window
 recur on every HEAD move. ``save_snapshot()`` (called before the re-exec
-in ``routes/api_v1/update.py::_perform_server_reexec`` and via an atexit
+in ``lib/server/server_reexec.py::perform_server_reexec`` and via an atexit
 hook for the signal path — atexit does NOT run on execv, hence both) and
 ``load_snapshot()`` (called once from server.py boot) carry the small LRU
 across a restart via ``data/write_freshness_tokens.json``.
@@ -105,21 +102,15 @@ import threading
 import time
 
 
-# One process-local fence, not a token/cache owner registry. Owned formatter
-# completion conservatively invalidates project-read receipts across tasks.
-# Old objects survive only while bounded receipts/in-flight reads reference them.
+# One process-local fence, not a token/cache owner registry. Nothing advances
+# it: no command reconciles read tokens, and the per-task cache invalidation on
+# writes fences project-read receipts.
 _project_read_cache_generation = object()
 
 
 def project_read_cache_generation() -> object:
     """Snapshot BEFORE a project read starts; never bind at late insertion."""
     return _project_read_cache_generation
-
-
-def advance_project_read_cache_generation() -> None:
-    """Fence receipts at proven owned formatter supervised completion."""
-    global _project_read_cache_generation
-    _project_read_cache_generation = object()
 
 from collections import OrderedDict
 
@@ -277,65 +268,6 @@ def record_written(conv_key: str, abs_path: str, data: bytes) -> None:
     _store_fingerprint(conv_key, abs_path, fp)
 
 
-@dataclass(frozen=True)
-class OwnedWriteEvidence:
-    """An existing observation matched under the caller's writer exclusion.
-
-    This is not authorization or a lease. Only the command admission owner may
-    capture it for a proven literal output, and must retain exclusion through
-    supervised process quiescence and reconciliation. No file bytes are retained.
-    """
-
-    conv_key: str
-    abs_path: str
-    token_entry: tuple
-
-
-def capture_owned_write(conv_key: str, abs_path: str) -> OwnedWriteEvidence | None:
-    """Pin a content-proven existing observation before an owned mutation.
-
-    Never bless an already-stale preimage, create a missing token, or rely on
-    the large-file metadata fallback as proof of byte ownership. Call after
-    writer admission, before execution. Interleaved observations invalidate CAS.
-    """
-    if not conv_key or not abs_path or not _gate_enabled():
-        return None
-    key = (conv_key, abs_path)
-    with _lock:
-        entry = _tokens.get(key)
-    if entry is None or entry[0][0] not in ('c', 's'):
-        return None
-    if _current_fingerprint(abs_path, entry[0]) != entry[0]:
-        return None
-    with _lock:
-        if _tokens.get(key) is not entry:
-            return None
-    return OwnedWriteEvidence(conv_key, abs_path, entry)
-
-
-def reconcile_owned_write(evidence: OwnedWriteEvidence | None) -> bool:
-    """Advance only the captured observation to the owned, settled postimage.
-
-    Call while the same writer exclusion remains held. Failure/partial writes
-    can settle here too, but launch/admission failure and unretired descendants
-    provide no authority to reconcile. A newer read/write, eviction or reset
-    wins: compare entry identity, not just its fingerprint (ABA-safe). Never
-    create a token for an unobserved file or advance another conversation.
-    """
-    if evidence is None or not _gate_enabled():
-        return False
-    current = _current_fingerprint(evidence.abs_path, evidence.token_entry[0])
-    if current is None or current[0] not in ('c', 's') or current == evidence.token_entry[0]:
-        return False
-    key = (evidence.conv_key, evidence.abs_path)
-    with _lock:
-        if _tokens.get(key) is not evidence.token_entry:
-            return False
-        _tokens.pop(key)
-        _tokens[key] = (current, time.time())
-    return True
-
-
 def is_stale(conv_key: str, abs_path: str) -> bool:
     """True iff a token exists AND the file exists AND its fingerprint moved.
 
@@ -482,7 +414,6 @@ def _reset_for_tests() -> None:
 __all__ = ['record', 'record_written', 'is_stale', 'has_token', 'drop',
            'ReadObservation', 'observation_from_snapshot', 'record_observation',
            'fingerprint_for_written_bytes',
-           'OwnedWriteEvidence', 'capture_owned_write', 'reconcile_owned_write',
            '_reset_for_tests', '_fingerprint', '_fingerprint_bytes',
            '_CONTENT_HASH_MAX_BYTES', 'save_snapshot', 'load_snapshot',
            '_snapshot_path']

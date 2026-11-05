@@ -3,9 +3,7 @@
 from collections.abc import Callable, Sequence
 import tempfile
 import json
-import os
 from pathlib import Path
-import subprocess
 import sys
 import threading
 
@@ -18,13 +16,15 @@ except ImportError:
         pymupdf = None  # type: ignore[assignment]
         # Warning already logged by _common.py — debug-only here to avoid noise
 
-from lib.log import get_logger
 from lib.pdf_parser._common import PYMUPDF_LOCK
 from lib.pdf_parser.images._render_worker import (
     COMPLETION_MAX_BYTES, FRAME_HEADER_BYTES, PdfPageLimitExceeded, render_document,
 )
+from lib.runtime.owned_helper_process import run_owned_helper
+from lib.runtime.pinned_helper_source import PinnedHelperSource
 
-logger = get_logger(__name__)
+# The frame constants above and the child that writes frames share one import.
+_RENDER_WORKER = PinnedHelperSource(Path(__file__).with_name('_render_worker.py'))
 
 
 class RenderedPageSpool(Sequence[bytes]):
@@ -99,29 +99,19 @@ def render_pdf_pages(
 
 
 def _render_command(dpi, max_pages):
-    return [sys.executable, str(Path(__file__).with_name('_render_worker.py')),
+    return [sys.executable, _RENDER_WORKER.path(),
             str(int(dpi)), '-' if max_pages is None else str(int(max_pages))]
 
 
-def _join_renderer(process):
-    if process.poll() is None:
-        try:
-            process.terminate()
-        except ProcessLookupError:
-            pass  # The exact owned child exited between poll and terminate.
-        except OSError as error:
-            # A failed signal grants no permission to close borrowed files.
-            logger.warning('PDF renderer terminate failed; retaining child ownership: %s', error)
-        try:
-            process.wait(timeout=0.25)
-        except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass  # The exact owned child exited between wait and kill.
-            except OSError as error:
-                logger.warning('PDF renderer kill failed; waiting for owned child: %s', error)
-    process.wait()
+def _render_cancellation(abort_check):
+    if abort_check is None:
+        return None
+
+    def cancelled():
+        if abort_check():
+            from lib.llm.llm_errors import AbortedError
+            raise AbortedError('VLM PDF rendering aborted')
+    return cancelled
 
 
 def _adopt_render_frames(pages, returncode):
@@ -167,33 +157,13 @@ def render_pdf_pages_isolated(pdf_bytes: bytes, *, dpi=150, max_pages=None,
     any descriptor closes; no ambiguous failed launch retries in the parent.
     """
     pages = RenderedPageSpool()
-    process = None
     try:
         with tempfile.TemporaryFile(mode='w+b') as source:
             source.write(pdf_bytes)
             source.seek(0)
-            if abort_check is not None and abort_check():
-                from lib.llm.llm_errors import AbortedError
-                raise AbortedError('VLM PDF rendering aborted')
-            # Native PDF parsing needs loader/temp/locale paths, never account
-            # credentials or application lifecycle authority.
-            names = ('PATH', 'SystemRoot', 'WINDIR', 'LD_LIBRARY_PATH', 'LD_PRELOAD',
-                     'DYLD_LIBRARY_PATH', 'PYTHONPATH', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL')
-            environment = {name: os.environ[name] for name in names if name in os.environ}
-            process = subprocess.Popen(_render_command(dpi, max_pages), stdin=source,
-                stdout=pages._file, stderr=subprocess.DEVNULL, env=environment, close_fds=True)
-            try:
-                while True:
-                    if abort_check is not None and abort_check():
-                        from lib.llm.llm_errors import AbortedError
-                        raise AbortedError('VLM PDF rendering aborted')
-                    try:
-                        returncode = process.wait(timeout=0.05)
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
-            finally:
-                _join_renderer(process)
+            returncode = run_owned_helper(
+                _render_command(dpi, max_pages), stdin=source, stdout=pages._file,
+                cancelled=_render_cancellation(abort_check))
         _adopt_render_frames(pages, returncode)
         if spool:
             return pages

@@ -12,7 +12,8 @@ import {
   MODEL_BRAND_COLORS,
   MODEL_BRAND_ICONS,
 } from '../../core/model-brand-icons';
-import { blendedModelCost } from './model';
+import { t } from '../../i18n';
+import { blendedModelCost, countAaScoredModels } from './model';
 import type { ModelCatalogRow, VendorGroup } from './types';
 
 export interface ParetoPoint {
@@ -33,6 +34,15 @@ export interface ParetoExclusion {
 
 export interface ParetoOptions {
   toUsd?: (value: number, currency: string) => number;
+  /** AA Intelligence Index version every plotted score belongs to. */
+  indexVersion?: number | null;
+}
+
+/** `` v5`` suffix naming the AA index version; empty while it is unknown. */
+export function aaIndexVersionSuffix(version: number | null | undefined): string {
+  return typeof version === 'number' && Number.isFinite(version) && version > 0
+    ? ` v${version}`
+    : '';
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -758,7 +768,7 @@ export function openParetoDialog(
 
   const head = document.createElement('header');
   head.className = 'stg-mc-pareto-head';
-  head.innerHTML = '<div><strong>成本 × AA Index</strong>'
+  head.innerHTML = `<div><strong>成本 × AA Index${aaIndexVersionSuffix(options.indexVersion)}</strong>`
     + `<span>${points.length} 个同时具备质量分和价格的模型</span></div>`;
   const closeButton = document.createElement('button');
   closeButton.type = 'button';
@@ -781,6 +791,13 @@ export function openParetoDialog(
       .join('、');
     note.textContent += ` 另有 ${exclusions.length} 个模型有质量分但缺官方价格，未入图：${names}`
       + `${exclusions.length > 5 ? ' 等' : ''}，补登记 list_pricing 或官方定价表收录后自动出现。`;
+  }
+  const catalogModels = groups.reduce((total, group) => total + group.models.length, 0);
+  const unscored = catalogModels - countAaScoredModels(groups);
+  if (unscored > 0) {
+    note.textContent += ` ${t('modelCatalog.aa.chartUnscored', {
+      n: unscored, s: unscored === 1 ? '' : 's',
+    })}`;
   }
   body.appendChild(note);
   dialog.append(head, body);

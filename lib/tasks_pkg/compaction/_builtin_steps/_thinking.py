@@ -60,7 +60,8 @@ def strip_thinking(ctx: CompactionContext) -> int:
                 thinking_stripped += 1
 
     if thinking_stripped > 0:
-        logger.info('[L1-think] conv=%s  stripped reasoning_content from %d '
-                    'cold assistant messages (~%d tokens saved)',
-                    _log_id(ctx.conv_id), thinking_stripped, tokens_saved)
+        log = logger.debug if ctx.dry_run else logger.info
+        log('[L1-think] conv=%s  stripped reasoning_content from %d '
+            'cold assistant messages (~%d tokens saved)',
+            _log_id(ctx.conv_id), thinking_stripped, tokens_saved)
     return tokens_saved

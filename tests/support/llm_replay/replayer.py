@@ -5,7 +5,9 @@
 loop, dispatch layer, tool pipeline, and persistence all run.  Calls are
 matched in strict recording order: each incoming request's normalized digest
 must equal the recorded step's digest, otherwise the scenario has drifted
-from the recording and the session raises :class:`ScenarioDriftError`.
+from the recording and the session raises :class:`ScenarioDriftError`.  With
+a ``request_store`` the error explains the drift: the JSON path and the
+recorded vs current values of the first difference (``diff.py``).
 
 Abort semantics mirror ``lib/llm/stream.py``: the real stream polls
 ``abort_check`` as chunks arrive and, on a mid-stream owner cancel, stops
@@ -23,10 +25,19 @@ from typing import Any, Callable
 from lib.llm.llm_errors import LocalRequestPreparationError
 from lib.llm.stream_result import ProviderStreamResult, ProviderStreamState
 
+from tests.support.llm_replay.diff import (
+    describe_difference,
+    request_differences,
+)
 from tests.support.llm_replay.normalize import (
     chat_request_proxy,
-    normalized_field_digests,
-    normalized_request_digest,
+    json_digest,
+    normalized_projection,
+    projection_field_digests,
+)
+from tests.support.llm_replay.request_store import (
+    RequestStoreError,
+    load_recorded_field,
 )
 from tests.support.llm_replay.script import (
     ChatStep,
@@ -37,6 +48,9 @@ from tests.support.llm_replay.script import (
 )
 
 __all__ = ['ReplaySession', 'ScenarioDriftError']
+
+_FOLLOWING_PATHS_REPORTED = 5
+
 
 class ScenarioDriftError(LocalRequestPreparationError, AssertionError):
     """Local replay validation failed before any provider I/O.
@@ -65,28 +79,49 @@ class ReplaySession:
         *,
         verify: bool = True,
         after_event: Callable[[int, dict], None] | None = None,
+        request_store=None,
     ):
         self.script_path = script_path
         self.cwd = str(cwd)
         self.verify = bool(verify)
         self.after_event = after_event
+        self.request_store = request_store
         self.steps: tuple[Step, ...] = load_script(script_path)
         self._cursor = 0
         self._lock = threading.Lock()
 
     # ── sequence matching ────────────────────────────────────────────
 
-    def _drift_hint(self, step: Step, body) -> str:
-        recorded = step.field_digests
-        if not recorded:
-            return ('first differing top-level field: unknown (the fixture '
-                    'carries no per-field digests)')
-        current = normalized_field_digests(body, cwd=self.cwd)
-        for field in ('model', 'messages', 'system', 'tools'):
-            if current.get(field) != recorded.get(field):
-                return f'first differing top-level field: {field!r}'
-        return ('first differing top-level field: unknown (per-field '
-                'digests agree but the wholesale digest differs)')
+    def _drift_report(self, step: Step, current: dict) -> str:
+        recorded_digests = step.field_digests
+        if not recorded_digests:
+            return 'the fixture carries no per-field digests'
+        current_digests = projection_field_digests(current)
+        fields = [field for field in current
+                  if current_digests[field] != recorded_digests.get(field)]
+        if not fields:
+            return 'per-field digests agree but the wholesale digest differs'
+        report = f'differing fields: {", ".join(fields)}'
+        if self.request_store is None:
+            return f'{report}; no request store holds the recorded values'
+        try:
+            recorded = {
+                field: load_recorded_field(
+                    self.request_store, field, recorded_digests.get(field))
+                for field in fields}
+        except RequestStoreError as error:
+            return f'{report}; recorded values unavailable: {error}'
+        differences = request_differences(
+            recorded, {field: current[field] for field in fields})
+        report += (f'; {len(differences)} difference(s); first: '
+                   f'{describe_difference(differences[0])}')
+        following = [difference.path for difference in
+                     differences[1:1 + _FOLLOWING_PATHS_REPORTED]]
+        if following:
+            more = len(differences) - 1 - len(following)
+            report += '; then: ' + ', '.join(following) + (
+                f' and {more} more' if more else '')
+        return report
 
     def _advance(self, body) -> tuple[Step, int]:
         with self._lock:
@@ -97,13 +132,14 @@ class ReplaySession:
                     f'scenario')
             step = self.steps[index]
             if self.verify:
-                digest = normalized_request_digest(body, cwd=self.cwd)
-                if digest != step.request_digest:
+                current = normalized_projection(body, cwd=self.cwd)
+                if json_digest(current) != step.request_digest:
                     raise ScenarioDriftError(
                         f'step {index}: request digest mismatch — the '
                         f'scenario drifted from the recording '
-                        f'({self._drift_hint(step, body)}). Re-record the '
-                        f'scenario if the change is intentional.')
+                        f'({self._drift_report(step, current)}). Re-record '
+                        f'the scenario if the change is intentional '
+                        f'(tests/AGENTS.md "LLM record/replay").')
             self._cursor = index + 1
         return step, index
 

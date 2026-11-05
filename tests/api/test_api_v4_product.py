@@ -260,3 +260,13 @@ def test_multi_rule_view_projects_unique_v4_endpoints():
             assert body['data']['key'] == 'hello'
 
     asyncio.run(exercise())
+
+
+def test_projection_accepts_flask_blueprint_without_websocket_registries():
+    from flask import Blueprint
+    from lib.api_v4 import copy_blueprint_to_v4
+    source = Blueprint('flask_compat', __name__)
+    projected = copy_blueprint_to_v4(source, name='flask_compat_v4')
+    assert projected.before_websocket_funcs == {}
+    assert projected.after_websocket_funcs == {}
+    assert projected.teardown_websocket_funcs == {}

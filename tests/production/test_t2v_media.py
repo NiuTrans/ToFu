@@ -148,7 +148,7 @@ def _edit_task(tmp_path, job, **over):
     task['edit_of'] = 'motion_original'
     task['instruction'] = '海浪拍打礁石'
     task['query'] = '海浪拍打礁石'
-    task['kind'] = 't2v'
+    task['asset_kind'] = 't2v'
     task.update(over)
     return task
 

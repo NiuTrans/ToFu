@@ -631,6 +631,24 @@ def test_empty_target_resolution_never_mints_solo_or_consumes_ack(harness, monke
     assert bool(harness['approvals']) is attended
 
 
+@pytest.mark.parametrize('command', [
+    'WT=/proj/guarded/.wt/x; git worktree remove --force "$WT"',
+    'R=/proj/guarded; git -C $R worktree remove $R/.wt/x',
+    'for W in /tmp/a /tmp/b; do git worktree remove $W; done',
+])
+@pytest.mark.parametrize('attended', [True, False])
+def test_shell_resolved_worktree_retirement_keeps_the_existing_gate(
+        harness, monkeypatch, command, attended):
+    # Execution starts these (no lease to resolve); approval still cannot
+    # attribute presence, so it never mints a receipt and keeps its gate.
+    monkeypatch.setattr(guard, 'active_peers',
+                        lambda *args, **kwargs: pytest.fail('unresolved targets have no presence'))
+    stopped, _ = _invoke(command=command, attended=attended)
+    assert stopped is True
+    assert harness['receipts'] == []
+    assert bool(harness['approvals']) is attended
+
+
 @pytest.mark.parametrize('command, trigger', [
     ('git stash push -m backup && git merge --no-ff topic -m merge', 'stash'),
     ('git merge --no-ff topic -m "--abort"; git cherry-pick --abort', 'cherry-pick'),

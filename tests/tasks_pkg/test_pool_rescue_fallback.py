@@ -25,6 +25,12 @@ Run:  pytest tests/tasks_pkg/test_pool_rescue_fallback.py -m unit
 """
 from __future__ import annotations
 
+import lib.llm as _fallback_llm
+import lib.tasks_pkg.llm_fallback._retry as _fallback_retry
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+import lib.tasks_pkg.llm_fallback._usage as _fallback_usage
+import lib.tasks_pkg.manager._events as _fallback_events
+
 import os
 import sys
 import threading
@@ -46,16 +52,16 @@ def _patch_common(monkeypatch, stream_impl, fallback='kimi-k3',
                   patch_fallback=True, rescue='kimi-k3'):
     import lib.tasks_pkg.llm_fallback._call as fb_pkg
     events = []
-    monkeypatch.setattr(fb_pkg, 'stream_llm_response', stream_impl)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream_impl)
     if patch_fallback:
-        monkeypatch.setattr(fb_pkg, '_get_fallback_model', lambda task: fallback)
+        monkeypatch.setattr(_fallback_retry, '_get_fallback_model', lambda task: fallback)
     monkeypatch.setattr(
-        fb_pkg, '_get_pool_rescue_model',
+        _fallback_retry, '_get_pool_rescue_model',
         lambda failed: rescue if rescue and rescue not in set(failed or ()) else '')
-    monkeypatch.setattr(fb_pkg, '_flag_empty_stop_for_retry',
+    monkeypatch.setattr(_fallback_retry, '_flag_empty_stop_for_retry',
                         lambda *a, **kw: False)
-    monkeypatch.setattr(fb_pkg, '_emit_round_usage', lambda *a, **kw: None)
-    monkeypatch.setattr(fb_pkg, 'append_event',
+    monkeypatch.setattr(_fallback_usage, '_emit_round_usage', lambda *a, **kw: None)
+    monkeypatch.setattr(_fallback_events, 'append_event',
                         lambda task, ev: events.append(ev))
     return events
 
@@ -284,7 +290,7 @@ class TestFallbackTerminalSettlement:
             self, monkeypatch, fallback_error_factory):
         from lib.llm import PermissionError_
         from lib.tasks_pkg.llm_fallback._call import _llm_call_with_fallback
-        from lib.tasks_pkg.orchestrator._finalize import _build_done_event_base
+        from lib.tasks_pkg.orchestrator._completion_receipt import build_done_event
         from lib.tasks_pkg.turn_retry import should_auto_retry_turn
 
         fallback_error = fallback_error_factory()
@@ -316,8 +322,10 @@ class TestFallbackTerminalSettlement:
         assert task['error']['fallbackModel'] == 'glm-5.3'
         assert should_auto_retry_turn(task['error'], 0, {}) == (False, 0.0)
 
-        done = _build_done_event_base(
+        done = build_done_event(
             task,
+            cfg={},
+            api_rounds=[],
             last_finish_reason=result['finish_reason'],
             last_stream_result=None,
             accumulated_usage={},
@@ -351,9 +359,9 @@ class TestFallbackTerminalSettlement:
             return {'model': model, 'messages': list(messages)}
 
         _patch_common(monkeypatch, _stream, fallback='text-fallback')
-        monkeypatch.setattr(fallback, 'build_body', _build)
+        monkeypatch.setattr(_fallback_llm, 'build_body', _build)
         monkeypatch.setattr(
-            fallback, 'model_supports_vision',
+            _fallback_llm, 'model_supports_vision',
             lambda model: model == 'vision-primary')
         task = _base_task()
 
@@ -449,6 +457,41 @@ class TestStreamPoolWideSeam:
              'messages': [{'role': 'user', 'content': 'hi'}]},
             max_429_attempts=3)
         assert rec.get('max_429_attempts') == 3
+
+
+@pytest.mark.unit
+def test_rescue_round_is_labelled_and_priced_by_logical_model(monkeypatch):
+    """A gateway wire spelling has no price row; the rescued round must carry
+    the slot's logical model so settlement prices it from the model table."""
+    from lib.llm import PermissionError_
+    from lib.tasks_pkg.llm_fallback._call import _llm_call_with_fallback
+
+    calls = []
+
+    def _stream(task, body, tag='', on_tool_call_ready=None, **kw):
+        calls.append(tag)
+        if len(calls) < 3:
+            raise PermissionError_('API HTTP 401: denied')
+        return ({'role': 'assistant', 'content': 'rescued'}, 'stop',
+                {'prompt_tokens': 5, 'completion_tokens': 3,
+                 '_dispatch': {'model': 'kunlunbedrock.kimi-k3-m17',
+                               'logical_model': 'kimi-k3', 'key': 'k9'}})
+
+    _patch_common(monkeypatch, _stream, fallback='glm-5.3', rescue='kimi-k3')
+    _set_gate(monkeypatch, has=True)
+    task = _base_task()
+    api_rounds = []
+    res = _llm_call_with_fallback(
+        task, {'model': 'claude-opus-5',
+               'messages': [{'role': 'user', 'content': 'hi'}]},
+        'claude-opus-5', 0, 512, False, None,
+        [{'role': 'user', 'content': 'hi'}],
+        'low', False, {}, api_rounds)
+
+    assert res['model'] == 'kimi-k3'
+    assert task['_fallback_model'] == 'kimi-k3'
+    assert [row['model'] for row in api_rounds
+            if row.get('tag') == 'R1-RESCUE'] == ['kimi-k3']
 
 
 if __name__ == '__main__':

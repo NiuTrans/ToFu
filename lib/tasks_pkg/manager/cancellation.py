@@ -18,11 +18,13 @@ logger = get_logger(__name__)
 
 
 def cancel_task(task_id: str, *, user_id: int,
-                source: str = 'unknown') -> dict[str, Any]:
+                source: str = 'unknown', reason: str | None = None,
+                reason_detail: str | None = None) -> dict[str, Any]:
     """Cancel one owned task and every currently scoped runtime resource.
 
     Returns a transport-neutral receipt. Missing and owner-mismatched tasks are
-    deliberately indistinguishable to callers.
+    deliberately indistinguishable to callers. ``reason`` names a non-user
+    cause and is kept only when this cancellation is the task's first stop.
     """
     from lib.identity import require_user_id
 
@@ -47,7 +49,8 @@ def cancel_task(task_id: str, *, user_id: int,
     already_cancelled = bool(task.get('aborted')) or bool(
         task.get('abort_event') and task['abort_event'].is_set())
     signalled = chat_task_runtime.abort_owned(
-        task_id, user_id=owner_user_id, source=source, expected_task=task)
+        task_id, user_id=owner_user_id, source=source, expected_task=task,
+        reason=reason, reason_detail=reason_detail)
     if not signalled:
         # finish() may have claimed settlement after get_owned(). Never
         # rewrite its outcome or cancel resources after that decision.

@@ -110,7 +110,7 @@ _LONG_ANSWER = ('analysis paragraph\n\n' * 400) + '```py\ncode\n```' + (
 
 def test_swarm_update_carries_full_result_untruncated():
     payload = format_swarm_update(
-        agent_id='a', role='researcher', status='completed',
+        agent_id='a', swarm_run_id='run-1', role='researcher', status='completed',
         elapsed_seconds=1.0, tokens=10, result=_LONG_ANSWER)
     assert '<result>' in payload and '<preview>' not in payload
     # Natural text is returned whole — the tail must be present.
@@ -120,14 +120,14 @@ def test_swarm_update_carries_full_result_untruncated():
 
 def test_swarm_update_escapes_full_result():
     payload = format_swarm_update(
-        agent_id='a', role='r', status='completed',
+        agent_id='a', swarm_run_id='run-1', role='r', status='completed',
         elapsed_seconds=1.0, tokens=10, result='hello & <world>')
     assert 'hello &amp; &lt;world&gt;' in payload
 
 
 def test_swarm_update_omits_empty_result():
     payload = format_swarm_update(
-        agent_id='a', role='r', status='failed',
+        agent_id='a', swarm_run_id='run-1', role='r', status='failed',
         elapsed_seconds=1.0, tokens=10, result='', error='boom')
     assert '<result>' not in payload
     assert '<error>boom</error>' in payload

@@ -17,7 +17,6 @@ pytestmark = pytest.mark.unit
 ])
 def test_prelude_only_recovers_receipts_for_a_durable_root(monkeypatch, flags):
     from lib import agent_inbox, message_queue
-    from lib.swarm import integration
 
     principal = PrincipalContext.user(subject_id='prelude-test', owner_user_id=7)
     task = {'id': uuid.uuid4().hex, 'convId': uuid.uuid4().hex,
@@ -31,7 +30,6 @@ def test_prelude_only_recovers_receipts_for_a_durable_root(monkeypatch, flags):
 
     monkeypatch.setattr(message_queue, 'pending_background_command_injections', recover)
     monkeypatch.setattr(agent_inbox, 'is_tombstoned', lambda key: False)
-    monkeypatch.setattr(integration, 'reset_autocontinue_chain', lambda key: None)
     monkeypatch.setattr(agent_inbox, 'enqueue',
                         lambda *args, **kwargs: delivered.append((args, kwargs)))
     cfg = {'model': 'test-model'}

@@ -36,6 +36,17 @@ python -m pip install './packages/tofu-environments[mcp]'
 tofu-environments-mcp --factory deployment.environments:binding
 ```
 
+First-party requirement ranges must admit the in-repo version of each
+first-party dependency (`tests/meta/test_first_party_requirements.py`); the
+internal provider's floors (`tofu-environments>=0.2`, `tofu-mtsso-auth>=0.3`)
+also keep an older installed release from satisfying it. Install a provider
+together with the in-repo packages it needs, for example the Hope provider:
+
+```sh
+python -m pip install ./packages/tofu-environments ./packages/tofu-mtsso-auth \
+  './bundles/yourprovider/environment-provider[official-auth]'
+```
+
 The trusted deployment factory returns `mcp_adapter.MCPBinding(actor,
 environment_service=..., job_service=..., authorize=..., close=...)`. Actor,
 project, repository and provider resolvers come from the deployment's identity,
@@ -61,7 +72,7 @@ Without configured services or trusted `environment_provider_ids` /
 discovery tool is offered. Installing a provider is not proof of usable actor
 credentials. `compute_wait` also requires an executing Evolution run; native
 collection requires an attached project. No deployment-wide opt-in is added.
-The SDK package and existing private Meituan providers remain optional and
+The SDK package and existing private YourProvider providers remain optional and
 release-separated. A deployment still owns live platform acceptance.
 
 | Tool | Behavior |
@@ -224,7 +235,7 @@ at the provider and adds no persistent polling worker. `read_job_output` adapter
 remain responsible for exact owned-job binding, deadlines and remote transport. Declared cost bounds must be enforced by each real adapter; schema
 validation alone does not enforce remote cost or seal a source file.
 
-The private `bundles/meituan/environment-provider` distribution now declares a
+The private `bundles/yourprovider/environment-provider` distribution now declares a
 `hope` compute entry point. Its adapter uses explicit actor-bound host ports for
 MCP calls, sealed job preparation, exact-operation/exit evidence and output
 reads. It disables transport replay and quota retries on submission, preserves
@@ -408,6 +419,21 @@ enrolled dependency. Alternatives rejected: model polling grows context/cost;
 platform-specific wait names do not provide a general interface; a new polling
 daemon would duplicate scheduling and lifecycle authority. Verify
 `test_evolution_compute_wait.py` and the optional SDK host tests.
+
+A wait has no ceiling of its own; only owner-configured run budgets end it. A
+status read that raises, or a success whose zero exit cannot be proven, keeps
+the run parked and records where it stopped: `last_error` (exception type and
+message, or the verification code), `last_error_origin` (innermost raising
+frame, import-root-relative) and `failed_since` (first failure of the streak).
+Each new failure is logged once with its traceback and reported as a `compute`
+Watchdog fault signal ([ROUTER.md](ROUTER.md)) whose ID the wait keeps; the
+first successful read clears these fields and closes the signal, as do the end
+of the wait and cancellation. The studio presents the stall as the executor's
+dialogue with the record and the Watchdog hand-off, never as a quota or limit.
+Alternatives rejected: a bare exception type (the owner cannot tell where the
+read fails); a retry ceiling or wait deadline (a tuning knob that abandons a
+still-running job); reporting every failed pass (the reaper re-reads every five
+seconds, so one failure class per streak is one signal).
 
 ### Goal creation in the browser
 

@@ -89,8 +89,8 @@ def test_dispatch_attempt_boundaries(monkeypatch, asynchronous, outcome):
 
 def test_start_fields_mask_slot_key_into_recognition_hint():
     observer = AttemptObserver(lambda **event: None)
-    slot = SimpleNamespace(model='m', routing_provider_id='sankuai',
-                           provider_id='sankuai',
+    slot = SimpleNamespace(model='m', routing_provider_id='default',
+                           provider_id='default',
                            api_key='2208abcdefghij5409')
     fields, _started = observer._start(slot)
     hint = fields['keyHint']
@@ -102,6 +102,64 @@ def test_start_fields_mask_slot_key_into_recognition_hint():
                             api_key='')
     fields, _started = observer._start(oauth)
     assert fields['keyHint'] == ''
+
+
+def _raising(error):
+    def transport():
+        raise error
+    return transport
+
+
+_SLOT = SimpleNamespace(model='m', routing_provider_id='', provider_id='p')
+
+
+@pytest.mark.parametrize('error_args,envelope_kind', [
+    # A gateway 503 is raised as RateLimitError only to reuse slot rotation.
+    (dict(msg='HTTP 503: overloaded', is_gateway=True, status_code=503),
+     'upstream_error'),
+    (dict(msg='429 too many requests', status_code=429), 'ratelimit'),
+    (dict(msg='insufficient_quota', is_quota=True, status_code=429), 'quota'),
+])
+def test_failed_attempt_names_its_envelope_cause_not_its_class(
+        error_args, envelope_kind):
+    from lib.llm.llm_errors import RateLimitError
+    events = []
+    observer = AttemptObserver(lambda **event: events.append(event))
+    error = RateLimitError(**error_args)
+    with pytest.raises(RateLimitError):
+        observer.call(_raising(error), _SLOT)
+    complete = events[-1]
+    assert (complete['status'], complete['errorKind'], complete['envelopeKind']) == (
+        'failed', 'RateLimitError', envelope_kind)
+    assert complete['statusCode'] == error_args['status_code']
+
+
+def test_aborted_attempt_has_no_envelope_cause():
+    from lib.llm import AbortedError
+    events = []
+    observer = AttemptObserver(lambda **event: events.append(event))
+    with pytest.raises(AbortedError):
+        observer.call(_raising(AbortedError('user abort')), _SLOT)
+    assert events[-1]['status'] == 'aborted'
+    assert 'envelopeKind' not in events[-1]
+
+
+def test_classifier_fault_never_replaces_the_transport_error(monkeypatch):
+    from lib.llm.llm_errors import RateLimitError
+    from lib.llm_dispatch import _attempt_timing as timing
+
+    def broken(error):
+        raise RuntimeError('classifier defect')
+
+    monkeypatch.setattr(timing, '_classify_exception', broken)
+    events = []
+    observer = AttemptObserver(lambda **event: events.append(event))
+    error = RateLimitError('HTTP 503', is_gateway=True, status_code=503)
+    with pytest.raises(RateLimitError) as raised:
+        observer.call(_raising(error), _SLOT)
+    assert raised.value is error
+    assert events[-1]['status'] == 'failed'
+    assert 'envelopeKind' not in events[-1]
 
 
 def test_elapsed_ignores_wall_clock(monkeypatch):

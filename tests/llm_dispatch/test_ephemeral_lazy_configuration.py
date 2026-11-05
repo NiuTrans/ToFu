@@ -20,9 +20,10 @@ def test_mint_is_independent_and_later_configured_rebuild_preserves_owner(
         entered.append(True)
         if configured_outcome == 'failure':
             raise RuntimeError('configured authority unavailable')
+        return [], {}
 
     monkeypatch.setattr(dispatcher, '_build_slots', configure)
-    monkeypatch.setattr(dispatcher, '_load_benchmark_data', lambda: None)
+    monkeypatch.setattr(dispatcher, '_load_benchmark_data', lambda slots: None)
     handle = ephemeral.mint_ephemeral_slot(
         base_url='http://127.0.0.1:1/v1', api_key='', model_id='owned-model')
     try:

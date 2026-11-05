@@ -54,7 +54,7 @@ def main():
             child.update(status='done', finishReason='stop', streamState='provider_finished',
                          content='verified once\n' + 'x' * values.get('result_bytes', 0))
             if values.get('native_fees'):
-                from lib.billing.cost import transfer_native_child_fees
+                from lib.billing.native_cost import transfer_native_child_fees
                 from tests.billing.test_native_actor_fee_evidence import paid
                 child.update(status='running', apiRounds=[], _nativePricingRequired=True, _executionActualsComplete=True)
                 paid(child)

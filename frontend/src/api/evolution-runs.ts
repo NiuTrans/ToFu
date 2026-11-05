@@ -22,6 +22,8 @@ export interface EvolutionRun {
   artifact_evidence_source?: EvolutionSourceReference;
   background_evidence_source?: EvolutionSourceReference;
   background_wait?: boolean;
+  compute_wait?: {operation_id: string; task_id: string; parked: boolean; next_poll_at: number; last_error?: string;
+    last_error_origin?: string; failed_since?: number; watchdog_signal_id?: string};
   review_reserve?: ReviewReserve;
   run_id: string; objective: string; status: string; task_id: string;
   attempt: number; model?: EvolutionModel; role_models?: RoleModels; created_at: number; updated_at: number;
@@ -63,7 +65,14 @@ export interface EvolutionStageOutcomePage {
   actuals: EvolutionRun['actuals']; actuals_complete: boolean;
 }
 export interface ResearchRunParams {lang?: 'zh'|'en'; n_ideas?: number; seed_arxiv_ids?: string[]; harvest_n?: number; model?: string}
-export interface CreateRunBody {executor_plugins?: string[]; executor_schema_budget_tokens?: number; objective: string; model?: EvolutionModel; role_models?: RoleModels; domain?: 'general'|'research'; research?: ResearchRunParams;
+export interface SkillBinding {skill_id: string; content_hash: string}
+export interface ResearchExecutionContext {
+  hypothesis: string;
+  protocol: Record<string, unknown>;
+  capability_bindings: Array<{capability: string; provider: string; tool: string; schema_hash: string;
+    enabled: boolean; argument_defaults: Record<string, unknown>; notes: string}>;
+}
+export interface CreateRunBody {skill_selection?: string[]; skill_bindings?: SkillBinding[]; research_context?: ResearchExecutionContext; executor_plugins?: string[]; executor_schema_budget_tokens?: number; objective: string; model?: EvolutionModel; role_models?: RoleModels; domain?: 'general'|'research'; research?: ResearchRunParams;
   acceptance_requirements?: string[]; require_requirement_originals?: true; project_path?: string; budget?: RunBudget | null; review_reserve?: ReviewReserve; max_attempts?: number | null; max_review_recoveries?: number; max_review_format_retries?: number}
 export type EvolutionRunSummary = Pick<EvolutionRun, 'run_id' | 'objective' | 'status' | 'task_id' | 'attempt' | 'created_at' | 'updated_at'>;
 export interface EvolutionFloorItem {

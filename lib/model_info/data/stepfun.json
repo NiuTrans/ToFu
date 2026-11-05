@@ -6,8 +6,9 @@
   "name": "StepFun",
   "base_url": "https://api.stepfun.com/v1",
   "catalog_mode": "curated",
-  "catalog_source": {"url": "https://platform.stepfun.com/docs", "checked_at": "2026-09-09"},
+  "catalog_source": {"url": "https://platform.stepfun.com/docs", "checked_at": "2026-11-02"},
   "offering_recipes": [
+    {"model_id": "step-5-preview", "display_name": "Step 5 Preview", "capabilities": ["text", "vision", "video", "thinking", "cheap"], "context_window": 1000000, "rpm": 30},
     {"model_id": "step-3.7-flash", "capabilities": ["text", "vision", "thinking"], "rpm": 30},
     {"model_id": "step-3.5-flash", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 60},
     {"model_id": "step-3", "capabilities": ["text", "vision", "thinking"], "rpm": 30}

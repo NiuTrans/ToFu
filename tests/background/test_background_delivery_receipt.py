@@ -13,6 +13,20 @@ from tests.turn_lifecycle.test_turn_event_carried_task_event import (
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _process_runtime(storage):  # noqa: F811
+    """Turn writes and the flush resolve the process runtime; bind it to this authority."""
+    from lib.storage import StorageRuntime
+    from lib.storage.service import install_runtime_for_test
+    runtime = StorageRuntime(storage, auto_restart=False)
+    install_runtime_for_test(runtime)
+    try:
+        runtime.start()
+        yield
+    finally:
+        install_runtime_for_test(None)
+
+
 def _seed(turn_service, storage, monkeypatch):  # noqa: F811
     created, task = _running_task(turn_service, storage, 'receipt-c', 'receipt-task')
     task['convId'] = 'receipt-c'

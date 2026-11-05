@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import type { ConversationTurnViewModel, ConversationViewModel } from '../presentation/conversation-view-model';
-import { renderComposerModelNotice } from './composer-model-notice';
+import { holdComposerModelNotice, renderComposerModelNotice } from './composer-model-notice';
 const { JSDOM } = await vi.importActual<{ JSDOM: new (html: string) => {
   window: Pick<Window, 'document' | 'close'>;
 } }>('jsdom');
@@ -26,10 +26,10 @@ it('keeps a live switch visible before route settlement and after reload', () =>
     node.replaceChildren();
     const replay = JSON.parse(JSON.stringify(turn));
     replay.status = 'completed';
-    replay.source.projection.lastRoundUsage = { model: 'kimi-k3', resolvedModel: 'kimi-k3', providerId: 'sankuai' };
+    replay.source.projection.lastRoundUsage = { model: 'kimi-k3', resolvedModel: 'kimi-k3', providerId: 'example-corp' };
     renderComposerModelNotice(node, view(replay));
     expect(node.textContent).toContain('Automatically switched: gpt-6.1-sol → kimi-k3');
-    expect(node.textContent).toContain('Model: kimi-k3 · sankuai');
+    expect(node.textContent).toContain('Model: kimi-k3 · example-corp');
     node.replaceChildren();
     replay.metadata.fallback = undefined;
     renderComposerModelNotice(node, view(replay));
@@ -45,5 +45,40 @@ it('keeps a live switch visible before route settlement and after reload', () =>
     expect(node.hidden).toBe(true);
     renderComposerModelNotice(node, null);
     expect(node.dataset.conversationId).toBe('');
+  } finally { dom.window.close(); }
+});
+
+it('holds the outgoing notice box without its facts until a conversation renders its own', () => {
+  const dom = new JSDOM('<!doctype html><body></body>');
+  try {
+    const node = dom.window.document.createElement('div');
+    node.hidden = true; // As shipped: an empty notice is hidden.
+    const view = (conversationId: string, model: string) => ({ conversationId, mainLane: { turns: [{
+      actor: 'assistant', status: 'completed', metadata: {},
+      source: { projection: { lastRoundUsage: { model, resolvedModel: model } } },
+    }] } }) as unknown as ConversationViewModel;
+    holdComposerModelNotice(node);
+    expect(node.dataset.modelNoticeHeld).toBeUndefined();
+    renderComposerModelNotice(node, view('A', 'kimi-k3'));
+    const stable = node.firstChild;
+    holdComposerModelNotice(node);
+    expect(node.hidden).toBe(false);
+    expect(node.firstChild).toBe(stable);
+    expect(node.dataset.modelNoticeHeld).toBe('true');
+    expect(node.getAttribute('aria-hidden')).toBe('true');
+    // Reselecting the same conversation shows the same facts again.
+    renderComposerModelNotice(node, view('A', 'kimi-k3'));
+    expect(node.dataset.modelNoticeHeld).toBeUndefined();
+    expect(node.hasAttribute('aria-hidden')).toBe(false);
+    expect(node.firstChild).toBe(stable);
+    holdComposerModelNotice(node);
+    renderComposerModelNotice(node, view('B', 'gpt-6.1-sol'));
+    expect(node.textContent).toBe('Model: gpt-6.1-sol');
+    expect(node.dataset.modelNoticeHeld).toBeUndefined();
+    holdComposerModelNotice(node);
+    renderComposerModelNotice(node, null);
+    expect(node.hidden).toBe(true);
+    expect(node.dataset.modelNoticeHeld).toBeUndefined();
+    expect(node.hasAttribute('aria-hidden')).toBe(false);
   } finally { dom.window.close(); }
 });

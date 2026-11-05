@@ -14,11 +14,12 @@ import pytest
 pytestmark = pytest.mark.visual
 
 
-def _open_historical_process(page):
-    """Demand-mount settled process evidence through the actual reader action."""
-    summary = page.locator('#chatInner .conversation-history-process > summary')
-    summary.focus()
-    summary.press('Enter')
+def _open_tool_panel(page):
+    """Mount a settled reply's calls through the reader's own panel toggle."""
+    toggle = page.locator('#chatInner .conversation-tool-panel__toggle[aria-expanded="false"]')
+    if toggle.count():
+        toggle.first.focus()
+        toggle.first.press('Enter')
 
 
 def test_sidebar_single_read_viewport_budget_and_late_snapshot(browser, live_server, monkeypatch):
@@ -99,10 +100,10 @@ def test_sidebar_single_read_viewport_budget_and_late_snapshot(browser, live_ser
         assert snapshots[first] == snapshots[second] == 1, snapshots
         budget = page.evaluate("""() => {
           const root=document.querySelector('#chatInner');
-          const process=root.querySelector('.conversation-history-process');
+          const toggle=root.querySelector('.conversation-tool-panel__toggle');
           return {blocks:root.querySelectorAll('[data-block-id]').length,
-            emptyHidden:!!process && !process.open
-              && !process.querySelector('[data-block-id]'),
+            emptyHidden:!!toggle && toggle.getAttribute('aria-expanded')==='false'
+              && !root.querySelector('[data-turn-zone="process"]'),
             controls:[...root.querySelectorAll('[data-conversation-block-window-action="earlier"]')]
               .filter(n=>{const r=n.getBoundingClientRect(),s=getComputedStyle(n);
                 return r.width>2 && r.height>2 && s.opacity!=='0' && s.visibility!=='hidden'
@@ -112,11 +113,15 @@ def test_sidebar_single_read_viewport_budget_and_late_snapshot(browser, live_ser
         assert budget['emptyHidden'] and budget['controls'] == 0, budget
         _dismiss_onboarding_modals(page)
         expect(page.locator('#chatInner .conversation-round-toolbar:visible')).to_have_count(0)
-        _open_historical_process(page)
-        # Settled process paging remains inside its disclosure. Outer scroll
-        # owns Turn history, and must not become a second process window owner.
+        _open_tool_panel(page)
+        # An oversized panel opens at its first call; the in-card row that
+        # counts the hidden later calls pages through them.
+        expect(page.locator('#chatInner .conversation-tool-panel')).to_be_visible()
         before = page.locator('#chatInner [data-block-kind="tool"]').first.get_attribute('data-block-id')
-        page.locator('#chatInner [data-process-page="next"]').click()
+        later = page.locator('#chatInner [data-region-boundary="process:later"] button')
+        expect(later).to_be_visible()
+        later.focus()
+        later.press('Enter')
         page.wait_for_function("""before => document.querySelector('#chatInner [data-block-kind="tool"]')
           ?.dataset.blockId !== before""", arg=before)
         assert page.locator('#chatInner [data-block-id]').count() <= 200
@@ -197,7 +202,7 @@ def test_lazy_tool_output_fetches_on_expand_retries_and_aborts_on_navigation(liv
         _dismiss_onboarding_modals(page)
         # Tool evidence remains available through each card's native disclosure;
         # conversation-level bulk controls are not part of the reading surface.
-        _open_historical_process(page)
+        _open_tool_panel(page)
         viewers = page.locator('#chatInner details[data-lazy-tool-result]')
         expect(viewers).to_have_count(2)
         assert not detail_requests, detail_requests
@@ -264,7 +269,7 @@ def test_sidebar_large_completed_reasoning_materializes_on_keyboard_open(browser
         _dismiss_onboarding_modals(page)
         row.click(position={'x':12,'y':12})
         expect(page.locator('#chatInner')).to_contain_text('The final answer is immediately available.',timeout=20000)
-        _open_historical_process(page)
+        _open_tool_panel(page)
         details=page.locator('#chatInner [data-block-id="large-thinking"] details.thinking-block')
         expect(details).to_have_attribute('data-state','complete')
         assert not details.evaluate('(n)=>n.open')
@@ -305,7 +310,8 @@ def test_successful_command_output_is_lazy_exact_and_keyboard_inspectable(browse
             })
             assert response.status == 200, response.text()
         rounds = []
-        for index, exit_code in enumerate((0, 1)):
+        # The producers' exact persisted shape: the parsed decimal string.
+        for index, exit_code in enumerate(('0', '1')):
             rounds.append({'toolCallId': f'command-{index}', 'toolName': 'run_command', 'status': 'done',
                 'toolArgs': {'command': 'printf fixture'}, 'toolContent': output,
                 'llmRound': index, 'roundNum': index + 1, 'attemptId': 'fixture', 'taskId': 'fixture',
@@ -326,7 +332,7 @@ def test_successful_command_output_is_lazy_exact_and_keyboard_inspectable(browse
         page.locator(f'.conv-item[data-conv-id="{target}"]').click(position={'x': 12, 'y': 12})
         expect(page.locator('#chatInner')).to_contain_text('Command final answer', timeout=20000)
         _dismiss_onboarding_modals(page)
-        _open_historical_process(page)
+        _open_tool_panel(page)
         viewer = page.locator('#chatInner details[data-tool-result-authority="deferred"]')
         expect(viewer).to_have_count(1)
         assert not requests

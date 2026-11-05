@@ -19,25 +19,12 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-class _StalledBeacon:
-    """Minimal progress beacon stuck past its stall threshold."""
-
-    stall_timeout = 1800
-
-    def is_making_progress(self, _key):
-        return False
-
-    def seconds_since_activity(self, _key):
-        return 4000.0
-
-    def touch(self, _key, _kind):
-        raise AssertionError('a stalled beacon must not be touched here')
-
-
-def _invocation_task(**fields):
-    task = {'id': 'conv-waiting', 'aborted': False, 'config': {},
-            'abort_event': threading.Event(),
-            '_invocationProgressBeacon': _StalledBeacon()}
+def _silent_task(**fields):
+    """A running task whose BOTH liveness clocks are an hour stale."""
+    stale = time.time() - 3600
+    task = {'id': 'conv-waiting', 'status': 'running', 'aborted': False,
+            'config': {}, 'abort_event': threading.Event(), 'created_at': stale,
+            '_t_last_event': stale, '_dispatch_heartbeat': stale}
     task.update(fields)
     return task
 
@@ -61,13 +48,31 @@ def test_published_markers_name_their_owner():
         {'_workspaceAdmission': {'since': 1.0, 'depth': 1}}) == 'workspace-admission'
 
 
+def test_child_invocation_wait_is_explained_only_while_the_child_is_live():
+    from lib.tasks_pkg.explained_wait import (
+        CHILD_INVOCATION_WAIT_KEY, child_invocation_wait, explained_wait,
+    )
+
+    parent = {'id': 'flow-parent'}
+    child = {'id': 'flow-child', 'status': 'running', 'aborted': False}
+    with child_invocation_wait(parent, child):
+        assert explained_wait(parent) == 'child-invocation'
+        child['aborted'] = True  # reaped/stopped child no longer owns it
+        assert explained_wait(parent) == ''
+        child.update(aborted=False, status='done')
+        assert explained_wait(parent) == ''
+        child['status'] = 'running'
+    assert parent[CHILD_INVOCATION_WAIT_KEY] == {}
+    assert explained_wait(parent) == ''
+
+
 def test_admission_publisher_and_predicate_share_one_key():
     """Binding test: the lease wait owner publishes the key the predicate reads."""
-    from lib.project_mod.tool_admission import Cancellation, tool_admission_scope
-    from lib.project_mod.workspace_lease import _publish_admission_wait
-    from lib.tasks_pkg.explained_wait import (
-        WORKSPACE_ADMISSION_KEY, explained_wait,
+    from lib.project_mod.tool_admission import (
+        WORKSPACE_ADMISSION_KEY, Cancellation, tool_admission_scope,
     )
+    from lib.project_mod.workspace_lease import _publish_admission_wait
+    from lib.tasks_pkg.explained_wait import explained_wait
 
     task = {'id': 'conv-waiting'}
     with tool_admission_scope(task=task):
@@ -79,24 +84,56 @@ def test_admission_publisher_and_predicate_share_one_key():
         assert explained_wait(task) == ''
 
 
-# ── Invocation stall guard ───────────────────────────────────────────────
-def test_stalled_beacon_still_stops_an_unexplained_silence():
-    from lib.tasks_pkg.invocation import invocation_abort_requested
+def test_stale_filesystem_mount_explains_every_silence(monkeypatch):
+    """2026-11-02: a 27-minute FUSE freeze silenced every agent at once.
 
-    task = _invocation_task()
-    assert invocation_abort_requested(task) is True
-    assert task['aborted'] is True
-    assert task['_invocationStopReason'] == 'stalled'
+    Blocked I/O cannot be interrupted, so the silence belongs to the mount.
+    """
+    import lib.fs_keepalive as fs_keepalive
+    from lib.tasks_pkg.explained_wait import explained_wait
+
+    monkeypatch.setattr(fs_keepalive, 'filesystem_unresponsive', lambda: True)
+    assert explained_wait({'id': 'any-agent'}) == 'filesystem'
+    # A task-owned wait still names its own, more specific owner.
+    assert explained_wait({'_storageWaits': {'op': 1}}) == 'storage'
+    monkeypatch.setattr(fs_keepalive, 'filesystem_unresponsive', lambda: False)
+    assert explained_wait({'id': 'any-agent'}) == ''
+
+
+# ── The one judge ────────────────────────────────────────────────────────
+def test_unexplained_silence_is_wedged_for_the_shared_judge():
+    from lib.tasks_pkg.liveness import judge
+
+    verdict = judge(_silent_task(), time.time(), 1800)
+    assert verdict.state == 'wedged'
+    assert verdict.silent_seconds >= 3600
 
 
 @pytest.mark.parametrize('marker', [
     {'_workspaceAdmission': {'since': time.monotonic(), 'depth': 1}},
     {'_storageWaits': {'op': 1}},
 ])
-def test_explained_wait_does_not_stall_stop_the_invocation(marker):
+def test_explained_wait_is_never_wedged(marker):
+    from lib.tasks_pkg.liveness import judge
+
+    verdict = judge(_silent_task(**marker), time.time(), 1800)
+    assert verdict.state == 'explained' and verdict.reason
+
+
+def test_invocation_monitor_does_not_judge_silence_itself():
+    """A child is judged like its parent, never by a private sub-agent rule.
+
+    The per-invocation monitor once stopped a child after 900s of beacon
+    silence while the root rule waited 1800s and interrupted a silent command
+    instead. Only the shared judge (``lib.tasks_pkg.liveness``) decides.
+    """
+    from lib.swarm.liveness import ProgressBeacon
     from lib.tasks_pkg.invocation import invocation_abort_requested
 
-    task = _invocation_task(**marker)
+    beacon = ProgressBeacon(stall_timeout=0)
+    beacon.touch('conv-waiting')
+    task = _silent_task(_invocationProgressBeacon=beacon,
+                        _invocationProgressKey='conv-waiting')
     assert invocation_abort_requested(task) is False
-    assert task['aborted'] is False
-    assert task['abort_event'].is_set() is False
+    assert task['aborted'] is False and not task['abort_event'].is_set()
+    assert '_invocationStopReason' not in task

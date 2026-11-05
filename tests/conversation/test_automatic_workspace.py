@@ -42,6 +42,18 @@ def test_sdk_server_and_explicit_bindings_remain_host_owned(config, workspace_ba
     assert list(workspace_base.iterdir()) == []
 
 
+def test_owner_tool_preferences_do_not_disown_the_chat_workspace(workspace_base):
+    """A browser turn carries the owner's tool preference block as a mapping;
+    only a caller's list of tool schemas is a host-owned binding."""
+    from lib.conversation_sync.workspace import resolve_workspace_config
+    config = {'chatMode': 'chat', 'projectPath': '',
+              'tools': {'toolSearch': 'auto', 'nativeExposure': 'routed'}}
+    resolved = resolve_workspace_config(config, 'chat-a', 7)
+    assert resolved['projectPath'] == resolve_workspace_config(
+        {'chatMode': 'chat', 'projectPath': ''}, 'chat-a', 7)['projectPath']
+    assert resolved['tools'] == config['tools']
+
+
 def test_public_request_cannot_forge_managed_or_checkout_authority():
     from lib.conversation_sync.execution_identity import capture_execution_identity
     accepted = capture_execution_identity({'chatMode': 'chat',

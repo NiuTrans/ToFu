@@ -7,7 +7,7 @@ the content doesn't look like the tool's structured output, so the caller
 falls through to default single-file persistence.
 
   * ``_persist_web_search_split``  → one file per search hit
-  * ``_persist_grep_search_split`` → one file per matched source file
+  * ``_persist_search_files_split`` → one file per matched source file
   * ``_persist_find_files_split``  → one file per batched search section
   * ``_persist_fetch_url_split``   → one file per URL
   * ``_generate_web_search_preview`` → structured preview (no disk writes)
@@ -182,9 +182,9 @@ def _persist_web_search_split(content: str, persist_dir: str,
     return '\n'.join(index_lines)
 
 
-def _persist_grep_search_split(content: str, persist_dir: str,
-                               safe_id: str) -> str | None:
-    """Split grep_search results by source file into per-file result files.
+def _persist_search_files_split(content: str, persist_dir: str,
+                                safe_id: str) -> str | None:
+    """Split search_files results by source file into per-file result files.
 
     Each source file's matches are saved as a separate file.  Returns an
     index listing each source file, its match count, and the saved file
@@ -254,7 +254,7 @@ def _persist_grep_search_split(content: str, persist_dir: str,
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(file_content)
             files_written += 1
-            _register_label(filepath, 'grep_search', fpath)
+            _register_label(filepath, 'search_files', fpath)
         except Exception as e:
             logger.warning('[Persist] Failed to write split file %s: %s',
                            filepath, e)
@@ -280,7 +280,7 @@ def _persist_grep_search_split(content: str, persist_dir: str,
     if files_written < 2:
         return None
 
-    logger.info('[Persist] grep_search split into %d files in %s',
+    logger.info('[Persist] search_files split into %d files in %s',
                 files_written, persist_dir)
 
     return '\n'.join(index_lines)

@@ -23,7 +23,8 @@ _BACKENDS=['sqlite','tofudb'] + (['postgres'] if os.environ.get('TOFU_STORAGE_TE
 def storage(request, tmp_path, monkeypatch):
     from contextlib import ExitStack
     from pathlib import Path
-    from lib.storage import StorageSupervisor
+    from lib.storage import StorageRuntime, StorageSupervisor
+    from lib.storage.service import install_runtime_for_test
     with ExitStack() as resources:
         if request.param=='postgres':
             from tests.support.postgres_isolation import isolated_postgres_dsn
@@ -35,9 +36,14 @@ def storage(request, tmp_path, monkeypatch):
             monkeypatch.setenv('TOFUDB_BIN',resolve_deployment_binary(Path(__file__).resolve().parents[2]))
             monkeypatch.setenv('TOFUDB_TRANSPORT','daemon')
         supervisor=StorageSupervisor(project_root=tmp_path,backend=request.param,startup_timeout=60)
-        supervisor.start()
-        try:yield supervisor
-        finally:supervisor.stop()
+        # Turn writes resolve the process runtime; bind it to this authority so
+        # a supervisor stop/start is the simulated restart under test.
+        runtime=StorageRuntime(supervisor,auto_restart=False)
+        install_runtime_for_test(runtime)
+        try:
+            runtime.start()
+            yield supervisor
+        finally:install_runtime_for_test(None)
 
 
 def _row():
@@ -94,13 +100,16 @@ class LostExecutor(BaseException):
     pass
 
 
-@pytest.mark.parametrize('resume_operation', ['continue','checkpoint_resume'])
+# A prose tail is rewound by the checkpoint; a prose-free tail continues.
+@pytest.mark.parametrize('prose_tail, resume_operation',
+                         [('', 'continue'), ('seed', 'checkpoint_resume')])
 def test_restart_closes_only_the_interruption_and_preserves_query_and_resume(
-        storage, turn_service, owner, project, monkeypatch, resume_operation):
+        storage, turn_service, owner, project, monkeypatch, prose_tail, resume_operation):
     from lib.project_mod.write_tools import _ops
     from lib.conversation_sync.command_service import _resume_executor_config
     from lib.tasks_pkg.orchestrator._resume_state import prepare_resume_state
     _,task=_task(turn_service,storage,'retired-file-effect')
+    task['content']=prose_tail
     def lose_executor(*a,**kw):raise LostExecutor()
     monkeypatch.setattr(_ops,'_record_modification_checked',lose_executor)
     try:
@@ -124,7 +133,8 @@ def test_restart_closes_only_the_interruption_and_preserves_query_and_resume(
     assert turn_service.recover_running_attempts()==0
     assert service_for(storage).inspect_tool_effect(source['convId'],source['_turnId'],1,
         operation_id=operation)['outcome']=='file_published'
-    option=next(o for o in recovered['settlement']['resumeOptions'] if o['operation']==resume_operation)
+    option=recovered['settlement']['resumeOptions'][0]
+    assert option['operation']==resume_operation
     accepted=turn_service.create_attempt(source['convId'],source['_turnId'],command_id='resume-'+source['id'],
         operation=resume_operation,expected_projection_revision=recovered['projectionRevision'],
         resume_anchor=option['anchor'],config={'model':'gpt-4o'},user_id=1)
@@ -191,12 +201,15 @@ def test_killed_executor_and_reopened_store_resume_to_fresh_inspection_without_r
     recovered=turn_service.get_turn(source['convId'],source['_turnId'],user_id=1)
     row=recovered['projection']['toolRounds'][0]
     assert row['executionEffect']['state']=='unknown' and json.loads(row['toolContent'])['retryable'] is False
-    option=next(o for o in recovered['settlement']['resumeOptions'] if o['operation']=='continue')
+    # The writer left a prose tail, so the first (batch-resume) option rewinds it
+    # to the closed write round instead of continuing the prose.
+    option=recovered['settlement']['resumeOptions'][0]
+    assert option['operation']=='checkpoint_resume'
     accepted=turn_service.create_attempt(source['convId'],source['_turnId'],command_id='continue-'+source['id'],
-        operation='continue',expected_projection_revision=recovered['projectionRevision'],
+        operation=option['operation'],expected_projection_revision=recovered['projectionRevision'],
         resume_anchor=option['anchor'],config={'model':'gpt-4o'},user_id=1)
     target_id='successor-'+source['id'];turn_service.bind_task(accepted['attempt']['attemptId'],target_id,user_id=1)
-    config=_resume_executor_config('continue',accepted['turn']['projection'])
+    config=_resume_executor_config(option['operation'],accepted['turn']['projection'])
     task=chat_task_runtime.create(user_id=1,task_id=target_id)
     task.update(convId=source['convId'],_turnId=source['_turnId'],_attemptId=accepted['attempt']['attemptId'],
         config=config,model='gpt-4o',status='running',content='',thinking='',messages=[],toolRounds=[],
@@ -206,7 +219,7 @@ def test_killed_executor_and_reopened_store_resume_to_fresh_inspection_without_r
     monkeypatch.setattr(repository,'SidecarConversationSyncRepository',
         lambda:repository_type(client_factory=lambda write=False:storage.client))
     try:
-        messages=[];apply_resume_state(task=task,cfg=config,messages=messages,model='gpt-4o',tid=target_id)
+        messages=[];apply_resume_state(task=task,cfg=config,messages=messages,tid=target_id)
         feedback=[m for m in messages if m.get('role')=='tool']
         assert len(feedback)==1 and operation in feedback[0]['content']
         _,observed=read(task,operation,2)

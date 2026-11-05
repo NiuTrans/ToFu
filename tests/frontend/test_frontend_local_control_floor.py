@@ -42,7 +42,6 @@ static markup is what makes "first paint" literal rather than aspirational.
 
 from __future__ import annotations
 
-import functools
 import json
 import re
 import shutil
@@ -53,6 +52,7 @@ from pathlib import Path
 import pytest
 
 from tests._runtime_sections import runtime_section_path, runtime_sections_dir
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -64,19 +64,8 @@ LC_JS = Path(runtime_section_path("local-control.js"))
 
 def _node() -> str:
     exe = shutil.which("node")
-    if not exe:
-        pytest.skip("node not available")
+    require_node_modules('jsdom')
     return exe
-
-
-@functools.lru_cache(maxsize=1)
-def _has_jsdom() -> bool:
-    try:
-        subprocess.run([_node(), "-e", "require('jsdom')"], cwd=ROOT,
-                       capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -189,7 +178,6 @@ MODAL_HTML = """
     <span class="browser-status-dot disconnected"></span>
     <span class="lc-status-text">STALE</span>
   </span>
-  <button class="lc-switch" id="lcBrowserSwitch" aria-checked="false"></button>
   <p class="lc-cap-about" id="lcBrowserAbout"></p>
   <div class="lc-cap-setup" id="lcBrowserSetup"></div>
   <span class="lc-cap-status" id="lcDesktopStatus">
@@ -214,7 +202,6 @@ HARNESS = textwrap.dedent("""
       .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     global.browserEnabled = false;
     global.desktopEnabled = false;
-    global._applyBrowserUI = (v) => {{ global.browserEnabled = !!v; }};
     global._applyDesktopUI = (v) => {{ global.desktopEnabled = !!v; }};
     global.captureActiveConversationSettings = () => {{}};
     global.updateSubmenuCounts = () => {{}};
@@ -307,7 +294,6 @@ def _run(api_stub: str, neuter=None) -> dict:
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_opening_paints_an_instruction_before_any_response():
     """THE REGRESSION. Read synchronously, before a promise can settle."""
     out = _run(_API_PENDING)["firstPaint"]
@@ -319,7 +305,6 @@ def test_opening_paints_an_instruction_before_any_response():
         "returned")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_the_first_paint_status_is_a_state_not_a_spinner():
     """The label must name a state the user can act on, not "checking…"."""
     out = _run(_API_PENDING)["firstPaint"]
@@ -332,7 +317,6 @@ def test_the_first_paint_status_is_a_state_not_a_spinner():
             f"repaint it")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_the_floor_works_with_no_backend_at_all():
     """A painted instruction whose button is dead is a worse lie than a wait."""
     assert _run(_API_PENDING)["floorBtnWorks"] == 1, (
@@ -340,7 +324,6 @@ def test_the_floor_works_with_no_backend_at_all():
         "backend response, so it must be wired by the same paint")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_the_modal_is_usable_even_when_the_api_client_is_missing():
     """``_lcRefresh`` returns EARLY when ``Api`` is undefined — no repaint.
 
@@ -353,7 +336,6 @@ def test_the_modal_is_usable_even_when_the_api_client_is_missing():
         "path that used to hang on 'checking…' forever")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_a_failed_status_call_does_not_blank_the_guidance():
     """Both renderers used to run ``setup.innerHTML = ''`` on error."""
     out = _run(_API_PENDING)["afterError"]
@@ -364,7 +346,6 @@ def test_a_failed_status_call_does_not_blank_the_guidance():
         "a failed desktop status call wiped the install instruction")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_a_connected_capability_still_clears_its_box():
     """Complement. Without this, "always render something" would pass by
     showing install steps to a user who already installed it — the
@@ -376,7 +357,6 @@ def test_a_connected_capability_still_clears_its_box():
         "a connected agent is still being told how to install itself")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_detection_upgrades_the_floor_to_the_specific_instruction():
     """Complement: the floor must not PREVENT the better instruction.
 
@@ -395,7 +375,6 @@ def test_detection_upgrades_the_floor_to_the_specific_instruction():
 #  NEUTER — prove each guard bites
 # ══════════════════════════════════════════════════════════════════
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_removing_the_floor_paint_restores_the_empty_box():
     """Drop the synchronous paint → back to waiting on the network."""
     out = _run(_API_PENDING,
@@ -404,7 +383,6 @@ def test_NEUTER_removing_the_floor_paint_restores_the_empty_box():
         "NEUTER did not remove the floor")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_blanking_on_error_is_caught():
     """Restore ``innerHTML = ''`` on the browser error path."""
     out = _run(_API_PENDING, lambda s: s.replace(
@@ -415,7 +393,6 @@ def test_NEUTER_blanking_on_error_is_caught():
         "NEUTER did not restore the blank-on-error behaviour")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_a_dead_floor_button_is_caught():
     """Render the button but never wire it — the shape of a dead control."""
     out = _run(_API_PENDING, lambda s: s.replace(

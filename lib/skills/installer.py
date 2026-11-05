@@ -357,10 +357,13 @@ def _walk_validated_files(root: str) -> Iterator[tuple[str, str, int]]:
         pending.extend(reversed(child_directories))
 
 
-def _copy_validated_tree(source: str, destination: str) -> int:
+def _copy_validated_tree(source: str, destination: str, *,
+                         excluded_root_names: frozenset[str] = frozenset()) -> int:
     os.makedirs(destination, exist_ok=False)
     count = 0
     for relative, full, _size in _walk_validated_files(source):
+        if relative in excluded_root_names:
+            continue
         if any(part in _RESERVED_METADATA_NAMES
                for part in relative.split('/')):
             raise InstallerError(
@@ -708,7 +711,7 @@ def stage_skill_snapshot_package(
 def install_skill_package(
     source: str | bytes,
     *,
-    scope: str = 'project',
+    scope: str = 'global',
     project_path: str | None = None,
     owner_user_id: int | None = None,
     overwrite: bool = False,
@@ -721,6 +724,7 @@ def install_skill_package(
     ignored_archive_paths: set[str] | frozenset[str] | None = None,
     source_registry: str | None = None,
     source_url: str | None = None,
+    exclude_source_origin_markers: bool = False,
 ) -> dict[str, Any]:
     """Validate, verify, stage, and atomically activate one skill package."""
     catalog_id = str(catalog_id or '').strip() or None
@@ -782,7 +786,16 @@ def install_skill_package(
                 if os.path.islink(selected_source):
                     raise InstallerError('Symlink package roots are rejected')
                 copied = os.path.join(extracted, 'package')
-                _copy_validated_tree(selected_source, copied)
+                # An installed package keeps the origin markers of its own
+                # install at its root. They are not content (the digest skips
+                # them) and this install writes fresh ones, so a caller that
+                # re-installs such a directory opts out of rejecting them.
+                # Provenance is never copied, only passed as arguments.
+                _copy_validated_tree(
+                    selected_source, copied,
+                    excluded_root_names=(
+                        _RESERVED_METADATA_NAMES
+                        if exclude_source_origin_markers else frozenset()))
                 extracted = copied
             elif isinstance(source, str) and os.path.isfile(source):
                 if not zipfile.is_zipfile(source):

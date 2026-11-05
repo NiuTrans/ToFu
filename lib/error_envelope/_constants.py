@@ -22,12 +22,13 @@ KINDS = frozenset({
     'prompt_too_long', 'stream_only', 'model_limit',
     'tool_rounds_exhausted', 'tool_timeout', 'tool_loop',
     'premature_close', 'abnormal_stop', 'aborted', 'server_offline',
-    'server_busy', 'task_start_failed',
+    'server_busy', 'task_start_failed', 'event_delivery_failed',
     'internal', 'generic',
     'bad_request', 'not_found', 'upstream_error', 'worker_lost', 'budget_exceeded',
     'content_refused',
     'tool_not_available', 'tool_call_rejected',
-    'storage_fence',
+    'storage_fence', 'storage_unavailable',
+    'dispatch_grant_revoked', 'dispatch_authority_lost',
     'oauth_reauth',
     'execution_token_usage_unknown',
 })
@@ -39,10 +40,11 @@ _WARNING_KINDS = frozenset({
     'tool_rounds_exhausted', 'tool_timeout',
  'tool_loop',
     'premature_close', 'abnormal_stop',
-    'aborted', 'server_offline', 'server_busy', 'task_start_failed',
+    'aborted', 'server_offline', 'server_busy', 'task_start_failed', 'event_delivery_failed',
     'upstream_error', 'worker_lost', 'budget_exceeded', 'content_refused',
     'tool_not_available', 'tool_call_rejected',
-    'storage_fence',
+    'storage_fence', 'storage_unavailable',
+    'dispatch_grant_revoked',
     'oauth_reauth',
     'execution_token_usage_unknown',
 })
@@ -52,10 +54,10 @@ _WARNING_KINDS = frozenset({
 _RETRYABLE_KINDS = frozenset({
     'ratelimit', 'no_slot', 'timeout', 'network', 'endpoint_unreachable',
     'premature_close', 'abnormal_stop', 'server_offline', 'server_busy',
-    'task_start_failed',
+    'task_start_failed', 'event_delivery_failed',
     'tool_timeout', 'tool_loop', 'upstream_error', 'worker_lost',
     'content_refused',
-    'storage_fence',
+    'storage_fence', 'storage_unavailable',
 })
 
 
@@ -244,11 +246,43 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
                             'automatically and try to recover any content that was generated.'),
     'server_busy':        ('⚠️ 服务器当前繁忙',
                             'Server is temporarily busy',
-                            '• 服务器当前容量不足（并发任务数或内存余量）。请稍后重试；'
-                            '无需修改 API Key 或模型设置。',
-                            '• The server is temporarily out of capacity (active-task '
-                            'slots or memory headroom). Retry shortly; you do not need to '
-                            'change API keys or model settings.'),
+                            '• 服务暂时无法完成请求，请查看错误详情和服务端日志。'
+                            '本地并发任务数和内存余量不限制任务准入。',
+                            '• The service could not complete the request. Check the '
+                            'error detail and server logs. Local task counts and memory '
+                            'headroom do not limit task admission.'),
+    'event_delivery_failed': ('⚠️ 本轮事件保存失败',
+                              'Turn event persistence failed',
+                              '• 服务端未能确认本轮事件已保存，后续发布已暂停；'
+                              '已确认保存的内容仍可读取。请检查错误详情中的存储或执行器故障，'
+                              '修复后重试。无需修改 API Key 或模型设置。',
+                              '• The server could not confirm this turn event was saved, '
+                              'so later publication is paused. Confirmed content remains '
+                              'readable. Check the storage or worker failure in the error '
+                              'detail, repair it, then retry. API keys and model settings '
+                              'do not need to change.'),
+    # The storage authority could not serve the request: the sidecar is down,
+    # fenced, or saturated. This is NOT local server capacity — labelling it
+    # `server_busy` told the operator the machine was out of task slots while
+    # the authority was actually fenced and only a process restart could
+    # restore it (2026-10-22: a 9.5 h fenced outage read as "server busy,
+    # retry shortly"). The hint names the storage layer, and names the
+    # restart recovery when the runtime is degraded.
+    'storage_unavailable': ('⚠️ 存储服务暂时不可用',
+                             'Storage service temporarily unavailable',
+                             '• 数据库暂时无法完成请求，请稍后重试；这与 API Key 或模型设置无关。\n'
+                             '• 若错误详情显示存储运行时已 degraded（连续崩溃后熔断，存储被围栏），'
+                             '重试无用——需要重启服务器进程才能恢复（服务器管理端执行 '
+                             'python3 serverctl.py restart）。\n'
+                             '• 可在 logs/app.log 中检索 tofu.storage.runtime 确认存储运行时状态。',
+                             '• The database could not complete the request; retry shortly. '
+                             'This is unrelated to API keys or model settings.\n'
+                             '• If the error detail says the storage runtime is degraded '
+                             '(fenced after repeated crashes), retrying will not help — only a '
+                             'server process restart restores it (server manager: '
+                             'python3 serverctl.py restart).\n'
+                             '• Check the tofu.storage.runtime entries in logs/app.log to '
+                             'confirm the storage runtime state.'),
     'task_start_failed':  ('⚠️ 生成执行器未能启动',
                             'Generation executor did not start',
                             '• 本次请求已安全终止，没有后台任务仍在运行。请直接点击 Retry；若反复出现，请查看服务器日志（logs/error.log）。',
@@ -373,6 +407,40 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
                             '• Usually the capability is switched OFF for this conversation (e.g. code '
                             'execution / browser / project tools). Enable it in the toolbar and retry, or '
                             'tell the model to use a tool it actually has.'),
+    # Project-dispatch authority ended a dispatched task (lib.turn_verdict
+    # DISPATCH_AUTHORITY_ABORT_REASONS). Not a Stop in this conversation and
+    # never retried automatically: the same grant/carrier refuses again, so
+    # the recovery is a new delegation. A revocation is a deliberate
+    # withdrawal (warning); unestablished authority is a failure (error).
+    'dispatch_grant_revoked': ('⏹️ 派发授权已撤销，任务已停止',
+                               'Stopped: the dispatch grant was revoked',
+                               '• 这不是在本会话中点击的停止：授权这个派发任务的项目派发授权已被撤销'
+                               '（由协调者取消、协调者会话中的停止或项目范围变更引起）。'
+                               '任务在下一次模型或工具调用前停止，不会自动重试；已生成的内容已保留。\n'
+                               '• 如仍需要这项工作，请在协调者会话中重新委派。',
+                               '• This was not a Stop in this conversation: the project dispatch grant '
+                               'that authorized this task was revoked (cancelled by the Coordinator, by a '
+                               'Stop in the Coordinator conversation, or by a scope change). The task '
+                               'stopped before its next model or tool call and is not retried '
+                               'automatically; generated content is preserved.\n'
+                               '• If the work is still needed, delegate it again from the Coordinator '
+                               'conversation.'),
+    'dispatch_authority_lost': ('⚠️ 派发授权丢失，任务已停止',
+                                'Stopped: dispatch authority was lost',
+                                '• 这不是手动停止：这个派发任务的授权载体丢失，或其授权无法重新确认'
+                                '（例如任务身份、执行关联或已登记的隔离工作区发生变化，或授权记录读取失败）。'
+                                '任务在下一次模型或工具调用前停止，不会自动重试；已生成的内容已保留。\n'
+                                '• 如仍需要这项工作，请在协调者会话中重新委派；若反复出现，'
+                                '请把 logs/app.log 中该任务的 project_dispatch 记录发给维护者。',
+                                '• This was not a manual Stop: this dispatched task lost its admission '
+                                'carrier, or its authority could not be re-established (for example a '
+                                'changed task identity, execution association or registered isolated '
+                                'workspace, or an unreadable grant record). It stopped before its next '
+                                'model or tool call and is not retried automatically; generated content '
+                                'is preserved.\n'
+                                '• If the work is still needed, delegate it again from the Coordinator '
+                                'conversation; if this recurs, share the task\'s project_dispatch entries '
+                                'from logs/app.log with the maintainers.'),
     'tool_call_rejected': ('⚠️ 工具调用在执行前被拦截，任务未完成',
                             'Tool call was blocked before execution',
                             '• 这不是 Key / 配额问题。工具在执行前被安全、权限、模式、审批或参数校验拦截；'

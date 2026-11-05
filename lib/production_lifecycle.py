@@ -550,7 +550,6 @@ def start_optional_production_services(
     logger: logging.Logger,
     process_role: str = 'all',
     boot: Callback = _default_boot,
-    request_graceful_shutdown: Callback | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Start best-effort integrations after the required bootstrap succeeds."""
     from lib.process_roles import (
@@ -574,23 +573,7 @@ def start_optional_production_services(
         from lib import cgroup_guard
 
         cgroup_guard.startup_self_check()
-
-        def _recycle_oversized_worker(reason: str) -> None:
-            if shutdown_requested.is_set():
-                return
-            logger.critical(
-                '[Server] Controlled memory recycle requested: %s', reason)
-            if request_graceful_shutdown is None:
-                shutdown_requested.set()
-            else:
-                request_graceful_shutdown(
-                    shutdown_requested,
-                    logger=logger,
-                    reason='memory_recycle',
-                )
-
-        cgroup_guard.start_monitor(
-            recycle_callback=_recycle_oversized_worker)
+        cgroup_guard.start_monitor()
     except Exception as exc:
         logger.warning(
             '[cgroup] pressure defenses failed to start: %s', exc)
@@ -631,7 +614,6 @@ def register_production_lifecycle(
     logger: logging.Logger | None = None,
     boot: Callback = _default_boot,
     announce_ready: Callback | None = None,
-    request_graceful_shutdown: Callback | None = None,
     optional_services: Callback = start_optional_production_services,
     shutdown_runtime: Callback | None = None,
     process_role: str = 'all',
@@ -710,7 +692,6 @@ def register_production_lifecycle(
             logger=log,
             boot=boot,
             process_role=process_role,
-            request_graceful_shutdown=request_graceful_shutdown,
         ),
     ]
     if announce_ready is not None:

@@ -16,6 +16,7 @@ import {
 } from '../presentation/conversation-view-model';
 import {
   createConversationSurface,
+  type ConversationRetainedTail,
   type ConversationSurface,
   type ConversationSurfaceRenderers,
   type ConversationIntent,
@@ -26,6 +27,8 @@ import {
 
 import { mergeTranslationActivity } from './translation-activity';
 import type { RoundOutlineTranslator } from '../ui/round-outline';
+
+const RETAINED_TAIL_CONVERSATIONS = 64;
 
 export interface ConversationDocument extends Record<string, unknown> {
   id: string;
@@ -72,6 +75,8 @@ export interface ConversationSurfaceHost {
 
 export interface ConversationSurfaceController {
   invalidateTaskTimePresentations(conversationId: string): void;
+  /** Physical active host for bounded presentation reads, not a sync ACK. */
+  isMounted(conversationId: string): boolean;
   ownsConversation(conversationId: string): boolean;
   render(
     conversation: ConversationDocument,
@@ -106,14 +111,40 @@ export function createConversationSurfaceController(
   const selector = createConversationViewModelSelector();
   let surface: ConversationSurface | null = null;
   let surfaceConversationId = '';
+  let surfaceContainer: HTMLElement | null = null;
   let currentConversation: ConversationDocument | null = null;
   let currentState: TurnState | null = null;
   const translationModeByTurn = new Map<string, TranslationDisplayMode>();
-  const translationActivityByTurn = new Map<string, TranslationActivity>();
+  /* Running-turn previews arrive once per block and are never re-sent, so
+   * they are kept per conversation, mounted or not: a switch must not discard
+   * what a later visit would otherwise show in the source language. The
+   * settling done/aborted frame or conversation disposal releases them. */
+  const translationActivityByConversation = new Map<
+    string,
+    Map<string, TranslationActivity>
+  >();
+  const noTranslationActivity: ReadonlyMap<string, TranslationActivity> = new Map();
+  const surfaceTranslationActivity = (): ReadonlyMap<string, TranslationActivity> => (
+    translationActivityByConversation.get(surfaceConversationId) ?? noTranslationActivity
+  );
   const artifactsByTurn = new Map<
     string,
     ReadonlyArray<ConversationArtifactViewModel>
   >();
+  /* Tail ranges residency retired, per conversation: a revisit mounts that
+   * range rather than the whole Turn budget it would retire again after
+   * first paint. Two Turn IDs per entry; the oldest entry is evicted first. */
+  const retainedTails = new Map<string, ConversationRetainedTail>();
+  const rememberRetainedTail = (): void => {
+    if (!surface || !surfaceConversationId) return;
+    const tail = surface.retainedTail;
+    retainedTails.delete(surfaceConversationId);
+    if (!tail) return;
+    retainedTails.set(surfaceConversationId, tail);
+    if (retainedTails.size > RETAINED_TAIL_CONVERSATIONS) {
+      retainedTails.delete(retainedTails.keys().next().value as string);
+    }
+  };
   let expandedBranchLaneId: string | null = null;
   let pending: {
     conversation: ConversationDocument;
@@ -122,7 +153,11 @@ export function createConversationSurfaceController(
   } | null = null;
   let scheduled: { cancel?: () => void } | null = null;
   let disposed = false;
+  let committing = false;
   let surfaceOwnsScroll = false;
+  let mountAcknowledged = false;
+  let commitFailed = false;
+  let retryScheduled = false;
 
   const taskTimes = host.loadTaskTimePresentations ? createTaskTimePresentations({
     load: host.loadTaskTimePresentations,
@@ -142,16 +177,20 @@ export function createConversationSurfaceController(
   };
 
   const disposeSurface = (): void => {
+    rememberRetainedTail();
     selector.dispose();
     taskTimes?.dispose();
     surface?.dispose();
     surface = null;
     surfaceOwnsScroll = false;
+    mountAcknowledged = false;
+    commitFailed = false;
+    retryScheduled = false;
     surfaceConversationId = '';
+    surfaceContainer = null;
     currentConversation = null;
     currentState = null;
     translationModeByTurn.clear();
-    translationActivityByTurn.clear();
     artifactsByTurn.clear();
     expandedBranchLaneId = null;
   };
@@ -159,7 +198,7 @@ export function createConversationSurfaceController(
   const presentationState = (): ConversationPresentationState => ({
     ...(taskTimes ? { taskTimePresentationsByAttempt: taskTimes.values } : {}),
     translationModeByTurn,
-    translationActivityByTurn,
+    translationActivityByTurn: surfaceTranslationActivity(),
     artifactsByTurn,
     expandedBranchLaneId,
     ...(host.costSignatureSnapshot && currentState
@@ -176,7 +215,7 @@ export function createConversationSurfaceController(
   const turnHasTranslation = (turnId: string): boolean => {
     const projection = currentState?.turnsById[turnId]?.projection;
     if (!projection) return false;
-    if (translationActivityByTurn.get(turnId)?.partial) return true;
+    if (surfaceTranslationActivity().get(turnId)?.partial) return true;
     if (projection.translatedContent || projection.originalContent) return true;
     return (projection.segments ?? []).some((segment) => (
       (segment.type === 'text' || segment.type === 'thinking')
@@ -191,7 +230,7 @@ export function createConversationSurfaceController(
     catch (error) { console.warn('[ConversationSurface] render cancellation failed', error); }
   };
   const schedulePaint = (): void => {
-    if (scheduled || disposed) return;
+    if (scheduled || disposed || committing) return;
     const frame: { cancel?: () => void } = {};
     scheduled = frame;
     try {
@@ -200,21 +239,59 @@ export function createConversationSurfaceController(
         // conversation's pending paint. Synchronous clocks are supported.
         if (disposed || scheduled !== frame) return;
         scheduled = null;
-        flush();
+        tryCommit();
       });
     } catch (error) {
       if (scheduled === frame) scheduled = null;
       throw error;
     }
   };
+  const tryCommit = (operation?: () => boolean): boolean => {
+    if (committing) return false;
+    committing = true;
+    const demand = pending;
+    let repair = false;
+    try { return operation ? operation() : flush(); }
+    catch (error) {
+      commitFailed = true;
+      selector.dispose();
+      // Navigation can commit a different DOM window without a pending graph.
+      // Its failure still owes the latest canonical graph a successful commit;
+      // never replace newer demand that arrived while the operation was running.
+      if (!pending && currentConversation && currentState && !disposed
+          && host.isActive(currentConversation.id)) {
+        pending = { conversation: currentConversation, state: currentState, force: true };
+      }
+      console.warn('[ConversationSurface] commit failed; latest graph retained', error);
+      // One immediate repair per failure streak, not an unbounded paint loop.
+      // Further canonical/health/UI demand retries the retained newest graph.
+      if (pending && !retryScheduled && !disposed
+          && host.isActive(pending.conversation.id)) {
+        retryScheduled = true;
+        repair = true;
+      }
+      return false;
+    } finally {
+      committing = false;
+      // Refused/absent mounts retain their graph but cannot create a paint loop.
+      // Only a new demand token or this streak's bounded repair earns a callback.
+      const replacedGraph = pending && demand
+        && (pending.state !== demand.state
+          || pending.conversation.id !== demand.conversation.id);
+      if (repair || (pending && pending !== demand && (!commitFailed || replacedGraph) && !disposed
+          && host.isActive(pending.conversation.id) && host.getContainer())) schedulePaint();
+    }
+  };
   const repaintPresentation = (immediate = false): void => {
     if (!surface || !currentConversation || !currentState
       || disposed || !host.isActive(currentConversation.id)) return;
-    pending ??= { conversation: currentConversation, state: currentState, force: true };
-    pending.force = true;
+    // A callback may invalidate presentation while the current frame commits.
+    // Give that demand its own identity so acknowledging this frame cannot drop it.
+    pending = pending ? { ...pending, force: true }
+      : { conversation: currentConversation, state: currentState, force: true };
     // Explicit disclosure/display intents commit before the next action can
     // read their DOM. Async presentation receipts still coalesce with the graph.
-    if (immediate) flush();
+    if (immediate) tryCommit();
     else schedulePaint();
   };
 
@@ -224,11 +301,16 @@ export function createConversationSurfaceController(
   ): ConversationSurface => {
     if (surface && surface.root.parentElement === container
         && surfaceConversationId === conversation.id) return surface;
-    disposeSurface();
+    // Keep a failed mount's owner before Surface construction. Retrying the
+    // same host must not reset the bounded streak simply because no root exists.
+    if (surface || surfaceConversationId !== conversation.id || surfaceContainer !== container) {
+      disposeSurface();
+      surfaceConversationId = conversation.id;
+      surfaceContainer = container;
+    }
     currentConversation = conversation;
     currentState = currentState?.conversationId === conversation.id
       ? currentState : null;
-    surfaceConversationId = conversation.id;
     const scrollViewport = host.getScrollViewport?.() ?? null;
     surfaceOwnsScroll = Boolean(host.scrollAnchor || scrollViewport);
     surface = createConversationSurface(container, {
@@ -241,6 +323,9 @@ export function createConversationSurfaceController(
       ...(host.roundOutlineLabel ? { roundOutlineLabel: host.roundOutlineLabel } : {}),
       ...(host.transportNoticeLabel
         ? { transportNoticeLabel: host.transportNoticeLabel }
+        : {}),
+      ...(retainedTails.has(conversation.id)
+        ? { retainedTail: retainedTails.get(conversation.id) }
         : {}),
       onCommit(turnIds) { refreshTaskTimes(false, turnIds); },
       onIntent(intent) {
@@ -292,14 +377,15 @@ export function createConversationSurfaceController(
     return surface;
   };
 
-  const flush = (): void => {
+  const flush = (): boolean => {
     cancelPaint();
     const frame = pending;
-    pending = null;
-    if (!frame || disposed || !host.isActive(frame.conversation.id)) return;
+    if (!frame || disposed || !host.isActive(frame.conversation.id)) {
+      if (pending === frame) pending = null;
+      return false;
+    }
     const container = host.getContainer();
-    if (!container) return;
-    const previousSurface = surface;
+    if (!container) return false;
     const activeSurface = ensureSurface(container, frame.conversation);
     const useLegacyScroll = !surfaceOwnsScroll;
     const scroll = useLegacyScroll ? host.captureScroll?.() : undefined;
@@ -317,21 +403,42 @@ export function createConversationSurfaceController(
       frame.state, {}, presentationState(),
     );
     activeSurface.render(viewModel);
+    const stillOwnsMount = (): boolean => !disposed && surface === activeSurface
+      && surfaceConversationId === frame.conversation.id
+      && host.isActive(frame.conversation.id)
+      && activeSurface.root.parentElement === host.getContainer();
     // A forced paint is not evidence that accepted automation output changed.
     // Only the explicit invalidation port requests a reread.
     if (useLegacyScroll) host.restoreScroll?.(scroll);
-    if (previousSurface !== activeSurface) host.onConversationMounted?.(frame.conversation);
+    if (!stillOwnsMount()) return false;
+    if (!mountAcknowledged) {
+      host.onConversationMounted?.(frame.conversation);
+      if (!stillOwnsMount()) return false;
+      mountAcknowledged = true;
+    }
     host.afterConversationCommit?.(
       frame.conversation, frame.state, frame.force, viewModel, activeSurface.mountedTurnIds,
     );
+    if (!stillOwnsMount()) return false;
+    // DOM, mount and required commit callbacks must all succeed before ACK.
+    // Reentrant demand may carry a newer graph; acknowledge only this frame.
+    if (pending === frame) pending = null;
+    commitFailed = false;
+    retryScheduled = false;
+    return true;
   };
 
+  const isMounted = (conversationId: string): boolean => !disposed
+    && host.isActive(conversationId) && surfaceConversationId === conversationId
+    && Boolean(surface && surface.root.parentElement === host.getContainer());
+
   return {
+    isMounted,
     invalidateTaskTimePresentations(conversationId) {
       if (!disposed && conversationId === surfaceConversationId) refreshTaskTimes(true);
     },
     ownsConversation(conversationId) {
-      return !disposed && host.isActive(conversationId) && surfaceConversationId === conversationId;
+      return !committing && !commitFailed && !pending && isMounted(conversationId);
     },
     render(conversation, state, context = {}) {
       if (disposed || conversation.id !== state.conversationId
@@ -345,14 +452,19 @@ export function createConversationSurfaceController(
       return true;
     },
     setTranslationActivity(conversationId, turnId, activity) {
-      if (disposed || !host.isActive(conversationId)
-        || !turnId || conversationId !== surfaceConversationId) return;
+      if (disposed || !conversationId || !turnId) return;
+      let byTurn = translationActivityByConversation.get(conversationId);
       if (activity) {
-        const previous = translationActivityByTurn.get(turnId);
-        const next = mergeTranslationActivity(previous, activity);
-        translationActivityByTurn.set(turnId, next);
+        if (!byTurn) {
+          byTurn = new Map();
+          translationActivityByConversation.set(conversationId, byTurn);
+        }
+        byTurn.set(turnId, mergeTranslationActivity(byTurn.get(turnId), activity));
+      } else {
+        if (!byTurn || !byTurn.delete(turnId)) return;
+        if (!byTurn.size) translationActivityByConversation.delete(conversationId);
       }
-      else translationActivityByTurn.delete(turnId);
+      if (conversationId !== surfaceConversationId) return;
       // Use the existing graph paint scheduler. A burst merges every key but
       // derives/renders the combined preview only for the scheduled frame.
       repaintPresentation();
@@ -372,25 +484,34 @@ export function createConversationSurfaceController(
       repaintPresentation();
     },
     revealTurn(conversationId, turnId) {
-      if (disposed || !host.isActive(conversationId)) return false;
-      if (pending?.conversation.id === conversationId) {
-        flush();
-      }
-      return surfaceConversationId === conversationId && Boolean(surface?.revealTurn(turnId));
+      if (disposed || committing || !host.isActive(conversationId)) return false;
+      if (pending?.conversation.id === conversationId && !tryCommit()) return false;
+      const activeSurface = surface;
+      if (surfaceConversationId !== conversationId || !activeSurface) return false;
+      return tryCommit(() => activeSurface.revealTurn(turnId));
     },
     isNearLatest(threshold) {
       return !surface || !host.isActive(surfaceConversationId) || surface.isNearLatest(threshold);
     },
     followLatest(intent) {
-      if (disposed) return;
-      if (intent?.force !== false && pending && host.isActive(pending.conversation.id)) flush();
+      if (disposed || committing) return;
+      if (intent?.force !== false && pending && host.isActive(pending.conversation.id)
+          && !tryCommit()) return;
       if (!surface || !host.isActive(surfaceConversationId)) return;
-      if (surfaceOwnsScroll) surface.followLatest(intent);
-      else if (intent?.force !== false) host.followLatest?.();
+      const activeSurface = surface;
+      tryCommit(() => {
+        if (surfaceOwnsScroll) activeSurface.followLatest(intent);
+        else if (intent?.force !== false) host.followLatest?.();
+        return true;
+      });
     },
     disposeConversation(conversationId) {
-      if (pending?.conversation.id === conversationId) { pending = null; cancelPaint(); }
+      translationActivityByConversation.delete(conversationId);
+      if (pending?.conversation.id === conversationId) {
+        pending = null; cancelPaint(); commitFailed = false; retryScheduled = false;
+      }
       if (surfaceConversationId === conversationId) disposeSurface();
+      retainedTails.delete(conversationId);
     },
     dispose() {
       if (disposed) return;
@@ -398,6 +519,8 @@ export function createConversationSurfaceController(
       pending = null;
       cancelPaint();
       disposeSurface();
+      translationActivityByConversation.clear();
+      retainedTails.clear();
     },
   };
 }

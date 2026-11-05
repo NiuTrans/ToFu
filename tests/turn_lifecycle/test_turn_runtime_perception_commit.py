@@ -1,6 +1,5 @@
 """Perception evidence must cross actual DOM commit, not render scheduling."""
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
@@ -10,7 +9,6 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.skipif(shutil.which('node') is None, reason='node required')
 def test_runtime_commit_mount_revision_and_snapshot_receipts():
     bundle = native_module_path(
         'runtime-perception-commit.js', ROOT / 'frontend/src/core/turn-runtime.ts')
@@ -81,7 +79,7 @@ const snapshot = id => ({
 });
 const appliedStates = [];
 const runtime = globalThis.createConversationTurnRuntime({
-  api: { snapshot: async id => snapshot(id), eventsUrl: id => id,
+  api: { snapshot: async id => snapshot(id),
     recordPerception: async (c, t, body) => sent.push({ c, t, ...body }) },
   findConversation: id => id === 'A' ? A : B,
   isActive: conv => conv.id === active,
@@ -92,7 +90,9 @@ const runtime = globalThis.createConversationTurnRuntime({
 
   getTurnMountToken: (c, t) => { activeConvId = active; return getTurnMountToken(c, t); },
   renderState: (conv, state) => { pending.set(conv.id, state); return true; },
-  eventSourceFactory: id => { const s = new Source(); sources.set(id, s); return s; },
+  eventSourceFactory: request => {
+    const s = new Source(); sources.set(request.conversationId, s); return s;
+  },
   onProtocolError: e => errors.push(String(e)),
 });
 function commit(id, ids = ['t-' + id]) {
@@ -171,6 +171,12 @@ function event(id, seq, revision, type = 'projection_updated') {
   commit('B'); await paint();
   assert.equal(sent.at(-1).kind, 'transport_degraded');
   sources.get('B').onopen(); await paint();
+  // An opened socket is only 'connecting'; the first valid frame proves recovery.
+  sources.get('B').onmessage({ lastEventId: '', data: JSON.stringify({
+    contract: 'tofu.conversation-sync.event/v1', conversationId: 'B',
+    type: 'sync.heartbeat', cursor: 'cursor-0', serverBootId: 'boot', degraded: false,
+  }) });
+  await paint();
   const beforeHealthCommit = sent.length;
   commit('B'); await paint();
   assert.equal(sent.length, beforeHealthCommit + 1);
@@ -188,7 +194,7 @@ function event(id, seq, revision, type = 'projection_updated') {
   for (const cleanup of cleanups) { cleanup(); cleanup(); }
   assert.equal(disconnectedObservers, 1, 'composition cleanup is idempotent');
   assert.equal(frames.size, 0); console.log('ok');
-})().catch(e => { console.error(e); process.exitCode = 1; });
+})().catch(e => { console.error(e); process.exit(1); });
 """
     adapter = (ROOT / 'frontend/src/runtime/sections/main/conversation_turn_store.js').read_text()
     bridge = adapter.split('getTurnMountToken: ', 1)[1].split('\n    isTurnMounted', 1)[0]
@@ -199,7 +205,6 @@ function event(id, seq, revision, type = 'projection_updated') {
     assert proc.stdout.strip() == 'ok'
 
 
-@pytest.mark.skipif(shutil.which('node') is None, reason='node required')
 def test_mount_tracker_real_dom_lifetimes_and_cleanup():
     tracker = native_module_path(
         'mount-tracker-real-dom.js',

@@ -1,7 +1,12 @@
 """Fresh-process count-kernel receipts cannot be replaced with warm clocks."""
 import copy
 import unittest
+
+import pytest
+
 from benchmarks.token_cold_start import ENCODINGS, summarize
+
+pytestmark = pytest.mark.unit
 
 
 def cohort():

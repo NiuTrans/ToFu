@@ -83,14 +83,19 @@ def parent(limit=50, *, deadline=None):
     return task
 
 
-def fetch(monkeypatch, task):
+def fetch(monkeypatch, task, *, after_fetch=None):
     from lib.tasks_pkg.handlers.search import _handlers as handlers
     page = 'retained original source'
     item = {'url': 'https://source.test/page', 'page_content': page,
             'fetched_source': page, 'is_pdf': False, 'raw_chars': len(page),
             'filtered_chars': len(page), 'error_msg': None, 'saved_path': None,
             'is_asset': False}
-    backend = SimpleNamespace(_fetch_url_one=lambda *a, **k: item)
+
+    def fetch_one(*_args, **_kwargs):
+        if after_fetch is not None:
+            after_fetch()
+        return item
+    backend = SimpleNamespace(_fetch_url_one=fetch_one)
     monkeypatch.setattr(handlers, '_load_search_backend', lambda: (backend, None))
     monkeypatch.setattr(handlers, '_finalize_tool_round', lambda *a, **k: None)
     monkeypatch.setattr('lib.search.search_bridge.bind_search_browser', lambda **k: nullcontext())
@@ -142,10 +147,15 @@ def test_parent_stop_prevents_auxiliary_send_and_keeps_source(monkeypatch, extra
     import time
     bodies, _, _ = extraction_provider
     task = parent(deadline=time.time() - 1 if stop == 'deadline' else None)
-    if stop == 'cancel':
+
+    def stop_after_source_fetch():
+        # Stop lands between the source fetch and the auxiliary extraction
+        # send. A Stop before the call starts aborts it instead: an aborted
+        # task never adopts a speculative or new tool result.
         task['aborted'] = True
         task['abort_event'].set()
-    content, entry = fetch(monkeypatch, task)
+    content, entry = fetch(monkeypatch, task,
+                           after_fetch=stop_after_source_fetch if stop == 'cancel' else None)
     assert bodies == []
     assert 'retained original source' in content and 'extractMode' not in entry
     assert task['aborted']

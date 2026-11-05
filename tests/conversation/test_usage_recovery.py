@@ -105,7 +105,10 @@ def recovery_source(chat_sidecar, flask_client, monkeypatch):
 
     def create_record(*, owner_id=1, config=None, tool_rounds=None,
                       usage_complete=False, error_kind=UNKNOWN_USAGE,
-                      conversation_id=None, task_id=None, client=default_client):
+                      turn_status='failed', with_error=True, api_rounds=None,
+                      source_input='Finish the existing task.',
+                      saved_output=SAVED_OUTPUT, conversation_id=None,
+                      task_id=None, client=default_client):
         conversation_id = conversation_id or f'usage-recovery-{uuid.uuid4().hex}'
         client.command('conversation.create', {
             'conv_id': conversation_id, 'user_id': owner_id,
@@ -125,13 +128,13 @@ def recovery_source(chat_sidecar, flask_client, monkeypatch):
             '_resumeSource': {'turnId': 'old-resume-source'},
             'checkpointUsage': deepcopy(PAID_USAGE),
             'checkpointUsageComplete': False, 'checkpointToolRounds': [],
-            'checkpointSegments': [], 'resumePrefill': SAVED_OUTPUT,
-            'contentPrefix': SAVED_OUTPUT,
+            'checkpointSegments': [], 'resumePrefill': saved_output,
+            'contentPrefix': saved_output,
         }
         saved_config.update(deepcopy(config or {}))
         created = create_turn_pair(
             conversation_id, command_id=f'source-{conversation_id}',
-            input_projection={'content': 'Finish the existing task.'},
+            input_projection={'content': source_input},
             config=saved_config, user_id=owner_id,
         )
         turn_id = created['turn']['turnId']
@@ -143,7 +146,7 @@ def recovery_source(chat_sidecar, flask_client, monkeypatch):
         task = {
             'id': task_id, 'convId': conversation_id, '_turnId': turn_id,
             '_attemptId': attempt_id, '_userId': owner_id,
-            'status': 'running', 'content': SAVED_OUTPUT,
+            'status': 'running', 'content': saved_output,
             'thinking': 'Existing reasoning is retained.', 'segments': [],
             'config': saved_config, 'model': saved_config.get('model', ''),
             'toolRounds': deepcopy(tool_rounds if tool_rounds is not None else [{
@@ -152,17 +155,26 @@ def recovery_source(chat_sidecar, flask_client, monkeypatch):
                 'status': 'done', 'roundNum': 1, 'llmRound': 0,
             }]),
             'usage': deepcopy(PAID_USAGE),
+            'apiRounds': deepcopy(api_rounds or []),
             '_executionActualsComplete': usage_complete,
         }
-        assert record_task_event(task, {'type': 'delta', 'content': SAVED_OUTPUT})
+        assert record_task_event(task, {'type': 'delta', 'content': saved_output})
         error = make_envelope(error_kind, model='gpt-4o-mini',
                               detail='The preceding request has no confirmed usage.',
                               context='usage-recovery-test', source='test')
-        task.update(status='error', finishReason='error', error=error)
-        assert record_task_event(task, {'type': 'done', 'error': error})
+        assert turn_status in {'failed', 'interrupted'}
+        terminal_error = {'error': error} if with_error else {}
+        if turn_status == 'interrupted':
+            task.update(status='aborted', finishReason='aborted', aborted=True,
+                        _abort_reason='server_shutdown', **terminal_error)
+            event = {'type': 'aborted', **terminal_error}
+        else:
+            task.update(status='error', finishReason='error', **terminal_error)
+            event = {'type': 'done', **terminal_error}
+        assert record_task_event(task, event)
         source = RecoverySource(client, conversation_id, owner_id, turn_id, attempt_id)
-        assert source.turn()['status'] == 'failed'
-        assert source.attempt()['status'] == 'failed'
+        assert source.turn()['status'] == turn_status
+        assert source.attempt()['status'] == turn_status
         assert source.turn()['projection']['usage'] == PAID_USAGE
         assert source.turn()['projection']['usageComplete'] is usage_complete
         from lib.conversation_sync.runtime import conversation_turn_commands
@@ -299,6 +311,155 @@ def test_get_is_read_only_and_proposes_a_finite_new_budget(
     assert source.snapshot() == before
     assert source.attempt() == before_attempt
     assert executor_starts == []
+
+
+@pytest.mark.parametrize('source_options', [
+    {'error_kind': 'bad_request'},
+    {'error_kind': 'generic'},
+    {'turn_status': 'interrupted', 'with_error': False},
+], ids=['request-rejection', 'generic-failure', 'restart-without-error'])
+def test_any_settled_unconfirmed_usage_has_a_forward_recovery_not_a_doomed_resume(
+    flask_client, recovery_source, executor_starts, source_options,
+):
+    source = recovery_source(**source_options)
+    before = deepcopy(source.turn())
+    preview = _preview(flask_client, source)
+    assert (preview['state'], preview['reason']) == ('ready', 'ready')
+    response = flask_client.post(source.url, json=_confirmation(preview))
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()['attempt']['operation'] == 'generate'
+    assert len(executor_starts) == 1
+    assert source.turn() == before
+
+
+def test_proposed_budget_fits_saved_large_input_and_a_real_model_admission(
+    flask_client, recovery_source, executor_starts,
+):
+    from lib.agent_core.execution_budget import model_budget_admission
+
+    prompt_tokens, output_limit = 226646, 32768
+    source = recovery_source(config={'maxTokens': output_limit}, api_rounds=[{
+        'round': 1, 'model': 'gpt-4o-mini',
+        'usage': {'prompt_tokens': prompt_tokens, 'completion_tokens': 1500},
+    }])
+    before = deepcopy(source.turn())
+    preview = _preview(flask_client, source)
+    assert preview['state'] == 'ready'
+    assert preview['budget']['maxTokens'] > prompt_tokens + output_limit
+    response = flask_client.post(source.url, json=_confirmation(preview))
+    assert response.status_code == 200, response.get_json()
+    config = executor_starts[0]['config']
+    owner = {'id': 'fresh-recovery', 'config': config, 'usage': {}, 'toolRounds': []}
+    lease = model_budget_admission(owner)(
+        input_tokens=prompt_tokens, max_output_tokens=output_limit)
+    assert lease is not None
+    lease.settle({'prompt_tokens': prompt_tokens, 'completion_tokens': 1})
+    assert owner.get('_executionActualsComplete') is not False
+    assert source.turn() == before
+
+
+def test_large_saved_context_is_counted_locally_even_without_a_provider_receipt(
+    flask_client, recovery_source, executor_starts,
+):
+    from lib.token_counter import count_tokens
+
+    original_task = 'Preserve the entire original user task. ' * 19000
+    source = recovery_source(source_input=original_task)
+    estimate = count_tokens([{'role': 'user', 'content': original_task}],
+                            model='gpt-4o-mini', mode='tiktoken')['tokens']
+    assert estimate > 100000
+    preview = _preview(flask_client, source)
+    assert preview['state'] == 'ready'
+    assert preview['budget']['maxTokens'] > estimate + 2048
+    assert executor_starts == []
+
+
+def test_a_saved_limit_too_small_for_one_request_is_blocked_before_authorization(
+    flask_client, recovery_source, executor_starts,
+):
+    source = recovery_source(config={
+        'maxTokens': 2048, 'executionLimits': {'max_tokens': 1000},
+    }, api_rounds=[{
+        'round': 1, 'model': 'gpt-4o-mini',
+        'usage': {'prompt_tokens': 5000, 'completion_tokens': 10},
+    }])
+    before = deepcopy(source.snapshot())
+    preview = _preview(flask_client, source)
+    assert (preview['state'], preview['reason']) == ('blocked', 'budget_insufficient')
+    response = flask_client.post(source.url, json=_confirmation(preview))
+    _assert_conflict(response, 'usage_recovery_blocked')
+    assert source.snapshot() == before and executor_starts == []
+
+
+@pytest.mark.parametrize(('operation', 'content'), [
+    ('continue', ''), ('checkpoint_resume', SAVED_OUTPUT),
+])
+def test_unconfirmed_settlement_still_accepts_an_ordinary_resume(
+    flask_client, recovery_source, executor_starts, operation, content,
+):
+    """A missing receipt must not cost the reader their unfinished task.
+
+    The conversation turn carries ``_unknownUsagePolicy=continue``, so the
+    restored checkpoint's incomplete accounting is recorded as a lower bound
+    and the plain resume still dispatches. A saved prose tail uses the
+    checkpoint anchor; only a prose-free tail can use ``continue``.
+    """
+    source = recovery_source(error_kind='bad_request', saved_output=content)
+    offered = [option['operation']
+               for option in source.turn()['settlement']['resumeOptions']]
+    assert operation in offered
+    response = flask_client.post(
+        f'/api/v4/conversations/{source.conversation_id}/turns/{source.turn_id}/attempts',
+        json={'commandId': f'resume-{uuid.uuid4().hex}', 'operation': operation,
+              'expectedProjectionRevision': source.turn()['projectionRevision'],
+              'config': {'model': 'gpt-4o-mini'}})
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()['attempt']['operation'] == operation
+    assert len(executor_starts) == 1
+    assert executor_starts[0]['config']['_unknownUsagePolicy'] == 'continue'
+
+
+def test_recovery_carries_original_objective_as_task_text_not_old_automation_authority(
+    flask_client, recovery_source, executor_starts,
+):
+    objective = 'Complete the reviewed source change, validate it and preserve existing user edits.'
+    source = recovery_source(config={'_goalObjective': objective})
+    response = flask_client.post(source.url, json=_confirmation(_preview(flask_client, source)))
+    assert response.status_code == 200, response.get_json()
+    accepted = response.get_json()
+    assert objective in accepted['submittedTurn']['projection']['content']
+    config = executor_starts[0]['config']
+    assert '_goalObjective' not in config and '_goalRunId' not in config
+    assert config['autopilot'] is False
+
+
+def test_recovery_model_context_keeps_original_task_and_tool_results_not_rejected_ciphertext(
+    flask_client, recovery_source, executor_starts,
+):
+    from lib.turn_lifecycle import build_api_messages
+
+    source = recovery_source(tool_rounds=[{
+        'toolName': 'read_files', 'toolCallId': 'saved-read',
+        'toolArgs': {'path': 'saved.txt'}, 'toolContent': 'Exact saved tool evidence.',
+        'status': 'done', 'roundNum': 1, 'llmRound': 0,
+        '_responsesItems': [
+            {'type': 'reasoning', 'id': 'rejected-reasoning', 'encrypted_content': 'bad-ciphertext'},
+            {'type': 'compaction', 'id': 'rejected-compaction', 'encrypted_content': 'bad-compaction'},
+        ],
+    }])
+    before = deepcopy(source.turn())
+    response = flask_client.post(source.url, json=_confirmation(_preview(flask_client, source)))
+    assert response.status_code == 200, response.get_json()
+    target = response.get_json()['turn']['turnId']
+    config = deepcopy(executor_starts[0]['config'])
+    messages = build_api_messages(source.conversation_id, target, config, user_id=1)
+    assert messages is not None
+    assert any(message.get('content') == 'Finish the existing task.' for message in messages)
+    assert any(message.get('content') == 'Exact saved tool evidence.' for message in messages)
+    assert not any(item.get('type') in {'reasoning', 'compaction'}
+                   for message in messages for item in message.get('_responses_items', []))
+    assert config['_modelReplayStatus'] == 'replay_disabled'
+    assert source.turn() == before
 
 
 def test_preview_does_not_increase_smaller_saved_limits(
@@ -638,8 +799,8 @@ def test_unconfirmed_tool_effect_or_background_work_blocks_recovery(
 
 @pytest.mark.parametrize('source_options', [
     {'usage_complete': True},
-    {'error_kind': 'generic'},
-], ids=['complete-usage', 'different-failure'])
+    {'usage_complete': True, 'error_kind': 'generic'},
+], ids=['complete-usage', 'different-failure-with-complete-usage'])
 def test_non_applicable_source_never_authorizes_new_work(
     flask_client, recovery_source, executor_starts, source_options,
 ):
@@ -771,3 +932,55 @@ def test_unknown_write_is_checked_against_real_file_publication_evidence(
     assert (staged.read_bytes() if staged.exists() else None) == before_stage
     with locked_intents(str(session)) as store:
         assert store.read() == [record]
+
+
+@pytest.mark.parametrize('mode', [
+    {},
+    {'autopilot': True},
+    {'autopilotEnabled': True},
+    {'activeFlow': 'goal'},
+    {'_unknownUsagePolicy': 'fence'},
+], ids=['chat', 'goal-mode', 'goal-mode-setting', 'flow', 'forged-fence'])
+def test_every_conversation_resume_continues_without_a_receipt(
+    flask_client, recovery_source, executor_starts, mode,
+):
+    """Goal Mode and Flow resumes keep going on a missing receipt, like chat.
+
+    ``recovery_source`` saves a Goal Mode run's automation config. Whatever
+    mode the resume selects, and whatever policy a request claims, the
+    conversation turn dispatches with the ``continue`` policy; an explicit
+    finite cap remains the only stop.
+    """
+    source = recovery_source(error_kind='bad_request')
+    # A saved prose tail resumes from the tool checkpoint; only a prose-free
+    # tail uses the bare ``continue`` operation. Both carry the same
+    # ``_unknownUsagePolicy=continue`` dispatch this test asserts, so resume
+    # through whichever operation the settlement offers.
+    offered = [option['operation']
+               for option in source.turn()['settlement']['resumeOptions']]
+    operation = 'continue' if 'continue' in offered else 'checkpoint_resume'
+    response = flask_client.post(
+        f'/api/v4/conversations/{source.conversation_id}/turns/{source.turn_id}/attempts',
+        json={'commandId': f'resume-{uuid.uuid4().hex}', 'operation': operation,
+              'expectedProjectionRevision': source.turn()['projectionRevision'],
+              'config': {'model': 'gpt-4o-mini', **mode}})
+    assert response.status_code == 200, response.get_json()
+    assert len(executor_starts) == 1
+    assert executor_starts[0]['config']['_unknownUsagePolicy'] == 'continue'
+
+
+def test_a_new_goal_mode_turn_continues_without_a_receipt(
+    flask_client, recovery_source, executor_starts,
+):
+    """A fresh Goal Mode run shares ordinary chat's unknown-usage policy."""
+    source = recovery_source(error_kind='bad_request')
+    response = flask_client.post(
+        f'/api/v4/conversations/{source.conversation_id}/turns',
+        json={'commandId': f'goal-{uuid.uuid4().hex}',
+              'inputTurn': {'content': 'Keep hardening the storage layer.'},
+              'config': {'model': 'gpt-4o-mini', 'autopilot': True}})
+    assert response.status_code == 200, response.get_json()
+    assert len(executor_starts) == 1
+    config = executor_starts[0]['config']
+    assert config['autopilot'] is True
+    assert config['_unknownUsagePolicy'] == 'continue'

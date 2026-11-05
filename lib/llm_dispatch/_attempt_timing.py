@@ -6,6 +6,7 @@ transport route/retry loops are intentionally included in this scope.
 import time
 import uuid
 
+from lib.error_envelope import _classify_exception
 from lib.log import get_logger
 from lib.llm.stream_result import ensure_provider_stream_result
 from lib.secret_envelope import secret_hint
@@ -28,6 +29,20 @@ def _key_hint(slot):
     By construction the hint can never operate as the credential; slots
     without key material (OAuth) emit nothing."""
     return secret_hint(getattr(slot, 'api_key', '') or '')[:64]
+
+
+def _envelope_kind(error):
+    """Closed error-envelope kind of a failed attempt, from the live exception.
+
+    The class name alone is ambiguous: a gateway 503 is raised as
+    RateLimitError only to reuse slot rotation, and the envelope calls it
+    upstream_error. Classification is diagnostic, so a classifier fault must
+    never replace the transport error this observer is reporting."""
+    try:
+        return _classify_exception(error)
+    except Exception as e:
+        logger.debug('[AttemptTiming] envelope kind unavailable: %s', e)
+        return ''
 
 
 class AttemptObserver:
@@ -64,9 +79,13 @@ class AttemptObserver:
         fields = dict(fields, durationMs=max(0, int(
             (time.monotonic() - started) * 1000)))
         if error is not None:
-            fields.update(status='aborted' if type(error).__name__ in
-                          ('AbortedError', 'CancelledError', 'GeneratorExit')
-                          else 'failed', errorKind=type(error).__name__[:160])
+            aborted = type(error).__name__ in (
+                'AbortedError', 'CancelledError', 'GeneratorExit')
+            fields.update(status='aborted' if aborted else 'failed',
+                          errorKind=type(error).__name__[:160])
+            envelope_kind = '' if aborted else _envelope_kind(error)
+            if envelope_kind:
+                fields['envelopeKind'] = envelope_kind
             code = getattr(error, 'status_code', None)
             if isinstance(code, int) and 0 < code <= 599:
                 fields['statusCode'] = code

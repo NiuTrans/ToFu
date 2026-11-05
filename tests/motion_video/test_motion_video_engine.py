@@ -176,13 +176,22 @@ def _fake_media(monkeypatch, *, render_ok=True):
     def fake_probe(path, **kw):
         idx = os.path.join(os.path.dirname(path), 'index.html')
         dur = 4.0
+        has_audio = False
         if os.path.isfile(idx):
             m = re.search(r'data-duration="([0-9.]+)"',
                           open(idx, encoding='utf-8').read())
             if m:
                 dur = float(m.group(1))
+        else:
+            sidecar = os.path.join(os.path.dirname(path), 'final.srt')
+            if os.path.isfile(sidecar):
+                with open(sidecar, encoding='utf-8') as stream:
+                    start, end = mv.total_span(mv.parse_srt(stream.read()))
+                dur = end - start
+            has_audio = any(os.path.isfile(os.path.join(os.path.dirname(path), name))
+                            for name in ('audio/narration.wav', 'audio_plan.json'))
         return {'codec': 'h264', 'width': 1080, 'height': 1440, 'fps': 30.0,
-                'duration': dur, 'has_audio': False}
+                'duration': dur, 'has_audio': has_audio}
     monkeypatch.setattr('lib.motion_video.probe_video', fake_probe)
 
     def fake_concat(inputs, output, **kw):
@@ -337,7 +346,8 @@ def test_engine_spec_gate_NEUTER(monkeypatch, tmp_path):
                         lambda path, **kw: {'codec': 'h264', 'width': 640,
                                             'height': 360, 'fps': 30.0,
                                             'duration': 2.0,
-                                            'has_audio': False})
+                                            'has_audio': os.path.basename(path) in (
+                                                'final.mp4', 'final.pending.mp4')})
     # Control: real gate → engine must fail.
     task = _engine_task(tmp_path)
     run_motion_task(task)
@@ -358,7 +368,7 @@ def test_engine_spec_gate_NEUTER(monkeypatch, tmp_path):
 def test_runtime_dedup_lifecycle():
     from lib.motion_video.runtime import (
         _motion_index_get,
-        _motion_index_register,
+        _production,
         _motion_runtime,
         _new_motion_task,
         _motion_task_id,
@@ -369,7 +379,7 @@ def test_runtime_dedup_lifecycle():
                             speed=None, alignment='loose', narration=True,
                             quality='draft', parallel=1, width=1080,
                             height=1440, user_id=TEST_OWNER_USER_ID)
-    _motion_index_register(key, tid)
+    _production.index_register(key, tid)
     assert _motion_index_get(key) == tid
     _motion_runtime.finish(tid, result={'ok': True})
     assert task['status'] == 'done'

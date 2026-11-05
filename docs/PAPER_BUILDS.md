@@ -23,8 +23,9 @@ Viewer subscriptions expire after four minutes unless renewed; detaching one
 viewer preserves other consumers. Abandoned work cancels cooperatively and
 compiler process groups stop before worker retirement or server shutdown.
 
-The launch probe sizes idle compiler reuse and a 64..512 MiB / 16..32-record
-reconstructible artifact cache; independent compile work starts on demand. Contract limits
+The fixed `TOFU_PAPER_BUILD_WORKERS` hint (4) sizes idle compiler reuse and the
+launch probe sizes a 64..512 MiB / 16..32-record reconstructible artifact
+cache; independent compile work starts on demand. Contract limits
 bound source, output, logs and compilation time. Stage and read leases protect
 live files from reclamation; publication rolls back without destroying the
 previous successful version. These files are reconstructible cache, separate
@@ -330,10 +331,10 @@ of rebasing a rewrite generated from older text onto the collaborator's changes.
 The complete operation, including clone/pull, is bounded to 120 seconds. Files
 and scalar inputs stay within 16 MiB; encoded requests and results are capped at
 52 MiB and 2 MiB. Oversized reads fail explicitly instead of returning truncated
-success. One launch observation supplies CPU affinity/quota, physical/cgroup
-memory and headroom, and free temporary-volume space. Personal Git memory is
-128..256 MiB; temporary workspace uses at most 1/64 of free disk and 256 MiB.
-Probe failures fall back to 128 MiB memory and 64 MiB disk. Explicit
+success. Git memory is a fixed 256 MiB that never follows the launch probe
+("Hardware never limits work" in `docs/RESOURCE_CONTROL.md`); its CPU and
+memory observations are diagnostic only. Temporary workspace uses at most 1/64
+of free disk and 256 MiB, or 64 MiB when free space is unknown. Explicit
 `TOFU_OVERLEAF_GIT_MEMORY_MIB` and `TOFU_OVERLEAF_GIT_WORKSPACE_MIB` overrides
 remain within 512 MiB and 256 MiB ceilings. Export and Git share the launch probe.
 
@@ -482,7 +483,8 @@ The first requested chunk is checked before headers, and later read failures
 abort the response. Reads and cleanup run outside the serving loop; cancellation
 joins the outstanding read before releasing its lease.
 
-Direct reads admit eight streams per launch-derived build worker, at most 32.
+Direct reads admit eight streams per `TOFU_PAPER_BUILD_WORKERS` hint, at most 32
+(32 with the fixed hint of 4).
 Each stream retains one 256 KiB decoded chunk and emits at most 64 KiB per HTTP
 iteration; new chunk reads stop before their 240-second lease expires. Chunk
 JSON uses the strict two-string shape and the stdlib decoder to avoid orjson's

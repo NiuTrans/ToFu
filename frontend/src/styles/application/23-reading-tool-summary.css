@@ -1,0 +1,382 @@
+/* Shared outer action language: each call is ONE quiet line, the step's
+ * intent and a single outcome at the row's end. Routine settled steps recede
+ * into the secondary ink; a running or unresolved step reads in primary ink
+ * and a failure keeps its error outcome. Everything else is one gesture away:
+ * - the exact identity (tool + target), per-call debug anchors, command and
+ *   output folds and the disclosure caret show on row hover or keyboard focus
+ *   and while the step is open; touch devices keep the controls visible;
+ * - a long intent clamps to one line (two on phones) without overflowing;
+ *   its full text is the title tooltip and the step's evidence;
+ * - reasoning between calls folds into the step whose result it reads.
+ * Native evidence owners retain their bodies and controls. ui/tool-summary.ts
+ * places identity directly after the intent; round controls belong to
+ * ui/round-outline.ts. Every tool family, including unknown MCP fallbacks,
+ * consumes this one type, spacing and state vocabulary, and every ink comes
+ * from the --tool-row-* roles in 00-design-tokens.css. */
+
+.conversation-surface [data-action-summary] {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 var(--space-3);
+  min-width: 0;
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-1) var(--conversation-process-inset);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+  color: var(--tool-row-intent-ink);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-process-font-size);
+  line-height: var(--leading-title);
+}
+.conversation-surface [data-action-summary]:hover { background: var(--turn-process-hover); }
+/* Every process label shares the turn's one text edge with the role,
+ * narration and answer (timeline reading contract), so rows carry no leading
+ * glyph: the step's identity names the exact tool. */
+.conversation-surface [data-action-summary]::before { content: none; }
+.conversation-surface .thinking-block .thinking-header > :is(.thinking-icon, .thinking-state-dot) { display: none; }
+.conversation-surface :is([data-action-summary], .ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header) > :is(.ptool-icon, .ptool-cmd-icon) { display: none; }
+.conversation-surface [data-action-summary] :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title, .ptc-title, .sw-header-title) {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  /* One visual line that still wraps internally: it never overflows the row
+   * and stays selectable; ui/tool-summary.ts keeps the full text as title. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
+  color: inherit;
+  font-family: var(--font-ui);
+  font-size: var(--conversation-process-font-size);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-title);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  /* The clamped line fills to the edge: a long path or file name is cut at
+   * the ellipsis instead of jumping whole to the hidden second line. */
+  word-break: break-all;
+}
+/* A command standing in for a missing description reads as code. */
+.conversation-surface [data-action-summary] .ptool-cmd-desc-command {
+  font-family: var(--font-mono), var(--cjk-fallback), monospace;
+  font-size: var(--conversation-font-size-meta);
+}
+/* An intent that carries structured evidence (Repo Map parameters, saved-
+ * output search terms) keeps its owners' contract: visible, wrapping and
+ * selectable before expansion, never clamped to a hover-only summary. */
+.conversation-surface [data-action-summary] :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title, .ptc-title):has(.ptool-repo-map-params, .ptool-artifact-queries, .ptool-artifact-header) {
+  display: block;
+  -webkit-line-clamp: none;
+  overflow: visible;
+  word-break: normal;
+}
+/* A human-guidance question is the step itself: never clamped or quieted. */
+.conversation-surface [data-action-summary] .hg-title {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-process-font-size);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-title);
+  overflow-wrap: anywhere;
+}
+/* Heads with their own meta line (program, checklist, swarm) keep wrapping;
+ * the intent holds most of the first line. */
+.conversation-surface [data-action-summary] > :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title, .ptc-title) {
+  max-width: 72%;
+}
+/* Secondary text gives way first: it shrinks a thousand times faster than the
+ * intent, so a long preview or command never squeezes "发给 X 的消息" or a
+ * step's intent down to an ellipsis. */
+.conversation-surface [data-action-summary] > :is(.conversation-tool-identity, .ptool-line-preview) {
+  flex: 0 1000 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--tool-row-meta-ink);
+  font-family: var(--font-mono), var(--cjk-fallback), monospace;
+  font-size: var(--conversation-font-size-meta);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-title);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-surface [data-action-summary] > .ptool-line-preview { font-family: var(--font-ui); }
+/* The exact identity is the reader's to ask for: an open step, or a step that
+ * needs attention. At rest, and while a step runs (its glyph, intent and live
+ * output already say what is happening), it lives in the intent's tooltip.
+ * Hover never reveals it, because inline identity takes width from the
+ * intent and would reflow the text under the pointer mid-selection. */
+.conversation-surface [data-action-summary] > .conversation-tool-identity {
+  display: none;
+  /* When asked for, the exact tool name stays legible. */
+  min-width: min(16ch, 30%);
+  max-width: 45%;
+}
+.conversation-surface :is(details[open] > [data-action-summary], [data-action-summary]:has([aria-expanded="true"])) > .conversation-tool-identity,
+.conversation-surface .conversation-block[data-action-state="attention"] [data-action-summary] > .conversation-tool-identity {
+  display: block;
+}
+/* An open command pane already prints the exact command. */
+.conversation-surface .ptool-cmd-block.cmd-open > [data-action-summary] > .conversation-tool-identity { display: none; }
+.conversation-surface [data-action-summary]:has(> .ptool-line-preview) > .conversation-tool-identity { display: none; }
+/* A free-standing swarm sheet keeps its own inner inset (inside an open tool
+ * panel it takes the card's call columns, 23-reading-tool-panel.css). Its
+ * title already names the operation, so the exact identity (spawn_agents)
+ * lives only in the title tooltip. Its verdict (.sw-status-pill) is its
+ * outcome; ui/round-outline.ts appends no generic state beside it. */
+.conversation-surface .conversation-block .sw-header[data-action-summary] {
+  padding: var(--space-1) var(--space-3);
+  border-radius: 0;
+}
+.conversation-surface .conversation-block .sw-header[data-action-summary] > .conversation-tool-identity { display: none; }
+.conversation-surface details[open] > [data-action-summary] > .ptool-line-preview { visibility: hidden; }
+/* Outcomes (owner report 2026-11-01): a chip in a row always means "look
+ * here". Telemetry (tokens, characters), counts and routine status words are
+ * metadata: quiet tabular text in the meta ink and the UI face, never the
+ * accent and never monospace, which belongs to code (the exact identity).
+ * A routine success is a bare check. Only failures, warnings, skips and
+ * refusals draw a chip, from the shared --chip-* palette. */
+.conversation-surface [data-action-summary] :is(.ptool-badge, .ptool-cmd-status, .ptool-line-status, .conversation-tool-card__chip, .conversation-action-state) {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  animation: none;
+  color: var(--tool-row-meta-ink);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-meta);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-title);
+  white-space: nowrap;
+}
+.conversation-surface [data-action-summary] .ptool-line-status--ok { color: var(--tool-row-ok-ink); }
+/* A successful command's outcome is a check, not "exit 0": the code stays in
+ * the accessibility tree and in the open step's evidence. */
+.conversation-surface .ptool-cmd-ok [data-action-summary] .ptool-cmd-status {
+  color: var(--tool-row-ok-ink);
+  font-size: 0;
+}
+.conversation-surface .ptool-cmd-ok [data-action-summary] .ptool-cmd-status::before {
+  content: "\2713" / "";
+  font-size: var(--conversation-font-size-meta);
+  font-weight: var(--weight-semibold);
+}
+.conversation-surface [data-action-summary] :is(.ptool-badge-warn, .ptool-badge-skip, .ptool-badge-interrupted, .ptool-cmd-timeout .ptool-cmd-status, .ptool-cmd-notrun .ptool-cmd-status, .ptool-cmd-interrupted .ptool-cmd-status),
+.conversation-surface [data-action-summary] :is(.ptool-badge-err, .ptool-badge-reject, .ptool-line-status--err, .conversation-tool-card__chip--err, .ptool-cmd-err .ptool-cmd-status) {
+  padding: 0 var(--space-2);
+  border: var(--control-edge-inset) solid var(--chip-warn-border);
+  border-radius: var(--radius-pill);
+  background: var(--chip-warn-bg);
+  color: var(--chip-warn-color);
+  font-size: var(--conversation-font-size-caption);
+  font-weight: var(--weight-medium);
+  line-height: var(--space-5);
+}
+.conversation-surface [data-action-summary] :is(.ptool-badge-err, .ptool-badge-reject, .ptool-line-status--err, .conversation-tool-card__chip--err, .ptool-cmd-err .ptool-cmd-status) {
+  border-color: var(--chip-err-border);
+  background: var(--chip-err-bg);
+  color: var(--chip-err-color);
+}
+.conversation-surface [data-action-summary] :is(.ptool-badge, .conversation-tool-card__chip, .conversation-tool-card__badge)[hidden] { display: none; }
+.conversation-surface [data-action-summary] .ptool-error-reason {
+  margin: 0;
+  padding: 0;
+  color: var(--error-text);
+  font-size: var(--conversation-font-size-meta);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-title);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.conversation-surface [data-action-summary] .ptool-error-reason[data-tool-effect-outcome="not_started"] {
+  color: var(--text-secondary);
+}
+.conversation-surface [data-action-summary] > .ptool-error-reason {
+  flex: 0 0 100%;
+  order: 10;
+}
+.conversation-surface [data-action-summary] .ptool-cmd-fold {
+  min-height: 0;
+  padding: 0 var(--space-2);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--leading-title);
+}
+.conversation-surface .ptool-cmd-header[data-action-summary] .ptool-cmd-meta { flex: 0 0 auto; }
+.conversation-surface .ptool-cmd-header[data-action-summary] .ptool-cmd-timer { display: none; }
+/* Step controls sit before the outcome (as command rows already do), so a
+ * hidden debug anchor never pushes "970 tok" off the shared end column. */
+.conversation-surface [data-action-summary] > .ptool-row-ctl { order: 1; }
+.conversation-surface [data-action-summary] > :is(.ptool-badge, .ptool-line-status, .conversation-action-state, .conversation-tool-card__chip, .conversation-tool-card__badge) { order: 2; }
+
+/* Call rows reserve one end lane for the disclosure caret, so every outcome
+ * (exit codes, counts, "created") ends on the same column, caret or not. */
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary],
+.conversation-surface .sw-inbox-row-header {
+  position: relative;
+  padding-inline-end: var(--space-6);
+}
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary]::after,
+.conversation-surface .sw-inbox-row-header::after {
+  position: absolute;
+  inset-inline-end: var(--space-2);
+  top: calc(50% - var(--space-1));
+  margin: 0;
+}
+@media (min-width: 601px) {
+  .conversation-surface :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary] { flex-wrap: nowrap; }
+  .conversation-surface :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary] > :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title) {
+    flex: 1 1 auto;
+    max-width: none;
+  }
+  /* Beside secondary text the intent never shrinks: a sub-pixel share of
+   * the overflow would push its last glyph onto the clamped second line
+   * ("发给 X 的消…"). It caps at a share of the row instead. */
+  .conversation-surface :is(details[open] > [data-action-summary], [data-action-summary]:has([aria-expanded="true"]), [data-action-summary]:has(> .ptool-line-preview)) > :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title) {
+    flex-shrink: 0;
+    max-width: 62%;
+  }
+  /* A failure's reason takes its own line under the step. */
+  .conversation-surface :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary]:has(> .ptool-error-reason) { flex-wrap: wrap; }
+  .conversation-surface :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary]:has(> .ptool-error-reason) > :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title) { flex-basis: 0; }
+}
+
+/* Step controls (command/output folds, per-call debug anchors) and disclosure
+ * carets are chrome: pointer readers get them on row hover or keyboard focus.
+ * They stay in layout and focusable, so nothing moves when they appear; an
+ * expanded fold stays visible as its own close control. */
+@media (hover: hover) {
+  .conversation-surface .sw-header[data-action-summary] > .sw-header-right > .ri-tool-anchor:not(:hover, :focus-visible) {
+    opacity: 0;
+    transition: opacity var(--motion-fast) var(--ease-standard);
+  }
+  .conversation-surface .sw-header[data-action-summary]:is(:hover, :focus-within) > .sw-header-right > .ri-tool-anchor:not(:hover, :focus-visible) {
+    opacity: 0.6;
+  }
+  .conversation-surface [data-action-summary] :is(.ptool-row-ctl, .ptool-cmd-fold:not([aria-expanded="true"])),
+  .conversation-surface :is([data-action-summary], .sw-inbox-row-header)::after,
+  .conversation-surface .thinking-header > .thinking-toggle {
+    opacity: 0;
+    transition: opacity var(--motion-fast) var(--ease-standard);
+  }
+  .conversation-surface [data-action-summary]:is(:hover, :focus-within) :is(.ptool-row-ctl, .ptool-cmd-fold),
+  .conversation-surface :is([data-action-summary], .sw-inbox-row-header):is(:hover, :focus-visible)::after,
+  .conversation-surface details[open] > :is([data-action-summary], .sw-inbox-row-header)::after,
+  .conversation-surface [data-action-summary][aria-expanded="true"]::after,
+  .conversation-surface :is(.thinking-header:hover, .thinking-header:focus-visible, .thinking-block[open] > .thinking-header) > .thinking-toggle {
+    opacity: 1;
+  }
+}
+
+.conversation-surface .conversation-block[data-process-edge][data-action-state="active"] { background: transparent; }
+.conversation-surface .conversation-block:is([data-action-state="active"], [data-action-state="attention"], [data-action-state="background"]) [data-action-summary] :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title, .ptc-title, .sw-header-title) {
+  color: var(--tool-row-intent-ink-live);
+}
+.conversation-surface .conversation-block[data-action-state="active"] [data-action-summary] :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title, .ptc-title, .sw-header-title) {
+  font-weight: var(--weight-medium);
+}
+/* A step that needs the reader shows its whole intent, with the exact
+ * identity on its own line beneath it instead of competing for width. */
+.conversation-surface .conversation-block[data-action-state="attention"] [data-action-summary] :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title, .ptc-title, .sw-header-title) {
+  -webkit-line-clamp: none;
+}
+.conversation-surface .conversation-block[data-action-state="attention"] [data-action-summary] { flex-wrap: wrap; }
+.conversation-surface .conversation-block[data-action-state="attention"] [data-action-summary] > :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title) { flex: 1 1 0; }
+.conversation-surface .conversation-block[data-action-state="attention"] [data-action-summary] > .conversation-tool-identity {
+  flex: 1 1 100%;
+  order: 10;
+  max-width: none;
+}
+.conversation-surface .conversation-block[data-action-state="attention"] [data-action-summary] .conversation-action-state { color: var(--error-text); }
+
+.conversation-surface .thinking-label { font-weight: var(--weight-regular); }
+/* Injection rows read like a step: the delivered agent list is detail. */
+.conversation-surface .sw-inbox-row-header .ptool-text { font-weight: var(--weight-regular); }
+.conversation-surface .sw-inbox-row-header .sw-inbox-row-ids { display: none; }
+.conversation-surface details[open] > .sw-inbox-row-header .sw-inbox-row-ids { display: inline; }
+@media (hover: hover) {
+  .conversation-surface .sw-inbox-row-header:is(:hover, :focus-visible) .sw-inbox-row-ids { display: inline; }
+}
+
+.conversation-round-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-4);
+  margin-block: var(--space-3) var(--space-1);
+  padding-inline: var(--conversation-process-inset);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+}
+.conversation-round-label { flex: 1 1 auto; font-weight: var(--weight-medium); }
+/* The finder is a quiet field on the heading line: a hairline underline at
+ * rest, the full field on hover/focus or while it holds a query. */
+.conversation-round-search {
+  min-width: 0;
+  width: 12em;
+  max-width: 100%;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-block-end: var(--control-edge-inset) solid var(--turn-rule);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--conversation-font-size-meta);
+}
+.conversation-round-search:is(:hover, :focus, :not(:placeholder-shown)) {
+  border: var(--control-edge-inset) solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+.conversation-round-search::placeholder { color: var(--text-tertiary); }
+.conversation-round-matches {
+  flex: 0 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-height: 50vh;
+  overflow: auto;
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+}
+.conversation-round-matches[hidden] { display: none; }
+.conversation-round-matches > button {
+  display: block;
+  padding: var(--space-1) 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: start;
+  font: inherit;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.conversation-round-matches > button:hover { text-decoration: underline; }
+.conversation-surface :is(.conversation-round-search, .conversation-round-matches > button):focus-visible {
+  outline: calc(2 * var(--control-edge-inset)) solid var(--accent);
+  outline-offset: var(--space-1);
+}
+
+@media (max-width: 600px) {
+  .conversation-round-search { flex: 1 1 100%; width: 100%; }
+  .conversation-surface [data-action-summary] { column-gap: var(--space-2); }
+  /* Phone rows keep the compact ramp. Identity and preview move under the
+   * intent, and a long outcome wraps rather than squeezing the intent. */
+  .conversation-surface [data-action-summary] > :is(.conversation-tool-identity, .ptool-line-preview) { flex-basis: 100%; max-width: none; order: 10; }
+  .conversation-surface [data-action-summary] > :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title, .ptc-title) {
+    max-width: none;
+    flex: 1 1 12em;
+    -webkit-line-clamp: 2;
+  }
+}

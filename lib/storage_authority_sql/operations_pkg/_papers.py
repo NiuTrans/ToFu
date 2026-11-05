@@ -17,6 +17,12 @@ from lib.paper.contracts import (
     PAPER_TRANSLATION_MAX_OUTPUT_BYTES,
     PAPER_TRANSLATION_MAX_OUTPUT_CHARS,
 )
+from lib.paper.report_metadata import (
+    REPORT_TOKEN_FIELDS,
+    merge_report_second_pass,
+    recompute_report_totals,
+    recorded_usage_integer,
+)
 from lib.storage.errors import StorageError
 from lib.storage_authority_sql.adapters.base import Session
 
@@ -362,54 +368,7 @@ def _paper_report_second_pass_merge(
         current = {}
     if not isinstance(current, dict):
         current = {}
-    passes = current.get("secondPasses")
-    if not isinstance(passes, dict):
-        passes = {}
-        current["secondPasses"] = passes
-    passes[name] = entry
-
-    token_keys = (
-        "prompt_tokens",
-        "completion_tokens",
-        "cache_read_tokens",
-        "cache_write_tokens",
-        "reasoning_tokens",
-    )
-
-    def integer(value: Any) -> int:
-        return (
-            int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
-        )
-
-    total = {
-        key: integer(
-            current.get(
-                key.split("_")[0] + "".join(part.title() for part in key.split("_")[1:])
-            )
-        )
-        for key in token_keys
-    }
-    for pass_meta in passes.values():
-        usage = pass_meta.get("usage") if isinstance(pass_meta, Mapping) else None
-        if isinstance(usage, Mapping):
-            for key in token_keys:
-                total[key] += integer(usage.get(key))
-    current["totalUsage"] = total
-
-    def cost(value: Any) -> float:
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
-        return 0.0
-
-    for suffix in ("Cny", "Usd"):
-        field = f"cost{suffix}"
-        total_cost = cost(current.get(field)) + sum(
-            cost(item.get(field))
-            for item in passes.values()
-            if isinstance(item, Mapping)
-        )
-        if total_cost:
-            current[f"totalCost{suffix}"] = total_cost
+    merge_report_second_pass(current, name, entry)
 
     session.execute(
         "UPDATE paper_reports SET meta = ? "
@@ -431,16 +390,9 @@ def _paper_report_second_pass_accumulate(
     raw_usage = payload.get("usage")
     if not isinstance(raw_usage, Mapping):
         raise StorageError("database_protocol_error", "Invalid paper second-pass usage")
-    token_keys = (
-        "prompt_tokens",
-        "completion_tokens",
-        "cache_read_tokens",
-        "cache_write_tokens",
-        "reasoning_tokens",
-    )
     usage = {
         key: _integer(raw_usage, key, default=0, minimum=0, maximum=10_000_000_000)
-        for key in token_keys
+        for key in REPORT_TOKEN_FIELDS
     }
     incremental_costs = {}
     for suffix in ("Cny", "Usd"):
@@ -479,15 +431,10 @@ def _paper_report_second_pass_accumulate(
     if not isinstance(previous_usage, Mapping):
         previous_usage = {}
 
-    def integer(value: Any) -> int:
-        return (
-            int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
-        )
-
     entry["usage"] = {
-        key: integer(previous_usage.get(key)) + usage[key] for key in token_keys
+        key: recorded_usage_integer(previous_usage.get(key)) + usage[key] for key in REPORT_TOKEN_FIELDS
     }
-    entry["calls"] = integer(entry.get("calls")) + 1
+    entry["calls"] = recorded_usage_integer(entry.get("calls")) + 1
     for field, increment in incremental_costs.items():
         previous = entry.get(field)
         prior = (
@@ -498,37 +445,7 @@ def _paper_report_second_pass_accumulate(
         if prior or increment:
             entry[field] = prior + increment
 
-    total_usage = {
-        key: integer(
-            current.get(
-                key.split("_")[0] + "".join(part.title() for part in key.split("_")[1:])
-            )
-        )
-        for key in token_keys
-    }
-    for pass_meta in passes.values():
-        pass_usage = pass_meta.get("usage") if isinstance(pass_meta, Mapping) else None
-        if isinstance(pass_usage, Mapping):
-            for key in token_keys:
-                total_usage[key] += integer(pass_usage.get(key))
-    current["totalUsage"] = total_usage
-    for suffix in ("Cny", "Usd"):
-        field = f"cost{suffix}"
-        body = current.get(field)
-        body_cost = (
-            float(body)
-            if isinstance(body, (int, float)) and not isinstance(body, bool)
-            else 0.0
-        )
-        total_cost = body_cost + sum(
-            float(item.get(field) or 0)
-            for item in passes.values()
-            if isinstance(item, Mapping)
-            and isinstance(item.get(field), (int, float))
-            and not isinstance(item.get(field), bool)
-        )
-        if total_cost:
-            current[f"totalCost{suffix}"] = total_cost
+    recompute_report_totals(current)
 
     session.execute(
         "UPDATE paper_reports SET meta = ? "

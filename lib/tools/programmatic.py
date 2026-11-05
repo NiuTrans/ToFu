@@ -12,14 +12,16 @@ Tool Search dual-backend precedent):
 * ``native_openai`` — the hosted V8 runtime on the public OpenAI Responses
   API (GPT-5.6 family only).  The model's program runs upstream and its
   child calls stream back with ``caller.type='program'``.
-* ``local`` — ordinary direct tools plus bounded JSON ``execute_tools.calls``
-  by default. Explicit ``programmaticCalling=on`` also exposes JavaScript via
-  ``execute_program``; child calls share the ordinary execution boundary.
+* ``local`` — ordinary direct tools, bounded JSON ``execute_tools.calls`` and
+  the first-class JavaScript action ``execute_program``; child calls share the
+  ordinary execution boundary.
 
-Model names, sizes and context windows do not prove JavaScript proficiency.
-``auto`` therefore uses the batch surface locally, including after a hosted
-fallback. ``TOFU_PTC_TIER=program|batch`` is an explicit operator/benchmark
-override; ``off`` still disables program execution regardless of that override.
+The default ``auto`` and explicit ``on`` both select the program tier locally,
+including after a hosted fallback (owner decision 2026-11-02, recorded in
+docs/contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md). Repeated JavaScript authoring
+failures move one task to the batch surface. ``TOFU_PTC_TIER=program|batch`` is
+an explicit operator/benchmark override; ``off`` still disables program
+execution regardless of that override.
 """
 
 from __future__ import annotations
@@ -135,15 +137,16 @@ def programmatic_tier(model: str = '', *, provider_id: str = '',
                       requested: str = 'auto') -> str:
     """Select the local interface from explicit policy, never model-name guesses.
 
-    Unverified local routes default to JSON batches. ``on`` explicitly opts in
-    to JavaScript. The environment override supports controlled evaluations;
-    callers separately enforce inactive/off modes. Model/provider arguments
-    remain for compatibility and deliberately do not select proficiency.
+    Active modes (default ``auto`` and ``on``) expose JavaScript; per-task
+    authoring failures, not model names, move a task to JSON batches. The
+    environment override supports controlled evaluations; callers separately
+    enforce inactive/off modes. Model/provider arguments remain for
+    compatibility and deliberately do not select proficiency.
     """
     override = str(os.environ.get('TOFU_PTC_TIER') or '').strip().lower()
     if override in _PROGRAMMATIC_TIERS:
         return override
-    return 'program' if requested == 'on' else 'batch'
+    return 'program' if requested in ACTIVE_PROGRAMMATIC_MODES else 'batch'
 
 
 def local_ptc_guidance(tier: str, eligible: list[str] | tuple | set) -> str:

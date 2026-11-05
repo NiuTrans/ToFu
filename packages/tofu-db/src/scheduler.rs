@@ -41,10 +41,6 @@ fn conflict(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, message)
 }
 
-fn resource_exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
-
 fn owner_key(
     transaction: &AuthorityTransaction,
     namespace: &str,
@@ -249,7 +245,7 @@ fn write_count(
         transaction,
         count_key(transaction)?,
         u64::try_from(count)
-            .map_err(|_| resource_exhausted("scheduler task count overflow"))?
+            .map_err(|_| crate::resource_exhaustion::accounting_overflow("scheduler task count overflow"))?
             .to_le_bytes()
             .to_vec(),
     )
@@ -277,7 +273,7 @@ fn scan_task_index(
         let complete = page.len() < page_limit;
         if page.is_empty() { break; }
         let successor = page.last().unwrap().0.clone().exact_range()?.1;
-        output.try_reserve(page.len()).map_err(|_| resource_exhausted("scheduler index allocation failed"))?;
+        output.try_reserve(page.len()).map_err(|_| crate::resource_exhaustion::reservation_failure("scheduler index allocation failed"))?;
         output.extend(page);
         if complete || successor >= *end { break; }
         start = successor;
@@ -428,7 +424,7 @@ fn validate_document(
     let encoded = serde_json::to_vec(document)
         .map_err(|_| invalid_data("scheduler task document cannot be encoded"))?;
     if encoded.len() > MAX_SCHEDULER_TASK_DOCUMENT_BYTES {
-        return Err(resource_exhausted(
+        return Err(crate::resource_exhaustion::domain_bound(
             "scheduler task document exceeds its bound",
         ));
     }
@@ -1422,7 +1418,7 @@ pub(crate) fn execute(
             let encoded = serde_json::to_vec(&document)
                 .map_err(|_| invalid_input("scheduler poll cannot be encoded"))?;
             if encoded.len() > crate::generated_tofudb_ir::MAX_SCHEDULER_POLL_DOCUMENT_BYTES {
-                return Err(resource_exhausted(
+                return Err(crate::resource_exhaustion::domain_bound(
                     "scheduler poll document exceeds its bound",
                 ));
             }

@@ -1,6 +1,6 @@
 """Route-missing HTTP 400 = model-level dispatch exclusion (mtgrjqtuhzi4i9).
 
-The sankuai AIGC gateway answers an unserved model with HTTP 400
+The example-corp AIGC gateway answers an unserved model with HTTP 400
 "不支持的模型类型(model=…)". Before this fix the dispatch layer filed it as
 a generic deterministic 400: pair-exclusion burnt every remaining key of the
 dead model, and — arriving LAST — it masked the preferred model's actionable
@@ -13,16 +13,24 @@ dispatch handlers exclude the whole MODEL for the rest of the dispatch and
 process-suppress the provider/wire-model route until dispatcher rebuild.
 Catalog or settings refresh rebuilds that pool; the settings cell probe shares
 the same marker table.
+
+The same verdict arrives as HTTP 404 when the gateway stops serving a model
+over the request's wire protocol (2026-10-31: "模型 [deepseek-v4.1-flash-m17]
+不支持协议 ANTHROPIC_MESSAGES" ended every cheap translation that picked it).
+Only that explicit phrase types a 404 as route-missing; every other 404 stays
+request-scoped.
 """
 
 import pytest
 
 import lib.llm_dispatch.api as api
 from lib.llm.llm_errors import (
+    GATEWAY_PROTOCOL_UNSUPPORTED_MARKERS,
     ROUTE_MISSING_MARKERS,
     BadRequestError,
     ModelRouteMissingError,
     PermissionError_,
+    RequestScopedError,
     _classify_http_error,
 )
 
@@ -63,6 +71,46 @@ class TestRouteMissingClassifier:
         assert provider_probe._ROUTE_MISSING_MARKERS is ROUTE_MISSING_MARKERS
 
 
+_DEAD_WIRE = 'deepseek-v4.1-flash-m17'
+# The gateway's answer once it stopped serving that model over Anthropic
+# Messages, as the transport hands it to the classifier.
+_PROTOCOL_UNSUPPORTED_404 = (
+    'API HTTP 404: {"type":"error","error":{"type":"not_found_error",'
+    '"message":"模型 [deepseek-v4.1-flash-m17] 不支持协议 ANTHROPIC_MESSAGES"}}')
+
+
+class TestProtocolUnsupported404Classifier:
+
+    def test_gateway_protocol_unsupported_404_is_route_missing(self):
+        with pytest.raises(ModelRouteMissingError) as exc:
+            _classify_http_error(404, _PROTOCOL_UNSUPPORTED_404, _DEAD_WIRE,
+                                 '[T]')
+        assert exc.value.model == _DEAD_WIRE
+        assert exc.value.status_code == 404
+        assert '不支持协议 ANTHROPIC_MESSAGES' in str(exc.value)
+
+    @pytest.mark.parametrize('marker', GATEWAY_PROTOCOL_UNSUPPORTED_MARKERS)
+    def test_every_protocol_marker_matches(self, marker):
+        with pytest.raises(ModelRouteMissingError):
+            _classify_http_error(404, '{"message":"%s"}' % marker, 'm', '[T]')
+
+    @pytest.mark.parametrize('status,body', [
+        (404, '{"detail":"Not Found"}'),
+        (404, '{"type":"error","error":{"type":"not_found_error",'
+              '"message":"Not Found"}}'),
+        # The broad HTTP 400 route-missing markers never type a 404.
+        (404, '{"error":{"code":"model_not_found",'
+              '"message":"The model `m` does not exist"}}'),
+        # Only the 404 branch reads the protocol verdict.
+        (422, '{"message":"模型 [m] 不支持协议 ANTHROPIC_MESSAGES"}'),
+    ])
+    def test_other_bodies_stay_request_scoped(self, status, body):
+        with pytest.raises(RequestScopedError) as exc:
+            _classify_http_error(
+                status, 'API HTTP %d: %s' % (status, body), 'm', '[T]')
+        assert exc.value.status_code == status
+
+
 class TestRouteMissingRuntimeSuppression:
 
     def test_unserved_wire_id_is_disabled_until_dispatcher_rebuild(self):
@@ -71,16 +119,16 @@ class TestRouteMissingRuntimeSuppression:
 
         first = Slot(
             key_name='k0', api_key='fake-k0', model='moonshotai/kimi-k3',
-            provider_id='sankuai', capabilities={'text'})
+            provider_id='default', capabilities={'text'})
         second = Slot(
             key_name='k1', api_key='fake-k1', model='moonshotai/kimi-k3',
-            provider_id='sankuai', capabilities={'text'})
+            provider_id='default', capabilities={'text'})
         dispatcher = LLMDispatcher()
         dispatcher.slots = [first, second]
         dispatcher._initialized = True
 
         changed = dispatcher.mark_model_route_missing(
-            provider_id='sankuai', model='moonshotai/kimi-k3',
+            provider_id='default', model='moonshotai/kimi-k3',
             error='不支持的模型类型')
 
         assert changed == 2
@@ -173,7 +221,7 @@ class _RoutingDispatcher:
 
 class TestChatRouteMissingExclusion:
 
-    def test_dead_model_keys_are_skipped_and_first_400_wins(self, monkeypatch):
+    def test_payload_rejection_excludes_wire_and_preserves_first_400(self, monkeypatch):
         kimi_schema = BadRequestError(
             'invalid tool schema: conflicting keywords in anyOf with parent')
         nano_route = ModelRouteMissingError(
@@ -193,14 +241,11 @@ class TestChatRouteMissingExclusion:
             api.dispatch_chat(
                 [{'role': 'user', 'content': 'hi'}],
                 prefer_model='kimi-k3', max_retries=6, log_prefix='[T]')
-        # The actionable rejection wins over the last-ditch fallback's 400.
         assert exc.value is kimi_schema
-        # k1:gpt-5.4-nano is NEVER attempted: the first route-missing 400
-        # excluded the whole model (pre-fix: pair-exclusion would try it).
         assert dispatcher.attempts == [
-            ('k1', 'kimi-k3'), ('k0', 'kimi-k3'), ('k0', 'gpt-5.4-nano')]
-        assert slots[3].released == 0
-        assert all(s.released == 1 for s in slots[:3])
+            ('k1', 'kimi-k3'), ('k0', 'gpt-5.4-nano')]
+        assert all(s.released == 0 for s in slots[1::2])
+        assert all(s.released == 1 for s in slots[::2])
 
 
 # ── dispatch_stream: same exclusion on the streaming lane ────────────
@@ -257,3 +302,161 @@ class TestStreamRouteMissingExclusion:
         assert (msg, finish) == ('ok-text', 'stop')
         # k0:dead-m never tried — one route-missing 400 excluded the model.
         assert dispatcher.attempts == [('k1', 'dead-m'), ('k1', 'good-m')]
+
+
+# ── HTTP 404 protocol verdict on the real dispatcher (cheap failover) ─
+
+_TRANSLATION = '这是忠实翻译。'
+_ROUTE_MISSING_400 = (
+    'API HTTP 400: {"status":400,"message":"不支持的模型类型(model=%s)"}'
+    % _DEAD_WIRE)
+
+
+def _cheap_pool(monkeypatch, *, healthy=True):
+    """Install a real dispatcher whose best cheap slot is the dead wire."""
+    from lib.llm_dispatch.dispatcher import LLMDispatcher
+    from lib.llm_dispatch.slot import Slot
+
+    monkeypatch.setattr('lib.key_stats.is_key_enabled', lambda *a, **k: True)
+    dead = Slot(key_name='k0', api_key='sk-test-k0', model=_DEAD_WIRE,
+                provider_id='default', protocol='anthropic',
+                capabilities={'text', 'cheap'}, latency_ema=500)
+    good = Slot(key_name='k1', api_key='sk-test-k1', model='good-cheap',
+                provider_id='default', capabilities={'text', 'cheap'},
+                latency_ema=5000)
+    dispatcher = LLMDispatcher()
+    dispatcher.slots = [dead, good] if healthy else [dead]
+    dispatcher._initialized = True
+    monkeypatch.setattr(api, 'get_dispatcher', lambda: dispatcher)
+    monkeypatch.setattr(
+        'lib.llm_dispatch.factory.get_dispatcher', lambda: dispatcher)
+    return dead, good
+
+
+def _cheap_transport(monkeypatch, *, stream, status=404,
+                     error_body=_PROTOCOL_UNSUPPORTED_404):
+    """Fake provider: the dead wire answers ``status``; others translate."""
+    calls = []
+
+    def _answer(model):
+        calls.append(model)
+        if model == _DEAD_WIRE:
+            _classify_http_error(status, error_body, model, '[T]')
+
+    def _chat(*args, **kwargs):
+        _answer(kwargs.get('model'))
+        return _TRANSLATION, {'prompt_tokens': 3, 'completion_tokens': 2}
+
+    def _stream(body, **kwargs):
+        _answer(body.get('model'))
+        return (_TRANSLATION, 'stop',
+                {'prompt_tokens': 3, 'completion_tokens': 2})
+
+    if stream:
+        monkeypatch.setattr('lib.llm.stream_chat', _stream)
+    else:
+        monkeypatch.setattr('lib.llm.chat', _chat)
+    return calls
+
+
+class TestProtocolUnsupported404CheapFailover:
+    """Translation dispatches capability='cheap' with no fixed model.
+
+    The slot that answered the protocol verdict is excluded for the request
+    and suppressed for later ones; the next cheap slot serves the same
+    payload instead of the request ending as a request-scoped 404.
+    """
+
+    @pytest.mark.parametrize('stream', [False, True], ids=['chat', 'stream'])
+    def test_dead_wire_is_excluded_and_next_cheap_slot_serves(
+            self, monkeypatch, stream):
+        dead, good = _cheap_pool(monkeypatch)
+        calls = _cheap_transport(monkeypatch, stream=stream)
+        dispatch = api.dispatch_stream if stream else api.dispatch_chat
+
+        for _request in range(2):
+            result = dispatch([{'role': 'user', 'content': 'hi'}],
+                              capability='cheap', max_retries=3,
+                              log_prefix='[T]')
+            assert result[0] == _TRANSLATION
+
+        # One verdict: the dead wire is sent once, never again.
+        assert calls == [_DEAD_WIRE, 'good-cheap', 'good-cheap']
+        assert not dead.is_available and good.is_available
+        # Routing evidence, not slot or key health.
+        assert (dead.consecutive_errors, dead.total_errors,
+                dead.cooldown_until, dead.inflight) == (0, 0, 0, 0)
+
+    @pytest.mark.parametrize('status,error_body,notice_status', [
+        (404, _PROTOCOL_UNSUPPORTED_404, 404),
+        (400, _ROUTE_MISSING_400, 400),
+    ], ids=['protocol-404', 'route-missing-400'])
+    def test_retry_notice_carries_the_verdict_status(
+            self, monkeypatch, status, error_body, notice_status):
+        _cheap_pool(monkeypatch)
+        calls = _cheap_transport(monkeypatch, stream=True, status=status,
+                                 error_body=error_body)
+        notices = []
+
+        api.dispatch_stream([{'role': 'user', 'content': 'hi'}],
+                            capability='cheap', max_retries=3,
+                            log_prefix='[T]',
+                            on_retry=lambda **kw: notices.append(kw))
+
+        assert calls == [_DEAD_WIRE, 'good-cheap']
+        assert [(n['attempt_model'], n['status_code']) for n in notices] == [
+            (_DEAD_WIRE, notice_status)]
+
+    def test_translation_completes_on_the_next_cheap_slot(self, monkeypatch):
+        from lib.translate.engine import _engine
+
+        dead, _good = _cheap_pool(monkeypatch)
+        calls = _cheap_transport(monkeypatch, stream=False)
+        monkeypatch.setattr('lib.mt_provider.is_mt_configured', lambda: False)
+
+        translated, _usage = _engine._translate_one_chunk(
+            'This sentence needs a Chinese translation.',
+            'Translate faithfully.', source='English', target='Chinese',
+            overall_deadline=60, use_cache=False)
+
+        assert translated == _TRANSLATION
+        assert calls == [_DEAD_WIRE, 'good-cheap']
+        assert not dead.is_available
+
+
+class TestRouteMissingEnvelope:
+    """An escaped verdict still renders with its true HTTP status."""
+
+    def test_escaped_protocol_404_still_renders_not_found(self, monkeypatch):
+        from lib.error_envelope import from_exception
+
+        _cheap_pool(monkeypatch, healthy=False)
+        calls = _cheap_transport(monkeypatch, stream=False)
+
+        with pytest.raises(ModelRouteMissingError) as exc:
+            api.dispatch_chat([{'role': 'user', 'content': 'hi'}],
+                              capability='cheap', max_retries=3,
+                              log_prefix='[T]')
+
+        assert calls == [_DEAD_WIRE]
+        envelope = from_exception(exc.value, model=_DEAD_WIRE,
+                                  context='request-rejected',
+                                  source='llm-stream')
+        assert envelope['kind'] == 'not_found'
+        assert envelope['titleKey'] == 'err.k.not_found.title'
+        assert envelope['statusCode'] == 404
+        assert 'HTTP 404' in envelope['message']
+        assert 'HTTP 400' not in envelope['message']
+
+    def test_route_missing_400_envelope_is_unchanged(self):
+        from lib.error_envelope import from_exception
+
+        with pytest.raises(ModelRouteMissingError) as exc:
+            _classify_http_error(400, _ROUTE_MISSING_400, _DEAD_WIRE, '[T]')
+
+        envelope = from_exception(exc.value, model=_DEAD_WIRE)
+        # Byte-identical to the plain payload rejection it always rendered as.
+        assert envelope == from_exception(
+            BadRequestError(str(exc.value)), model=_DEAD_WIRE)
+        assert envelope['kind'] == 'bad_request'
+        assert 'statusCode' not in envelope

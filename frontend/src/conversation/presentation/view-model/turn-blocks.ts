@@ -31,6 +31,8 @@ import {
 } from './projection-sidecars';
 import { integrateContextProvenance } from '../context-provenance';
 
+import { isDuplicatedInboxDeliveryNote } from '../context-note-grouping';
+
 import { toolEffectNotice } from '../tool-effect-presentation';
 
 import { selectTerminalPresentationSegments } from './terminal-segment-presentation';
@@ -93,19 +95,14 @@ export function selectTurnBlocks(
   const claims = new Map<string, number>();
 
   const richRoundsBySegment = richToolRoundsBySegment(turn, displaySegments);
-  /* The inbox lane renders through the durable ``_inboxInjects`` chip (the
-   * ``<swarm-update>`` card). Turns persisted before the note was retired
-   * also carry an ``inbox_delivery`` ``context-injection`` system_note with
-   * the SAME payload — suppress it so the intervention does not render twice
-   * (the chip is the single owner). */
-  const hasInboxChip = Boolean(turn.projection._inboxInjects?.length);
+  const inboxReceipts = turn.projection._inboxInjects ?? [];
+  const peerReceipts = turn.projection._peerInjects ?? [];
   const hasPrograms = (turn.projection.toolRounds ?? []).some(round => round._programSynthetic === true);
   const blocks = displaySegments.flatMap((segment, index): ConversationBlockViewModel[] => {
     if (turn.projection.compaction && segment.type === 'text'
         && (segment.terminal || segment.deliverable)) return [];
-    if (hasInboxChip && segment.type === 'system_note'
-        && segment.noteKind === 'context-injection'
-        && segment.reason === 'inbox_delivery') return [];
+    if (segment.type === 'system_note'
+        && isDuplicatedInboxDeliveryNote(segment, inboxReceipts, peerReceipts)) return [];
     // Preserve the no-parent fast path for long historical execute_tools logs.
     if (!hasPrograms && segment.type === 'tool_use' && segment.name === 'execute_tools') return [];
     const block = blockFromSegment(

@@ -61,6 +61,12 @@ function check(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+// Automatic send retries keep their production policy; only backoff is collapsed.
+const productionRetryTransientSendStartup = retryTransientSendStartup;
+retryTransientSendStartup = (options) => productionRetryTransientSendStartup({
+  retryDelayMs: () => 0, ...options,
+});
+
 const composerInput = { value: '', style: { height: '44px' } };
 const pdfProgress = { style: { display: 'block' } };
 const composerConv = {
@@ -77,6 +83,7 @@ let clientId = 0;
 let followLatestCalls = 0;
 
 document = {
+  querySelector: () => null,
   getElementById(id) {
     if (id === 'userInput') return composerInput;
     if (id === 'pdfProgress') return pdfProgress;

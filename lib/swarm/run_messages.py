@@ -48,9 +48,17 @@ def validate_message(*, content, kind, key) -> None:
         raise RunMessageError('message_invalid_identity', 'idempotency_key must be valid UTF-8') from error
 
 
-def binding_for(parent: dict, spec, swarm_key: str) -> dict:
+def binding_for(parent: dict, spec, swarm_key: str, *, run_id: str) -> dict:
+    """Bind a recipient to its durable run, never to the session's live parent.
+
+    Restart Continue keeps the launch task ID as the run identity while the
+    accepted Continue task becomes the execution parent. A run derived from
+    ``parent['id']`` would name a mailbox that no durable run owns.
+    """
     from lib.conversations.project_identity import normalize_project_path
     from lib.tasks_pkg.manager import task_user_id
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError('Exact-run mailbox identity requires the durable run ID')
     cfg = parent.get('config') or {}
     if parent.get('_transientRuntime') or parent.get('_invocationStorageFree'):
         raise RunMessageError('durable_storage_required', 'Child messaging requires durable application storage')
@@ -58,14 +66,24 @@ def binding_for(parent: dict, spec, swarm_key: str) -> dict:
         'owner': task_user_id(parent), 'tenant': str(parent.get('_tenant_id') or ''),
         'conversationId': str(parent.get('convId') or ''),
         'projectPath': normalize_project_path(cfg.get('canonicalProjectPath') or cfg.get('projectPath') or ''),
-        'swarmKey': swarm_key, 'swarmRunId': str(parent['id']), 'agentId': str(spec.id),
+        'swarmKey': swarm_key, 'swarmRunId': run_id, 'agentId': str(spec.id),
         'retainedAgentId': spec.retained_agent_id, 'retainedRunId': spec.retained_run_id,
         'retainedScope': spec.retained_scope,
     }
 
 
-def validate_target(binding: dict, *, active_retained: bool = True) -> None:
-    """Revalidate ownership/scope when sending AND consuming, not from text."""
+def validate_target(binding: dict, *, active_retained: bool = True,
+                    outcome_admitted: bool = False) -> None:
+    """Revalidate ownership/scope when sending AND consuming, not from text.
+
+    ``outcome_admitted`` is reserved for ``validate_round_target``: this exact
+    binding already passed the complete check earlier in the same model round.
+    It skips only the durable child-outcome evaluation; conversation scope, run
+    identity, session state, coordinator liveness and retained assignment
+    are still revalidated, so concurrent Stop/cancel/supersede stays fenced.
+    Every check is one compact session/agent state read; it never pages the
+    session's agent checkpoints, so its cost is independent of team history.
+    """
     from lib.conversations.project_identity import normalize_project_path
     from lib.conversations.repository import ConversationRepository
     if binding['conversationId']:
@@ -76,7 +94,8 @@ def validate_target(binding: dict, *, active_retained: bool = True) -> None:
             raise RunMessageError('message_scope_unavailable', 'Original conversation/project scope is no longer available')
     if active_retained:
         from lib.swarm.persistence import load_session
-        row = load_session(binding['swarmKey'], required=True)
+        row = load_session(binding['swarmKey'], required=True,
+                           agent_id=binding['agentId'])
         coordinator = binding['agentId'] == binding['swarmRunId']
         if (row is None or row.get('task_id') != binding['swarmRunId']
                 or row.get('status') in {'quarantined', 'cancelled'}
@@ -87,10 +106,11 @@ def validate_target(binding: dict, *, active_retained: bool = True) -> None:
             # message. The root's existing task lifecycle fences consumption.
             from lib.swarm.team_messages import validate_coordinator
             validate_coordinator(binding)
-        for agent in row.get('agents') or []:
-            if agent.get('agent_id') == binding['agentId'] and agent.get('status') not in {'running', 'pending', 'interrupted'}:
-                RunMessageRepository(binding).close()
-                raise RunMessageError('message_run_ended', 'Durable child outcome already ended this run')
+        if not outcome_admitted:
+            for agent in row.get('agents') or []:
+                if agent.get('agent_id') == binding['agentId'] and agent.get('status') not in {'running', 'pending', 'interrupted'}:
+                    RunMessageRepository(binding).close()
+                    raise RunMessageError('message_run_ended', 'Durable child outcome already ended this run')
     if active_retained and binding['retainedAgentId']:
         from lib.swarm.retained_repository import RetainedAgentRepository
         found = RetainedAgentRepository(binding['owner'], tenant_id=binding['tenant']).get(
@@ -98,6 +118,30 @@ def validate_target(binding: dict, *, active_retained: bool = True) -> None:
         if (found is None or found[0].get('state') != 'busy'
                 or found[0].get('run_id') != binding['retainedRunId']):
             raise RunMessageError('message_run_superseded', 'Retained assignment was reset, abandoned or superseded')
+
+
+ROUND_TARGET_FIELD = '_swarmMessageRoundTarget'
+
+
+def validate_round_target(task: dict, binding: dict, *, round_num) -> None:
+    """Evaluate the durable child outcome at most once per model round.
+
+    Consumption checks of one round (injection, each prepared provider send,
+    input acknowledgement) share the first complete check of that exact
+    binding; every later check still runs ``validate_target`` with only the
+    outcome evaluation admitted. Another round, a changed binding or an unknown
+    round number always performs the complete check. A failed check records
+    nothing.
+    """
+    exact_round = isinstance(round_num, int) and not isinstance(round_num, bool) and round_num >= 0
+    admitted = task.get(ROUND_TARGET_FIELD)
+    if (exact_round and isinstance(admitted, dict) and admitted.get('round') == round_num
+            and admitted.get('binding') == binding):
+        validate_target(binding, outcome_admitted=True)
+        return
+    validate_target(binding)
+    if exact_round:
+        task[ROUND_TARGET_FIELD] = {'round': round_num, 'binding': copy.deepcopy(binding)}
 
 
 def mailbox_key(owner: int, tenant: str, conversation_id: str, run_id: str, agent_id: str) -> str:
@@ -239,6 +283,8 @@ class RunMessageRepository:
 def inject_messages(task: dict, messages: list[dict], round_num: int) -> None:
 
     task.pop('_swarmMessageAttemptIds', None)
+    # Each round starts with a complete target check; nothing carries over.
+    task.pop(ROUND_TARGET_FIELD, None)
     binding = task.get('_swarmMessageBinding')
     if not binding or task.get('aborted'):
         return
@@ -246,7 +292,7 @@ def inject_messages(task: dict, messages: list[dict], round_num: int) -> None:
     if not can_append_injection(messages):
         return
     try:
-        validate_target(binding)
+        validate_round_target(task, binding, round_num=round_num)
         repository = RunMessageRepository(binding)
         value, _ = repository.load()
         candidates = [m for m in value['messages'] if m['state'] == 'submitted']
@@ -290,7 +336,7 @@ def confirm_input(task: dict, *, round_num: int) -> None:
     if not binding or not ids:
         return
     try:
-        validate_target(binding)
+        validate_round_target(task, binding, round_num=round_num)
         RunMessageRepository(binding).confirm(ids, child_task_id=task['id'], round_num=round_num)
         task.pop('_swarmMessageAttemptIds', None)
     except Exception:

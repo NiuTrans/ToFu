@@ -287,7 +287,7 @@ def main(argv: list[str]) -> int:
         "",
         "## Reproducible build",
         "1. git checkout the commit recorded in data/tofudb-release-v0.2.0-manifest.md",
-        "2. cd packages/tofu-db  (its .cargo/config.toml pins the devtoolset-8 toolchain)",
+        "2. cd packages/tofu-db  (needs a C compiler accepting -Wdate-time, gcc >= 4.9; export CC to pick one)",
         "3. cargo build --release            # strip=false; link-time stripping is unsafe",
         "4. python3 packages/tofu-db/scripts/release_package.py --binary packages/tofu-db/target/release/tofu-db \\",
         "       --manifest data/tofudb-release-v0.2.0-manifest.md \\",

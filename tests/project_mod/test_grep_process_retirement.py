@@ -1,6 +1,5 @@
 """Search cleanup traverses only owned children and reaps on every exit path."""
 import os
-from pathlib import Path
 import subprocess
 import sys
 import threading
@@ -14,32 +13,23 @@ pytestmark = pytest.mark.unit
 
 def test_descendant_walk_reads_all_owned_threads_without_global_scan(monkeypatch):
     visited = []
-    tree = {'10': {'10': '20', '11': '30'}, '20': {'20': '40'},
-            '30': {'30': ''}, '40': {'40': '10'}}
+    tree = {'10': {'10': b'20', '11': b'30'}, '20': {'20': b'40'},
+            '30': {'30': b''}, '40': {'40': b'10'}}
 
-    class Entries:
-        def __init__(self, names):
-            self.names = names
-
-        def __enter__(self):
-            from types import SimpleNamespace
-            return iter(SimpleNamespace(name=name) for name in self.names)
-
-        def __exit__(self, *args):
-            pass
-
-    def scan(path):
+    def list_threads(path):
         visited.append(path)
         parts = path.split('/')
         assert parts[-1] == 'task' and len(parts) == 4
-        return Entries(tree[parts[2]])
+        return list(tree[parts[2]])
 
     def read(path):
         parts = str(path).split('/')
+        assert parts[-1] == 'children'
         return tree[parts[2]][parts[4]]
 
-    monkeypatch.setattr(process_group.os, 'scandir', scan)
-    monkeypatch.setattr(Path, 'read_text', read)
+    monkeypatch.setattr(process_group, '_kernel_lists_children', lambda: True)
+    monkeypatch.setattr(process_group.os, 'listdir', list_threads)
+    monkeypatch.setattr(process_group, '_read_child_list', read)
     assert set(process_group.descendant_pids(10)) == {20, 30, 40}
     assert len(visited) == 4
 

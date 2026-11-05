@@ -1364,3 +1364,152 @@ fn selected_retry_reference_commits_abort_without_http() {
     assert!(p.0.wait().unwrap().success());
     assert_eq!(listener.accept().unwrap_err().kind(),std::io::ErrorKind::WouldBlock);
 }
+
+/// Stdout frames on a channel so a test can assert that a frame does not arrive.
+fn frames(stdout: std::process::ChildStdout) -> std::sync::mpsc::Receiver<Value> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { return };
+            if sender.send(serde_json::from_str(&line).unwrap()).is_err() {
+                return;
+            }
+        }
+    });
+    receiver
+}
+fn reply(input: &mut std::process::ChildStdin, value: Value) {
+    writeln!(input, "{value}").unwrap();
+    input.flush().unwrap();
+}
+fn concurrent_config(endpoint: String) -> Value {
+    let mut c = config(endpoint);
+    c["tools"] = json!({"write":{"name":"write","permission":"write","contractVersion":"tofu.tool-contract/v2","arguments_schema":{"type":"object"}}});
+    c["approval_control"] = json!({"receipts":8,"identity_bytes":65536});
+    c["round_control"] = json!(true);
+    c["tool_sibling_control"] = json!(true);
+    c["concurrent_tool_dispatch"] = json!(true);
+    c["tool_result_join"] = json!(true);
+    c["deadline_ms"] = json!(10000);
+    c
+}
+fn writes(stream: &mut TcpStream) {
+    request(stream);
+    let calls: Vec<Value> = [("w0", "a"), ("w1", "b"), ("w2", "a")].iter().enumerate()
+        .map(|(index, (id, path))| json!({"index":index,"id":id,"type":"function",
+            "function":{"name":"write","arguments":json!({"path":path}).to_string()}}))
+        .collect();
+    response(stream, json!({"tool_calls":calls}), "tool_calls");
+}
+#[test]
+fn concurrent_writes_start_together_and_keep_the_host_call_order() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let c = concurrent_config(format!("http://{}/chat", listener.local_addr().unwrap()));
+    let provider = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        writes(&mut stream);
+        let replay = request(&mut stream);
+        response(&mut stream, json!({"content":"written"}), "stop");
+        replay
+    });
+    let mut process = Process(Command::new(env!("CARGO_BIN_EXE_tofu-native"))
+        .args(["run-http-agent", "65536"]).stdin(Stdio::piped())
+        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+    let mut input = process.0.stdin.take().unwrap();
+    reply(&mut input, c.clone());
+    let output = frames(process.0.stdout.take().unwrap());
+    let next = || output.recv_timeout(Duration::from_secs(5)).unwrap();
+    let version = c["version"].clone();
+    for round in 0..2 {
+        let reserve = next();
+        assert_eq!((reserve["type"].as_str(), reserve["round"].as_u64()), (Some("round_request"), Some(round)));
+        reply(&mut input, json!({"version":version,"type":"round_decision","request_id":reserve["request_id"],"approved":true}));
+        let settled = next();
+        assert_eq!(settled["type"], "round_settled");
+        let order = if round == 0 { json!({"w2":["w0"]}) } else { json!({}) };
+        reply(&mut input, json!({"version":version,"type":"round_ack","request_id":settled["request_id"],"accepted":true,"tool_order":order}));
+        if round == 1 {
+            break;
+        }
+        for id in ["w0", "w1", "w2"] {
+            let approval = next();
+            assert_eq!((approval["type"].as_str(), approval["call_id"].as_str()), (Some("approval_request"), Some(id)));
+            reply(&mut input, json!({"version":version,"type":"approval_decision","request_id":approval["request_id"],"decision":"human"}));
+        }
+        // Both independent writes are published before either one has a reply.
+        let first: Vec<Value> = (0..2).map(|_| next()).collect();
+        let mut started: Vec<&str> = first.iter().map(|f| f["model_call_id"].as_str().unwrap()).collect();
+        started.sort_unstable();
+        assert_eq!(started, ["w0", "w1"]);
+        let request_id = |id: &str| first.iter().find(|f| f["model_call_id"] == id).unwrap()["request_id"].clone();
+        reply(&mut input, json!({"version":version,"type":"tool_result","request_id":request_id("w1"),"content":"done w1"}));
+        assert!(output.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a same-target write started before its predecessor finished");
+        reply(&mut input, json!({"version":version,"type":"tool_result","request_id":request_id("w0"),"content":"done w0"}));
+        let third = next();
+        assert_eq!((third["type"].as_str(), third["model_call_id"].as_str()), (Some("tool_request"), Some("w2")));
+        reply(&mut input, json!({"version":version,"type":"tool_result","request_id":third["request_id"],"content":"done w2"}));
+    }
+    let terminal = next();
+    assert_eq!(terminal["status"], "done", "{terminal}");
+    assert!(process.0.wait().unwrap().success());
+    let replay = provider.join().unwrap();
+    let results: Vec<&str> = replay["messages"].as_array().unwrap().iter()
+        .filter(|row| row["role"] == "tool").map(|row| row["tool_call_id"].as_str().unwrap()).collect();
+    assert_eq!(results, ["w0", "w1", "w2"]);
+}
+#[test]
+fn concurrent_dispatch_requires_round_sibling_control_and_excludes_qualification() {
+    for field in ["round_control", "tool_sibling_control", "parallel_tool_names"] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut c = concurrent_config(format!("http://{}/chat", listener.local_addr().unwrap()));
+        if field == "parallel_tool_names" {
+            c[field] = json!([]);
+        } else {
+            c.as_object_mut().unwrap().remove(field);
+        }
+        let mut process = Process(Command::new(env!("CARGO_BIN_EXE_tofu-native"))
+            .args(["run-http-agent", "65536"]).stdin(Stdio::piped())
+            .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+        writeln!(process.0.stdin.as_mut().unwrap(), "{c}").unwrap();
+        let mut text = String::new();
+        BufReader::new(process.0.stdout.take().unwrap()).read_to_string(&mut text).unwrap();
+        assert!(!process.0.wait().unwrap().success(), "{field}");
+        assert!(text.is_empty(), "{field}: {text}");
+        assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+    }
+}
+#[test]
+fn concurrent_dispatch_refuses_a_missing_or_forward_call_order_before_any_tool() {
+    for order in [None, Some(json!({"w0":["w1"]})), Some(json!({"foreign":[]}))] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let c = concurrent_config(format!("http://{}/chat", listener.local_addr().unwrap()));
+        let provider = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            writes(&mut stream);
+        });
+        let mut process = Process(Command::new(env!("CARGO_BIN_EXE_tofu-native"))
+            .args(["run-http-agent", "65536"]).stdin(Stdio::piped())
+            .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+        let mut input = process.0.stdin.take().unwrap();
+        reply(&mut input, c.clone());
+        let output = frames(process.0.stdout.take().unwrap());
+        let next = || output.recv_timeout(Duration::from_secs(5)).unwrap();
+        let reserve = next();
+        reply(&mut input, json!({"version":c["version"],"type":"round_decision","request_id":reserve["request_id"],"approved":true}));
+        let settled = next();
+        assert_eq!(settled["type"], "round_settled");
+        let mut ack = json!({"version":c["version"],"type":"round_ack","request_id":settled["request_id"],"accepted":true});
+        if let Some(order) = &order {
+            ack["tool_order"] = order.clone();
+        }
+        reply(&mut input, ack);
+        let terminal = next();
+        assert_eq!(terminal["status"], "error", "{order:?}: {terminal}");
+        assert!(!process.0.wait().unwrap().success());
+        provider.join().unwrap();
+    }
+}

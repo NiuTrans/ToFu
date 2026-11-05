@@ -11,8 +11,9 @@ Pipeline (pure, no I/O besides the caller's filesystem):
     list_files()        → git ls-files / rg --files / pruned walk
     collect_tags()      → per-file (name, line, kind, signature) via
                           tree-sitter (grep_ast) with a Python-ast fast path
-    rank_files()        → PageRank over the reference graph (networkx)
-                          using the sumbd filter (aider)
+    rank_files()        → PageRank over the reference graph (optional native
+                          kernel, else dependency-free Python) using the
+                          sumbd filter (aider)
     render_map()        → complete aider-style indented table;
                           shared L0 owns model-context overflow
 

@@ -1,0 +1,2139 @@
+{
+  "responsibility": "Shared UI terminology for derived locales. Authors add a term with a disambiguating note; scripts/translate_i18n_locales.py fills and reviews missing translations, and every translation request follows them.",
+  "terms": [
+    {
+      "term": "Tofu",
+      "note": "product name; never translate",
+      "translations": {
+        "ko": "Tofu",
+        "ja": "Tofu",
+        "de": "Tofu",
+        "ru": "Tofu",
+        "fr": "Tofu"
+      }
+    },
+    {
+      "term": "model",
+      "note": "an LLM such as Claude or GPT",
+      "translations": {
+        "ko": "모델",
+        "ja": "モデル",
+        "de": "Modell",
+        "ru": "модель",
+        "fr": "modèle"
+      }
+    },
+    {
+      "term": "provider",
+      "note": "a company/service that supplies models and the credentials to call them (settings tab \"Providers\")",
+      "translations": {
+        "ko": "공급자",
+        "ja": "プロバイダー",
+        "de": "Anbieter",
+        "ru": "провайдер",
+        "fr": "fournisseur"
+      }
+    },
+    {
+      "term": "endpoint",
+      "note": "a provider's API access point / base URL",
+      "translations": {
+        "ko": "엔드포인트",
+        "ja": "エンドポイント",
+        "de": "Endpunkt",
+        "ru": "конечная точка",
+        "fr": "point de terminaison"
+      }
+    },
+    {
+      "term": "credential",
+      "note": "a stored secret (API key, token) used to call a provider",
+      "translations": {
+        "ko": "자격 증명",
+        "ja": "認証情報",
+        "de": "Zugangsdaten",
+        "ru": "учетные данные",
+        "fr": "identifiant"
+      }
+    },
+    {
+      "term": "Credential Vault",
+      "note": "encrypted store for the user's machine credentials",
+      "translations": {
+        "ko": "자격 증명 보관소",
+        "ja": "認証情報保管庫",
+        "de": "Zugangsdatentresor",
+        "ru": "Хранилище учетных данных",
+        "fr": "Coffre d’identifiants"
+      }
+    },
+    {
+      "term": "API key",
+      "note": "secret key for an API",
+      "translations": {
+        "ko": "API 키",
+        "ja": "APIキー",
+        "de": "API-Schlüssel",
+        "ru": "ключ API",
+        "fr": "clé API"
+      }
+    },
+    {
+      "term": "subscription",
+      "note": "a paid consumer plan login (Claude Pro, ChatGPT Plus) used instead of an API key",
+      "translations": {
+        "ko": "구독",
+        "ja": "サブスクリプション",
+        "de": "Abonnement",
+        "ru": "подписка",
+        "fr": "abonnement"
+      }
+    },
+    {
+      "term": "OAuth Login",
+      "note": "settings tab for signing in to subscriptions",
+      "translations": {
+        "ko": "OAuth 로그인",
+        "ja": "OAuthログイン",
+        "de": "OAuth-Anmeldung",
+        "ru": "Вход через OAuth",
+        "fr": "Connexion OAuth"
+      }
+    },
+    {
+      "term": "quota",
+      "note": "usage allowance of a key or subscription",
+      "translations": {
+        "ko": "할당량",
+        "ja": "クォータ",
+        "de": "Kontingent",
+        "ru": "квота",
+        "fr": "quota"
+      }
+    },
+    {
+      "term": "rate limit",
+      "note": "provider request-rate throttling",
+      "translations": {
+        "ko": "속도 제한",
+        "ja": "レート制限",
+        "de": "Ratenlimit",
+        "ru": "ограничение частоты запросов",
+        "fr": "limite de débit"
+      }
+    },
+    {
+      "term": "route",
+      "note": "model routing path that selects a provider deployment",
+      "translations": {
+        "ko": "라우트",
+        "ja": "ルート",
+        "de": "Route",
+        "ru": "маршрут",
+        "fr": "route"
+      }
+    },
+    {
+      "term": "fallback model",
+      "note": "model used automatically when the main model fails",
+      "translations": {
+        "ko": "대체 모델",
+        "ja": "フォールバックモデル",
+        "de": "Ersatzmodell",
+        "ru": "резервная модель",
+        "fr": "modèle de secours"
+      }
+    },
+    {
+      "term": "default model",
+      "note": "model used when the user picks none",
+      "translations": {
+        "ko": "기본 모델",
+        "ja": "既定のモデル",
+        "de": "Standardmodell",
+        "ru": "модель по умолчанию",
+        "fr": "modèle par défaut"
+      }
+    },
+    {
+      "term": "Thinking Depth",
+      "note": "setting for how much the model reasons before answering (Low/Medium/High/Max)",
+      "translations": {
+        "ko": "사고 깊이",
+        "ja": "思考の深さ",
+        "de": "Denktiefe",
+        "ru": "Глубина размышлений",
+        "fr": "Profondeur de réflexion"
+      }
+    },
+    {
+      "term": "reasoning",
+      "note": "the model's visible thinking process",
+      "translations": {
+        "ko": "추론",
+        "ja": "推論",
+        "de": "Denkprozess",
+        "ru": "рассуждения",
+        "fr": "raisonnement"
+      }
+    },
+    {
+      "term": "conversation",
+      "note": "a chat thread in the sidebar",
+      "translations": {
+        "ko": "대화",
+        "ja": "会話",
+        "de": "Unterhaltung",
+        "ru": "чат",
+        "fr": "conversation"
+      }
+    },
+    {
+      "term": "New Chat",
+      "note": "button/title for a new conversation",
+      "translations": {
+        "ko": "새 채팅",
+        "ja": "新しいチャット",
+        "de": "Neuer Chat",
+        "ru": "Новый чат",
+        "fr": "Nouveau chat"
+      }
+    },
+    {
+      "term": "turn",
+      "note": "one user message plus the full assistant reply to it",
+      "translations": {
+        "ko": "턴",
+        "ja": "ターン",
+        "de": "Durchgang",
+        "ru": "ход",
+        "fr": "tour"
+      }
+    },
+    {
+      "term": "round",
+      "note": "one model call inside a turn; a turn has several rounds when tools are used",
+      "translations": {
+        "ko": "라운드",
+        "ja": "ラウンド",
+        "de": "Runde",
+        "ru": "итерация",
+        "fr": "itération"
+      }
+    },
+    {
+      "term": "message",
+      "note": "a chat message",
+      "translations": {
+        "ko": "메시지",
+        "ja": "メッセージ",
+        "de": "Nachricht",
+        "ru": "сообщение",
+        "fr": "message"
+      }
+    },
+    {
+      "term": "prompt",
+      "note": "text instruction sent to a model",
+      "translations": {
+        "ko": "프롬프트",
+        "ja": "プロンプト",
+        "de": "Prompt",
+        "ru": "промпт",
+        "fr": "invite"
+      }
+    },
+    {
+      "term": "system prompt",
+      "note": "hidden instructions that configure the model",
+      "translations": {
+        "ko": "시스템 프롬프트",
+        "ja": "システムプロンプト",
+        "de": "System-Prompt",
+        "ru": "системный промпт",
+        "fr": "invite système"
+      }
+    },
+    {
+      "term": "token",
+      "note": "unit of LLM text (pricing and context size), not an auth token",
+      "translations": {
+        "ko": "토큰",
+        "ja": "トークン",
+        "de": "Token",
+        "ru": "токен",
+        "fr": "jeton"
+      }
+    },
+    {
+      "term": "context",
+      "note": "information sent to the model with a request; also the model's context window",
+      "translations": {
+        "ko": "컨텍스트",
+        "ja": "コンテキスト",
+        "de": "Kontext",
+        "ru": "контекст",
+        "fr": "contexte"
+      }
+    },
+    {
+      "term": "context window",
+      "note": "maximum tokens a model can take",
+      "translations": {
+        "ko": "컨텍스트 창",
+        "ja": "コンテキストウィンドウ",
+        "de": "Kontextfenster",
+        "ru": "контекстное окно",
+        "fr": "fenêtre de contexte"
+      }
+    },
+    {
+      "term": "compaction",
+      "note": "summarizing older conversation history to free context space",
+      "translations": {
+        "ko": "압축",
+        "ja": "圧縮",
+        "de": "Komprimierung",
+        "ru": "сжатие контекста",
+        "fr": "compactage"
+      }
+    },
+    {
+      "term": "summary",
+      "note": "condensed text produced by compaction or reports",
+      "translations": {
+        "ko": "요약",
+        "ja": "要約",
+        "de": "Zusammenfassung",
+        "ru": "сводка",
+        "fr": "résumé"
+      }
+    },
+    {
+      "term": "memory",
+      "note": "knowledge the assistant learned and reuses across conversations",
+      "translations": {
+        "ko": "메모리",
+        "ja": "メモリ",
+        "de": "Erinnerung",
+        "ru": "память",
+        "fr": "mémoire"
+      }
+    },
+    {
+      "term": "My Context",
+      "note": "page with the user's personal preferences and standing instructions for the assistant",
+      "translations": {
+        "ko": "내 컨텍스트",
+        "ja": "マイコンテキスト",
+        "de": "Mein Kontext",
+        "ru": "Мой контекст",
+        "fr": "Mon contexte"
+      }
+    },
+    {
+      "term": "working facts",
+      "note": "source-bound facts the agent verified and keeps during a conversation",
+      "translations": {
+        "ko": "확인된 사실",
+        "ja": "確認済みの事実",
+        "de": "Belegte Fakten",
+        "ru": "рабочие факты",
+        "fr": "faits vérifiés"
+      }
+    },
+    {
+      "term": "skill",
+      "note": "an installable workflow guide that teaches the agent a task (feature name \"Skills\")",
+      "translations": {
+        "ko": "스킬",
+        "ja": "スキル",
+        "de": "Skill",
+        "ru": "навык",
+        "fr": "compétence"
+      }
+    },
+    {
+      "term": "tool",
+      "note": "a function the agent can call (read file, run command, search…)",
+      "translations": {
+        "ko": "도구",
+        "ja": "ツール",
+        "de": "Tool",
+        "ru": "инструмент",
+        "fr": "outil"
+      }
+    },
+    {
+      "term": "tool call",
+      "note": "one invocation of a tool by the model",
+      "translations": {
+        "ko": "도구 호출",
+        "ja": "ツール呼び出し",
+        "de": "Tool-Aufruf",
+        "ru": "вызов инструмента",
+        "fr": "appel d’outil"
+      }
+    },
+    {
+      "term": "MCP",
+      "note": "Model Context Protocol; keep as MCP",
+      "translations": {
+        "ko": "MCP",
+        "ja": "MCP",
+        "de": "MCP",
+        "ru": "MCP",
+        "fr": "MCP"
+      }
+    },
+    {
+      "term": "agent",
+      "note": "an autonomous AI assistant that uses tools",
+      "translations": {
+        "ko": "에이전트",
+        "ja": "エージェント",
+        "de": "Agent",
+        "ru": "агент",
+        "fr": "agent"
+      }
+    },
+    {
+      "term": "Agent mode",
+      "note": "chat mode in which the assistant acts as an agent with tools",
+      "translations": {
+        "ko": "에이전트 모드",
+        "ja": "エージェントモード",
+        "de": "Agentenmodus",
+        "ru": "Режим агента",
+        "fr": "Mode agent"
+      }
+    },
+    {
+      "term": "sub-agent",
+      "note": "an agent started by another agent for a sub-task",
+      "translations": {
+        "ko": "하위 에이전트",
+        "ja": "サブエージェント",
+        "de": "Subagent",
+        "ru": "субагент",
+        "fr": "sous-agent"
+      }
+    },
+    {
+      "term": "swarm",
+      "note": "a group of sub-agents running in parallel",
+      "translations": {
+        "ko": "스웜",
+        "ja": "スウォーム",
+        "de": "Schwarm",
+        "ru": "рой агентов",
+        "fr": "essaim"
+      }
+    },
+    {
+      "term": "coordinator",
+      "note": "the agent that leads a project and assigns work to worker agents",
+      "translations": {
+        "ko": "코디네이터",
+        "ja": "コーディネーター",
+        "de": "Koordinator",
+        "ru": "координатор",
+        "fr": "coordinateur"
+      }
+    },
+    {
+      "term": "worker",
+      "note": "an agent that executes a task delegated by a coordinator",
+      "translations": {
+        "ko": "워커",
+        "ja": "ワーカー",
+        "de": "Worker",
+        "ru": "исполнитель",
+        "fr": "exécutant"
+      }
+    },
+    {
+      "term": "Delegate Mode",
+      "note": "mode in which the assistant delegates work to other agents",
+      "translations": {
+        "ko": "위임 모드",
+        "ja": "委任モード",
+        "de": "Delegierungsmodus",
+        "ru": "Режим делегирования",
+        "fr": "Mode délégation"
+      }
+    },
+    {
+      "term": "Plan Mode",
+      "note": "mode in which the assistant plans before acting",
+      "translations": {
+        "ko": "계획 모드",
+        "ja": "プランモード",
+        "de": "Planungsmodus",
+        "ru": "Режим планирования",
+        "fr": "Mode planification"
+      }
+    },
+    {
+      "term": "Goal Mode",
+      "note": "mode in which the assistant keeps working autonomously toward a stated goal",
+      "translations": {
+        "ko": "목표 모드",
+        "ja": "目標モード",
+        "de": "Zielmodus",
+        "ru": "Режим достижения цели",
+        "fr": "Mode objectif"
+      }
+    },
+    {
+      "term": "goal",
+      "note": "an objective the user sets for autonomous work",
+      "translations": {
+        "ko": "목표",
+        "ja": "目標",
+        "de": "Ziel",
+        "ru": "цель",
+        "fr": "objectif"
+      }
+    },
+    {
+      "term": "Evolution",
+      "note": "feature name: goal-driven autonomous improvement and research workbench",
+      "translations": {
+        "ko": "진화",
+        "ja": "進化",
+        "de": "Evolution",
+        "ru": "Эволюция",
+        "fr": "Évolution"
+      }
+    },
+    {
+      "term": "exploration",
+      "note": "one autonomous research/exploration run in Evolution",
+      "translations": {
+        "ko": "탐색",
+        "ja": "探索",
+        "de": "Erkundung",
+        "ru": "исследование",
+        "fr": "exploration"
+      }
+    },
+    {
+      "term": "experiment",
+      "note": "a measured trial comparing alternatives",
+      "translations": {
+        "ko": "실험",
+        "ja": "実験",
+        "de": "Experiment",
+        "ru": "эксперимент",
+        "fr": "expérience"
+      }
+    },
+    {
+      "term": "research program",
+      "note": "a multi-stage autonomous research run",
+      "translations": {
+        "ko": "연구 프로그램",
+        "ja": "研究プログラム",
+        "de": "Forschungsprogramm",
+        "ru": "исследовательская программа",
+        "fr": "programme de recherche"
+      }
+    },
+    {
+      "term": "orchestration",
+      "note": "designing and running multi-agent workflows",
+      "translations": {
+        "ko": "오케스트레이션",
+        "ja": "オーケストレーション",
+        "de": "Orchestrierung",
+        "ru": "оркестрация",
+        "fr": "orchestration"
+      }
+    },
+    {
+      "term": "Orchestration Studio",
+      "note": "editor page for multi-agent flows",
+      "translations": {
+        "ko": "오케스트레이션 스튜디오",
+        "ja": "オーケストレーションスタジオ",
+        "de": "Orchestrierungsstudio",
+        "ru": "Студия оркестрации",
+        "fr": "Studio d’orchestration"
+      }
+    },
+    {
+      "term": "flow",
+      "note": "an orchestration graph of agent steps",
+      "translations": {
+        "ko": "플로",
+        "ja": "フロー",
+        "de": "Ablauf",
+        "ru": "поток",
+        "fr": "flux"
+      }
+    },
+    {
+      "term": "workflow",
+      "note": "a saved reusable sequence of steps",
+      "translations": {
+        "ko": "워크플로",
+        "ja": "ワークフロー",
+        "de": "Workflow",
+        "ru": "рабочий процесс",
+        "fr": "flux de travail"
+      }
+    },
+    {
+      "term": "run",
+      "note": "one execution of a flow, task or command (noun)",
+      "translations": {
+        "ko": "실행",
+        "ja": "実行",
+        "de": "Ausführung",
+        "ru": "запуск",
+        "fr": "exécution"
+      }
+    },
+    {
+      "term": "task",
+      "note": "a unit of work the assistant executes",
+      "translations": {
+        "ko": "작업",
+        "ja": "タスク",
+        "de": "Aufgabe",
+        "ru": "задача",
+        "fr": "tâche"
+      }
+    },
+    {
+      "term": "background task",
+      "note": "work that continues while the user does something else",
+      "translations": {
+        "ko": "백그라운드 작업",
+        "ja": "バックグラウンドタスク",
+        "de": "Hintergrundaufgabe",
+        "ru": "фоновая задача",
+        "fr": "tâche en arrière-plan"
+      }
+    },
+    {
+      "term": "timer",
+      "note": "a background watcher that periodically checks a condition",
+      "translations": {
+        "ko": "타이머",
+        "ja": "タイマー",
+        "de": "Timer",
+        "ru": "таймер",
+        "fr": "surveillance périodique"
+      }
+    },
+    {
+      "term": "project",
+      "note": "a code/work folder the assistant works in",
+      "translations": {
+        "ko": "프로젝트",
+        "ja": "プロジェクト",
+        "de": "Projekt",
+        "ru": "проект",
+        "fr": "projet"
+      }
+    },
+    {
+      "term": "Project Brain",
+      "note": "feature name: panel holding project knowledge, plans and coordination",
+      "translations": {
+        "ko": "프로젝트 브레인",
+        "ja": "プロジェクトブレイン",
+        "de": "Projektgehirn",
+        "ru": "Мозг проекта",
+        "fr": "Cerveau du projet"
+      }
+    },
+    {
+      "term": "Project Assistant",
+      "note": "feature name: assistant bound to a project",
+      "translations": {
+        "ko": "프로젝트 도우미",
+        "ja": "プロジェクトアシスタント",
+        "de": "Projektassistent",
+        "ru": "Помощник проекта",
+        "fr": "Assistant de projet"
+      }
+    },
+    {
+      "term": "workspace",
+      "note": "the working directory/checkout the agent edits",
+      "translations": {
+        "ko": "작업 영역",
+        "ja": "ワークスペース",
+        "de": "Arbeitsbereich",
+        "ru": "рабочая область",
+        "fr": "espace de travail"
+      }
+    },
+    {
+      "term": "worktree",
+      "note": "a git worktree (isolated checkout)",
+      "translations": {
+        "ko": "워크트리",
+        "ja": "ワークツリー",
+        "de": "Worktree",
+        "ru": "рабочее дерево",
+        "fr": "arbre de travail"
+      }
+    },
+    {
+      "term": "branch",
+      "note": "a git branch; also a branch (fork) of a conversation",
+      "translations": {
+        "ko": "분기",
+        "ja": "ブランチ",
+        "de": "Branch",
+        "ru": "ветка",
+        "fr": "branche"
+      }
+    },
+    {
+      "term": "commit",
+      "note": "a git commit (noun and verb)",
+      "translations": {
+        "ko": "커밋",
+        "ja": "コミット",
+        "de": "Commit",
+        "ru": "коммит",
+        "fr": "commit (nom) ; valider (verbe)"
+      }
+    },
+    {
+      "term": "merge",
+      "note": "git merge",
+      "translations": {
+        "ko": "병합",
+        "ja": "マージ",
+        "de": "Zusammenführen",
+        "ru": "слияние",
+        "fr": "fusionner"
+      }
+    },
+    {
+      "term": "checkout",
+      "note": "a git working copy",
+      "translations": {
+        "ko": "체크아웃",
+        "ja": "チェックアウト",
+        "de": "Arbeitskopie",
+        "ru": "рабочая копия",
+        "fr": "copie de travail"
+      }
+    },
+    {
+      "term": "integration",
+      "note": "merging finished work into the project's stable branch",
+      "translations": {
+        "ko": "통합",
+        "ja": "統合",
+        "de": "Integration",
+        "ru": "интеграция",
+        "fr": "intégration"
+      }
+    },
+    {
+      "term": "delivery",
+      "note": "handing over finished work and its results to the user",
+      "translations": {
+        "ko": "전달",
+        "ja": "引き渡し",
+        "de": "Übergabe",
+        "ru": "передача результатов",
+        "fr": "livraison"
+      }
+    },
+    {
+      "term": "artifact",
+      "note": "a file or deliverable produced by the agent",
+      "translations": {
+        "ko": "아티팩트",
+        "ja": "成果物",
+        "de": "Artefakt",
+        "ru": "артефакт",
+        "fr": "artefact"
+      }
+    },
+    {
+      "term": "rich response",
+      "note": "structured interactive blocks inside an assistant reply",
+      "translations": {
+        "ko": "구조화된 응답",
+        "ja": "リッチレスポンス",
+        "de": "Erweiterte Antwort",
+        "ru": "расширенный ответ",
+        "fr": "réponse enrichie"
+      }
+    },
+    {
+      "term": "evidence",
+      "note": "recorded proof (logs, test results, sources) supporting a claim or result",
+      "translations": {
+        "ko": "증거",
+        "ja": "エビデンス",
+        "de": "Nachweis",
+        "ru": "доказательства",
+        "fr": "preuves"
+      }
+    },
+    {
+      "term": "review",
+      "note": "an independent check of work or results (not a paper peer review unless the context says paper)",
+      "translations": {
+        "ko": "검토",
+        "ja": "レビュー",
+        "de": "Prüfung",
+        "ru": "проверка",
+        "fr": "revue"
+      }
+    },
+    {
+      "term": "peer review",
+      "note": "academic review of a paper",
+      "translations": {
+        "ko": "동료 심사",
+        "ja": "査読",
+        "de": "Peer-Review",
+        "ru": "рецензирование",
+        "fr": "évaluation par les pairs"
+      }
+    },
+    {
+      "term": "acceptance",
+      "note": "confirming that a deliverable meets requirements",
+      "translations": {
+        "ko": "검수",
+        "ja": "検収",
+        "de": "Abnahme",
+        "ru": "приемка",
+        "fr": "acceptation"
+      }
+    },
+    {
+      "term": "verification",
+      "note": "checking that something is correct",
+      "translations": {
+        "ko": "검증",
+        "ja": "検証",
+        "de": "Verifizierung",
+        "ru": "верификация",
+        "fr": "vérification"
+      }
+    },
+    {
+      "term": "approval",
+      "note": "user permission for a risky tool action",
+      "translations": {
+        "ko": "승인",
+        "ja": "承認",
+        "de": "Genehmigung",
+        "ru": "одобрение",
+        "fr": "approbation"
+      }
+    },
+    {
+      "term": "sandbox",
+      "note": "isolated execution environment",
+      "translations": {
+        "ko": "샌드박스",
+        "ja": "サンドボックス",
+        "de": "Sandbox",
+        "ru": "песочница",
+        "fr": "bac à sable"
+      }
+    },
+    {
+      "term": "Local Control",
+      "note": "feature name: letting Tofu control the user's local computer",
+      "translations": {
+        "ko": "로컬 제어",
+        "ja": "ローカル制御",
+        "de": "Lokale Steuerung",
+        "ru": "Локальное управление",
+        "fr": "Contrôle local"
+      }
+    },
+    {
+      "term": "desktop agent",
+      "note": "a helper program running on the user's computer",
+      "translations": {
+        "ko": "데스크톱 에이전트",
+        "ja": "デスクトップエージェント",
+        "de": "Desktop-Agent",
+        "ru": "локальный агент",
+        "fr": "agent de bureau"
+      }
+    },
+    {
+      "term": "device",
+      "note": "a connected computer or phone",
+      "translations": {
+        "ko": "장치",
+        "ja": "デバイス",
+        "de": "Gerät",
+        "ru": "устройство",
+        "fr": "appareil"
+      }
+    },
+    {
+      "term": "relay",
+      "note": "a browser-based relay connection between Tofu and a device",
+      "translations": {
+        "ko": "릴레이",
+        "ja": "リレー",
+        "de": "Relay",
+        "ru": "ретранслятор",
+        "fr": "relais"
+      }
+    },
+    {
+      "term": "browser extension",
+      "note": "Tofu's Chrome extension",
+      "translations": {
+        "ko": "브라우저 확장 프로그램",
+        "ja": "ブラウザー拡張機能",
+        "de": "Browsererweiterung",
+        "ru": "расширение браузера",
+        "fr": "extension de navigateur"
+      }
+    },
+    {
+      "term": "Paper Reader",
+      "note": "feature name: reading academic papers with Q&A and reports",
+      "translations": {
+        "ko": "논문 리더",
+        "ja": "論文リーダー",
+        "de": "Paper-Reader",
+        "ru": "Чтение статей",
+        "fr": "Lecteur d’articles"
+      }
+    },
+    {
+      "term": "paper",
+      "note": "an academic paper",
+      "translations": {
+        "ko": "논문",
+        "ja": "論文",
+        "de": "Paper",
+        "ru": "статья",
+        "fr": "article"
+      }
+    },
+    {
+      "term": "report",
+      "note": "a generated analysis report of a paper",
+      "translations": {
+        "ko": "보고서",
+        "ja": "レポート",
+        "de": "Bericht",
+        "ru": "отчет",
+        "fr": "rapport"
+      }
+    },
+    {
+      "term": "insight",
+      "note": "an idea or connection the assistant derives while reading",
+      "translations": {
+        "ko": "인사이트",
+        "ja": "インサイト",
+        "de": "Erkenntnis",
+        "ru": "вывод",
+        "fr": "observation"
+      }
+    },
+    {
+      "term": "knowledge base",
+      "note": "local library of the user's documents",
+      "translations": {
+        "ko": "지식 베이스",
+        "ja": "ナレッジベース",
+        "de": "Wissensdatenbank",
+        "ru": "база знаний",
+        "fr": "base de connaissances"
+      }
+    },
+    {
+      "term": "source",
+      "note": "a reference or data source (document, web page)",
+      "translations": {
+        "ko": "출처",
+        "ja": "情報源",
+        "de": "Quelle",
+        "ru": "источник",
+        "fr": "source"
+      }
+    },
+    {
+      "term": "search engine",
+      "note": "web search engine",
+      "translations": {
+        "ko": "검색 엔진",
+        "ja": "検索エンジン",
+        "de": "Suchmaschine",
+        "ru": "поисковая система",
+        "fr": "moteur de recherche"
+      }
+    },
+    {
+      "term": "web page",
+      "note": "a page on the web",
+      "translations": {
+        "ko": "웹 페이지",
+        "ja": "Webページ",
+        "de": "Webseite",
+        "ru": "веб-страница",
+        "fr": "page web"
+      }
+    },
+    {
+      "term": "upload",
+      "note": "send a file to Tofu",
+      "translations": {
+        "ko": "업로드",
+        "ja": "アップロード",
+        "de": "Hochladen",
+        "ru": "Загрузить",
+        "fr": "Charger"
+      }
+    },
+    {
+      "term": "download",
+      "note": "save a file locally",
+      "translations": {
+        "ko": "다운로드",
+        "ja": "ダウンロード",
+        "de": "Herunterladen",
+        "ru": "Скачать",
+        "fr": "Télécharger"
+      }
+    },
+    {
+      "term": "export",
+      "note": "save data out in a file format",
+      "translations": {
+        "ko": "내보내기",
+        "ja": "エクスポート",
+        "de": "Exportieren",
+        "ru": "Экспортировать",
+        "fr": "Exporter"
+      }
+    },
+    {
+      "term": "import",
+      "note": "load data from a file",
+      "translations": {
+        "ko": "가져오기",
+        "ja": "インポート",
+        "de": "Importieren",
+        "ru": "Импортировать",
+        "fr": "Importer"
+      }
+    },
+    {
+      "term": "settings",
+      "note": "the application settings",
+      "translations": {
+        "ko": "설정",
+        "ja": "設定",
+        "de": "Einstellungen",
+        "ru": "параметры",
+        "fr": "paramètres"
+      }
+    },
+    {
+      "term": "preferences",
+      "note": "user preferences",
+      "translations": {
+        "ko": "선호 사항",
+        "ja": "ユーザー設定",
+        "de": "Präferenzen",
+        "ru": "предпочтения",
+        "fr": "préférences"
+      }
+    },
+    {
+      "term": "General",
+      "note": "settings tab name",
+      "translations": {
+        "ko": "일반",
+        "ja": "全般",
+        "de": "Allgemein",
+        "ru": "Общие",
+        "fr": "Général"
+      }
+    },
+    {
+      "term": "Display",
+      "note": "settings tab name for appearance",
+      "translations": {
+        "ko": "표시",
+        "ja": "表示",
+        "de": "Anzeige",
+        "ru": "Отображение",
+        "fr": "Affichage"
+      }
+    },
+    {
+      "term": "Advanced",
+      "note": "settings tab name",
+      "translations": {
+        "ko": "고급",
+        "ja": "詳細設定",
+        "de": "Erweitert",
+        "ru": "Дополнительно",
+        "fr": "Avancé"
+      }
+    },
+    {
+      "term": "Experiments",
+      "note": "settings tab name for experimental features",
+      "translations": {
+        "ko": "실험 기능",
+        "ja": "実験的機能",
+        "de": "Experimente",
+        "ru": "Эксперименты",
+        "fr": "Expérimentations"
+      }
+    },
+    {
+      "term": "debug mode",
+      "note": "developer diagnostics mode",
+      "translations": {
+        "ko": "디버그 모드",
+        "ja": "デバッグモード",
+        "de": "Debugmodus",
+        "ru": "режим отладки",
+        "fr": "mode débogage"
+      }
+    },
+    {
+      "term": "log",
+      "note": "diagnostic log",
+      "translations": {
+        "ko": "로그",
+        "ja": "ログ",
+        "de": "Protokoll",
+        "ru": "журнал",
+        "fr": "journal"
+      }
+    },
+    {
+      "term": "storage",
+      "note": "where data is persisted",
+      "translations": {
+        "ko": "스토리지",
+        "ja": "ストレージ",
+        "de": "Speicher",
+        "ru": "хранилище",
+        "fr": "stockage"
+      }
+    },
+    {
+      "term": "database",
+      "note": "database",
+      "translations": {
+        "ko": "데이터베이스",
+        "ja": "データベース",
+        "de": "Datenbank",
+        "ru": "база данных",
+        "fr": "base de données"
+      }
+    },
+    {
+      "term": "cache",
+      "note": "stored copy reused to save time or cost (also prompt caching)",
+      "translations": {
+        "ko": "캐시",
+        "ja": "キャッシュ",
+        "de": "Cache",
+        "ru": "кэш",
+        "fr": "cache"
+      }
+    },
+    {
+      "term": "server",
+      "note": "the Tofu backend server",
+      "translations": {
+        "ko": "서버",
+        "ja": "サーバー",
+        "de": "Server",
+        "ru": "сервер",
+        "fr": "serveur"
+      }
+    },
+    {
+      "term": "service",
+      "note": "a running backend service",
+      "translations": {
+        "ko": "서비스",
+        "ja": "サービス",
+        "de": "Dienst",
+        "ru": "служба",
+        "fr": "service"
+      }
+    },
+    {
+      "term": "connection",
+      "note": "network connection",
+      "translations": {
+        "ko": "연결",
+        "ja": "接続",
+        "de": "Verbindung",
+        "ru": "подключение",
+        "fr": "connexion"
+      }
+    },
+    {
+      "term": "network",
+      "note": "computer network",
+      "translations": {
+        "ko": "네트워크",
+        "ja": "ネットワーク",
+        "de": "Netzwerk",
+        "ru": "сеть",
+        "fr": "réseau"
+      }
+    },
+    {
+      "term": "proxy",
+      "note": "network proxy",
+      "translations": {
+        "ko": "프록시",
+        "ja": "プロキシ",
+        "de": "Proxy",
+        "ru": "прокси-сервер",
+        "fr": "proxy"
+      }
+    },
+    {
+      "term": "offline",
+      "note": "without network connection",
+      "translations": {
+        "ko": "오프라인",
+        "ja": "オフライン",
+        "de": "Offline",
+        "ru": "не в сети",
+        "fr": "hors connexion"
+      }
+    },
+    {
+      "term": "reconnect",
+      "note": "connect again",
+      "translations": {
+        "ko": "다시 연결",
+        "ja": "再接続",
+        "de": "Neu verbinden",
+        "ru": "Переподключиться",
+        "fr": "Reconnecter"
+      }
+    },
+    {
+      "term": "Retry",
+      "note": "button: try the failed action again",
+      "translations": {
+        "ko": "다시 시도",
+        "ja": "再試行",
+        "de": "Erneut versuchen",
+        "ru": "Повторить",
+        "fr": "Réessayer"
+      }
+    },
+    {
+      "term": "Stop",
+      "note": "button: stop a running generation or task",
+      "translations": {
+        "ko": "중지",
+        "ja": "停止",
+        "de": "Beenden",
+        "ru": "Остановить",
+        "fr": "Arrêter"
+      }
+    },
+    {
+      "term": "Cancel",
+      "note": "button: dismiss a dialog without applying",
+      "translations": {
+        "ko": "취소",
+        "ja": "キャンセル",
+        "de": "Abbrechen",
+        "ru": "Отменить",
+        "fr": "Annuler"
+      }
+    },
+    {
+      "term": "Pause",
+      "note": "button",
+      "translations": {
+        "ko": "일시 중지",
+        "ja": "一時停止",
+        "de": "Anhalten",
+        "ru": "Приостановить",
+        "fr": "Suspendre"
+      }
+    },
+    {
+      "term": "Resume",
+      "note": "button: continue paused work",
+      "translations": {
+        "ko": "재개",
+        "ja": "再開",
+        "de": "Fortsetzen",
+        "ru": "Возобновить",
+        "fr": "Reprendre"
+      }
+    },
+    {
+      "term": "Continue",
+      "note": "button: proceed",
+      "translations": {
+        "ko": "계속",
+        "ja": "続行",
+        "de": "Weiter",
+        "ru": "Продолжить",
+        "fr": "Continuer"
+      }
+    },
+    {
+      "term": "Undo",
+      "note": "button: revert the last action",
+      "translations": {
+        "ko": "실행 취소",
+        "ja": "元に戻す",
+        "de": "Rückgängig",
+        "ru": "Отменить действие",
+        "fr": "Annuler"
+      }
+    },
+    {
+      "term": "Redo",
+      "note": "button",
+      "translations": {
+        "ko": "다시 실행",
+        "ja": "やり直し",
+        "de": "Wiederholen",
+        "ru": "Вернуть",
+        "fr": "Rétablir"
+      }
+    },
+    {
+      "term": "Restore",
+      "note": "button: bring back a deleted or earlier version",
+      "translations": {
+        "ko": "복원",
+        "ja": "復元",
+        "de": "Wiederherstellen",
+        "ru": "Восстановить",
+        "fr": "Restaurer"
+      }
+    },
+    {
+      "term": "Delete",
+      "note": "button",
+      "translations": {
+        "ko": "삭제",
+        "ja": "削除",
+        "de": "Löschen",
+        "ru": "Удалить",
+        "fr": "Supprimer"
+      }
+    },
+    {
+      "term": "Archive",
+      "note": "button",
+      "translations": {
+        "ko": "보관",
+        "ja": "アーカイブ",
+        "de": "Archivieren",
+        "ru": "Архивировать",
+        "fr": "Archiver"
+      }
+    },
+    {
+      "term": "Rename",
+      "note": "button",
+      "translations": {
+        "ko": "이름 바꾸기",
+        "ja": "名前の変更",
+        "de": "Umbenennen",
+        "ru": "Переименовать",
+        "fr": "Renommer"
+      }
+    },
+    {
+      "term": "Duplicate",
+      "note": "button: create a copy",
+      "translations": {
+        "ko": "복제",
+        "ja": "複製",
+        "de": "Duplizieren",
+        "ru": "Дублировать",
+        "fr": "Dupliquer"
+      }
+    },
+    {
+      "term": "Copy",
+      "note": "button: copy to clipboard",
+      "translations": {
+        "ko": "복사",
+        "ja": "コピー",
+        "de": "Kopieren",
+        "ru": "Копировать",
+        "fr": "Copier"
+      }
+    },
+    {
+      "term": "Paste",
+      "note": "button",
+      "translations": {
+        "ko": "붙여넣기",
+        "ja": "貼り付け",
+        "de": "Einfügen",
+        "ru": "Вставить",
+        "fr": "Coller"
+      }
+    },
+    {
+      "term": "Edit",
+      "note": "button",
+      "translations": {
+        "ko": "편집",
+        "ja": "編集",
+        "de": "Bearbeiten",
+        "ru": "Изменить",
+        "fr": "Modifier"
+      }
+    },
+    {
+      "term": "Save",
+      "note": "button",
+      "translations": {
+        "ko": "저장",
+        "ja": "保存",
+        "de": "Speichern",
+        "ru": "Сохранить",
+        "fr": "Enregistrer"
+      }
+    },
+    {
+      "term": "Apply",
+      "note": "button: apply changes",
+      "translations": {
+        "ko": "적용",
+        "ja": "適用",
+        "de": "Übernehmen",
+        "ru": "Применить",
+        "fr": "Appliquer"
+      }
+    },
+    {
+      "term": "Reset",
+      "note": "button: return to defaults",
+      "translations": {
+        "ko": "초기화",
+        "ja": "リセット",
+        "de": "Zurücksetzen",
+        "ru": "Сбросить",
+        "fr": "Réinitialiser"
+      }
+    },
+    {
+      "term": "Refresh",
+      "note": "button: reload the shown data",
+      "translations": {
+        "ko": "새로 고침",
+        "ja": "更新",
+        "de": "Aktualisieren",
+        "ru": "Обновить",
+        "fr": "Actualiser"
+      }
+    },
+    {
+      "term": "Reload",
+      "note": "button: reload the page",
+      "translations": {
+        "ko": "다시 로드",
+        "ja": "再読み込み",
+        "de": "Neu laden",
+        "ru": "Перезагрузить",
+        "fr": "Recharger"
+      }
+    },
+    {
+      "term": "Open",
+      "note": "button/command",
+      "translations": {
+        "ko": "열기",
+        "ja": "開く",
+        "de": "Öffnen",
+        "ru": "Открыть",
+        "fr": "Ouvrir"
+      }
+    },
+    {
+      "term": "Close",
+      "note": "button",
+      "translations": {
+        "ko": "닫기",
+        "ja": "閉じる",
+        "de": "Schließen",
+        "ru": "Закрыть",
+        "fr": "Fermer"
+      }
+    },
+    {
+      "term": "Expand",
+      "note": "button: show more detail",
+      "translations": {
+        "ko": "펼치기",
+        "ja": "展開",
+        "de": "Aufklappen",
+        "ru": "Развернуть",
+        "fr": "Développer"
+      }
+    },
+    {
+      "term": "Collapse",
+      "note": "button: show less detail",
+      "translations": {
+        "ko": "접기",
+        "ja": "折りたたむ",
+        "de": "Zuklappen",
+        "ru": "Свернуть",
+        "fr": "Réduire"
+      }
+    },
+    {
+      "term": "Show",
+      "note": "command",
+      "translations": {
+        "ko": "표시",
+        "ja": "表示",
+        "de": "Anzeigen",
+        "ru": "Показать",
+        "fr": "Afficher"
+      }
+    },
+    {
+      "term": "Hide",
+      "note": "command",
+      "translations": {
+        "ko": "숨기기",
+        "ja": "非表示",
+        "de": "Ausblenden",
+        "ru": "Скрыть",
+        "fr": "Masquer"
+      }
+    },
+    {
+      "term": "Enable",
+      "note": "command: turn on a feature",
+      "translations": {
+        "ko": "사용",
+        "ja": "有効化",
+        "de": "Aktivieren",
+        "ru": "Включить",
+        "fr": "Activer"
+      }
+    },
+    {
+      "term": "Disable",
+      "note": "command: turn off a feature",
+      "translations": {
+        "ko": "사용 안 함",
+        "ja": "無効化",
+        "de": "Deaktivieren",
+        "ru": "Отключить",
+        "fr": "Désactiver"
+      }
+    },
+    {
+      "term": "On",
+      "note": "toggle state label",
+      "translations": {
+        "ko": "켜짐",
+        "ja": "オン",
+        "de": "Ein",
+        "ru": "Вкл.",
+        "fr": "Activé"
+      }
+    },
+    {
+      "term": "Off",
+      "note": "toggle state label",
+      "translations": {
+        "ko": "꺼짐",
+        "ja": "オフ",
+        "de": "Aus",
+        "ru": "Выкл.",
+        "fr": "Désactivé"
+      }
+    },
+    {
+      "term": "Auto",
+      "note": "automatic option label",
+      "translations": {
+        "ko": "자동",
+        "ja": "自動",
+        "de": "Automatisch",
+        "ru": "Авто",
+        "fr": "Automatique"
+      }
+    },
+    {
+      "term": "manual",
+      "note": "done by the user, not automatic",
+      "translations": {
+        "ko": "수동",
+        "ja": "手動",
+        "de": "Manuell",
+        "ru": "вручную",
+        "fr": "manuel"
+      }
+    },
+    {
+      "term": "Default",
+      "note": "option label for the default value",
+      "translations": {
+        "ko": "기본값",
+        "ja": "既定",
+        "de": "Standard",
+        "ru": "По умолчанию",
+        "fr": "Par défaut"
+      }
+    },
+    {
+      "term": "Custom",
+      "note": "option label for a user-defined value",
+      "translations": {
+        "ko": "사용자 지정",
+        "ja": "カスタム",
+        "de": "Benutzerdefiniert",
+        "ru": "Пользовательский",
+        "fr": "Personnalisé"
+      }
+    },
+    {
+      "term": "optional",
+      "note": "field is not required",
+      "translations": {
+        "ko": "선택 사항",
+        "ja": "任意",
+        "de": "Optional",
+        "ru": "необязательно",
+        "fr": "facultatif"
+      }
+    },
+    {
+      "term": "required",
+      "note": "field must be filled",
+      "translations": {
+        "ko": "필수",
+        "ja": "必須",
+        "de": "Erforderlich",
+        "ru": "обязательно",
+        "fr": "obligatoire"
+      }
+    },
+    {
+      "term": "pending",
+      "note": "status: not started yet",
+      "translations": {
+        "ko": "대기 중",
+        "ja": "待機中",
+        "de": "Ausstehend",
+        "ru": "Не начато",
+        "fr": "En attente"
+      }
+    },
+    {
+      "term": "queued",
+      "note": "status: waiting in a queue",
+      "translations": {
+        "ko": "대기열에 있음",
+        "ja": "キュー待ち",
+        "de": "In Warteschlange",
+        "ru": "В очереди",
+        "fr": "En file d’attente"
+      }
+    },
+    {
+      "term": "running",
+      "note": "status: currently executing",
+      "translations": {
+        "ko": "실행 중",
+        "ja": "実行中",
+        "de": "Wird ausgeführt",
+        "ru": "Выполняется",
+        "fr": "En cours d’exécution"
+      }
+    },
+    {
+      "term": "waiting",
+      "note": "status: waiting for something",
+      "translations": {
+        "ko": "기다리는 중",
+        "ja": "待機中",
+        "de": "Wartet",
+        "ru": "Ожидание",
+        "fr": "En attente"
+      }
+    },
+    {
+      "term": "completed",
+      "note": "status: finished successfully",
+      "translations": {
+        "ko": "완료됨",
+        "ja": "完了",
+        "de": "Abgeschlossen",
+        "ru": "Завершено",
+        "fr": "Terminé"
+      }
+    },
+    {
+      "term": "failed",
+      "note": "status: finished with an error",
+      "translations": {
+        "ko": "실패",
+        "ja": "失敗",
+        "de": "Fehlgeschlagen",
+        "ru": "Сбой",
+        "fr": "Échec"
+      }
+    },
+    {
+      "term": "error",
+      "note": "an error",
+      "translations": {
+        "ko": "오류",
+        "ja": "エラー",
+        "de": "Fehler",
+        "ru": "ошибка",
+        "fr": "erreur"
+      }
+    },
+    {
+      "term": "warning",
+      "note": "a warning",
+      "translations": {
+        "ko": "경고",
+        "ja": "警告",
+        "de": "Warnung",
+        "ru": "предупреждение",
+        "fr": "avertissement"
+      }
+    },
+    {
+      "term": "unavailable",
+      "note": "status: cannot be used right now",
+      "translations": {
+        "ko": "사용할 수 없음",
+        "ja": "利用不可",
+        "de": "Nicht verfügbar",
+        "ru": "Недоступно",
+        "fr": "Indisponible"
+      }
+    },
+    {
+      "term": "blocked",
+      "note": "status: cannot proceed until something is resolved",
+      "translations": {
+        "ko": "차단됨",
+        "ja": "ブロック中",
+        "de": "Blockiert",
+        "ru": "Заблокировано",
+        "fr": "Bloqué"
+      }
+    },
+    {
+      "term": "interrupted",
+      "note": "status: stopped unexpectedly before finishing",
+      "translations": {
+        "ko": "중단됨",
+        "ja": "中断",
+        "de": "Unterbrochen",
+        "ru": "Прервано",
+        "fr": "Interrompu"
+      }
+    },
+    {
+      "term": "incomplete",
+      "note": "status: not finished",
+      "translations": {
+        "ko": "미완료",
+        "ja": "未完了",
+        "de": "Unvollständig",
+        "ru": "Не завершено",
+        "fr": "Incomplet"
+      }
+    },
+    {
+      "term": "draft",
+      "note": "unsent or unpublished version",
+      "translations": {
+        "ko": "초안",
+        "ja": "下書き",
+        "de": "Entwurf",
+        "ru": "черновик",
+        "fr": "brouillon"
+      }
+    },
+    {
+      "term": "folder",
+      "note": "a folder (sidebar or file system)",
+      "translations": {
+        "ko": "폴더",
+        "ja": "フォルダー",
+        "de": "Ordner",
+        "ru": "папка",
+        "fr": "dossier"
+      }
+    },
+    {
+      "term": "file",
+      "note": "a file",
+      "translations": {
+        "ko": "파일",
+        "ja": "ファイル",
+        "de": "Datei",
+        "ru": "файл",
+        "fr": "fichier"
+      }
+    },
+    {
+      "term": "path",
+      "note": "file system path",
+      "translations": {
+        "ko": "경로",
+        "ja": "パス",
+        "de": "Pfad",
+        "ru": "путь",
+        "fr": "chemin"
+      }
+    },
+    {
+      "term": "image",
+      "note": "a picture",
+      "translations": {
+        "ko": "이미지",
+        "ja": "画像",
+        "de": "Bild",
+        "ru": "изображение",
+        "fr": "image"
+      }
+    },
+    {
+      "term": "video",
+      "note": "a video",
+      "translations": {
+        "ko": "동영상",
+        "ja": "動画",
+        "de": "Video",
+        "ru": "видео",
+        "fr": "vidéo"
+      }
+    },
+    {
+      "term": "podcast",
+      "note": "generated audio discussion of a paper",
+      "translations": {
+        "ko": "팟캐스트",
+        "ja": "ポッドキャスト",
+        "de": "Podcast",
+        "ru": "подкаст",
+        "fr": "podcast"
+      }
+    },
+    {
+      "term": "slides",
+      "note": "a presentation deck (PPT)",
+      "translations": {
+        "ko": "슬라이드",
+        "ja": "スライド",
+        "de": "Folien",
+        "ru": "слайды",
+        "fr": "diapositives"
+      }
+    },
+    {
+      "term": "voice input",
+      "note": "dictating text with the microphone",
+      "translations": {
+        "ko": "음성 입력",
+        "ja": "音声入力",
+        "de": "Spracheingabe",
+        "ru": "голосовой ввод",
+        "fr": "saisie vocale"
+      }
+    },
+    {
+      "term": "speech recognition",
+      "note": "speech-to-text (settings tab \"Speech\")",
+      "translations": {
+        "ko": "음성 인식",
+        "ja": "音声認識",
+        "de": "Spracherkennung",
+        "ru": "распознавание речи",
+        "fr": "reconnaissance vocale"
+      }
+    },
+    {
+      "term": "translation",
+      "note": "translating text between languages",
+      "translations": {
+        "ko": "번역",
+        "ja": "翻訳",
+        "de": "Übersetzung",
+        "ru": "перевод",
+        "fr": "traduction"
+      }
+    },
+    {
+      "term": "Auto Translate",
+      "note": "feature: automatically translate messages",
+      "translations": {
+        "ko": "자동 번역",
+        "ja": "自動翻訳",
+        "de": "Automatisch übersetzen",
+        "ru": "Автоперевод",
+        "fr": "Traduction automatique"
+      }
+    },
+    {
+      "term": "original",
+      "note": "the original, untranslated text",
+      "translations": {
+        "ko": "원문",
+        "ja": "原文",
+        "de": "Original",
+        "ru": "оригинал",
+        "fr": "original"
+      }
+    },
+    {
+      "term": "title",
+      "note": "a title",
+      "translations": {
+        "ko": "제목",
+        "ja": "タイトル",
+        "de": "Titel",
+        "ru": "название",
+        "fr": "titre"
+      }
+    },
+    {
+      "term": "description",
+      "note": "a description",
+      "translations": {
+        "ko": "설명",
+        "ja": "説明",
+        "de": "Beschreibung",
+        "ru": "описание",
+        "fr": "description"
+      }
+    },
+    {
+      "term": "name",
+      "note": "a name",
+      "translations": {
+        "ko": "이름",
+        "ja": "名前",
+        "de": "Name",
+        "ru": "имя",
+        "fr": "nom"
+      }
+    },
+    {
+      "term": "status",
+      "note": "current state",
+      "translations": {
+        "ko": "상태",
+        "ja": "状態",
+        "de": "Status",
+        "ru": "состояние",
+        "fr": "état"
+      }
+    },
+    {
+      "term": "details",
+      "note": "more information",
+      "translations": {
+        "ko": "세부 정보",
+        "ja": "詳細",
+        "de": "Details",
+        "ru": "подробности",
+        "fr": "détails"
+      }
+    },
+    {
+      "term": "history",
+      "note": "past records",
+      "translations": {
+        "ko": "기록",
+        "ja": "履歴",
+        "de": "Verlauf",
+        "ru": "история",
+        "fr": "historique"
+      }
+    },
+    {
+      "term": "version",
+      "note": "software or document version",
+      "translations": {
+        "ko": "버전",
+        "ja": "バージョン",
+        "de": "Version",
+        "ru": "версия",
+        "fr": "version"
+      }
+    },
+    {
+      "term": "update",
+      "note": "software update (noun) / to update",
+      "translations": {
+        "ko": "업데이트",
+        "ja": "更新",
+        "de": "Update",
+        "ru": "обновление",
+        "fr": "mise à jour (nom) ; mettre à jour (verbe)"
+      }
+    },
+    {
+      "term": "Software Update",
+      "note": "page for updating Tofu",
+      "translations": {
+        "ko": "소프트웨어 업데이트",
+        "ja": "ソフトウェア更新",
+        "de": "Softwareupdate",
+        "ru": "Обновление ПО",
+        "fr": "Mise à jour logicielle"
+      }
+    },
+    {
+      "term": "install",
+      "note": "install software",
+      "translations": {
+        "ko": "설치",
+        "ja": "インストール",
+        "de": "Installieren",
+        "ru": "Установить",
+        "fr": "Installer"
+      }
+    },
+    {
+      "term": "restart",
+      "note": "restart a program or server",
+      "translations": {
+        "ko": "다시 시작",
+        "ja": "再起動",
+        "de": "Neu starten",
+        "ru": "Перезапустить",
+        "fr": "Redémarrer"
+      }
+    },
+    {
+      "term": "Daily Optimizer",
+      "note": "feature name: daily automated analysis that proposes improvements",
+      "translations": {
+        "ko": "일일 최적화 도구",
+        "ja": "デイリーオプティマイザー",
+        "de": "Täglicher Optimierer",
+        "ru": "Ежедневный оптимизатор",
+        "fr": "Optimiseur quotidien"
+      }
+    },
+    {
+      "term": "My Day",
+      "note": "feature name: daily activity report page",
+      "translations": {
+        "ko": "나의 하루",
+        "ja": "マイデイ",
+        "de": "Mein Tag",
+        "ru": "Мой день",
+        "fr": "Ma journée"
+      }
+    },
+    {
+      "term": "virtual user",
+      "note": "a simulated user that drives a conversation automatically",
+      "translations": {
+        "ko": "가상 사용자",
+        "ja": "仮想ユーザー",
+        "de": "Virtueller Benutzer",
+        "ru": "виртуальный пользователь",
+        "fr": "utilisateur virtuel"
+      }
+    },
+    {
+      "term": "Feishu",
+      "note": "messaging platform (Lark); keep the name Feishu",
+      "translations": {
+        "ko": "Feishu",
+        "ja": "Feishu",
+        "de": "Feishu",
+        "ru": "Feishu",
+        "fr": "Feishu"
+      }
+    },
+    {
+      "term": "AA Index",
+      "note": "Artificial Analysis Intelligence Index; keep as AA Index",
+      "translations": {
+        "ko": "AA Index",
+        "ja": "AA Index",
+        "de": "AA Index",
+        "ru": "AA Index",
+        "fr": "AA Index"
+      }
+    },
+    {
+      "term": "candidate",
+      "note": "Project Brain integration ref that writer checkpoints merge into before promotion; an identifier the source keeps in English",
+      "translations": {
+        "ja": "candidate",
+        "ko": "candidate",
+        "fr": "candidate",
+        "de": "candidate",
+        "ru": "candidate"
+      }
+    },
+    {
+      "term": "stable",
+      "note": "Project Brain integration ref that candidate is promoted to; an identifier the source keeps in English",
+      "translations": {
+        "ja": "stable",
+        "ko": "stable",
+        "fr": "stable",
+        "de": "stable",
+        "ru": "stable"
+      }
+    },
+    {
+      "term": "canonical",
+      "note": "the user's canonical checkout/branch in Project Brain integration; an identifier the source keeps in English",
+      "translations": {
+        "ja": "canonical",
+        "ko": "canonical",
+        "fr": "canonical",
+        "de": "canonical",
+        "ru": "canonical"
+      }
+    },
+    {
+      "term": "writer",
+      "note": "a registered writer workspace/agent in Project Brain integration",
+      "translations": {
+        "ja": "writer",
+        "ko": "writer",
+        "fr": "agent rédacteur",
+        "de": "Writer",
+        "ru": "writer"
+      }
+    }
+  ]
+}

@@ -40,6 +40,21 @@ function fixture() {
 }
 
 describe('queued background command groups', () => {
+  it('uses one retained decorative outlined chevron per native summary', () => {
+    const { render, row } = fixture();
+    const items = [completion('q1', 1), completion('q2', 2)];
+    render(items);
+    const summary = row('q2').querySelector('summary')!;
+    const chevron = summary.querySelector('.bgcmd-chevron')!;
+    expect(chevron).not.toBeNull();
+    expect(summary.querySelectorAll('.conversation-disclosure-chevron')).toHaveLength(1);
+    expect(chevron.getAttribute('aria-hidden')).toBe('true');
+    expect(chevron.querySelector('svg')?.getAttribute('fill')).toBe('none');
+    expect(summary.lastElementChild).toBe(chevron);
+    render([{ ...items[1], position: 1 }]);
+    expect(row('q2').querySelector('.bgcmd-chevron')).toBe(chevron);
+  });
+
   it('shows one counted status with independent bounded, escaped result rows', () => {
     const { host, render, row } = fixture();
     render([completion('q1', 1), completion('q2', 2)]);

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+# pyright: strict
+
 from dataclasses import dataclass
 from dataclasses import field
 import hashlib

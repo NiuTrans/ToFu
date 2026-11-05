@@ -16,6 +16,7 @@ from collections.abc import Mapping
 
 from lib.identity import require_user_id
 from lib.storage.errors import StorageError
+from lib.error_envelope import BadRequest
 from .decisions import AUDIT_CHECKS
 from .observation_audit import AUDIT_VERSION
 
@@ -212,14 +213,14 @@ class ResearchHistoryRepository:
     def page(self, history, *, cursor=None):
         history = normalize_history(history)
         if cursor is not None and (type(cursor) is not int or not 0 < cursor <= history['count']):
-            raise ValueError('Invalid research history cursor')
+            raise BadRequest('Invalid research history cursor', field='history_cursor')
         target = history['count'] if cursor is None else cursor
         for head, chunk in self.iter_chunks(history):
             if chunk['count'] == target:
                 return {'head': history['head'], 'page': head, 'total': history['count'],
                         'runs': chunk['runs'], 'next_cursor': chunk['previous_count'] or None}
         if target:
-            raise ValueError('Research history cursor is not a committed page boundary')
+            raise BadRequest('Research history cursor is not a committed page boundary', field='history_cursor')
         return {'head': '', 'page': '', 'total': 0, 'runs': [], 'next_cursor': None}
 
 

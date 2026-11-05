@@ -22,6 +22,8 @@ export interface ExplorationHypothesis {
 }
 export type ProgramAdvanceMode = 'continuous' | 'checkpoint';
 export interface CreateProgramBody {
+  skill_selection?: CreateRunBody['skill_selection']; skill_bindings?: CreateRunBody['skill_bindings'];
+  research_context?: CreateRunBody['research_context'];
   executor_schema_budget_tokens?: number;
   objective: string; research_source?: {task_id: string; idea_id: string}; acceptance?: string[]; steps?: ExplorationStep[];
   auto_replan?: boolean;
@@ -30,6 +32,7 @@ export interface CreateProgramBody {
   budget?: RunBudget | null; review_reserve?: CreateRunBody['review_reserve']; model?: CreateRunBody['model']; role_models?: CreateRunBody['role_models'];
 }
 export interface ExplorationProgram {
+  chat_source?: {conversation_id: string; turn_id: string};
   final_evidence_version?: 1;
   schema_version: 1; program_id: string; objective: string; acceptance: string[];
   status: 'ready' | 'active' | 'paused' | 'needs_attention' | 'completed' | 'cancelled';
@@ -40,7 +43,7 @@ export interface ExplorationProgram {
   replan_proposal?: ReplanProposal;
   actuals_complete?: boolean;
   tool_calls_complete?: boolean;
-  execution_options?: Pick<CreateProgramBody, 'executor_schema_budget_tokens' | 'project_path' | 'budget' | 'review_reserve' | 'model' | 'role_models' | 'max_attempts' | 'max_review_recoveries' | 'max_review_format_retries'>;
+  execution_options?: Pick<CreateProgramBody, 'skill_selection' | 'skill_bindings' | 'research_context' | 'executor_schema_budget_tokens' | 'project_path' | 'budget' | 'review_reserve' | 'model' | 'role_models' | 'max_attempts' | 'max_review_recoveries' | 'max_review_format_retries'>;
   current: {sequence: number; step: ExplorationStep; payload: CreateRunBody; context_seed: string; run_id: string; deadline_at: number | null; cancellation_accounting?: {actuals: EvolutionRun['actuals']; prior_complete: boolean}} | null;
   settled_through: number; actuals: EvolutionRun['actuals']; error: string;
   created_at: number; updated_at: number;

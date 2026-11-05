@@ -18,11 +18,10 @@ def capture_resource_environment() -> dict[str, str]:
         probe_system_resources,
     )
     environment = os.environ.copy()
-    manifest = install_runtime_resource_defaults(
+    install_runtime_resource_defaults(
         environment, snapshot=probe_system_resources(environment))
-    return {'TOFU_RESOURCE_PROFILE': manifest['resource_profile'],
-            **{key: environment[key] for key in sorted(RESOURCE_BUDGET_ENV_KEYS)
-               if key in environment}}
+    return {key: environment[key] for key in sorted(RESOURCE_BUDGET_ENV_KEYS)
+            if key in environment}
 
 
 def recorded_resource_environment(manifest: Mapping) -> dict[str, str]:
@@ -31,20 +30,20 @@ def recorded_resource_environment(manifest: Mapping) -> dict[str, str]:
     value = manifest.get('runtime_resource_environment', {})
     if not isinstance(value, dict):
         raise ValueError('runtime resource environment must be an object')
-    allowed = RESOURCE_BUDGET_ENV_KEYS | {'TOFU_RESOURCE_PROFILE'}
-    if set(value) - allowed:
-        raise ValueError('runtime resource environment contains an unknown key')
-    for key, raw in value.items():
+    unknown = sorted(set(value) - RESOURCE_BUDGET_ENV_KEYS)
+    if unknown:
+        # A run registered under a retired resource policy cannot be resumed
+        # with equivalent resources; it needs a new run ID.
+        raise ValueError(
+            'runtime resource environment contains an unknown key: '
+            + ', '.join(unknown[:8]))
+    for raw in value.values():
         if not isinstance(raw, str) or len(raw) > 32:
             raise ValueError('runtime resource environment requires bounded strings')
-        if key == 'TOFU_RESOURCE_PROFILE':
-            if raw not in {'balanced', 'throughput'}:
-                raise ValueError('unknown runtime resource profile')
-        else:
-            try:
-                int(raw)
-            except ValueError as exc:
-                raise ValueError('runtime resource environment requires integer budgets') from exc
+        try:
+            int(raw)
+        except ValueError as exc:
+            raise ValueError('runtime resource environment requires integer budgets') from exc
     return dict(value)
 
 

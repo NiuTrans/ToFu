@@ -57,6 +57,10 @@ pub struct ControlFile {
     /// the cache is dropped whenever a write or barrier fails because the
     /// on-disk outcome is then ambiguous.
     current: Option<ControlState>,
+    /// The other slot, which recovery selects when `current` is unreadable:
+    /// `Some(None)` when it holds no valid state, `None` whenever `current`
+    /// is unknown. A successful publication overwrites exactly this slot.
+    fallback: Option<Option<ControlState>>,
 }
 
 fn invalid_data(message: &str) -> io::Error {
@@ -272,6 +276,7 @@ impl ControlFile {
             path,
             file,
             current: Some(initial),
+            fallback: Some(None),
         })
     }
 
@@ -296,6 +301,7 @@ impl ControlFile {
             path,
             file,
             current: None,
+            fallback: None,
         })
     }
 
@@ -324,6 +330,7 @@ impl ControlFile {
             return Err(invalid_data("conflicting CONTROL slots at one generation"));
         }
         self.current = Some(newest.clone());
+        self.fallback = Some(states.pop());
         Ok(newest)
     }
 
@@ -438,10 +445,59 @@ impl ControlFile {
             // The torn/complete outcome of this publication is unknown, so
             // the cache can no longer describe stable storage.
             self.current = None;
+            self.fallback = None;
             return Err(error);
         }
+        self.fallback = Some(Some(current));
         self.current = Some(next.clone());
         Ok(())
+    }
+
+    /// Every valid state recovery can select, newest first.
+    #[cfg(test)]
+    pub(crate) fn selectable_states_for_test(&self) -> Vec<ControlState> {
+        self.current.iter().cloned().chain(self.fallback.clone().flatten()).collect()
+    }
+
+    /// Whether no slot recovery can select names a payload catalog other
+    /// than `installed`; a slot without a catalog names no segment file.
+    /// Unknown slot contents after a failed write answer `false`.
+    pub(crate) fn slots_name_only_payload_manifest(&self, installed: Option<BlockId>) -> bool {
+        let names_only_installed = |state: &ControlState| {
+            state.payload_manifest_block_id.is_none() || state.payload_manifest_block_id == installed
+        };
+        match (&self.current, &self.fallback) {
+            (Some(current), Some(fallback)) => {
+                names_only_installed(current) && fallback.as_ref().is_none_or(names_only_installed)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether every slot recovery can select replays into the physical roots
+    /// of `state`: the same WAL chain, checkpoint, history manifest and
+    /// payload catalog, with a root witness. Such slots differ at most in
+    /// generation and durable tip, which recovery re-derives from that shared
+    /// WAL, so they need no block `state` does not. Unknown slot contents
+    /// after a failed write answer `false`.
+    pub(crate) fn slots_name_only_physical_roots(&self, state: &ControlState) -> bool {
+        let names_only_physical_roots = |slot: &ControlState| {
+            slot.authority_uuid == state.authority_uuid
+                && slot.active_log_generation == state.active_log_generation
+                && slot.sealed_log == state.sealed_log
+                && slot.checkpoint_sequence == state.checkpoint_sequence
+                && slot.checkpoint_hash == state.checkpoint_hash
+                && slot.history_manifest_block_id == state.history_manifest_block_id
+                && slot.payload_manifest_block_id == state.payload_manifest_block_id
+                && slot.authority_state_root.is_some()
+        };
+        match (&self.current, &self.fallback) {
+            (Some(current), Some(fallback)) => {
+                names_only_physical_roots(current)
+                    && fallback.as_ref().is_none_or(names_only_physical_roots)
+            }
+            _ => false,
+        }
     }
 
     pub fn path(&self) -> &Path {

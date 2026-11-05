@@ -2,10 +2,15 @@
 
 Continue grants a new execution, never resurrects the dead process. The Turn
 repository remains cancellation authority; swarm rows are recovery evidence.
+A tool round left open by a restart, crash or Stop is closed here with an
+explicit recovery notice so its own agent can reconcile it; nothing is re-run.
 """
 from __future__ import annotations
 
+import copy
 import threading
+
+from lib.turn_initiation import INITIATOR_HUMAN, resolve_turn_initiator
 
 _RESTART_REASONS = frozenset({
     'server_restart', 'server_shutdown', 'process_restart', 'process_killed',
@@ -38,7 +43,7 @@ def _continuation_header(row: dict) -> dict:
         'turnId', 'laneId', 'ordinal', 'status', 'actor', 'kind', 'parentTurnId',
         'settlement') if key in row}
     result['projection'] = {key: projection[key] for key in (
-        '_initiator', '_swarmAutoContinueCommandId', '_swarmFailureRecovery', 'error')
+        'origin', '_initiator', '_swarmAutoContinueCommandId', '_swarmFailureRecovery', 'error')
         if key in projection}
     result['_externalBlocker'] = known_external_blocker(projection)
     return result
@@ -97,7 +102,8 @@ def _read_authority_turns(conv_id: str, *, user_id: int, lane_id: str = 'main',
             if continuation:
                 header = _continuation_header(row)
                 turns.append(header)
-                if header.get('actor') == 'human' and not header['projection'].get('_initiator'):
+                if (header.get('actor') == 'human'
+                        and resolve_turn_initiator(header) == INITIATOR_HUMAN):
                     return {'turns': list(reversed(turns))}
             else:
                 turns.append({key: row[key] for key in (
@@ -252,14 +258,17 @@ def continue_recovery_allowed(sess: dict, task: dict, *, user_id: int,
 
 
 def checkpoint_recovery_error(agent: dict) -> str:
-    """Refuse unresolved tools; an absent receipt is never proof of rollback."""
-    result = agent.get('result') or {}
-    if result.get('checkpoint_phase') == 'tools_in_flight':
-        return 'restart_tool_outcome_unknown'
+    """Refuse a checkpoint whose transcript cannot show what was in flight.
+
+    An open tool round is resumable (see ``settle_interrupted_tool_round``);
+    a malformed transcript, or a ``tools_in_flight`` phase without the tool
+    calls it claims, would hide an effect from the resumed model.
+    """
     messages = agent.get('messages') or []
     if not isinstance(messages, list) or (not messages and agent.get('rounds_used')):
         return 'restart_checkpoint_invalid'
     pending = set()
+    last_calls: list = []
     for message in messages:
         if not isinstance(message, dict):
             return 'restart_checkpoint_invalid'
@@ -274,9 +283,117 @@ def checkpoint_recovery_error(agent: dict) -> str:
                     return 'restart_checkpoint_invalid'
                 seen.add(call_id)
                 pending.add(call_id)
+            last_calls = calls
         elif message.get('role') == 'tool':
             call_id = message.get('tool_call_id')
             if not isinstance(call_id, str) or call_id not in pending:
                 return 'restart_checkpoint_invalid'
             pending.remove(call_id)
-    return 'restart_tool_outcome_unknown' if pending else ''
+    if (agent.get('result') or {}).get('checkpoint_phase') == 'tools_in_flight' and not last_calls:
+        return 'restart_checkpoint_invalid'
+    return ''
+
+
+_INTERRUPTION_NOTICES = {
+    'server_shutdown': ('A server restart', 'Any abort shown in this round came '
+                        'from that restart, not from a user decision.'),
+    'parent_stop': ('A Stop', 'The user has since chosen to continue this run.'),
+}
+_UNKNOWN_INTERRUPTION = ('A server restart or crash', 'Any abort shown in this '
+                         'round came from that interruption, not from a user decision.')
+
+
+def interrupted_tool_calls(agent: dict) -> list[dict]:
+    """Return the calls of a valid checkpoint's open tool round, else ``[]``.
+
+    The round is open when the phase says tools were in flight or a call has
+    no recorded result. Only the newest assistant message can hold it.
+    """
+    messages = agent.get('messages') or []
+    last = next((index for index in range(len(messages) - 1, -1, -1)
+                 if messages[index].get('role') == 'assistant'), None)
+    if last is None:
+        return []
+    calls = messages[last].get('tool_calls') or []
+    answered = {message.get('tool_call_id') for message in messages[last + 1:]
+                if message.get('role') == 'tool'}
+    in_flight = (agent.get('result') or {}).get('checkpoint_phase') == 'tools_in_flight'
+    if not calls or not (in_flight or any(call['id'] not in answered for call in calls)):
+        return []
+    return list(calls)
+
+
+def surviving_command_error(agent: dict, *, conv_id: str) -> str:
+    """Refuse resume while a command of the open round may still be running.
+
+    Boot retires orphaned foreground command groups before swarm recovery, so
+    a remaining record means retirement failed or another live process still
+    owns it. Unreadable records cannot prove quiescence either.
+    """
+    calls = interrupted_tool_calls(agent)
+    if not calls:
+        return ''
+    from lib.project_mod.foreground_command_records import surviving_foreground_commands
+    try:
+        records = surviving_foreground_commands(
+            conv_id=conv_id, tool_call_ids=[call['id'] for call in calls])
+    except OSError as exc:
+        return ('restart_command_still_running: command process records are unreadable '
+                f'({type(exc).__name__}); confirm no command from the interrupted tool '
+                'round is still running, then retry')
+    if not records:
+        return ''
+    record = records[0]
+    return ('restart_command_still_running: the command of interrupted call '
+            f"{record.get('tool_call_id')} may still be running (process group "
+            f"{record.get('pgid')}: {record.get('command')!r}); stop it, then retry")
+
+
+def settle_interrupted_tool_round(agent: dict) -> list | None:
+    """Close an open tool round for resume without re-running any call.
+
+    Requires ``checkpoint_recovery_error(agent) == ''``. Every call of the open
+    round keeps its recorded result plus a recovery notice; a call without a
+    result gets one stating its outcome is unknown. The resumed agent, which
+    issued the calls, reconciles them like any other interrupted tool. Returns
+    new messages (the input is not mutated) or None when no round was open.
+    """
+    calls = interrupted_tool_calls(agent)
+    if not calls:
+        return None
+    cause, attribution = _INTERRUPTION_NOTICES.get(
+        (agent.get('result') or {}).get('recovery_reason'), _UNKNOWN_INTERRUPTION)
+    recorded_notice = (
+        f'[Tofu recovery notice: {cause} stopped this agent while this tool round '
+        f'was open. Tofu did not run this call again. {attribution} If the result '
+        'above is complete, it stands. If it shows an abort, interruption, timeout '
+        'or missing output, the call may not have run, or may have run partially '
+        'or completely: check the actual state before relying on it or repeating it.]')
+    missing_notice = (
+        f'[Tofu recovery notice: {cause} stopped this agent before the result of '
+        'this call was recorded. Tofu did not run it again. The call may not have '
+        'run, or may have run partially or completely: check the actual state '
+        'before relying on it or repeating it.]')
+    messages = agent['messages']
+    last = max(index for index, message in enumerate(messages)
+               if message.get('role') == 'assistant')
+    tail = copy.deepcopy(messages[last + 1:])
+    results = {message['tool_call_id']: message for message in tail
+               if message.get('role') == 'tool'}
+    settled = copy.deepcopy(messages[:last + 1])
+    for call in calls:
+        message = results.get(call['id'])
+        if message is None:
+            settled.append({'role': 'tool', 'tool_call_id': call['id'],
+                            'content': missing_notice})
+            continue
+        content = message.get('content')
+        if isinstance(content, list):
+            message['content'] = [*content, {'type': 'text', 'text': recorded_notice}]
+        elif content is None or content == '':
+            message['content'] = recorded_notice
+        else:
+            message['content'] = f'{content}\n\n{recorded_notice}'
+        settled.append(message)
+    settled.extend(message for message in tail if message.get('role') != 'tool')
+    return settled

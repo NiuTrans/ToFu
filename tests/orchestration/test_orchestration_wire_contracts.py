@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -172,10 +171,6 @@ def test_browser_registry_matches_backend_protocol_identifiers():
         assert handle.read() == render_typescript()
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not shutil.which(ESBUILD),
-    reason='node + vite test bundler unavailable',
-)
 def test_classic_and_native_wire_policies_have_behavioral_parity(tmp_path):
     built = tmp_path / 'wire-contract.js'
     compiled = subprocess.run(

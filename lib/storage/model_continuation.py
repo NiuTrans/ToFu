@@ -15,7 +15,7 @@ import uuid
 
 from lib.storage.errors import StorageError
 from lib.agent_core.model_context_limits import (
-    MAX_ENTRY_BYTES, MAX_MESSAGES, MAX_TURN_WITNESSES,
+    MAX_ENTRY_BYTES, MAX_JSON_SAFE_INTEGER, MAX_MESSAGES, MAX_TURN_WITNESSES,
 )
 from lib.storage.generated_model_context_projection import (
     DISPLAY_ONLY_FIELDS as _DISPLAY_ONLY_FIELDS,
@@ -102,19 +102,21 @@ def encode_projection(projection):
     if not isinstance(projection, dict):
         return None
     messages, turns = projection.get('messages'), projection.get('turns')
+    # A proof binds the whole prefix and carries only its terminal witness.
+    witnesses_allowed = 1 if 'historyProof' in projection else MAX_TURN_WITNESSES
     if (not isinstance(messages, list) or not 0 < len(messages) <= MAX_MESSAGES
             or not all(isinstance(message, dict) for message in messages)
             or messages[-1].get('role') != 'assistant'
-            or not isinstance(turns, list) or not 0 < len(turns) <= MAX_TURN_WITNESSES):
+            or not isinstance(turns, list) or not 0 < len(turns) <= witnesses_allowed):
         return None
     if 'historyProof' in projection:
         proof = projection['historyProof']
         if (not isinstance(proof, dict) or set(proof) != {'version', 'count', 'digest'}
                 or type(proof.get('version')) is not int or proof['version'] not in (1, 2)
-                or type(proof.get('count')) is not int or not 0 <= proof['count'] < 10000
+                or type(proof.get('count')) is not int
+                or not 0 <= proof['count'] <= MAX_JSON_SAFE_INTEGER
                 or not isinstance(proof.get('digest'), str) or len(proof['digest']) != 64
-                or any(char not in '0123456789abcdef' for char in proof['digest'])
-                or len(turns) != 1):
+                or any(char not in '0123456789abcdef' for char in proof['digest'])):
             return None
     for witness in turns:
         if (not isinstance(witness, list) or len(witness) != 2
@@ -183,11 +185,12 @@ class ModelContinuationStore:
         proof = first['historyProof']
         covered = first['covered']
         cursor = first['nextTurnId']
-        seen = set()
+        # Every page must add unseen Turns under one unchanged proof, so the
+        # bounded selected suffix itself ends paging; no Turn count is capped.
+        seen = {row['turnId'] for row in turns}
         while cursor:
-            if cursor in seen or cursor != turns[-1]['turnId'] or len(turns) >= 10000:
+            if cursor != turns[-1]['turnId']:
                 raise StorageError('database_protocol_error', 'model context cursor did not advance')
-            seen.add(cursor)
             try:
                 page = self.client.query('turn.context.read',
                                          payload | {'after_turn_id': cursor}, deadline=5.0)
@@ -204,6 +207,7 @@ class ModelContinuationStore:
                     or not page.get('turns')
                     or any(row['turnId'] in seen for row in page['turns'])):
                 raise _ContextPagingChanged()
+            seen.update(row['turnId'] for row in page['turns'])
             turns.extend(page['turns'])
             first['proofEligible'] = first['proofEligible'] and page['proofEligible']
             cursor = page.get('nextTurnId')

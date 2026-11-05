@@ -1,0 +1,6 @@
+{
+  "file": {"path": "reminder.txt", "content": "Review the deck when it is ready.\n"},
+  "content_contains": ["deck is still running", "reminder is saved"],
+  "tool_names": ["produce_slides", "write_file"],
+  "aborted": false
+}

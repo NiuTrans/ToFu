@@ -13,11 +13,11 @@ details and verification dates):
   Provider        Best available counter          Confidence
   ==============  ==============================  ==================
   Anthropic       Upstream ``count_tokens`` API   exact
-                  (proxied by Meituan gateway)
+                  (proxied by YourProvider gateway)
   AWS Bedrock     (same answer via Anthropic)     exact
   Google Gemini   Native ``countTokens`` — ONLY   exact
                   when connected directly to
-                  Google; Meituan gateway skips
+                  Google; YourProvider gateway skips
                   it (gracefully → tiktoken).
   OpenAI (GPT-*)  ``tiktoken`` (official)         exact
   DeepSeek        ``deepseek_tokenizer`` pip      exact
@@ -61,6 +61,11 @@ Public API (imported from ``lib.token_counter``):
   :func:`count_text`     Fast single-string count.
   :func:`cached_cheap_estimate_text`
                          Entropy safety estimate with bounded digest reuse.
+  :class:`RequestTextCounts`
+                         Owner-held per-text count memo for repeated
+                         ``count_tokens(..., text_count_memo=...)`` calls;
+                         ``memo.view(label)`` counts one projection of the
+                         request (:class:`RequestTextCountView`).
   :func:`record_usage`   Feed the last response's usage into the cache.
                          Called from ``lib/llm/stream.py`` after every
                          successful stream.
@@ -70,16 +75,20 @@ Public API (imported from ``lib.token_counter``):
 from __future__ import annotations
 
 from .api import (
+    RequestTextCounts,
+    RequestTextCountView,
     cached_cheap_estimate_text,
     count_text,
     count_tokens,
     invalidate,
     record_usage,
+    request_text_count_view,
 )
 from .base import CountResult
 
 __all__ = [
     'count_tokens', 'count_text', 'cached_cheap_estimate_text',
     'record_usage', 'invalidate',
-    'CountResult',
+    'CountResult', 'RequestTextCounts', 'RequestTextCountView',
+    'request_text_count_view',
 ]

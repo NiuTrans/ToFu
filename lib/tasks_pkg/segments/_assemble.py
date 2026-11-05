@@ -10,11 +10,14 @@ that batch as ``assistantContent`` / ``thinking`` / ``thinkingSignature``
 before ``_discard_pretool_prose`` zeroes the accumulators; the terminal round's
 deliverable prose survives in ``task['content']`` / ``task['thinking']``.
 Prose-only rounds whose stop a continuation enforcer vetoed are the ONE shape
-that record misses (no tool batch to stamp onto, accumulators later zeroed);
-they are snapshotted into ``task[CONTINUATION_PROSE_FIELD]`` at nudge time
-(``record_continuation_prose``) and interleaved here. So the ordered merged
-list + continuation snapshots + terminal strings are a complete, lossless
-record.
+that record misses (no tool batch to stamp onto); they are snapshotted into
+``task[CONTINUATION_PROSE_FIELD]`` at nudge time (``record_continuation_prose``).
+Each vetoed channel has exactly one owner at a time: while the live text still
+holds its bytes they belong to the terminal strings, and once a live-text
+replacement drops them (``release_continuation_prose``) the record owns them
+and they are interleaved here as non-deliverable prose. So the ordered merged
+list + released continuation snapshots + terminal strings are a complete,
+lossless record that shows no byte twice.
 
 Mid-turn checkpoints add one live-window rule: while the TRAILING tool batch
 is still in flight (``LIVE_ROUND_STATUSES``) and its prose stamp has not
@@ -37,6 +40,7 @@ Pure functions; no Flask, no DB, no LLM.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any
 
 from lib.log import get_logger
@@ -63,6 +67,14 @@ from lib.tasks_pkg.segments._types import (
 )
 
 logger = get_logger(__name__)
+
+# Per-entry live-text hold of a continuation-prose record: ``{channel: end}``
+# maps a live-text key (``content`` / ``thinking``) to the live length that,
+# at record time, ended with the vetoed bytes.
+_LIVE_TEXT_HOLD = 'liveTextHold'
+_LIVE_TEXT_CHANNELS = ('content', 'thinking')
+_CONTINUATION_BLOCK_PREFIXES = (
+    f'{SEG_THINKING}:continuation-', f'{SEG_TEXT}:continuation-')
 
 
 def _round_block_suffix(round_dict: dict[str, Any], position: int) -> str:
@@ -149,15 +161,21 @@ def record_continuation_prose(
     """Snapshot a prose-only round whose stop a continuation enforcer vetoed.
 
     The wire keeps the interrupted answer (``append_assistant_prose_message``
-    runs first), but the legacy channels cannot: ``task['content']`` /
-    ``task['thinking']`` are NOT reset between consecutive continuations and
-    are zeroed by the next tool round's ``_discard_pretool_prose``, and the
-    prose-only round owns no tool batch to stamp ``assistantContent`` onto.
-    Append the exact per-round strings here so ``assemble_segments`` can
-    interleave them. Sources MUST be the per-round message fields
+    runs first), but the prose-only round owns no tool batch to stamp
+    ``assistantContent`` onto. Append the exact per-round strings here so
+    ``assemble_segments`` can interleave them once the live text drops them.
+    Sources MUST be the per-round message fields
     (``assistant_msg['content']`` / ``['reasoning_content']``), never the
     accumulators — those carry earlier rounds too and would duplicate
     already-recorded entries on a second nudge.
+
+    Ownership: a channel whose bytes still end the live text
+    (``task['content']`` / ``task['thinking']``) is recorded as held. The
+    live text — and so the terminal deliverable — owns those bytes until a
+    replacement drops them (``release_continuation_prose``); only then does
+    this record render them. An enforcer that keeps the vetoed answer as the
+    provisional answer leaves the live text alone; one that supersedes it
+    resets the live text, which releases the hold immediately.
     """
     if not isinstance(task, dict):
         return None
@@ -177,9 +195,78 @@ def record_continuation_prose(
         entry['attemptId'] = attempt_id
         if task_id:
             entry['taskId'] = task_id
-    entries = task.setdefault(CONTINUATION_PROSE_FIELD, [])
-    entries.append(entry)
+    with task.get('content_lock') or nullcontext():
+        hold: dict[str, int] = {}
+        for channel, value in zip(_LIVE_TEXT_CHANNELS, (text, think)):
+            live = task.get(channel)
+            # Whitespace at either edge is not displayed content; providers
+            # may trim it from the assembled message but not from the deltas.
+            if (value.strip() and isinstance(live, str)
+                    and live.rstrip().endswith(value.strip())):
+                hold[channel] = len(live)
+        if hold:
+            entry[_LIVE_TEXT_HOLD] = hold
+        task.setdefault(CONTINUATION_PROSE_FIELD, []).append(entry)
     return entry
+
+
+def release_continuation_prose(
+    task: dict[str, Any],
+    *,
+    content: Any,
+    thinking: Any,
+) -> bool:
+    """Hand vetoed prose that a live-text replacement drops to its record.
+
+    The live-text owner (``reset_task_text``) calls this while holding the
+    content lock, before it writes ``content`` / ``thinking``. A held channel
+    stays with the live text only while the replacement preserves the live
+    prefix that ends with the vetoed bytes — a rollback to the round base.
+    Every other replacement (pre-tool discard, retry reset, contract
+    correction, delivered tool text) drops them, so the record becomes their
+    only owner and ``assemble_segments`` renders them at their round.
+    Returns whether any channel changed owner.
+    """
+    entries = task.get(CONTINUATION_PROSE_FIELD)
+    if not isinstance(entries, list):
+        return False
+    released = False
+    replacement = {
+        'content': content if isinstance(content, str) else '',
+        'thinking': thinking if isinstance(thinking, str) else '',
+    }
+    for entry in entries:
+        hold = entry.get(_LIVE_TEXT_HOLD) if isinstance(entry, dict) else None
+        if not isinstance(hold, dict):
+            continue
+        for channel, end in list(hold.items()):
+            live = task.get(channel)
+            live = live if isinstance(live, str) else ''
+            if replacement.get(channel, '')[:end] != live[:end]:
+                del hold[channel]
+                released = True
+        if not hold:
+            del entry[_LIVE_TEXT_HOLD]
+    return released
+
+
+def _live_text_snapshot(
+    task: dict[str, Any],
+) -> tuple[Any, Any, list[tuple[int, dict[str, Any], frozenset[str]]]]:
+    """Read the live text and the continuation holds in one critical section.
+
+    ``release_continuation_prose`` moves bytes from the live text to a record
+    under the same lock, so an atomic read can never see them in both owners
+    or in neither.
+    """
+    with task.get('content_lock') or nullcontext():
+        entries = task.get(CONTINUATION_PROSE_FIELD)
+        records = [
+            (position, entry, frozenset(entry.get(_LIVE_TEXT_HOLD) or ()))
+            for position, entry in enumerate(entries)
+            if isinstance(entry, dict)
+        ] if isinstance(entries, list) else []
+        return task.get('content'), task.get('thinking'), records
 
 
 def record_injected_note(
@@ -233,7 +320,7 @@ def record_injected_note(
 
 def _insert_continuation_prose_segments(
     segments: list[dict[str, Any]],
-    task: dict[str, Any],
+    records: list[tuple[int, dict[str, Any], frozenset[str]]],
 ) -> None:
     """Interleave vetoed final answers into the round-derived segment list.
 
@@ -248,17 +335,18 @@ def _insert_continuation_prose_segments(
     ``deliverable=False`` keeps ``derive_content`` byte-identical, and the
     rounds view only attaches prose to tool-bearing batches, so replay never
     re-sends these bytes (the wire row appended at nudge time already did).
+    A channel the live text still holds is skipped: its bytes are part of the
+    terminal strings (see ``record_continuation_prose``).
     """
-    entries = task.get(CONTINUATION_PROSE_FIELD)
-    if not isinstance(entries, list):
-        return
-    for position, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            continue
+    for position, entry, held in records:
         raw_text = entry.get('content')
         raw_think = entry.get('thinking')
         text = raw_text if isinstance(raw_text, str) else ''
         think = raw_think if isinstance(raw_think, str) else ''
+        if 'content' in held:
+            text = ''
+        if 'thinking' in held:
+            think = ''
         if not (text.strip() or think.strip()):
             continue
         lr = entry.get('llmRound')
@@ -300,6 +388,22 @@ def _insert_continuation_prose_segments(
         segments[index:index] = inserted
 
 
+def merge_injected_note_segments(
+    segments: list[dict[str, Any]],
+    notes: Any,
+) -> list[dict[str, Any]]:
+    """Project pending notes through the same owner as checkpoint assembly.
+
+    Structural events may precede the next checkpoint. Merge by durable block
+    identity, without mutating the captured task or rebuilding its tool prefix.
+    """
+    if not isinstance(notes, list) or not notes:
+        return segments
+    merged = list(segments)
+    _insert_injected_note_segments(merged, {INJECTED_NOTES_FIELD: notes})
+    return merged
+
+
 def _insert_injected_note_segments(
     segments: list[dict[str, Any]],
     task: dict[str, Any],
@@ -318,8 +422,8 @@ def _insert_injected_note_segments(
 
     Continuation prose is exempt from the skip: it lands at the same batch
     head via the shared ``>= lr`` rule, and this pass (running after it) steps
-    PAST that same-round prose before inserting — preserving the wire order
-    "prose, then the nudge that re-drove the model". A nudge that fired with
+    PAST that same-round prose — its thinking and its text — before inserting,
+    preserving the wire order "prose, then the nudge that re-drove the model". A nudge that fired with
     no consuming round yet (``lr`` past every segment) still falls through to
     the tail.
     """
@@ -348,33 +452,40 @@ def _insert_injected_note_segments(
                and entry['taskId'] else {}),
         }
         index = len(segments)
-        if lr is not None:
-            for i, segment in enumerate(segments):
-                seg_round = segment.get('llmRound')
-                if not (isinstance(seg_round, int)
-                        and not isinstance(seg_round, bool)):
-                    continue
-                if seg_round < lr:
-                    continue
-                # Same-round vetoed prose stays ahead of the nudge that
-                # re-drove the model past it (see docstring).
-                if (seg_round == lr
-                        and segment.get('type') == SEG_TEXT
-                        and str(segment.get('blockId') or '').startswith(
-                            'text:continuation-')):
-                    continue
-                # A note already anchored at this batch head is not a
-                # boundary: later entries land AFTER it, keeping injection
-                # order (otherwise each new note bumps the previous one and
-                # a turn-start stack renders reversed). With the prose skip
-                # above this makes the head a STABLE sort — prose, then notes
-                # in entry order, then the round's own content.
-                if (seg_round == lr
-                        and segment.get('type') == SEG_SYSTEM_NOTE):
-                    continue
+        for i, segment in enumerate(segments):
+            if any(identity_fields.get(field) and segment.get(field)
+                   and identity_fields[field] != segment[field]
+                   for field in ('attemptId', 'taskId')):
+                continue
+            # Live narration can still be terminal while its early tool card
+            # follows it. This is a boundary, not a fallback that a later
+            # same-round tool may override. Apply execution scope to both
+            # anchors so another attempt's terminal cannot capture this note.
+            if segment.get('terminal'):
                 index = i
                 break
-        segments[index:index] = [{
+            seg_round = segment.get('llmRound')
+            if (lr is None or not isinstance(seg_round, int)
+                    or isinstance(seg_round, bool) or seg_round < lr):
+                continue
+            # Same-round vetoed prose stays ahead of the nudge that
+            # re-drove the model past it (see docstring).
+            if (seg_round == lr
+                    and str(segment.get('blockId') or '').startswith(
+                        _CONTINUATION_BLOCK_PREFIXES)):
+                continue
+            # A note already anchored at this batch head is not a
+            # boundary: later entries land AFTER it, keeping injection
+            # order (otherwise each new note bumps the previous one and
+            # a turn-start stack renders reversed). With the prose skip
+            # above this makes the head a STABLE sort — prose, then notes
+            # in entry order, then the round's own content.
+            if (seg_round == lr
+                    and segment.get('type') == SEG_SYSTEM_NOTE):
+                continue
+            index = i
+            break
+        note_segment = {
             'type': SEG_SYSTEM_NOTE,
             'blockId': entry.get('blockId') or f'system-note:{kind}-{position}',
             'text': text,
@@ -384,7 +495,18 @@ def _insert_injected_note_segments(
                if isinstance(entry.get('reason'), str) else {}),
             'llmRound': lr,
             **identity_fields,
-        }]
+        }
+        existing_index = next((
+            i for i, current in enumerate(segments)
+            if current.get('type') == SEG_SYSTEM_NOTE
+            and current.get('blockId') == note_segment['blockId']
+            and execution_identity(current) == execution_identity(note_segment)
+        ), None)
+        if existing_index is None:
+            segments.insert(index, note_segment)
+        else:
+            # Grouped context can gain entries after an earlier event.
+            segments[existing_index] = note_segment
 
 
 def _merged_rounds(task: dict[str, Any], merged: list | None) -> list:
@@ -422,6 +544,8 @@ def assemble_segments(task: dict[str, Any],
         provable byte-identity gate rather than a fragile field-by-field rebuild.
     """
     rounds = _merged_rounds(task, merged)
+    raw_term_content, raw_term_think, continuation_records = (
+        _live_text_snapshot(task))
     segments: list[dict[str, Any]] = []
     previous_batch_key: tuple[Any, ...] | None = None
     ordered_batch_keys = execution_batch_keys(rounds)
@@ -514,7 +638,7 @@ def assemble_segments(task: dict[str, Any],
     # ── Interrupted final answers vetoed by continuation enforcers ──
     # Ordered before any later llmRound's segments (and before the terminal
     # deliverable appended below) — the position they occupied on the wire.
-    _insert_continuation_prose_segments(segments, task)
+    _insert_continuation_prose_segments(segments, continuation_records)
 
     # ── Engine-authored intervention notes (stall nudge / todo reminder) ──
     # After the continuation-prose pass on purpose: prose keeps the tail-of-
@@ -523,11 +647,12 @@ def assemble_segments(task: dict[str, Any],
     _insert_injected_note_segments(segments, task)
 
     # ── Terminal round: the deliverable prose + its thinking ──
-    # task['content'] / task['thinking'] hold the LAST round's output (reset
-    # each tool round). Any Sources-footer / content-filter override applied in
-    # _finalize_and_emit_done is already folded into task['content'] by the time
-    # we assemble, so the deliverable segment captures it verbatim.
-    raw_term_think = task.get('thinking')
+    # task['content'] / task['thinking'] hold the prose since the last tool
+    # round (reset each tool round): the terminal round's output, preceded by
+    # any vetoed answer the live text still owns. Any Sources-footer /
+    # content-filter override applied in _finalize_and_emit_done is already
+    # folded into task['content'] by the time we assemble, so the deliverable
+    # segment captures it verbatim.
     term_think = raw_term_think if isinstance(raw_term_think, str) else ''
     terminal_segments: list[dict[str, Any]] = []
     if term_think:
@@ -536,7 +661,6 @@ def assemble_segments(task: dict[str, Any],
             'blockId': 'thinking:terminal',
             'deliverable': False, 'terminal': True,
         })
-    raw_term_content = task.get('content')
     term_content = raw_term_content if isinstance(raw_term_content, str) else ''
     if term_content:
         term_seg: dict[str, Any] = {
@@ -544,11 +668,9 @@ def assemble_segments(task: dict[str, Any],
             'blockId': 'text:terminal',
             'deliverable': True, 'terminal': True,
         }
-        # A turn cut off mid-answer leaves a RESUMABLE deliverable prefix.
-        # Marked here (additive, dark) off the finish reason so a persisted
-        # final row carries the signal; resume_prefill_from_segments also
-        # accepts a finish_reason override for rows assembled at checkpoint
-        # time (status='running', no finishReason yet).
+        # A turn cut off mid-answer leaves an unfinished deliverable prefix.
+        # Marked here (additive, display-only) off the finish reason so a
+        # persisted final row carries the signal.
         if (task.get('finishReason') or '') in RESUMABLE_FINISH_REASONS:
             term_seg['resumable'] = True
         terminal_segments.append(term_seg)

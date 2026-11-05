@@ -6,6 +6,18 @@ This package owns wallet, reservation/settlement, ledger, and cleanup policy.
 Canonical model rates live in `lib/pricing/`. Read
 `docs/modules/auth_providers_billing.md`.
 
+`payments/stripe_events.py` owns signed-event admission and normalized payment
+facts without storage access. `payments/stripe.py` owns checkout/provider IO and
+the shared record/settle handoff. Add event variants at the admission owner;
+preserve PaymentIntent deduplication and unpaid/invalid no-write specifications.
+
+`payments/alipay_protocol.py` owns RSA2 request signing and notification admission
+without storage IO. `payments/alipay.py` joins those facts to an existing local
+order before shared settlement; never infer a wallet from callback metadata.
+`payments/amounts.py` owns exact payment unit conversion, using the existing credit
+unit. Verify pending-order durability, merchant/amount binding, frozen rates,
+concurrency and lost ACKs through SQLite and both native application transports.
+
 ## Editing rules
 
 - Every operation is owner/account scoped and uses stable idempotency keys.
@@ -26,8 +38,12 @@ Canonical model rates live in `lib/pricing/`. Read
 Run focused billing, cost, pricing, idempotency, rollback, settlement, and
 janitor tests, plus the Sidecar transaction cases for changed ledger operations.
 
-Native-required terminal settlement consumes frozen per-round Rust credits via
-native_task_cost. Verify account coverage/unknown refusal, signed overflow,
+`cost` adapts canonical dynamic prices; `cost_types` carries the shared integer
+result. `native_cost` owns frozen per-round Rust credit validation, child fee
+grants and transfer. Its per-projection producer/round index only selects candidate
+witnesses; exact evidence and owner checks still authorize each row. It never
+reprices native fees or retains an authorization cache between projections.
+Verify account coverage/unknown refusal, signed overflow,
 zero reserve release and real native wallet lost-ACK idempotency; never reprice.
 `native_admission` protects a billed root's positive hold before provider entry
 through the existing immutable ledger. Wallet transactions serialize admission

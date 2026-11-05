@@ -136,9 +136,9 @@ def test_update_search_settings_read_vs_write():
     from lib.tasks_pkg.tool_display import tool_round_label
     read = tool_round_label('update_search_settings', {})
     write = tool_round_label('update_search_settings',
-                             {'fetch_top_n': 8, 'fetch_timeout': 30})
+                             {'block_domain': 'spam.example', 'unblock_domain': 'ok.example'})
     assert read != write
-    assert 'fetch_top_n' in write and 'fetch_timeout' in write
+    assert 'block_domain' in write and 'unblock_domain' in write
 
 
 def test_frontend_card_probe_is_wired_in_render_pipeline():
@@ -188,6 +188,8 @@ if __name__ == '__main__':
 
 
 @pytest.mark.parametrize('name', [
+    'create_conversation', 'dispatch_project_assignment', 'get_project_assignment',
+    'report_to_user',
     'evolution_explore', 'evolution_artifact', 'evolution_review', 'evolution_source',
     'send_project_message', 'get_project_messages', 'consider_project_message',
     'list_agents', 'manage_agents', 'publish_response_asset', 'publish_response_file',

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from tests._runtime_sections import _require_frontend_bundler
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -27,8 +28,7 @@ def transport_capture(tmp_path_factory):
     # Shared dep guard: skip on dep-less lanes, fail under
     # TOFU_REQUIRE_FRONTEND=1 (the bundler needs npm dev-deps, not just node).
     _require_frontend_bundler()
-    if not shutil.which('node') or not ESBUILD.is_file():
-        pytest.skip('node + esbuild unavailable')
+    require_node_modules('vite')
     output = tmp_path_factory.mktemp('request-id') / 'transport.cjs'
     compiled = subprocess.run(
         [str(ESBUILD), str(TRANSPORT), '--bundle', '--format=cjs',

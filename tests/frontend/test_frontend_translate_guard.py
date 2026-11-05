@@ -10,6 +10,7 @@ import subprocess
 import pytest
 
 from tests._runtime_sections import native_module_path, runtime_section
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -21,8 +22,7 @@ CLAIM_OWNER_BUNDLE = native_module_path(
 
 
 def _run_node(source: str) -> dict:
-    if not shutil.which("node"):
-        pytest.skip("node is required")
+    require_node_modules('vite')
     script = f"""
 const run = new Function({json.dumps(source)});
 run().then((value) => console.log(JSON.stringify(value))).catch((error) => {{
@@ -281,3 +281,54 @@ return (async () => {
 """)
 
     assert result == {"poll": 0, "hydrate": 1, "pollers": 0}
+
+
+def test_running_turn_previews_rehydrate_on_open_and_push_reconnect():
+    pipeline = runtime_section("translation.js", scope_prelude=False)
+    result = _run_node(r"""
+const runtimeScope = globalThis;
+const window = globalThis;
+let conversations = [{id:'conv-a'}, {id:'conv-idle'}];
+let activeConvId = 'conv-a';
+let reconnect = null;
+function pushSubscribe() {}
+function pushOnReconnect(listener) { reconnect = listener; }
+const calls = {previews:[], activity:[]};
+let previews = [{
+  turnId:'turn-a',
+  partialByRound:{'text:llm-1':'译文一', 'thinking:llm-1':'推理一'},
+}];
+const Api = {
+  translate:{
+    previews:async (convId) => { calls.previews.push(convId); return previews; },
+    pollBatch:async () => [],
+  },
+};
+runtimeScope.ConversationTurnRead = {
+  activeAttemptIds:(convId) => (convId === 'conv-a' ? ['attempt-a'] : []),
+};
+runtimeScope.ConversationSurfacePresentation = {
+  setTranslationActivity:(conversationId, turnId, activity) => {
+    calls.activity.push([conversationId, turnId, activity?.status || null,
+      activity?.partialByRound || null]);
+  },
+};
+function errorEnvelopeMessage() { return ''; }
+""" + pipeline + r"""
+return (async () => {
+  await _resumePendingTranslations('conv-idle');
+  await _resumePendingTranslations('conv-a');
+  previews = null;
+  reconnect();
+  await new Promise((resolve) => setImmediate(resolve));
+  return calls;
+})();
+""")
+
+    # Only a conversation with a running attempt asks; a failed probe (null)
+    # keeps whatever previews the page already holds.
+    assert result["previews"] == ["conv-a", "conv-a"]
+    assert result["activity"] == [[
+        "conv-a", "turn-a", "pending",
+        {"text:llm-1": "译文一", "thinking:llm-1": "推理一"},
+    ]]

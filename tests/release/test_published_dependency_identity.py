@@ -84,7 +84,7 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 _REQUIREMENTS = _ROOT / 'requirements.txt'
 
 _PACKAGE = 'tofu-search'
-_PINNED_VERSION = '0.10.4'
+_PINNED_VERSION = '0.12.25'
 
 # Measured 2026-08-21 from the artifacts built off tofu-search e2cbcfc (tag
 # v0.10.3) via clean `git archive HEAD` + `python -m build --no-isolation`,
@@ -93,14 +93,18 @@ _PINNED_VERSION = '0.10.4'
 # __file__ asserted inside the probe dir and all 37 facade __all__ symbols
 # resolving; the digests below are PyPI's own /pypi/tofu-search/0.10.3/json
 # values AND match the local sha256 of the uploaded files byte-for-byte.
-# 0.10.4 digests: local clean-checkout build (python -m build), twine check
-# PASSED, isolated-import probe with all 38 facade __all__ symbols resolving;
-# PyPI will carry identical bytes on publish (reproducible build).
+# 0.12.25 digests are PyPI's own /pypi/tofu-search/0.12.25/json values, read
+# back after the trusted-publisher upload (tag search-v0.12.25, workflow run
+# 39758603792 attempt 2). The local clean-checkout artifacts were NOT used for
+# these numbers: this build is content-deterministic but not byte-reproducible,
+# because the wheel/sdist record file mtimes. Two clean builds produced zero
+# differing members yet different sha256 digests, so pinning a local hash would
+# have recorded bytes PyPI never served.
 _EXPECTED_DIGESTS = {
-    'tofu_search-0.10.4-py3-none-any.whl':
-        '439c090bb3954cab17edb3adf641397bb2ade636f1a99ef9eca658d6d6f08741',
-    'tofu_search-0.10.4.tar.gz':
-        'e47591a61e73ddf028c61edbacc2b568e3c8044d789ce93eb0f12ad9dd7d074e',
+    'tofu_search-0.12.25-py3-none-any.whl':
+        'bc4ee3cfda6678e8e3ccc9ed3ec4b48302c73b5be10def4be3bbec03f09756c1',
+    'tofu_search-0.12.25.tar.gz':
+        'e55e590dd691445c02fb9691d657fcda753d718ca8fa4183873277d0c48e1aae',
 }
 
 _PYPI_VERSION_JSON = 'https://pypi.org/pypi/{name}/{version}/json'

@@ -166,7 +166,7 @@ def test_terminal_waits_for_previous_event_and_settles_exact_final_content(
     assert turn['status'] == 'completed'
     assert turn['projection']['content'] == 'answer'
     assert _stored_event(storage, task['id'], 1)['event']['type'] == 'done'
-    assert task['_eventDeliveryLane'].projection_source is None
+    assert task['_eventDeliveryLane'].projection.source is None
     _discard(task)
 
 

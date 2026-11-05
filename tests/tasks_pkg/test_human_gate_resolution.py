@@ -1,4 +1,4 @@
-"""Public concurrency, ownership, and capacity contracts for human gates."""
+"""Public concurrency, ownership, and registration contracts for human gates."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def _wait_until(predicate, *, timeout=1.0):
 
 
 def test_registry_binds_owner_and_preserves_first_resolution():
-    registry = OwnedHumanGateRegistry(capacity=2)
+    registry = OwnedHumanGateRegistry()
     entry = registry.register(
         GATE_WRITE_APPROVAL, 'approval-one', owner_user_id=OWNER)
 
@@ -62,19 +62,24 @@ def test_registry_binds_owner_and_preserves_first_resolution():
     assert len(registry) == 0
 
 
-def test_registry_capacity_is_shared_across_gate_kinds():
-    registry = OwnedHumanGateRegistry(capacity=2)
+def test_registry_refuses_only_duplicates_never_by_count():
+    registry = OwnedHumanGateRegistry()
 
     assert registry.register(
         GATE_STDIN, 'same-id', owner_user_id=OWNER) is not None
     assert registry.register(
         GATE_GUIDANCE, 'same-id', owner_user_id=OWNER) is not None
     assert registry.register(
-        GATE_WRITE_APPROVAL, 'third', owner_user_id=OWNER) is None
+        GATE_STDIN, 'same-id', owner_user_id=OTHER_OWNER) is None
+    for index in range(5000):
+        assert registry.register(
+            GATE_WRITE_APPROVAL, f'approval-{index}',
+            owner_user_id=OWNER) is not None
+    assert len(registry) == 5002
 
 
 def test_registry_timeout_discard_cannot_erase_a_winning_response():
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     entry = registry.register(
         GATE_STDIN, 'boundary', owner_user_id=OWNER)
     assert entry is not None
@@ -190,7 +195,7 @@ def distributed_store(monkeypatch):
 
 
 def test_register_plants_request_flag(distributed_store):
-    registry = OwnedHumanGateRegistry(capacity=2)
+    registry = OwnedHumanGateRegistry()
     entry = registry.register(
         GATE_WRITE_APPROVAL, 'plant', owner_user_id=OWNER)
     assert entry is not None
@@ -206,7 +211,7 @@ def test_cross_replica_resolve_plants_answer_first_writer_wins(
         distributed_store):
     """A resolve for a waiter on ANOTHER replica lands in the store;
     a second resolve (either replica) loses."""
-    registry = OwnedHumanGateRegistry(capacity=2)
+    registry = OwnedHumanGateRegistry()
     assert registry.resolve(
         GATE_STDIN, 'remote', owner_user_id=OWNER, response='first')
     assert not registry.resolve(
@@ -222,7 +227,7 @@ def test_cross_replica_resolve_refuses_foreign_request_flag(
     different principal, even cross-replica."""
     distributed_store.set_value(
         'human-gate-req', f'{GATE_STDIN}:foreign', str(OTHER_OWNER), 300)
-    registry = OwnedHumanGateRegistry(capacity=2)
+    registry = OwnedHumanGateRegistry()
     assert not registry.resolve(
         GATE_STDIN, 'foreign', owner_user_id=OWNER, response='forged')
     assert distributed_store.get_value(
@@ -230,7 +235,7 @@ def test_cross_replica_resolve_refuses_foreign_request_flag(
 
 
 def test_poller_adopts_remote_answer_and_cleans_flag(distributed_store):
-    registry = OwnedHumanGateRegistry(capacity=2)
+    registry = OwnedHumanGateRegistry()
     entry = registry.register(GATE_STDIN, 'adopt', owner_user_id=OWNER)
     assert entry is not None
 
@@ -248,7 +253,7 @@ def test_poller_adopts_remote_answer_and_cleans_flag(distributed_store):
 
 
 def test_poller_rejects_wrong_owner_answer(distributed_store):
-    registry = OwnedHumanGateRegistry(capacity=2)
+    registry = OwnedHumanGateRegistry()
     entry = registry.register(GATE_GUIDANCE, 'forged', owner_user_id=OWNER)
     assert entry is not None
 
@@ -260,7 +265,7 @@ def test_poller_rejects_wrong_owner_answer(distributed_store):
 
 
 def test_poller_adopts_remote_cancel(distributed_store):
-    registry = OwnedHumanGateRegistry(capacity=2)
+    registry = OwnedHumanGateRegistry()
     entry = registry.register(GATE_STDIN, 'cancel-remote', owner_user_id=OWNER)
     assert entry is not None
 
@@ -335,9 +340,9 @@ def test_stdin_prompt_cleanup_preserves_concurrent_terminal_status(monkeypatch):
 
 
 @pytest.mark.parametrize('gate', ['approval', 'guidance'])
-def test_cancelled_wait_releases_capacity_and_rejects_late_answer(monkeypatch, gate):
+def test_cancelled_wait_releases_entry_and_rejects_late_answer(monkeypatch, gate):
     module = approval if gate == 'approval' else human_guidance
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(module, 'human_gate_registry', registry)
     interval = '_STORE_POLL_INTERVAL' if gate == 'approval' else '_ABORT_POLL_INTERVAL'
     monkeypatch.setattr(module, interval, 0.01)
@@ -371,7 +376,7 @@ def test_cancelled_wait_releases_capacity_and_rejects_late_answer(monkeypatch, g
 @pytest.mark.parametrize('gate', ['approval', 'guidance'])
 def test_failed_abort_probe_releases_registered_waiter(monkeypatch, gate):
     module = approval if gate == 'approval' else human_guidance
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(module, 'human_gate_registry', registry)
     class BrokenTask(dict):
         def get(self, key, default=None):
@@ -388,7 +393,7 @@ def test_failed_abort_probe_releases_registered_waiter(monkeypatch, gate):
 
 
 def test_approval_response_winning_cancel_boundary_is_preserved(monkeypatch):
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(approval, 'human_gate_registry', registry)
     class RacingTask(dict):
         def get(self, key, default=None):
@@ -406,7 +411,7 @@ def test_approval_response_winning_cancel_boundary_is_preserved(monkeypatch):
 def test_request_publication_can_resolve_immediately_and_failure_cleans_up(monkeypatch, gate):
     module = approval if gate == 'approval' else human_guidance
     kind = GATE_WRITE_APPROVAL if gate == 'approval' else GATE_GUIDANCE
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(module, 'human_gate_registry', registry)
     request = module.request_write_approval if gate == 'approval' else module.request_human_guidance
     answer = True if gate == 'approval' else 'answer'
@@ -422,5 +427,5 @@ def test_request_publication_can_resolve_immediately_and_failure_cleans_up(monke
     assert len(registry) == 0
     assert registry.register(kind, 'occupied', owner_user_id=OWNER) is not None
     called = []
-    assert not request('full', owner_user_id=OWNER, on_registered=lambda: called.append(True))
+    assert not request('occupied', owner_user_id=OWNER, on_registered=lambda: called.append(True))
     assert called == []

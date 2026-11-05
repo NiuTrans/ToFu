@@ -21,6 +21,8 @@ from lib.runtime.runtime_paths import data_root
 from lib.storage_authority_sql.projection_paths import (
     MAX_DIRECTORY_LENGTH as MAX_DIRECTORY_LENGTH,
     SearchProjectionEnvironmentOverrideError as SearchProjectionEnvironmentOverrideError,
+    automatic_placement_decision,
+    legacy_search_projection_directory,
     resolve_search_projection_paths as resolve_search_projection_paths,
     save_search_projection_directory as save_search_projection_directory,
 )
@@ -329,15 +331,22 @@ def search_projection_state(backend: str, runtime: dict[str, Any] | None = None
     supervisor with no launch witness must not claim a projection is active.
     Base directories are user configuration; only effective namespaced paths
     may be sent to the native engine. This read never creates directories.
+    For an automatic placement ``pendingDirectory`` follows the capacity
+    decision the next launch is predicted to make, so a local copy that will
+    yield is not shown as the next-launch target.
     """
     if backend != 'tofudb':
         return None
     from lib.storage.service import storage_status
 
-    paths = resolve_search_projection_paths(Path(data_root()))
+    root = Path(data_root())
+    paths = resolve_search_projection_paths(root)
     runtime = storage_status() if runtime is None else runtime
     active = str(runtime.get('search_projection_directory') or '')
     pending = str(paths.directory)
+    decision = automatic_placement_decision(root, paths, launch=False)
+    if decision is not None and not decision['selected']:
+        pending = str(legacy_search_projection_directory(paths))
     return {
         'required': True,
         'directory': active,

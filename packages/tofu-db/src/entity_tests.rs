@@ -854,8 +854,9 @@
         }
     }
 
-    #[test]
-    fn reachability_rejects_child_level_and_key_range_transplants() {
+    /// A root whose second child is a leaf transplanted below a key range
+    /// that excludes its key.
+    fn transplanted_leaf_graph() -> (BlockId, BTreeMap<BlockId, Vec<u8>>) {
         let first_leaf = Page::Leaf(vec![(
             b"a".to_vec(),
             EntityValue {
@@ -897,6 +898,12 @@
             (first_id, first_leaf),
             (transplanted_id, transplanted_leaf),
         ]);
+        (root_id, blocks)
+    }
+
+    #[test]
+    fn reachability_rejects_child_level_and_key_range_transplants() {
+        let (root_id, blocks) = transplanted_leaf_graph();
         assert_eq!(
             visit_entity_page_graph(
                 Some(root_id),
@@ -912,6 +919,201 @@
             .kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    /// A mark checks every page on the first path that reaches it.
+    #[test]
+    fn reachability_once_rejects_a_transplant_on_its_first_walk() {
+        let (root_id, blocks) = transplanted_leaf_graph();
+        let error = visit_entity_page_graphs_once(
+            &[Some(root_id)],
+            |block_id| {
+                blocks
+                    .get(&block_id)
+                    .cloned()
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+            },
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Roots of one database as one online mark walks them: the first
+    /// declares 200 persistent pins, the second one more, and four more roots
+    /// each update one record. Later roots share the earlier roots' pin leaves.
+    fn shared_pin_catalog_roots(database: &mut EntityDatabase) -> Vec<Option<BlockId>> {
+        database.set_write_overlay_enabled(false);
+        let mut seed = database.begin(7, 11).unwrap();
+        for index in 0..512_u16 {
+            database.put(&mut seed, key(index), vec![index as u8; 256]).unwrap();
+        }
+        database.commit(seed).unwrap();
+        let mut pins = database.begin(7, 11).unwrap();
+        for index in 0..200 {
+            database
+                .stage_persistent_snapshot_pin(&mut pins, format!("pin-{index}").as_bytes())
+                .unwrap();
+        }
+        database.commit(pins).unwrap();
+        let mut roots = vec![database.snapshot().root];
+        let mut pin = database.begin(7, 11).unwrap();
+        database.stage_persistent_snapshot_pin(&mut pin, b"pin-200").unwrap();
+        database.commit(pin).unwrap();
+        roots.push(database.snapshot().root);
+        for index in 0..4_u16 {
+            let mut update = database.begin(7, 11).unwrap();
+            database.put(&mut update, key(index * 128), b"updated".to_vec()).unwrap();
+            database.commit(update).unwrap();
+            roots.push(database.snapshot().root);
+        }
+        roots
+    }
+
+    /// Walked root by root, every shared page is read once per root and once
+    /// per walk of each persistent pin that reaches it. One mark reads and
+    /// visits each page once and still covers every root. The second root's
+    /// count record names 201 pins while most of its pin leaves were walked
+    /// for the first root, so it validates only through their kept tallies; a
+    /// last root whose count disagrees with its records still fails the mark.
+    #[test]
+    fn reachability_once_reads_each_shared_page_once_and_checks_every_roots_pin_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = EntityDatabase::initialize(directory.path()).unwrap();
+        let mut roots = shared_pin_catalog_roots(&mut database);
+        let mut per_root = BTreeMap::<BlockId, u64>::new();
+        {
+            let engine = database.writer_engine().unwrap();
+            for root in &roots {
+                visit_entity_page_graph(*root, |id| engine.read_block(id), |id, _| {
+                    *per_root.entry(id).or_default() += 1;
+                    Ok(())
+                })
+                .unwrap();
+            }
+            let reads = std::cell::RefCell::new(BTreeMap::<BlockId, u64>::new());
+            let mut once = BTreeMap::<BlockId, u64>::new();
+            let walk = visit_entity_page_graphs_once(
+                &roots,
+                |id| {
+                    *reads.borrow_mut().entry(id).or_default() += 1;
+                    engine.read_block(id)
+                },
+                |id, _| {
+                    *once.entry(id).or_default() += 1;
+                    Ok(())
+                },
+                |_, _| Ok(()),
+            )
+            .unwrap();
+            assert!(once.keys().eq(per_root.keys()), "one mark visits exactly the pages of every root");
+            assert!(once.values().all(|visits| *visits == 1));
+            assert!(reads.borrow().keys().eq(once.keys()));
+            assert!(reads.borrow().values().all(|reads| *reads == 1));
+            assert_eq!(walk.walked_pages, once.len());
+            let per_root_visits: u64 = per_root.values().sum();
+            assert!(per_root_visits > 100 * once.len() as u64, "{per_root_visits} visits of {} pages", once.len());
+        }
+
+        let count_key = persistent_root_pin_count_key().unwrap();
+        let mut force = database
+            .begin_with_additional_scope_prefixes(7, 11, vec![count_key.encoded().to_vec()])
+            .unwrap();
+        database
+            .put(&mut force, count_key, encode_persistent_root_pin_count(999).unwrap())
+            .unwrap();
+        database.commit(force).unwrap();
+        roots.push(database.snapshot().root);
+        let engine = database.writer_engine().unwrap();
+        let error = visit_entity_page_graphs_once(&roots, |id| engine.read_block(id), |_, _| Ok(()), |_, _| Ok(()))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("does not match its catalog"), "{error}");
+    }
+
+    /// The current root `r3` names the held root `r2` through pin `b`, and only
+    /// `r2`'s own pin leaf names pin `c`, the one path to a deleted record.
+    fn pin_reached_through_another_pin() -> (tempfile::TempDir, EntityDatabase, [Option<BlockId>; 2], Option<BlockId>) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = EntityDatabase::initialize(directory.path()).unwrap();
+        database.set_write_overlay_enabled(false);
+        let mut seed = database.begin(7, 11).unwrap();
+        for index in 0..256_u16 {
+            database.put(&mut seed, key(index), vec![index as u8; 64]).unwrap();
+        }
+        database.commit(seed).unwrap();
+        let mut kept = database.begin(7, 11).unwrap();
+        database.put(&mut kept, key(1_000), b"only pin c keeps this".to_vec()).unwrap();
+        database.commit(kept).unwrap();
+        let mut pin_c = database.begin(7, 11).unwrap();
+        let pin_c_root = database.stage_persistent_snapshot_pin(&mut pin_c, b"c").unwrap().root;
+        database.delete(&mut pin_c, key(1_000)).unwrap();
+        database.commit(pin_c).unwrap();
+        let held_root = database.snapshot().root;
+        let mut pin_b = database.begin(7, 11).unwrap();
+        assert!(database.remove_persistent_snapshot_pin(&mut pin_b, b"c").unwrap());
+        assert_eq!(database.stage_persistent_snapshot_pin(&mut pin_b, b"b").unwrap().root, held_root);
+        database.commit(pin_b).unwrap();
+        let roots = [database.snapshot().root, held_root];
+        (directory, database, roots, pin_c_root)
+    }
+
+    /// Pin `b`'s walk and `r2`'s own walk reach the same pin leaf; one mark
+    /// reads every page once and still discovers pin `c`.
+    #[test]
+    fn reachability_once_discovers_the_pins_of_a_root_that_another_pin_reaches() {
+        let (_directory, database, roots, pin_c_root) = pin_reached_through_another_pin();
+        let engine = database.writer_engine().unwrap();
+        let mut per_root = BTreeSet::new();
+        for root in &roots {
+            visit_entity_page_graph(*root, |id| engine.read_block(id), |id, _| {
+                per_root.insert(id);
+                Ok(())
+            })
+            .unwrap();
+        }
+        let mut pin_c_pages = BTreeSet::new();
+        visit_entity_page_graph(pin_c_root, |id| engine.read_block(id), |id, _| {
+            pin_c_pages.insert(id);
+            Ok(())
+        })
+        .unwrap();
+        assert!(pin_c_pages.is_subset(&per_root));
+
+        let reads = std::cell::RefCell::new(BTreeMap::<BlockId, u64>::new());
+        let mut once = BTreeSet::new();
+        visit_entity_page_graphs_once(&roots, |id| {
+            *reads.borrow_mut().entry(id).or_default() += 1;
+            engine.read_block(id)
+        }, |id, _| {
+            assert!(once.insert(id), "a page is visited once per mark");
+            Ok(())
+        }, |_, _| Ok(()))
+        .unwrap();
+        assert_eq!(once, per_root, "the held root's own walk still discovers pin c");
+        assert!(reads.borrow().values().all(|reads| *reads == 1));
+    }
+
+    /// The walk order above never needs it, but a page walked without
+    /// discovery never satisfies a walk that needs discovery: `r2` walked as a
+    /// pin root first is walked again, and pin `c` is still found.
+    #[test]
+    fn page_walked_without_discovery_is_walked_again_by_a_walk_that_discovers() {
+        let (_directory, database, [_, held_root], pin_c_root) = pin_reached_through_another_pin();
+        let engine = database.writer_engine().unwrap();
+        let mut visits = EntityPageVisits::default();
+        let mut visited = BTreeSet::new();
+        walk_entity_page_graph(reachability_root(held_root.unwrap(), false), Some(&mut visits),
+            |id| engine.read_block(id), |id, _| { assert!(visited.insert(id)); Ok(()) }, |_, _| Ok(()))
+        .unwrap();
+        assert!(visits.deferred.is_empty(), "a walk without discovery finds no pins");
+        let mut rewalked = 0;
+        walk_entity_page_graph(reachability_root(held_root.unwrap(), true), Some(&mut visits),
+            |id| { rewalked += 1; engine.read_block(id) }, |id, _| { assert!(visited.insert(id)); Ok(()) }, |_, _| Ok(()))
+        .unwrap();
+        assert!(rewalked > 0);
+        assert_eq!(visits.deferred, vec![pin_c_root.unwrap()], "the discovery walk finds pin c");
     }
 
     #[test]
@@ -2792,6 +2994,41 @@
         reopened.merge_overlay_fully().unwrap();
         let mut read = reopened.begin(7, 11).unwrap();
         for index in 0..256 { assert_eq!(reopened.get(&mut read, &key(index)).unwrap(), Some(vec![1; 32])); }
+    }
+
+    #[test]
+    fn full_overlay_drain_batches_without_inflating_foreground_slice() {
+        let vfs = Arc::new(DeterministicVfs::new(None));
+        vfs.create_dir(std::path::Path::new("/data")).unwrap();
+        vfs.sync_directory(std::path::Path::new("/")).unwrap();
+        let mut database = EntityDatabase::initialize_with_vfs(
+            std::path::Path::new("/data"), vfs.clone()).unwrap();
+        database.set_write_overlay_enabled(true);
+        let count = EntityDatabase::MERGE_CHUNK_ENTRIES as u16 + 1;
+        let mut seed = database.begin(7, 11).unwrap();
+        for index in 0..count {
+            database.put(&mut seed, key(index), vec![index as u8; 32]).unwrap();
+        }
+        database.commit(seed).unwrap();
+        assert_eq!(database.overlay.read().unwrap().entries(), usize::from(count));
+        // A slow foreground commit can legitimately reach one key per slice.
+        // A synchronous full drain already owns the authority until empty;
+        // inheriting that slice turns one fsync latency into thousands of them.
+        database.merge_chunk_entries_adaptive.store(1, std::sync::atomic::Ordering::Release);
+        let before = database.writer_engine().unwrap().next_sequence().unwrap();
+        database.merge_overlay_fully().unwrap();
+        let commits = database.writer_engine().unwrap().next_sequence().unwrap() - before;
+        assert_eq!(commits, 2, "full drain must retain bounded bulk commits");
+        assert_eq!(database.merge_chunk_entries_adaptive.load(std::sync::atomic::Ordering::Acquire), 1,
+            "bulk throughput must not inflate the next foreground latency slice");
+        assert_eq!(database.overlay.read().unwrap().entries(), 0);
+        drop(database);
+        vfs.crash().unwrap();
+        let reopened = EntityDatabase::open_with_vfs(std::path::Path::new("/data"), vfs).unwrap();
+        let mut read = reopened.begin(7, 11).unwrap();
+        for index in 0..count {
+            assert_eq!(reopened.get(&mut read, &key(index)).unwrap(), Some(vec![index as u8; 32]));
+        }
     }
 
     #[test]

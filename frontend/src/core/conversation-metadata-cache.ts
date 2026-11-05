@@ -7,8 +7,14 @@
  * `createConversationMetadataCache` and
  * `createIndexedDbConversationMetadataCacheStorage`. Dependencies: injected
  * identity, clock, and IndexedDB capability; no application globals, network,
- * transcript state, or import-time work.
+ * transcript state, or import-time work. The cached settings keys derive from
+ * contracts/conversation_settings_v1.json.
  */
+
+import {
+  CONVERSATION_CACHE_SETTING_KEYS,
+  conversationSettingReadAliases,
+} from '../api/conversation-settings-contract';
 
 export const CONVERSATION_CACHE_MAX_METADATA_ROWS = 200;
 export const CONVERSATION_CACHE_MAX_SIDEBAR_ROWS = 1000;
@@ -442,36 +448,12 @@ export function extractConversationCacheSettings(
   conversation: unknown,
 ): Readonly<UnknownRecord> {
   const source = record(conversation) ?? {};
-  return {
-    model: source.model || source.preset || source.effort,
-    provider_id: source.provider_id,
-    thinkingDepth: source.thinkingDepth,
-    searchMode: source.searchMode,
-    fetchEnabled: source.fetchEnabled,
-    codeExecEnabled: source.codeExecEnabled,
-    browserEnabled: source.browserEnabled,
-    desktopEnabled: source.desktopEnabled,
-    memoryEnabled: source.memoryEnabled,
-    schedulerEnabled: source.schedulerEnabled,
-    autopilotEnabled: source.autopilotEnabled,
-    activeFlow: source.activeFlow,
-    imageGenMode: source.imageGenMode,
-    imageGenModel: source.imageGenModel,
-    imageGenProviderId: source.imageGenProviderId,
-    imageGenCount: source.imageGenCount,
-    imageGenAspect: source.imageGenAspect,
-    imageGenResolution: source.imageGenResolution,
-    humanGuidanceEnabled: source.humanGuidanceEnabled,
-    planMode: source.planMode,
-    projectPath: source.projectPath,
-    projectPaths: source.projectPaths,
-    readOnlyPaths: source.readOnlyPaths,
-    autoTranslate: source.autoTranslate,
-    pinned: source.pinned,
-    pinnedAt: source.pinnedAt,
-    folderId: source.folderId,
-    autopilotSummaries: source.autopilotSummaries,
-  };
+  const settings: UnknownRecord = {};
+  for (const key of CONVERSATION_CACHE_SETTING_KEYS) {
+    settings[key] = conversationSettingReadAliases(key)
+      .reduce((value, alias) => value || source[alias], source[key]);
+  }
+  return settings;
 }
 
 function metadataRow(

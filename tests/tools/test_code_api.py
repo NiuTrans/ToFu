@@ -7,6 +7,7 @@ import socket
 
 import pytest
 
+from lib.tools.code_api import CODE_API_INLINE_TARGET_TOKENS, compile_code_api_action
 from lib.tools.gateway import ptc_local_wire_tools
 
 
@@ -46,7 +47,7 @@ def test_complete_api_keeps_exact_names_schemas_and_input_immutable():
     descriptors = [json.loads(row[3:]) for row in description.splitlines() if row.startswith('// ')]
     assert descriptors == [row['function'] for row in catalog]
     assert proof['programmaticCodeApi']['methodNames'] == names(catalog)
-    assert proof['programmaticCodeApi']['schemaTokens'] <= 1200
+    assert proof['programmaticCodeApi']['schemaTokens'] <= CODE_API_INLINE_TARGET_TOKENS
     again, second = project(list(reversed(catalog)))
     assert again == wire and second == proof
 
@@ -66,7 +67,7 @@ def test_grouped_api_retains_every_exact_identity_and_complete_constraints():
     assert len(descriptors) == 1
     assert set(descriptors[0]['names']) == set(names(catalog))
     assert descriptors[0]['parameters'] == schema
-    assert detail['schemaTokens'] <= 1200 and catalog == before
+    assert detail['schemaTokens'] <= CODE_API_INLINE_TARGET_TOKENS and catalog == before
     again, second = project(list(reversed(catalog)))
     assert again == wire and second == proof
 
@@ -110,8 +111,25 @@ def test_large_catalog_uses_bounded_private_discovery(size):
     detail = proof['programmaticCodeApi']
     assert detail['reason'] == 'code_api_discovery'
     assert detail['methodCount'] == size and not detail['completeCatalogDocumented']
-    assert detail['schemaTokens'] <= 1200
+    assert detail['schemaTokens'] <= CODE_API_INLINE_TARGET_TOKENS
     assert 'catalog.search' in wire[0]['function']['description']
+
+
+def test_action_text_above_the_inline_target_still_compiles_discovery():
+    def count_tokens(rows):
+        return len(json.dumps(rows)) // 4
+    action = {'type': 'function', 'function': {
+        'name': 'execute_program', 'description': 'Run a program. ' * 2000,
+        'parameters': {'type': 'object', 'properties': {'code': {'type': 'string'}}}}}
+    catalog = [tool('method_' + str(n)) for n in range(100)]
+    compiled, proof = compile_code_api_action(
+        catalog, action, count_tokens=count_tokens, excluded_names=set(),
+        discovery_result_chars=64_000)
+    # The target sizes the inline index; it never reverts to additive exposure.
+    assert compiled is not None and proof['reason'] == 'code_api_discovery'
+    assert proof['schemaTokens'] > CODE_API_INLINE_TARGET_TOKENS
+    assert proof['indexMethodCount'] == 0 and proof['methodCount'] == 100
+    assert 'catalog.search' in compiled['function']['description']
 
 
 def test_large_description_does_not_force_all_metadata_onto_wire():
@@ -133,7 +151,7 @@ def test_discovery_index_names_real_methods_with_explicit_coverage(size):
     assert {row['name'] for row in index} <= set(names(catalog))
     assert all(row['summary'] == next(t['function']['description'] for t in catalog
                                       if t['function']['name'] == row['name']) for row in index)
-    assert detail['schemaTokens'] <= 1200
+    assert detail['schemaTokens'] <= CODE_API_INLINE_TARGET_TOKENS
     assert catalog == before
     again, second = project(list(reversed(catalog)))
     assert again == wire and second == proof

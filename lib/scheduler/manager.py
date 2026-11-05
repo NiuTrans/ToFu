@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta
+from collections.abc import Callable
 
 from lib.identity import PrincipalContext
 from lib.log import audit_log, get_logger
@@ -79,7 +80,6 @@ def _validated_scheduler_process_principal(
 # lib.SCHEDULER_ALLOW_CODE_EXEC. 'prompt'/'agent' are LLM-only;
 # System task types ignore their informational command field.
 _CODE_EXEC_TASK_TYPES = frozenset({"command", "python"})
-_ASYNC_TASK_TYPES = frozenset({'daily_report_backfill', 'storage_backup', 'provider_probe_daily', 'model_intelligence_daily'})
 
 
 def _application_managed_storage_backups_enabled() -> bool:
@@ -131,8 +131,10 @@ class ScheduledTaskManager:
         self._thread = None
         self._execution_log = []  # Recent execution log (in-memory)
         self._log_lock = threading.Lock()  # protects _execution_log
+        # Guards claimed-task run threads, pending reruns and startup hints.
         self._maintenance_lock = threading.Lock()
-        self._maintenance_threads: dict[str, threading.Thread] = {}
+        self._run_threads: dict[str, threading.Thread] = {}
+        self._pending_reruns: dict[str, dict] = {}
         self._startup_task_ids: set[str] = set()
         self._process_principal: PrincipalContext | None = None
 
@@ -158,6 +160,40 @@ class ScheduledTaskManager:
         """Atomically install one built-in task for the composed owner."""
         owner_user_id = self._background_principal().require_owner(
             context='built-in scheduler task')
+        return self._ensure_keyed_task(
+            owner_user_id, system_key=system_key, name=name, schedule=schedule,
+            command=command, task_type=task_type, description=description,
+            max_runtime=max_runtime, enabled=enabled,
+            reconcile_enabled=reconcile_enabled)
+
+    def ensure_owner_task(self, *, principal: PrincipalContext, **definition) -> tuple[dict, bool]:
+        """Install or refresh one keyed task that an owner-facing feature owns.
+
+        The same authority-keyed identity as process built-ins: retries and
+        concurrent calls converge on one owner-visible row (the Router Watchdog
+        review, docs/ROUTER.md R7). The owner authorizes it like create_task.
+        """
+        if not isinstance(principal, PrincipalContext):
+            raise TypeError('keyed task installation requires PrincipalContext')
+        owner_user_id = principal.require_owner(context='keyed scheduler task')
+        if not principal.has_scope('agents:scheduler'):
+            raise PermissionError('keyed task installation requires agents:scheduler scope')
+        return self._ensure_keyed_task(owner_user_id, **definition)
+
+    def _ensure_keyed_task(
+        self,
+        owner_user_id: int,
+        *,
+        system_key: str,
+        name: str,
+        schedule: str,
+        command: str,
+        task_type: str,
+        description: str,
+        max_runtime: int,
+        enabled: bool = True,
+        reconcile_enabled: bool = False,
+    ) -> tuple[dict, bool]:
         now = datetime.now().isoformat()
         result = _scheduler_client(write=True).command(
             "scheduler.task.ensure",
@@ -221,6 +257,7 @@ class ScheduledTaskManager:
         expires_at="",
         condition_command="",
         condition_regex="",
+        task_id=None,
     ):
         """Create a new scheduled task.
 
@@ -240,6 +277,9 @@ class ScheduledTaskManager:
             tools_config: Dict of tool settings for agent execution
             max_executions: Auto-disable after this many executions (0=unlimited)
             expires_at: Auto-disable after this ISO datetime
+            task_id: Caller-derived stable identity (default: a fresh one). The
+                storage refuses a second row with the same id, so a retried
+                creation can never schedule twice.
 
         Returns:
             task dict
@@ -293,7 +333,7 @@ class ScheduledTaskManager:
                     "the next year — check the day-of-month / month fields."
                 )
 
-        task_id = str(uuid.uuid4())[:12]
+        task_id = task_id or str(uuid.uuid4())[:12]
         now = datetime.now().isoformat()
         # Predicate condition paradigm (shared with timer_watchers): a proactive
         # agent (task_type='agent') can carry a shell PREDICATE that reconciles
@@ -726,6 +766,17 @@ class ScheduledTaskManager:
                 )
                 return False, "Reserve reclaim error (see logs)"
 
+        elif task_type == "router_watchdog_review":
+            # Router Watchdog review or re-check (docs/ROUTER.md R7): ``command``
+            # is informational; the owner's own Watchdog service decides.
+            try:
+                from lib.router.watchdog.review import run_scheduled_review
+
+                return run_scheduled_review(task)
+            except Exception:
+                logger.exception("[Scheduler] Router Watchdog review failed")
+                return False, "Router Watchdog review failed (see logs)"
+
         elif task_type == "optimizer":
             # Daily Optimizer: runs lib.optimizer.run_once() in-process.
             # ``command`` is informational only (the handler ignores it so
@@ -836,11 +887,58 @@ class ScheduledTaskManager:
         with maintenance_lock:
             getattr(self, '_startup_task_ids', set()).discard(str(task_id))
 
-    def _dispatch_claimed_task(self, task: dict) -> None:
+    def _dispatch_claimed_task(self, task: dict) -> bool:
+        """Run one claimed occurrence on its task's own thread, never inline.
+
+        The tick claims every due task and moves on, so a slow task can
+        neither delay another due task nor make the tick miss later minutes.
+        Single-flight per task id: an occurrence claimed while the same task
+        still runs becomes one pending rerun (later claims coalesce into it),
+        started when that run ends unless the scheduler is stopping. Returns
+        True when a run started now.
+        """
+        task_id = str(task['id'])
+        with self._maintenance_lock:
+            existing = self._run_threads.get(task_id)
+            if existing is not None and existing.is_alive():
+                self._pending_reruns[task_id] = dict(task)
+                logger.info(
+                    '[Scheduler] task %s is still running; its due occurrence '
+                    'runs when it finishes', task_id)
+                return False
+
+            def run_until_no_rerun() -> None:
+                occurrence = dict(task)
+                while True:
+                    try:
+                        self._run_claimed_task(occurrence)
+                    except Exception as exc:
+                        logger.error(
+                            '[Scheduler] scheduled task %s failed outside '
+                            'result recording: %s', task_id, exc, exc_info=True)
+                    with self._maintenance_lock:
+                        occurrence = self._pending_reruns.pop(task_id, None)
+                        if occurrence is None or self._stop_event.is_set():
+                            if self._run_threads.get(task_id) is threading.current_thread():
+                                self._run_threads.pop(task_id, None)
+                            if occurrence is not None:
+                                logger.info(
+                                    '[Scheduler] task %s rerun dropped: the '
+                                    'scheduler is stopping', task_id)
+                            return
+
+            thread = threading.Thread(
+                target=run_until_no_rerun,
+                name=f'tofu-scheduled-{task_id[:24]}',
+                daemon=True,
+            )
+            self._run_threads[task_id] = thread
+            thread.start()
+            return True
+
+    def _run_claimed_task(self, task: dict) -> None:
         if task['task_type'] == 'agent':
             self._run_proactive_poll(task)
-        elif task['task_type'] in _ASYNC_TASK_TYPES:
-            self._dispatch_maintenance_task(task)
         else:
             self._run_and_record(task)
 
@@ -855,55 +953,74 @@ class ScheduledTaskManager:
 
         for task in tasks:
             task = dict(task)
-            if str(task['id']) in startup_task_ids:
-                claimed = self._claim_due_task(task, now)
-                self._complete_startup_task(str(task['id']))
-                if claimed:
-                    self._dispatch_claimed_task(task)
-                continue
-            schedule = task["schedule"]
+            # A cron occurrence matches one minute; a row skipped because an
+            # earlier row failed is usually lost, not retried on the next tick.
+            try:
+                if str(task['id']) in startup_task_ids:
+                    claimed = self._claim_due_task(task, now)
+                    self._complete_startup_task(str(task['id']))
+                    if claimed:
+                        self._dispatch_claimed_task(task)
+                    continue
+                schedule = task["schedule"]
 
-            # One-time tasks
-            if schedule.startswith("once:"):
+                # One-time tasks
+                if schedule.startswith("once:"):
+                    try:
+                        target_time = datetime.fromisoformat(schedule[5:].strip())
+                    except ValueError:
+                        logger.warning(
+                            "[Scheduler] invalid once: schedule for task %s: %s — skipping",
+                            task.get("id", "?"),
+                            schedule,
+                            exc_info=True,
+                        )
+                        continue
+                    if now >= target_time:
+                        # Check if already run
+                        if task["run_count"] > 0:
+                            continue
+                        if not self._claim_due_task(task, now):
+                            continue
+                        self._dispatch_claimed_task(task)
+                        # Auto-disable after one-time run
+                        self.toggle_task(
+                            task["id"], user_id=int(task["user_id"]), enabled=False
+                        )
+                    continue
+
+                # Cron tasks
                 try:
-                    target_time = datetime.fromisoformat(schedule[5:].strip())
+                    if not cron_matches(schedule, now):
+                        continue
                 except ValueError:
-                    logger.warning(
-                        "[Scheduler] invalid once: schedule for task %s: %s — skipping",
+                    logger.debug(
+                        "[Scheduler] invalid cron expression for task %s: %s",
                         task.get("id", "?"),
                         schedule,
                         exc_info=True,
                     )
                     continue
-                if now >= target_time:
-                    # Check if already run
-                    if task["run_count"] > 0:
-                        continue
-                    if not self._claim_due_task(task, now):
-                        continue
-                    self._dispatch_claimed_task(task)
-                    # Auto-disable after one-time run
-                    self.toggle_task(
-                        task["id"], user_id=int(task["user_id"]), enabled=False
-                    )
-                continue
-
-            # Cron tasks
-            try:
-                if not cron_matches(schedule, now):
+                if not self._claim_due_task(task, now):
                     continue
-            except ValueError:
-                logger.debug(
-                    "[Scheduler] invalid cron expression for task %s: %s",
-                    task.get("id", "?"),
-                    schedule,
-                    exc_info=True,
-                )
-                continue
-            if not self._claim_due_task(task, now):
-                continue
 
-            self._dispatch_claimed_task(task)
+                self._dispatch_claimed_task(task)
+            except Exception as error:
+                from lib.storage import StorageError
+
+                if isinstance(error, StorageError) and error.retryable:
+                    logger.warning(
+                        "[Scheduler] due task %s failed on a transient storage "
+                        "error; continuing with the remaining due tasks: %s: %s",
+                        task.get("id", "?"), type(error).__name__, error,
+                    )
+                else:
+                    logger.error(
+                        "[Scheduler] due task %s failed; continuing with the "
+                        "remaining due tasks: %s",
+                        task.get("id", "?"), error,
+                        exc_info=True,
+                    )
 
     def _run_and_record(self, task):
         """Run task and record result in DB."""
@@ -942,38 +1059,6 @@ class ScheduledTaskManager:
             if len(self._execution_log) > 100:
                 self._execution_log = self._execution_log[-50:]
 
-    def _dispatch_maintenance_task(self, task: dict) -> bool:
-        """Run a claimed maintenance job without blocking the 30-second tick."""
-        task_id = str(task['id'])
-        with self._maintenance_lock:
-            existing = self._maintenance_threads.get(task_id)
-            if existing is not None and existing.is_alive():
-                logger.warning(
-                    '[Scheduler] maintenance task %s is already running', task_id)
-                return False
-
-            def run_and_release() -> None:
-                try:
-                    self._run_and_record(dict(task))
-                except Exception as exc:
-                    logger.error(
-                        '[Scheduler] maintenance task %s failed outside result '
-                        'recording: %s', task_id, exc, exc_info=True)
-                finally:
-                    with self._maintenance_lock:
-                        current = self._maintenance_threads.get(task_id)
-                        if current is threading.current_thread():
-                            self._maintenance_threads.pop(task_id, None)
-
-            thread = threading.Thread(
-                target=run_and_release,
-                name=f'tofu-maintenance-{task_id[:24]}',
-                daemon=True,
-            )
-            self._maintenance_threads[task_id] = thread
-            thread.start()
-            return True
-
     def _run_proactive_poll(self, task):
         """Run the proactive agent poll→decide→execute cycle for a task_type='agent'.
 
@@ -987,6 +1072,7 @@ class ScheduledTaskManager:
             gather_system_status,
             is_task_executing,
             poll_decision,
+            predicate_status,
             record_poll,
             should_auto_disable,
         )
@@ -1014,6 +1100,12 @@ class ScheduledTaskManager:
             "%s Starting poll #%d (kind=%s)", pfx, task.get("poll_count", 0) + 1, kind
         )
         status_snapshot = gather_system_status(task)
+        pred = None
+        if kind in ("code", "hybrid"):
+            # One evaluation: the hybrid LLM, the reconcile and the ledger all
+            # judge the same predicate evidence.
+            pred = evaluate_condition_predicate(task)
+            status_snapshot += predicate_status(pred)
 
         # tier / predicate_matched / llm_agreed audit trio for the ledger.
         tier, predicate_matched, llm_agreed = "llm", -1, -1
@@ -1023,7 +1115,6 @@ class ScheduledTaskManager:
             # Pure predicate — ZERO LLM. Ambiguous/errored predicate → NOT act
             # (never a false-positive trigger); a sustained ambiguity run demotes
             # back to hybrid so the LLM re-takes the wheel (self-healing).
-            pred = evaluate_condition_predicate(task)
             outcome = apply_reconcile_poll(
                 task, pred, llm_ready=None, llm_available=False
             )
@@ -1046,7 +1137,6 @@ class ScheduledTaskManager:
                 # treat that as an unusable verdict → llm_available=False → the
                 # reconcile resets the streak and never promotes on a bad poll.
                 _llm_ok = not str(reason).startswith(("Parse error", "LLM error"))
-                pred = evaluate_condition_predicate(task)
                 outcome = apply_reconcile_poll(
                     task, pred, llm_ready=should_act, llm_available=_llm_ok
                 )
@@ -1308,8 +1398,9 @@ class ScheduledTaskManager:
                 e,
             )
 
-    def start(self, *, principal: PrincipalContext) -> bool:
-        """Start the background scheduler thread."""
+    def start(self, *, principal: PrincipalContext,
+              startup_tasks: tuple[Callable[[], object], ...] = ()) -> bool:
+        """Start one owned worker, reconciling its definitions before claims."""
         principal = _validated_scheduler_process_principal(principal)
         if self._thread is not None and self._thread.is_alive():
             if self._process_principal != principal:
@@ -1322,6 +1413,13 @@ class ScheduledTaskManager:
 
         def _loop():
             logger.info("🕐 Background scheduler started")
+            for bootstrap in startup_tasks:
+                if self._stop_event.is_set():
+                    return
+                try:
+                    bootstrap()
+                except Exception as exc:
+                    logger.warning('[Scheduler] built-in task bootstrap failed: %s', exc)
             tick = 0
             while self._running:
                 try:
@@ -1330,11 +1428,17 @@ class ScheduledTaskManager:
                     # Transient DB connection errors (PG timeout, connection
                     # reset) are routinely recoverable on the next 30s tick —
                     # downgrade to WARNING without a traceback so they don't
-                    # pollute error.log. Anything else is still a real bug.
+                    # pollute error.log. A fenced authority answers with the
+                    # same outage codes and may mark them non-retryable; the
+                    # storage runtime already reports that verdict. Anything
+                    # else is still a real bug.
                     from lib.storage import StorageError
+                    from lib.storage.errors import is_transient_storage_error
 
                     etype = type(e).__name__
-                    is_transient_db = isinstance(e, StorageError) and e.retryable
+                    is_transient_db = (
+                        (isinstance(e, StorageError) and e.retryable)
+                        or is_transient_storage_error(e))
                     if is_transient_db:
                         logger.warning(
                             "[Scheduler] Transient DB error in check loop "
@@ -1348,6 +1452,23 @@ class ScheduledTaskManager:
                             e,
                             exc_info=True,
                         )
+                # Channel bridges start, stop and restart only from this
+                # existing tick (docs/CHANNELS.md C6): no timer, backoff or
+                # retry count of their own.
+                try:
+                    from lib.channels.dx.supervisor import reconcile_channel_bridges
+                    reconcile_channel_bridges(self._process_principal)
+                except Exception as e:
+                    logger.warning(
+                        "[Scheduler] channel bridge reconcile failed: %s", e)
+                # GitHub sessions follow the same tick (docs/CHANNELS.md C8);
+                # they poll only when GitHub's X-Poll-Interval allows.
+                try:
+                    from lib.channels.github.supervisor import reconcile_github_sessions
+                    reconcile_github_sessions(self._process_principal)
+                except Exception as e:
+                    logger.warning(
+                        "[Scheduler] GitHub channel reconcile failed: %s", e)
                 tick += 1
                 # Every ~2 minutes, re-scan durable active timers and adopt
                 # any whose watcher lease expired with its owner (crash
@@ -1369,7 +1490,11 @@ class ScheduledTaskManager:
         return True
 
     def stop(self, timeout: float = 2.0) -> bool:
-        """Stop the tick and cancel/drain maintenance children by deadline."""
+        """Stop the tick and drain claimed-task runs by deadline.
+
+        Pending reruns are dropped; a run in progress is joined, and command
+        tasks observe the stop event through their bounded process runner.
+        """
         self._running = False
         self._stop_event.set()
         thread = self._thread
@@ -1387,19 +1512,16 @@ class ScheduledTaskManager:
             self._thread = None
         maintenance_lock = getattr(self, '_maintenance_lock', None)
         if maintenance_lock is None:
-            maintenance_threads = []
+            run_threads = []
         else:
             with maintenance_lock:
-                maintenance_threads = list(
-                    getattr(self, '_maintenance_threads', {}).values())
-        for maintenance_thread in maintenance_threads:
-            if maintenance_thread is threading.current_thread():
+                run_threads = list(getattr(self, '_run_threads', {}).values())
+        for run_thread in run_threads:
+            if run_thread is threading.current_thread():
                 continue
-            maintenance_thread.join(
-                timeout=max(0.0, deadline - time.monotonic()))
-        maintenance_stopped = all(
-            not item.is_alive() for item in maintenance_threads)
-        if not scheduler_stopped or not maintenance_stopped:
+            run_thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        runs_stopped = all(not item.is_alive() for item in run_threads)
+        if not scheduler_stopped or not runs_stopped:
             return False
         logger.info("Stopped")
         return True
@@ -1425,8 +1547,10 @@ def start_scheduler_worker(*, principal: PrincipalContext):
     """Start the background scheduler thread and resume active timers.
 
     Called from ``register_all`` in ``routes/__init__.py`` after the storage
-    Sidecar is ready. Built-in task reconciliation is atomic and active timers
-    are resumed before this function returns.
+    Sidecar is ready. The existing worker reconciles built-in tasks before its
+    first due-task claim, without holding HTTP readiness behind durable writes.
+    Active timers are still resumed before this function returns. Shutdown joins
+    that same worker and stops further bootstrap writes between operations.
 
     Set ``TOFU_DISABLE_SCHEDULER=1`` to skip starting the worker entirely
     — the test suite sets this so importing ``server`` (which many tests do)
@@ -1445,8 +1569,6 @@ def start_scheduler_worker(*, principal: PrincipalContext):
         return get_scheduler()
 
     mgr = get_scheduler()
-    mgr.start(principal=principal)
-    logger.info("[Scheduler] Background scheduler worker started")
 
     bootstraps = []
     if principal.owner_user_id is not None:
@@ -1466,11 +1588,8 @@ def start_scheduler_worker(*, principal: PrincipalContext):
             '[Scheduler] Distributed scheduler has no implicit owner; personal '
             'built-in tasks and project/peer sweeps are disabled')
 
-    for bootstrap in bootstraps:
-        try:
-            bootstrap()
-        except Exception as e:
-            logger.warning("[Scheduler] built-in task bootstrap failed: %s", e)
+    mgr.start(principal=principal, startup_tasks=tuple(bootstraps))
+    logger.info("[Scheduler] Background scheduler worker started")
 
     try:
         from lib.scheduler.timer import resume_active_timers

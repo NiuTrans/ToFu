@@ -88,11 +88,12 @@ def _manifest_coverage(manifest,pairs):
         'limitations':['A manifest digest does not establish pre-result preregistration or authentic execution.']}
 
 
-def build_report(raw,*,manifest_raw=None):
+def build_report(raw,*,manifest_raw=None,require_efficiency=False):
     pairs=_decode(raw)
     comparison=quality_comparison.compare_quality(pairs)
     coverage=_manifest_coverage(_decode(manifest_raw),pairs) if manifest_raw is not None else None
     return {'schema_version':1,'scope':'declared_external_audit_receipts_only',
+        'efficiency_required':bool(require_efficiency),
         'manifest_sha256':hashlib.sha256(manifest_raw).hexdigest() if manifest_raw is not None else None,
         'manifest_coverage':coverage,
         'input_sha256':hashlib.sha256(raw).hexdigest(),
@@ -118,6 +119,8 @@ def main(argv=None):
     parser.add_argument('input',type=Path,help='JSON array of at most 100 paired audit records')
     parser.add_argument('--output',type=Path,help='Atomically save a report; input is never overwritten')
     parser.add_argument('--manifest',type=Path,help='Declared planned pair IDs and frozen task/corpus/model/budget identities')
+    parser.add_argument('--require-efficiency', action='store_true',
+                        help='Require complete paired time and human-effort measurements')
     args=parser.parse_args(argv)
     try:
         for source in (args.input,args.manifest):
@@ -128,12 +131,14 @@ def main(argv=None):
         manifest_raw=None
         if args.manifest:
             with args.manifest.open('rb') as stream:manifest_raw=stream.read(MAX_INPUT_BYTES+1)
-        report=build_report(raw,manifest_raw=manifest_raw)
+        report=build_report(raw,manifest_raw=manifest_raw,require_efficiency=args.require_efficiency)
         rendered=json.dumps(report,ensure_ascii=False,allow_nan=False,indent=2)+'\n'
         if args.output:_publish(args.output,rendered)
         else:sys.stdout.write(rendered)
         comparison=report['comparison']
         return 0 if (comparison['valid_pair_count'] and not comparison['excluded_pair_count']
+            and comparison['efficiency']['status'] != 'incomplete'
+            and (not args.require_efficiency or comparison['efficiency']['status'] == 'descriptive_only')
             and (report['manifest_coverage'] is None or report['manifest_coverage']['complete'])) else 3
     except (OSError,ValueError,TypeError,OverflowError) as exc:
         print('Research quality comparison failed: '+str(exc),file=sys.stderr)

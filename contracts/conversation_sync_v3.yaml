@@ -17,6 +17,8 @@ x-tofu-stream:
   reconnectGraceMs: 37500
   replayRetentionMs: 604800000
   eventSource: /api/v4/conversations/{conversationId}/events
+  multiplexedEventSource: /api/v4/conversation-events
+  streamClosedEvent: stream.closed
   gapEvent: sync.reset_required
   streamClientIdQuery: streamClientId
   streamGenerationQuery: streamGeneration
@@ -74,8 +76,10 @@ paths:
             independent clients; refs deduplicates exact terminal projection
             content and safely settled tool blocks against their sibling
             segment/round authorities. On completed Turns it also omits
-            server-only provider replay and request diagnostics for the
-            generated browser client.
+            server-only provider replay, thinking signatures, unrendered
+            request diagnostics and task-trace detail for the generated
+            browser client; a whole-projection edit restores them from the
+            stored revision.
           schema:
             type: string
             enum: [full, refs]
@@ -131,6 +135,8 @@ paths:
     get:
       operationId: conversationSyncEvents
       x-tofu-client: eventsUrl
+      x-tofu-client-fixed-query:
+        diagnosticPayload: none
       x-tofu-contract: tofu.conversation-sync.events/v1
       parameters:
         - $ref: '#/components/parameters/ConversationId'
@@ -152,6 +158,41 @@ paths:
             type: integer
             minimum: 1
             maximum: 2147483647
+        - name: diagnosticPayload
+          in: query
+          required: false
+          description: >-
+            The browser requests none: omit only AttemptEvent.payload.event
+            diagnostic bodies. Ordered identities, cursors, patches, phases,
+            interactions and settlements are unchanged. Complete diagnostics
+            remain durable and are read through Request Inspector endpoints.
+          schema:
+            type: string
+            enum: [full, none]
+            default: full
+        - name: windowBytes
+          in: query
+          required: false
+          description: >-
+            Catch-up budget, equal to the caller's snapshot windowBytes. When
+            the encoded changes committed before this connection opened
+            exceed it, the stream sends sync.reset_required with reason
+            replay_exceeds_window instead of replaying them, and the caller
+            re-anchors with one snapshot. Changes committed later always
+            stream. Omission replays every retained change.
+          schema: {type: integer, minimum: 65536, maximum: 16777216}
+        - name: cursorSource
+          in: query
+          required: false
+          description: >-
+            snapshot declares that after was minted by the snapshot this
+            stream directly follows. Its first connection replays that round
+            trip without the catch-up budget, because another snapshot would
+            only restart it. A native reconnect resumes from Last-Event-ID and
+            is budgeted.
+          schema:
+            type: string
+            enum: [snapshot]
       responses:
         '200':
           description: Ordered replayable Server-Sent Events.
@@ -161,6 +202,62 @@ paths:
                 $ref: '#/components/schemas/ConversationSyncEvent'
         '204':
           description: Superseded or capacity-limited stream; native EventSource must stop reconnecting.
+  /api/v4/conversation-events:
+    get:
+      operationId: conversationSyncMultiplexedEvents
+      x-tofu-client: multiplexedEventsUrl
+      x-tofu-client-fixed-query:
+        diagnosticPayload: none
+      x-tofu-contract: tofu.conversation-sync.multiplexed-events/v1
+      description: >-
+        The ordered replay of several conversations on one Server-Sent Events
+        response. An HTTP/1.x browser holds one connection per long-lived
+        stream and at most six per origin, so one stream per conversation
+        starves every other request once six conversations are live. Each
+        listed stream keeps the exact semantics of its own
+        /api/v4/conversations/{conversationId}/events connection: cursor,
+        catch-up budget, heartbeats and supersession by streamGeneration. Only
+        the framing differs: every frame's data is the stream's decimal index
+        in streams, a line feed, then the event document, and its id remains
+        that stream's cursor. A stream that cannot open, is superseded or ends
+        sends stream.closed with the status its own connection would have
+        answered and never resumes on this response; the other streams
+        continue. The response ends when no stream remains open.
+      parameters:
+        - name: streamClientId
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]{0,63}$'
+        - name: streams
+          in: query
+          required: true
+          description: >-
+            One subscription per conversation, each conversation at most once.
+            after is the newest cursor the client received on that stream; a
+            stream that has received no frame yet repeats its bootstrap cursor
+            and cursorSource, exactly as a native EventSource reconnect without
+            Last-Event-ID would.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationEventSubscriptions'
+        - name: diagnosticPayload
+          in: query
+          required: false
+          description: Same selector as the single-conversation stream.
+          schema:
+            type: string
+            enum: [full, none]
+            default: full
+      responses:
+        '200':
+          description: Multiplexed ordered replayable Server-Sent Events.
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ConversationSyncMultiplexedEvent'
   /api/v4/conversations/{conversationId}/turns:
     post:
       operationId: conversationTurnCreate
@@ -249,6 +346,11 @@ paths:
         - name: syncSeq
           in: query
           required: true
+          description: >-
+            The caller's applied replay head. The page answers at the newest
+            head not older than it (the response syncSeq); a head behind it,
+            or one that keeps moving through bounded re-reads, is
+            history_page_stale.
           schema: {type: integer, minimum: 0, maximum: 9223372036854775807}
         - name: beforeOrdinal
           in: query
@@ -264,7 +366,7 @@ paths:
           required: false
           description: >-
             Soft UTF-8 projection-byte budget; retains at least one Turn and
-            an exact continuation cursor at the requested replay head.
+            an exact continuation cursor at the replay head the page answers.
           schema: {type: integer, minimum: 65536, maximum: 16777216}
         - name: toolPayload
           in: query
@@ -987,7 +1089,11 @@ components:
           $ref: '#/components/schemas/TurnToolRejection'
         assistantContent: {type: string}
         thinking: {type: string}
-        thinkingSignature: {type: string}
+        thinkingSignature:
+          type: string
+          description: >-
+            Opaque provider replay evidence. Model requests read it from
+            storage; refs views of completed Turns omit it.
         result: {$ref: '#/components/schemas/TurnToolResult'}
         results:
           type: array
@@ -1030,9 +1136,11 @@ components:
         _snapshotDocumentRefs:
           $ref: '#/components/schemas/SnapshotDocumentReferences'
           description: >-
-            Snapshot-only references for repeated, immutable browser fields.
-            The generated browser client resolves every entry from
-            ConversationSyncSnapshot.sharedToolDocuments before TurnStore.
+            Snapshot-only references for repeated, immutable request-local
+            browser fields, including pending and running Turns. The generated
+            browser client restores every entry from
+            ConversationSyncSnapshot.sharedToolDocuments before TurnStore or
+            replay patch application; live base fields are never deferred.
     SnapshotToolResultReference:
       type: object
       additionalProperties: false
@@ -1162,7 +1270,11 @@ components:
         translatedText: {type: string}
         deliverable: {type: boolean}
         terminal: {type: boolean}
-        signature: {type: string}
+        signature:
+          type: string
+          description: >-
+            Opaque provider signature of this reasoning. Never rendered; refs
+            views of completed Turns omit it.
         llmRound:
           oneOf: [{type: integer, minimum: 0}, {type: 'null'}]
     TurnToolUseSegment:
@@ -1347,6 +1459,23 @@ components:
         previews:
           type: array
           items: {$ref: '#/components/schemas/TurnInjectionPreview'}
+        author: {$ref: '#/components/schemas/TurnSteerAuthor'}
+    # The author of a human-initiated input steered into a running Turn
+    # (user-steer lane only), stored once by turn.steer.commit with its record:
+    # the facts the input's own Turn would have had. Executor writes and client
+    # edits keep the stored value. It makes the message forwardable verbatim as
+    # its author's words (docs/ROUTER.md R2); nonhuman steers record none.
+    TurnSteerAuthor:
+      type: object
+      additionalProperties: false
+      required: [actor, text]
+      properties:
+        actor: {$ref: '#/components/schemas/TurnActor'}
+        text:
+          type: string
+          minLength: 1
+          description: Complete authored text (originalContent before any input translation).
+        origin: {$ref: '#/components/schemas/TurnOrigin'}
     TurnStallInjection:
       type: object
       additionalProperties: true
@@ -1480,13 +1609,43 @@ components:
         blockId: {type: string}
         initiator:
           type: string
-          enum: [human, autopilot, proactive, timer, brain, peer, operator, swarm]
+          enum: [human, autopilot, proactive, timer, brain, peer, operator, swarm, channel]
         sourceConversationId: {type: string}
         peerHuman: {type: boolean}
         brain: {$ref: '#/components/schemas/TurnBrainDispatch'}
         autopilotRunId: {type: string}
         boardTaskId: {type: string}
         scheduledTaskId: {type: string}
+        channel: {$ref: '#/components/schemas/TurnChannelOrigin'}
+        # A human request forwarded verbatim by the owner's Global Router
+        # (docs/ROUTER.md R2). Authority is admitted only after
+        # require_human_turn verifies the source Turn (or steered message)
+        # and identical text.
+        forwardedFrom: {$ref: '#/components/schemas/TurnForwardedFrom'}
+    # External channel source (docs/CHANNELS.md C4): initiator ``channel`` for
+    # third-party events and owner context, ``human`` for owner command-chat input.
+    TurnChannelOrigin:
+      type: object
+      additionalProperties: false
+      required: [channel, thread]
+      properties:
+        channel: {type: string}
+        thread: {type: string}
+        eventIds:
+          type: array
+          items: {type: string}
+        title: {type: string}
+    TurnForwardedFrom:
+      type: object
+      additionalProperties: false
+      required: [conversationId, turnId]
+      properties:
+        conversationId: {type: string}
+        turnId: {type: string}
+        # An owner message steered into router Turn ``turnId``: the commandId
+        # of its user-steer record, whose TurnSteerAuthor is the authority.
+        steerId: {type: string}
+        instructionId: {type: string}
     TurnContextSnapshot:
       type: object
       additionalProperties: false
@@ -1793,6 +1952,11 @@ components:
         routeMode: {type: string, maxLength: 24}
         routeDecision: {type: string, maxLength: 80}
         failureStage: {type: string, maxLength: 80}
+        # Failed model rows only: the closed error-envelope kind (the same
+        # taxonomy as a terminal error) classified from the live failure at
+        # emission. reasonCode keeps the raw class name, which is not a cause:
+        # a gateway 503 is raised as RateLimitError but is upstream_error.
+        envelopeKind: {type: string, maxLength: 160}
         count: {type: integer, minimum: 1, maximum: 2147483647}
         durationMs: {type: integer, minimum: 0, maximum: 9007199254740991}
         statusCode: {type: integer, minimum: 0, maximum: 9007199254740991}
@@ -1881,6 +2045,22 @@ components:
         # dispatch/coordination time inside step_start..step_complete windows
         # that llm/tool/wait spans did not claim. Absent on old payloads.
         flowStepMs: {type: integer, minimum: 0, maximum: 9007199254740991}
+        # Additive (never required): waitMs split by wait kind, from the same
+        # disjoint fold, so admissionWaitMs + retryWaitMs + spawnWaitMs ==
+        # waitMs. Sub-split, not buckets: never add them to the bucket sum.
+        # The bounded spans list cannot recover it once spans are dropped.
+        admissionWaitMs: {type: integer, minimum: 0, maximum: 9007199254740991}
+        retryWaitMs: {type: integer, minimum: 0, maximum: 9007199254740991}
+        spawnWaitMs: {type: integer, minimum: 0, maximum: 9007199254740991}
+        # Additive (never required): agent-loop work outside model requests,
+        # tools and waits — a bucket. Its split (startupMs + roundPrepMs +
+        # roundSettleMs + finalizeMs == orchestrationMs) is not added to the
+        # bucket sum. Absent on old payloads.
+        orchestrationMs: {type: integer, minimum: 0, maximum: 9007199254740991}
+        startupMs: {type: integer, minimum: 0, maximum: 9007199254740991}
+        roundPrepMs: {type: integer, minimum: 0, maximum: 9007199254740991}
+        roundSettleMs: {type: integer, minimum: 0, maximum: 9007199254740991}
+        finalizeMs: {type: integer, minimum: 0, maximum: 9007199254740991}
         ttftMs: {type: integer, minimum: 0, maximum: 9007199254740991}
         overBudget:
           type: array
@@ -2610,6 +2790,8 @@ components:
                 transaction as this attempt event. Diagnostic only: it never
                 mutates the turn projection, and its durability is what lets
                 live and replayed attempt-event streams carry it.
+                The diagnosticPayload=none stream representation omits this
+                optional body; it never changes durable evidence or projection.
               type: object
               additionalProperties: true
               required: [type]
@@ -2662,12 +2844,44 @@ components:
         cursor: {type: string}
         reason:
           type: string
-          enum: [cursor_expired, cursor_invalid, server_restarted, protocol_mismatch]
+          enum: [cursor_expired, cursor_invalid, server_restarted, protocol_mismatch, replay_exceeds_window]
     ConversationSyncEvent:
       oneOf:
         - $ref: '#/components/schemas/ConversationChange'
         - $ref: '#/components/schemas/SyncHeartbeat'
         - $ref: '#/components/schemas/SyncResetRequired'
+    ConversationEventSubscription:
+      type: object
+      additionalProperties: false
+      required: [conversationId, streamGeneration]
+      properties:
+        conversationId: {type: string, minLength: 1, maxLength: 256}
+        after: {type: string}
+        streamGeneration: {type: integer, minimum: 1, maximum: 2147483647}
+        windowBytes: {type: integer, minimum: 65536, maximum: 16777216}
+        cursorSource: {type: string, enum: [snapshot]}
+    ConversationEventSubscriptions:
+      type: array
+      minItems: 1
+      items: {$ref: '#/components/schemas/ConversationEventSubscription'}
+    ConversationStreamClosed:
+      type: object
+      additionalProperties: false
+      required: [contract, type, conversationId, status, code]
+      description: >-
+        One multiplexed stream stopped. status is the HTTP status its own
+        connection would have answered (204 superseded or ended, 400 invalid
+        cursor, 404, storage 503, 500); code is the stop reason.
+      properties:
+        contract: {const: tofu.conversation-sync.stream-closed/v1}
+        type: {const: stream.closed}
+        conversationId: {type: string}
+        status: {type: integer, minimum: 200, maximum: 599}
+        code: {type: string, minLength: 1, maxLength: 128}
+    ConversationSyncMultiplexedEvent:
+      oneOf:
+        - $ref: '#/components/schemas/ConversationSyncEvent'
+        - $ref: '#/components/schemas/ConversationStreamClosed'
     ActiveAttemptPhase:
       type: object
       additionalProperties: false
@@ -2733,7 +2947,8 @@ components:
           $ref: '#/components/schemas/SnapshotSharedToolDocuments'
           description: >-
             Request-local content-addressed values removed from repeated tool
-            round fields. Omitted unless segmentPayload=refs finds a repeated
+            round fields, including active Turns whose exact fields are restored
+            before replay. Omitted unless segmentPayload=refs finds a repeated
             document large enough to amortize its reference.
         snapshotProjectionRefs:
           $ref: '#/components/schemas/SnapshotProjectionReferences'
@@ -2959,7 +3174,12 @@ components:
       additionalProperties: false
       required: [maxTokens, maxToolCalls, durationSeconds]
       properties:
-        maxTokens: {type: integer, minimum: 1, maximum: 9007199254740991, default: 100000}
+        maxTokens:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+          default: 100000
+          description: Finite renewal sized for saved input and output; a smaller explicit source cap is never increased.
         maxToolCalls: {type: integer, minimum: 0, maximum: 9007199254740991, default: 100}
         durationSeconds: {type: integer, minimum: 1, maximum: 86400, default: 900}
     ConversationUsageRecovery:
@@ -2974,7 +3194,7 @@ components:
         state: {type: string, enum: [ready, blocked]}
         reason:
           type: string
-          enum: [ready, not_applicable, operation_unconfirmed, configuration_unavailable]
+          enum: [ready, not_applicable, operation_unconfirmed, configuration_unavailable, budget_insufficient]
         budget: {$ref: '#/components/schemas/UsageRecoveryBudget'}
     RecoverUsageRequest:
       type: object

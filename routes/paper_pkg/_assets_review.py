@@ -111,12 +111,11 @@ async def openreview_autofill():
     # Fetch the finished review for this paper+venue+lang.
     review_key = make_review_lang(venue, ui_lang)
     review_body = ""
-    try:
-        row = await asyncio.to_thread(artifacts.get_report, phash, review_key)
-        if row and row.report:
-            review_body = row.report
-    except Exception as e:
-        logger.warning("[OpenReview] Review lookup failed hash=%s: %s", phash, e)
+    # An absent review is ``None``. A failed lookup is a server fault for the
+    # global boundary, never the caller's "generate the review first".
+    row = await asyncio.to_thread(artifacts.get_report, phash, review_key)
+    if row and row.report:
+        review_body = row.report
     if not review_body.strip():
         return api_error(
             "No review found for this paper yet. Generate the review first, "

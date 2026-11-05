@@ -62,6 +62,11 @@ def _q(path):
     return f'{_LQ}{path}{_RQ}'
 
 
+def _cause(error):
+    # Exceptions such as MemoryError() or BrokenBarrierError() have empty text.
+    return str(error) or type(error).__name__
+
+
 # ── Plan ───────────────────────────────────────────────────────────────
 
 _FLAG_SHORTS_NOARG = frozenset('rRapfvdPunx')
@@ -402,12 +407,12 @@ class _Engine:
                 except Exception as error:
                     # Failed publication is unstarted. Preserve previously
                     # published copies and continue independent siblings.
-                    self._error(f'cp: cannot start copy task: {error}')
+                    self._error(f'cp: cannot start copy task: {_cause(error)}')
             for future in as_completed(futures):
                 try:
                     future.result()  # ordinary per-file errors settle inside
                 except Exception as error:
-                    self._error(f'cp: copy worker failed: {error}')
+                    self._error(f'cp: copy worker failed: {_cause(error)}')
 
     # ── walk ──
     def _walk_tree(self, src_abs, src_display, dst_abs, dst_display,
@@ -746,27 +751,45 @@ def _argv_end_words(words, start, segment):
 _CP_BINARIES = frozenset({'cp', '/bin/cp', '/usr/bin/cp'})
 
 
+def literal_cp_segment(segment):
+    """Whether a cp segment's words reach cp verbatim, so the engine may replace it.
+
+    The engine receives argv as given. A parameter, tilde, glob or brace word
+    must stay with the shell: quoting `$W/a` into the helper call made
+    `W=/abs; cp $W/a x` fail with "cannot stat '$W/a'".
+    """
+    from lib.project_mod.command_analysis import shell_source_has_expansion
+    return not shell_source_has_expansion(segment)
+
+
 def plan_cp_splice(command):
     """Rewrite standalone cp segments to the helper. Returns command or None.
 
     Only single-statement cp segments are eligible (no redirection inside
     the argv — a redirection truncating our argv view could smuggle
     operands past the planner). Pipelines/control flow around the segment
-    stay byte-for-byte intact.
+    stay byte-for-byte intact, and literal heredoc bodies are data, never
+    segments. A heredoc the literal view cannot prove to be data keeps the whole
+    command byte-for-byte (spans come from ``literal_rewrite_view``).
     """
     if os.name != 'posix' or not command or not command.strip():
         return None
     from lib.project_mod.command_analysis import (
-        _shell_words, _split_pipeline_spans)
+        _shell_words, _split_pipeline_spans, literal_rewrite_view)
+    view = literal_rewrite_view(command)
+    if view is None:
+        return None
     replacements = []
-    for seg_start, seg_end in _split_pipeline_spans(command):
-        segment = command[seg_start:seg_end]
+    for seg_start, seg_end in _split_pipeline_spans(view):
+        segment = view[seg_start:seg_end]
         words = _shell_words(segment)
         if not words or words[0].text not in _CP_BINARIES:
             continue
         argv_end = _argv_end_words(words, 0, segment)
         if argv_end != len(words):
             continue                       # redirection inside cp argv
+        if not literal_cp_segment(segment):
+            continue                       # the shell must expand the words
         plan = parse_cp_argv([w.text for w in words[1:]])
         if plan is None:
             continue

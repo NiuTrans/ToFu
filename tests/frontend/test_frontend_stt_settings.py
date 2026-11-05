@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -56,16 +55,34 @@ const { window, document, check, report } = setup({
 for (const name of ['HTMLElement', 'HTMLInputElement', 'HTMLSelectElement',
                     'AbortController', 'AbortSignal']) global[name] = window[name];
 
-let created = null, updated = null, deleted = null;
+const registry = window.__tofuTestFeatureRegistry;
+let created = null, updated = null, replaced = null;
+let serverDocument = emptyAuthority();
+registry._stgModelRoutingSavedJson = JSON.stringify(registry._stgModelRouting);
+function commitBundle(bundle, revision) {
+  serverDocument = {contract_version: 'tofu.model-routing/v2', revision: revision + 1,
+    creators: bundle.creators.length ? bundle.creators : serverDocument.creators,
+    models: bundle.models.length ? bundle.models : serverDocument.models,
+    providers: [bundle.provider], provider_accesses: [bundle.provider_access],
+    connections: bundle.connections,
+    credentials: bundle.credentials.map(row => ({...row, secret_reference: row.secret_reference || 'synthetic-stored'})),
+    offerings: bundle.offerings, deployments: bundle.deployments};
+  return {provider: bundle, revision: serverDocument.revision};
+}
 window.Api = {
   modelRouting: {
-    createProvider: async (bundle, revision) => { created = { bundle, revision }; },
-    saveProvider: async (providerId, bundle, revision) => {
-      updated = { providerId, bundle, revision };
+    createProvider: async (bundle, revision) => {
+      created = { bundle, revision }; return commitBundle(bundle, revision);
     },
-    deleteProvider: async (providerId, revision) => { deleted = { providerId, revision }; },
-    get: async () => ({ model_routing: window._stgModelRouting,
-                        revision: window._stgModelRoutingRevision }),
+    saveProvider: async (providerId, bundle, revision) => {
+      updated = { providerId, bundle, revision }; return commitBundle(bundle, revision);
+    },
+    replace: async (document, revision) => {
+      replaced = { document, revision }; serverDocument = {...document, revision: revision + 1};
+      return {model_routing: serverDocument, revision: serverDocument.revision};
+    },
+    deleteProvider: async () => { throw new Error('Speech disable cannot delete a Provider'); },
+    get: async () => ({model_routing: serverDocument, revision: serverDocument.revision}),
   },
 };
 
@@ -86,9 +103,9 @@ window.Api = {
       bundle.models[0].model_id === 'gpt-4o-transcribe');
     check('deployment_preserves_wire_id',
       bundle.deployments[0].wire_model_id === 'gpt-4o-transcribe' &&
-      bundle.deployments[0].probe_status === 'passed');
+      bundle.deployments[0].probe_status === 'unprobed');
 
-    window._stgModelRouting = {
+    registry._stgModelRouting = {
       contract_version: 'tofu.model-routing/v2', revision: 8,
       creators: bundle.creators, models: bundle.models,
       providers: [bundle.provider], provider_accesses: [bundle.provider_access],
@@ -97,8 +114,11 @@ window.Api = {
         secret_reference: 'mrs_existing', key_hint: '…abcd' }],
       offerings: bundle.offerings, deployments: bundle.deployments,
     };
-    window._stgModelRoutingRevision = 8;
+    registry._stgModelRoutingRevision = 8;
+    registry._stgModelRoutingSavedJson = JSON.stringify(registry._stgModelRouting);
+    serverDocument = registry._stgModelRouting;
     document.getElementById('settingSttKeyOpenai').value = '';
+    document.getElementById('settingSttBaseOpenai').value = 'https://fixture.invalid/new';
     await window._persistSttProvider();
     check('update_preserves_redacted_secret_reference',
       updated && updated.providerId === 'stt' && updated.revision === 8 &&
@@ -107,8 +127,10 @@ window.Api = {
 
     document.getElementById('settingSttEnabled').checked = false;
     await window._persistSttProvider();
-    check('disable_deletes_provider_access',
-      deleted && deleted.providerId === 'stt' && deleted.revision === 8);
+    check('disable_retains_access_and_credential', replaced && replaced.revision === 9 &&
+      replaced.document.provider_accesses[0].enabled === false &&
+      replaced.document.credentials[0].secret_reference === 'mrs_existing' &&
+      replaced.document.deployments[0].wire_model_id === 'gpt-4o-transcribe');
   } catch (error) {
     check('harness_threw_' + String(error && error.message || error), false);
   } finally {
@@ -124,27 +146,29 @@ window.Api = {
     )
 
 
-def test_speech_runtime_has_no_legacy_provider_array_port():
-    source = MODULE_TS.read_text(encoding='utf-8')
-    assert '_stgProviders' not in source
-    assert 'bridge._persistSttProvider = persistSttProvider;' in source
-    assert 'credential_secrets' in source
-
-    manifest = json.loads((
-        ROOT / 'frontend/src/runtime/sections/manifest.json'
-    ).read_text(encoding='utf-8'))
-    settings = next(
-        bundle for bundle in manifest['lazyBundles']
-        if bundle['name'] == 'settings-presenters'
-    )
-    assert {
-        'name': '_persistSttProvider',
-        'kind': 'function',
-        'providedBy': 'feature',
-    } in settings['runtimeServices']
-    assert not any(
-        binding['name'] == '_stgProviders'
-        for binding in settings['runtimeBindings']
-    )
-    save = (ROOT / 'frontend/src/runtime/sections/settings/save_export.js').read_text()
-    assert 'await _persistSttProvider();' in save
+def test_speech_without_authority_refuses_mutation(speech_bundle):
+    body = r'''
+const { setup } = require(process.env.JSDOM_HARNESS);
+const { window, check, report } = setup({
+  root: process.argv[3], targets: [process.argv[2]],
+  globals: {_stgModelRouting: null},
+});
+let requests = 0;
+window.Api = {modelRouting: {
+  createProvider: async () => {requests++;},
+  saveProvider: async () => {requests++;},
+  deleteProvider: async () => {requests++;},
+}};
+(async () => {
+  try {
+    await window._persistSttProvider();
+    check('missing_authority_refused', false);
+  } catch (error) {
+    check('missing_authority_refused', /authority/.test(error.message));
+  }
+  check('no_provider_write', requests === 0);
+  report();
+})();
+'''
+    run_harness(target_js=speech_bundle, body_js=body, min_pass=2,
+                label='stt-authority-admission')

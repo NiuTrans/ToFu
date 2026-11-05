@@ -1,4 +1,7 @@
-"""lib/trading_backtest_engine/reporting.py — Metrics Computation & Reporting
+"""Backtest metric policy and complete report projection.
+
+Entry point: compute_metrics. Shared arithmetic comes from performance_metrics;
+this module owns annualization, risk-free/downside policy and output formatting.
 
 Computes comprehensive backtest performance metrics from simulation state:
   - Total / annualised return
@@ -10,6 +13,8 @@ Computes comprehensive backtest performance metrics from simulation state:
 """
 
 import math
+
+from ..performance_metrics import adjacent_returns, maximum_drawdown, sample_return_statistics
 
 __all__ = [
     "compute_metrics",
@@ -51,18 +56,11 @@ def compute_metrics(state, bm_lookup, all_dates, initial_capital):
         annualized_return = 0
 
     # ── Daily returns ─────────────────────────────────────
-    daily_returns = []
-    for i in range(1, n):
-        if values[i - 1] > 0:
-            daily_returns.append((values[i] - values[i - 1]) / values[i - 1])
-        else:
-            daily_returns.append(0)
+    daily_returns = adjacent_returns(values)
 
     # ── Volatility (annualised) ───────────────────────────
     if daily_returns:
-        avg_ret = sum(daily_returns) / len(daily_returns)
-        variance = sum((r - avg_ret) ** 2 for r in daily_returns) / max(len(daily_returns) - 1, 1)
-        daily_vol = math.sqrt(variance)
+        avg_ret, daily_vol = sample_return_statistics(daily_returns)
         annualized_vol = daily_vol * math.sqrt(252) * 100
     else:
         avg_ret = 0
@@ -87,22 +85,10 @@ def compute_metrics(state, bm_lookup, all_dates, initial_capital):
         sortino = 0
 
     # ── Max drawdown ──────────────────────────────────────
-    peak = values[0]
-    max_dd = 0
-    max_dd_start = max_dd_end = dates[0]
-    dd_start = dates[0]
-    for i in range(1, n):
-        if values[i] > peak:
-            peak = values[i]
-            dd_start = dates[i]
-        dd = (peak - values[i]) / peak if peak > 0 else 0
-        if dd > max_dd:
-            max_dd = dd
-            max_dd_start = dd_start
-            max_dd_end = dates[i]
+    drawdown = maximum_drawdown(values, dates)
 
     # ── Calmar ratio ──────────────────────────────────────
-    calmar = annualized_return / (max_dd * 100) if max_dd > 0 else 0
+    calmar = annualized_return / (drawdown.fraction * 100) if drawdown.fraction > 0 else 0
 
     # ── Win rate ──────────────────────────────────────────
     # A winning sell = net proceeds (after fees) exceed the cost basis of the
@@ -146,8 +132,8 @@ def compute_metrics(state, bm_lookup, all_dates, initial_capital):
             'sharpe_ratio': round(sharpe, 3),
             'sortino_ratio': round(sortino, 3),
             'calmar_ratio': round(calmar, 3),
-            'max_drawdown_pct': round(max_dd * 100, 2),
-            'max_drawdown_period': {'start': max_dd_start, 'end': max_dd_end},
+            'max_drawdown_pct': round(drawdown.fraction * 100, 2),
+            'max_drawdown_period': {'start': drawdown.peak_date, 'end': drawdown.trough_date},
             'total_trades': len(state.trade_log),
             'total_fees': round(state.total_fees, 2),
             'win_rate_pct': round(win_rate, 1),

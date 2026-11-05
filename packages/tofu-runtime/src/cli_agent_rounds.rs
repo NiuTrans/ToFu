@@ -6,7 +6,7 @@ use serde_core::{Serialize,Serializer,ser::{SerializeMap,Error}};
 use std::io::{self,Write};
 use std::sync::Arc;
 use tofu_runtime::{
-    round_admission::{Admission, Context, Evidence, Permit},
+    round_admission::{Admission, Context, Evidence, Permit, ToolOrder},
     session::ExecutionSession,
     tool_contract::Catalog,
 };
@@ -48,6 +48,8 @@ pub(crate) struct Rounds {
     pub frame_bytes: usize,
     pub prepare_history: bool,
     pub tool_siblings: bool,
+    /// Concurrent dispatch: a returned response's ACK must carry its call order.
+    pub tool_order: bool,
     pub prepared_tools: Option<Arc<tofu_runtime::prepared_tool_wire::PreparedToolWire>>,
     pub progress_limits: tofu_runtime::progress::Limits,
     pub checkpoint_binding: Option<String>,
@@ -64,6 +66,28 @@ pub(crate) struct Rounds {
 }
 fn failure() -> Value {
     json!({"kind":"round_control","message":"native host round authority refused"})
+}
+/// Maps the host's call order onto response positions. Each listed predecessor
+/// must be an earlier call of the same response; unlisted calls start at once.
+fn call_order(ack: &Value, calls: Option<&Value>) -> Result<Vec<Vec<usize>>, Value> {
+    let plan = ack.get("tool_order").and_then(Value::as_object).ok_or_else(failure)?;
+    let ids: Vec<Option<&str>> = calls.and_then(Value::as_array).map_or_else(Vec::new, |calls| {
+        calls.iter().map(|call| call["id"].as_str()).collect()
+    });
+    let mut after = vec![Vec::new(); ids.len()];
+    for (id, earlier) in plan {
+        let position = ids.iter().position(|known| *known == Some(id.as_str())).ok_or_else(failure)?;
+        for predecessor in earlier.as_array().ok_or_else(failure)? {
+            let predecessor = predecessor.as_str().ok_or_else(failure)?;
+            let index = ids[..position].iter().position(|known| *known == Some(predecessor))
+                .ok_or_else(failure)?;
+            if after[position].contains(&index) {
+                return Err(failure());
+            }
+            after[position].push(index);
+        }
+    }
+    Ok(after)
 }
 pub(crate) async fn deadline(session: &ExecutionSession) {
     let snapshot = match session.snapshot() {
@@ -217,7 +241,13 @@ impl Admission for Rounds {
         }
         let rounds = self.clone();
         let session = self.session.clone();
+        let tool_order = self.tool_order.then(ToolOrder::default);
+        let settled_order = tool_order.clone();
         let permit = Permit::new(Box::new(move |outcome| {
+            let returned = match &outcome {
+                Evidence::Returned(r) => Some(*r),
+                _ => None,
+            };
             let evidence = match outcome {
                 Evidence::Returned(r) => {
                     let mut evidence=json!({"kind":"returned","usage":r.usage,"usage_observation":tofu_runtime::usage::evidence(&r.usage),"provider_state":r.state.as_str(),"finish_reason":r.finish_reason,"malformed_frames":r.malformed_frames});
@@ -246,8 +276,19 @@ impl Admission for Rounds {
             if ack["accepted"] != true {
                 return Err(failure());
             }
+            match (&settled_order, returned) {
+                (Some(order), Some(r)) => order
+                    .set(call_order(&ack, r.message.get("tool_calls"))?)
+                    .map_err(|_| failure())?,
+                _ if ack.get("tool_order").is_some() => return Err(failure()),
+                _ => {}
+            }
             Ok(())
         }));
+        let permit = match tool_order {
+            Some(order) => permit.with_tool_order(order),
+            None => permit,
+        };
         Ok(match prepared {Some(messages)=>permit.with_messages(messages),None=>permit})
     }
 }

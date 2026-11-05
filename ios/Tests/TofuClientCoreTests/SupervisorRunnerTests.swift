@@ -20,16 +20,17 @@ final class SupervisorRunnerTests: XCTestCase {
     }
 
     func test_login_block_short_circuits_with_explanation() async throws {
-        var calls = 0
+        let calls = TestCounter()
         let outcome = try await executeSupervisorCall(
             profile: profile, action: .status, plan: userPlan, signedIn: false,
             login: { _ in .badCredentials },
-            call: { _, _ in calls += 1; return .ok(running: true) },
+            call: { _, _ in _ = await calls.increment(); return .ok(running: true) },
             isCurrent: { true }
         )
         XCTAssertTrue(outcome.failed)
         XCTAssertTrue(outcome.message?.contains("Wrong password") ?? false)
-        XCTAssertEqual(calls, 0)
+        let count = await calls.value
+        XCTAssertEqual(count, 0)
     }
 
     /// needsInteractiveSso yields no cookie — proceeding would 401 and
@@ -47,7 +48,7 @@ final class SupervisorRunnerTests: XCTestCase {
     }
 
     func test_start_polls_until_running_then_hands_off() async throws {
-        var statuses = 0
+        let statuses = TestCounter()
         let outcome = try await executeSupervisorCall(
             profile: profile, action: .start, plan: userPlan, signedIn: true,
             login: { _ in .success(host: "h.example") },
@@ -55,8 +56,7 @@ final class SupervisorRunnerTests: XCTestCase {
                 switch action {
                 case .start: return .ok(running: false)
                 case .status:
-                    statuses += 1
-                    return .ok(running: statuses >= 2)
+                    return .ok(running: await statuses.increment() >= 2)
                 case .stop: return .ok(running: false)
                 }
             },
@@ -103,7 +103,7 @@ final class SupervisorRunnerTests: XCTestCase {
     func test_auto_probe_failure_stays_silent() async throws {
         let outcome = try await executeSupervisorCall(
             profile: profile, action: .status, plan: autoPlan, signedIn: true,
-            login: { _ in XCTFail("auto probe must never log in"); return .noCredential },
+            login: { _ in XCTFail("auto probe must never log in"); return .error(message: "unexpected login") },
             call: { _, _ in .failed(code: 502, message: "Bad Gateway") },
             isCurrent: { true }
         )
@@ -123,17 +123,18 @@ final class SupervisorRunnerTests: XCTestCase {
     }
 
     func test_stop_never_polls_and_never_hands_off() async throws {
-        var calls = 0
+        let calls = TestCounter()
         let outcome = try await executeSupervisorCall(
             profile: profile, action: .stop, plan: userPlan, signedIn: true,
             login: { _ in .success(host: "h.example") },
-            call: { _, _ in calls += 1; return .ok(running: false) },
+            call: { _, _ in _ = await calls.increment(); return .ok(running: false) },
             isCurrent: { true },
             pollIntervalMs: 0
         )
         XCTAssertEqual(outcome.running, false)
         XCTAssertFalse(outcome.handOff)
-        XCTAssertEqual(calls, 1)
+        let count = await calls.value
+        XCTAssertEqual(count, 1)
     }
 
     /// Leaving the screen is not an error: cancellation propagates so the task
@@ -166,4 +167,9 @@ final class SupervisorRunnerTests: XCTestCase {
         XCTAssertTrue(outcome.failed)
         XCTAssertNotNil(outcome.message)
     }
+}
+
+private actor TestCounter {
+    private(set) var value = 0
+    func increment() -> Int { value += 1; return value }
 }

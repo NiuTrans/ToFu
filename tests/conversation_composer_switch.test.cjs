@@ -5,17 +5,28 @@ const vm = require('node:vm');
 const ts = require('typescript');
 const {test} = require('node:test');
 const base = 'frontend/src/runtime/sections/';
-function functions(path, names) {
+/* Real retained source for named function declarations and top-level
+ * constants, so the harness runs the shipped wiring instead of a copy. */
+function declarations(path, names) {
   const text = fs.readFileSync(base + path, 'utf8');
   const ast = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-  const found = [];
+  const found = new Map();
   function visit(node) {
-    if (ts.isFunctionDeclaration(node) && names.includes(node.name?.text)) found.push(node.getText(ast));
+    if (ts.isFunctionDeclaration(node) && names.includes(node.name?.text)) {
+      found.set(node.name.text, node.getText(ast));
+    }
+    if (ts.isVariableStatement(node) && node.parent === ast) {
+      for (const declaration of node.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && names.includes(declaration.name.text)) {
+          found.set(declaration.name.text, node.getText(ast));
+        }
+      }
+    }
     ts.forEachChild(node, visit);
   }
   visit(ast);
-  assert.equal(found.length, names.length);
-  return found.join('\n');
+  assert.deepEqual([...found.keys()].sort(), [...names].sort(), `${path} declarations`);
+  return names.map(name => found.get(name)).join('\n');
 }
 function typed(name, directory = 'frontend/src/conversation/application') {
   const module = {exports: {}};
@@ -56,14 +67,15 @@ function harness({cold = false, text = '', attachment = false, staleCleanup = fa
     _resumePendingTranslations() {}, renderPendingQueueUI() {}, _refreshServerQueue() {},
     updateSendButton() {}, debugLog() {}, _updateProjectUI() {},
 
-    renderComposerModelNotice() {},
+    renderComposerModelNotice() {}, holdComposerModelNotice() {},
 
     composerTranslationStatus: {refresh() {}},
     normalizeConversationInteractionModes: () => ({agentMode: 'standard', activeFlow: ''}),
     convAutoTranslate: () => false, _scheduleReflow() {},
     _applyModelUI: model => {ctx.config.model = model;},
-    Api: {project: {setPaths: async paths => ({ok: true, json: async () => ({path: paths[0]})})}},
+    Api: {project: {status: async () => null}},
     ...typed('conversation-model'), ...typed('conversation-project'),
+    ...typed('project-conversation-navigation', 'frontend/src/features'),
   };
   if (outgoing) {
     ctx.conversations.push({id: 'outgoing', title: 'Outgoing', updatedAt: 123,
@@ -79,17 +91,12 @@ function harness({cold = false, text = '', attachment = false, staleCleanup = fa
     ctx.conversations[0]._turnSnapshotRequired = false;
   };
   vm.createContext(ctx);
-  vm.runInContext(functions('project_state.js', ['_hasProjectComposerDraft', '_clearProjectStateLocal',
-    '_applyProjectData', '_applyRemoteProjectState', '_restoreConvProject']) + `
-    const _conversationModelController = createConversationModelController({
-      hasDraft: _hasProjectComposerDraft, selection: () => captureComposerModel(config)});
-    const _conversationProjectController = createConversationProjectController({
-      activeId: () => activeConvId, exists: id => conversations.some(c => c.id === id),
-      hasDraft: _hasProjectComposerDraft, selection: () => projectState, clear: _clearProjectStateLocal,
-      remote: _applyRemoteProjectState, apply: _applyProjectData,
-      setPaths: (...args) => Api.project.setPaths(...args), warn: debugLog});
-    ` + functions('main.js', ['restoreConversationSettingsToComposer'])
-      + functions('main/main_conv_lifecycle.js', ['loadConversation']), ctx);
+  vm.runInContext([
+    declarations('project_state.js', ['_hasProjectComposerDraft', '_conversationProjectController',
+      '_restoreConvProject', '_enrichConvProjectContext']),
+    declarations('main.js', ['_conversationModelController', 'restoreConversationSettingsToComposer']),
+    declarations('main/main_conv_lifecycle.js', ['_projectConversationNavigation', 'loadConversation']),
+  ].join('\n'), ctx);
   const listeners = new Map();
   typed('sidebar', 'frontend/src/application-shell/interactions').installSidebarInteractions(
     {add() {}, listen: (_host, type, listener) => listeners.set(type, listener)},
@@ -112,11 +119,13 @@ for (const cold of [false, true]) {
     assert.equal(h.ctx.projectState.path, '/your-username/apk');
   });
   for (const draft of [{text: 'unsent'}, {attachment: true}]) {
-    test(`real sidebar preserves actual draft ${JSON.stringify(draft)} (cold=${cold})`, async () => {
+    // Model restore is draft-gated; saved roots are projected with no draft
+    // gate (docs/FRONTEND_ARCHITECTURE.md "Conversation workspace projection").
+    test(`real sidebar keeps the draft model while roots follow the conversation ${JSON.stringify(draft)} (cold=${cold})`, async () => {
       const h = harness({cold, ...draft});
       h.open(); h.release(); await settle();
       assert.equal(h.ctx.config.model, 'gpt-6-astra');
-      assert.equal(h.ctx.projectState.path, '/your-username/tofu');
+      assert.equal(h.ctx.projectState.path, '/your-username/apk');
     });
   }
 }
@@ -143,7 +152,7 @@ for (const cold of [false, true]) {
     assert.deepEqual(h.reconciliations, []);
     assert.equal(h.ctx.activeConvId, 'apk');
     assert.equal(h.ctx.config.model, 'gpt-6-astra');
-    assert.equal(h.ctx.projectState.path, '/your-username/tofu');
+    assert.equal(h.ctx.projectState.path, '/your-username/apk');
   });
   test(`changed outgoing tools persist only after switch without activity bump (cold=${cold})`, async () => {
     const h = harness({cold, outgoing: {fetchEnabled: true}, attachment: true});
@@ -165,6 +174,34 @@ for (const cold of [false, true]) {
     assert.equal(h.writes[0].updatedAt, 123);
   });
 }
+
+for (const cold of [false, true]) {
+  /* Clearing the notice on selection collapsed the composer for the whole
+   * load and grew it back at first paint, under the freshly pinned tail. */
+  test(`selection holds the outgoing model notice for the first commit to replace (cold=${cold})`, async () => {
+    const h = harness({cold, outgoing: {}});
+    const notices = [];
+    h.ctx.holdComposerModelNotice = () => notices.push('hold');
+    h.ctx.renderComposerModelNotice = (_node, view) => notices.push(view ? 'render' : 'clear');
+    h.open(); h.release(); await settle();
+    assert.deepEqual(notices, ['hold']);
+  });
+}
+
+test('a failed cold load releases the held model notice of its own selection only', async () => {
+  for (const reselect of [false, true]) {
+    const h = harness({cold: true, outgoing: {}});
+    const notices = [];
+    h.ctx.holdComposerModelNotice = () => notices.push('hold');
+    h.ctx.renderComposerModelNotice = (_node, view) => notices.push(view ? 'render' : 'clear');
+    h.ctx.console = {...console, error() {}};
+    h.ctx.hydrateConversationRuntime = async () => { throw new Error('offline'); };
+    h.open();
+    if (reselect) h.ctx.activeConvId = 'outgoing';
+    await settle();
+    assert.deepEqual(notices, reselect ? ['hold'] : ['hold', 'clear']);
+  }
+});
 
 test('busy outgoing translation remains frozen and does not create a write', () => {
   const h = harness({outgoing: {autoTranslate: true}, busy: true});

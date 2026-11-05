@@ -1,18 +1,21 @@
 """lib/memory/storage/_dirs.py — Constants, path resolution, per-root globals
 migration + the SHARED mutable process state.
 
-Holds the module-level ``_lock`` (Lock) and ``_migrated_roots`` (set tracking
-which roots have had their legacy global dir migrated). These MUST live in a
-single submodule and be shared BY REFERENCE — importers bind the same objects,
-so mutation from :func:`_migrate_one_root_globals` / :func:`list_all_memories`
-is globally visible. Also owns the ``_FM_RE``-adjacent path constants and
-``_PROJECT_ROOT``.
+Holds the module-level ``_migration_lock`` (Lock) and the migration latches
+(``_migrated_roots`` set, ``_server_store_migrated`` flag). These MUST live in
+a single submodule and be shared BY REFERENCE — importers bind the same
+objects, so latch mutation from :func:`run_storage_migrations` is globally
+visible. The lock serializes only pending one-time migrations; listings, ID
+probes and skill scans never take it. Also owns the ``_FM_RE``-adjacent path
+constants and ``_PROJECT_ROOT``.
 """
 
 import os
 import shutil
+import tempfile
 import threading
 
+from lib.json_store import atomic_output_path
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -54,7 +57,7 @@ SERVER_GLOBAL_MEMORY_SUBPATH = os.path.join('memories', 'global')
 # which used to live inside the global memory store).
 SERVER_GLOBAL_SKILLS_SUBPATH = os.path.join('skills', 'global')
 
-_lock = threading.Lock()
+_migration_lock = threading.Lock()
 
 # Roots whose per-root migrations (legacy globals + pre-split flat memories)
 # have already run this process (idempotent — guards repeated scans).
@@ -213,6 +216,10 @@ def _migrate_one_root_globals(root):
     MEMORY store; ``<id>/SKILL.md`` skill packages go to the global SKILLS
     store (post-split — pre-split copies in the memory store are moved out
     by :func:`_migrate_server_store_packages`).
+
+    Scans of other, already-migrated roots read the shared server stores
+    while this runs, so every copy is staged under a hidden sibling name
+    (scans skip dot entries) and published with one rename.
     """
     legacy_dir = _get_global_memory_dir(root)
     if not legacy_dir or not os.path.isdir(legacy_dir):
@@ -227,7 +234,8 @@ def _migrate_one_root_globals(root):
             dst = os.path.join(server_dir, entry)
             if os.path.exists(dst) or os.path.isdir(os.path.splitext(dst)[0]):
                 continue
-            shutil.copy2(src, dst)
+            with atomic_output_path(dst) as staging:
+                shutil.copy2(src, staging)
             logger.info('[Memory] migrated legacy global memory %s → %s',
                         entry, server_dir)
         elif os.path.isdir(src) and os.path.isfile(
@@ -237,7 +245,13 @@ def _migrate_one_root_globals(root):
             dst = os.path.join(skills_dir, entry)
             if os.path.exists(dst):
                 continue
-            shutil.copytree(src, dst)
+            staging = tempfile.mkdtemp(prefix='.migrating-', dir=skills_dir)
+            try:
+                shutil.copytree(src, staging, dirs_exist_ok=True)
+                os.rename(staging, dst)
+            except BaseException:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
             logger.info('[Memory] migrated legacy global skill package %s → %s',
                         entry, skills_dir)
 
@@ -316,24 +330,34 @@ def run_storage_migrations(project_path, extra_paths=None):
     """Run every idempotent storage migration once per process per root.
 
     Covers: legacy per-root globals (flat + packages), pre-split project flat
-    memories, and the one-shot server-store package move. Safe to call on
-    every listing — latches short-circuit repeat runs. Caller MUST hold
-    ``_lock``.
+    memories, and the one-shot server-store package move. Safe to call before
+    every listing: once the latches cover every requested root it returns
+    without taking ``_migration_lock``, so scans never queue behind each
+    other. A pending migration runs under the lock (latches are re-checked
+    inside it); a caller whose roots are not yet migrated therefore waits for
+    that work, while callers of migrated roots never do. Latches are set only
+    after their migration finished, so a lock-free reader that sees a latch
+    sees the migrated layout.
     """
     global _server_store_migrated
-    for root in _iter_roots(project_path, extra_paths):
-        if root in _migrated_roots:
-            continue
-        try:
-            _migrate_one_root_globals(root)
-            _migrate_project_flat_memories(root)
-        except Exception as e:
-            logger.warning('[Memory] storage migration failed for %s: %s',
-                           root, e)
-        _migrated_roots.add(root)
-    if not _server_store_migrated:
-        try:
-            _migrate_server_store_packages()
-        except Exception as e:
-            logger.warning('[Memory] server-store package migration failed: %s', e)
-        _server_store_migrated = True
+    roots = _iter_roots(project_path, extra_paths)
+    if _server_store_migrated and all(root in _migrated_roots for root in roots):
+        return
+    with _migration_lock:
+        for root in roots:
+            if root in _migrated_roots:
+                continue
+            try:
+                _migrate_one_root_globals(root)
+                _migrate_project_flat_memories(root)
+            except Exception as e:
+                logger.warning('[Memory] storage migration failed for %s: %s',
+                               root, e)
+            _migrated_roots.add(root)
+        if not _server_store_migrated:
+            try:
+                _migrate_server_store_packages()
+            except Exception as e:
+                logger.warning(
+                    '[Memory] server-store package migration failed: %s', e)
+            _server_store_migrated = True

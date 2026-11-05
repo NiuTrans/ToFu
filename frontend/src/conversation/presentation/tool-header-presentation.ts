@@ -13,7 +13,7 @@ import type { Translator } from '../../i18n';
 
 import { renderToolArtifactHeaderHtml } from './tool-artifact-presentation';
 import { renderRepoMapHeaderHtml } from './tool-repo-map-presentation';
-import { isBrowserToolRound, isProjectToolRound } from './tool-round-presentation';
+import { toolEffectOutcome } from './tool-effect-presentation';
 import type { WriteGateRefusalPresentation } from './write-gate-refusal';
 
 type UnknownRecord = Readonly<Record<string, unknown>>;
@@ -118,11 +118,12 @@ function queryText(roundValue: unknown): string {
     ? heading + query.slice(oldHeading.length) : query;
 }
 
-function badgeHtml(label: string, className: string, title = ''): string {
+function badgeHtml(label: string, className: string, title = '', effectOutcome = ''): string {
   const limit = TOOL_HEADER_PRESENTATION_LIMITS.badgeUnits;
   const shown = label.length > limit ? `${label.slice(0, limit)}…` : label;
   const titleAttribute = title ? ` title="${escapeHtmlText(title)}"` : '';
-  return `<span class="ptool-badge ${className}"${titleAttribute}>${
+  const outcomeAttribute = effectOutcome ? ` data-tool-effect-outcome="${effectOutcome}"` : '';
+  return `<span class="ptool-badge ${className}"${titleAttribute}${outcomeAttribute}>${
     escapeHtmlText(shown)
   }</span>`;
 }
@@ -136,6 +137,11 @@ export function createToolHeaderPresentation(
     const round = record(roundValue);
     const meta = record(metadataValue);
     const name = text(round.toolName);
+    const effectOutcome = toolEffectOutcome(round.executionEffect, text(round.status));
+    if (effectOutcome === 'not_started') return badgeHtml(translate('tool.notStarted'), 'ptool-badge-info');
+    if (effectOutcome === 'unknown') {
+      return badgeHtml(translate('tool.effectUnknown'), 'ptool-badge-warn', '', 'unknown');
+    }
     const batch = Boolean(batchPrefix(name));
     const write = batch || SINGLE_WRITE_NAMES.has(name);
     const refusal = writeGateRefusal.resolveRefusal(round, meta);
@@ -197,11 +203,6 @@ export function createToolHeaderPresentation(
     if (chars) {
       return badgeHtml(chars > 1000 ? `${Math.round(chars / 1000)}k chars` : `${chars} chars`,
         'ptool-badge-info');
-    }
-    const results = Array.isArray(round.results) ? round.results : [];
-    if (!isProjectToolRound(round) && !isBrowserToolRound(round) && !results.length) {
-      const elapsed = text(round._elapsed);
-      return badgeHtml(`done${elapsed ? ` · ${elapsed}` : ''}`, 'ptool-badge-ok');
     }
     return '';
   }

@@ -38,6 +38,17 @@ function activityInterpolationArgs(
   return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
+function activityErrorPresentation(
+  document: Document,
+  ports: ClassicConversationRendererPorts,
+) {
+  return createErrorEnvelopePresentation({
+    ownerDocument: document,
+    translate: ((key: string, values?: Readonly<Record<string, unknown>>) =>
+      textFor(ports, key, key, activityInterpolationArgs(values))) as Translator,
+  });
+}
+
 function activityDuration(value: number | undefined): string {
   if (value == null || value < 0) return '';
   if (value < 1000) return `${Math.round(value)}ms`;
@@ -97,22 +108,22 @@ function compactionTriggerLabel(
   trigger: string | undefined,
   ports: ClassicConversationRendererPorts,
 ): string {
-  if (trigger === 'working_set') {
-    return textFor(ports, 'activity.compaction.trigger.workingSet', 'Long context');
-  }
-  if (trigger === 'window') {
-    return textFor(ports, 'activity.compaction.trigger.window', 'Context budget threshold reached');
-  }
-  if (trigger === 'dispatch_guard') {
-    return textFor(ports, 'activity.compaction.trigger.dispatchGuard', 'Request too large before sending');
-  }
-  if (trigger === 'context_overflow') {
-    return textFor(ports, 'activity.compaction.trigger.contextOverflow', 'Provider context overflow');
-  }
-  if (trigger === 'manual') {
-    return textFor(ports, 'activity.compaction.trigger.manual', 'Manual compression');
-  }
-  return ''; // Unknown historical triggers remain inspectable, not guessed.
+  /* One plain-language cause per trigger the compaction owners can record.
+   * Keep the reason on the accounting line, next to the token flow; internal
+   * budget names (working_set / dispatch_guard) never reach the reader. */
+  const labels: Record<string, [string, string]> = {
+    working_set: ['activity.compaction.trigger.workingSet', 'Long conversation'],
+    window: ['activity.compaction.trigger.window', 'Context limit reached'],
+    dispatch_guard: ['activity.compaction.trigger.dispatchGuard', 'Message too large to send'],
+    context_overflow: ['activity.compaction.trigger.contextOverflow', 'Provider reported context overflow'],
+    reactive: ['activity.compaction.trigger.reactive', 'Provider rejected the context size'],
+    manual: ['activity.compaction.trigger.manual', 'Manual compression'],
+    force: ['activity.compaction.trigger.force', 'Requested compaction'],
+    checkpoint: ['activity.compaction.trigger.checkpoint', 'Saved on interruption'],
+  };
+  const known = trigger ? labels[trigger] : undefined;
+  return known ? textFor(ports, known[0], known[1]) : '';
+  // Unknown historical triggers remain inspectable in the fold, not guessed.
 }
 
 function buildActivityEventRow(
@@ -127,14 +138,15 @@ function buildActivityEventRow(
   previousCompactionOpen?: boolean,
 ): HTMLElement {
   const isCompaction = ['context_compaction', 'compacting'].includes(entry.reasonCode ?? '');
-  const row = document.createElement(terminalError ? 'details' : 'div');
+  const row = document.createElement(terminalError || isCompaction ? 'details' : 'div');
   row.className = `activity-event activity-event--${entry.kind} `
     + `activity-event--${entry.status} activity-event--${entry.severity}`
     + (entry.parentSpanId ? ' activity-event--nested' : '')
-    + (isCompaction ? ' activity-event--compaction' : '')
+    + (isCompaction ? ' activity-event--compaction activity-event__compaction-details' : '')
     + (terminalError ? ' activity-event--terminal-error' : '');
   if (row.tagName === 'DETAILS') {
-    (row as HTMLDetailsElement).open = previousOpen ?? true;
+    (row as HTMLDetailsElement).open = terminalError
+      ? previousOpen ?? true : previousCompactionOpen ?? false;
   }
   row.dataset.activityId = entry.id;
   row.dataset.activitySpanId = entry.spanId;
@@ -146,14 +158,8 @@ function buildActivityEventRow(
   const body = document.createElement('div');
   body.className = 'activity-event__body';
 
-  const diagnostics = isCompaction ? document.createElement('details') : null;
-  if (diagnostics) {
-    diagnostics.className = 'activity-event__compaction-details';
-    diagnostics.open = previousCompactionOpen ?? false;
-    const disclosure = document.createElement('summary');
-    disclosure.textContent = textFor(ports, 'activity.compaction.details', 'Details');
-    diagnostics.appendChild(disclosure);
-  }
+  const diagnostics = isCompaction ? document.createElement('div') : null;
+  if (diagnostics) diagnostics.className = 'activity-event__compaction-content';
   const quietCompaction = isCompaction && entry.status === 'succeeded'
     && entry.severity === 'info';
   const line = document.createElement('div');
@@ -201,6 +207,7 @@ function buildActivityEventRow(
     inspect.textContent = textFor(
       ports, 'activity.compaction.snapshot', 'View snapshot',
     );
+    // Inline beside the duration: the snapshot is one click, not a fold.
     chips.appendChild(inspect);
   }
   if (terminalError) {
@@ -208,9 +215,12 @@ function buildActivityEventRow(
   }
   if (chips.childNodes.length) line.appendChild(chips);
   body.appendChild(line);
-  if (isCompaction) {
+  const accounting = isCompaction ? document.createElement('div') : null;
+  if (accounting) {
+    accounting.className = 'activity-event__compaction-accounting';
     const tokenFlow = buildCompactionTokenFlow(document, entry, ports);
-    if (tokenFlow) body.appendChild(tokenFlow);
+    if (tokenFlow) accounting.appendChild(tokenFlow);
+    body.appendChild(accounting);
   }
   if (entry.detail && !terminalError) {
     const detail = document.createElement('div');
@@ -245,9 +255,21 @@ function buildActivityEventRow(
       ) : entry.detail;
     (quietCompaction && diagnostics ? diagnostics : body).appendChild(detail);
   }
+  // The classified cause leads the raw evidence it was derived from: a gateway
+  // 503 reads "Upstream error", not its RateLimitError routing class. The raw
+  // class stays on the cause label's tooltip instead of contradicting it in
+  // the same line. A terminal receipt already names its own kind.
+  const causeFact = !terminalError && entry.status === 'failed' && entry.envelopeKind
+    ? activityErrorPresentation(document, ports).fallbackKindLabel(entry.envelopeKind)
+    : '';
   const summaryReasonKey = typeof entry.summaryArgs?.reasonKey === 'string'
     ? entry.summaryArgs.reasonKey : '';
-  const reasonFact = isCompaction || entry.reasonCode === summaryReasonKey
+  // A phase row's default reasonCode is just the phase name itself
+  // ("retrying"), and a switch's typed kind ("content_filter") already names
+  // the cause stated in its detail. Neither is a fact worth a second line.
+  const reasonFact = isCompaction || Boolean(causeFact) || entry.reasonCode === summaryReasonKey
+    || entry.reasonCode === entry.phase
+    || (entry.status === 'switched' && Boolean(entry.detail))
     ? ''
     : entry.reasonCode?.startsWith('stream.retryReason.')
       ? textFor(ports, entry.reasonCode, entry.reasonCode)
@@ -260,27 +282,63 @@ function buildActivityEventRow(
   const summaryUnknown = !summaryModels.length || (!summaryModel
     && entry.summaryCalls?.some(call => typeof call.model !== 'string' || !call.model));
   const taskModel = entry.taskModel || entry.model; // Legacy model was the task.
-  const modelFacts = isCompaction ? [
-    ...summaryModels.map(model => textFor(ports, 'activity.compaction.summaryModel',
-      'Summary model: {model}', { model })),
-    summaryUnknown ? textFor(ports, 'activity.compaction.summaryModelUnknown', 'Summary model not recorded') : '',
-    entry.summarySelectedModel && !summaryModels.includes(entry.summarySelectedModel)
-      ? textFor(ports, 'activity.compaction.summarySelectedModel', 'Selected summary model: {model}', { model: entry.summarySelectedModel }) : '',
-  ] : [entry.model, entry.providerId, entry.keyHint];
+  if (isCompaction) {
+    // The receipt names the summarizer as plain model text, not a "Summary
+    // model:" label — the row already says the context was compacted.
+    const attribution = document.createElement('span');
+    attribution.className = 'activity-event__compaction-model';
+    attribution.textContent = summaryModels.join(' · ');
+    attribution.hidden = !summaryModels.length;
+    attribution.title = [
+      ...summaryModels.map(model => textFor(ports, 'activity.compaction.summaryModel',
+        'Summary model: {model}', { model })),
+      summaryUnknown ? textFor(ports, 'activity.compaction.summaryModelUnknown',
+        'Summary model not recorded') : '',
+    ].filter(Boolean).join(' · ');
+    line.insertBefore(attribution, chips.parentElement === line ? chips : null);
+  }
+  // The summary already names the model ("X request failed", "switched to Y",
+  // "switched back to Y"); repeating it in the facts line is pure noise. Only
+  // the provider/key routing facts — which the summary cannot express — stay.
+  const modelFactKeys = new Set(
+    ['model', 'from', 'to', 'fallback', 'fromModel', 'toModel']);
+  const modelNamedInSummary = Boolean(entry.model)
+    && Object.entries(entry.summaryArgs ?? {})
+      .some(([key, value]) => modelFactKeys.has(key) && value === entry.model);
+  const modelFacts = isCompaction
+    ? []
+    : [modelNamedInSummary ? '' : entry.model, entry.providerId, entry.keyHint];
   const facts = [
-    ...modelFacts, entry.statusCode ? `HTTP ${entry.statusCode}` : '', triggerFact, reasonFact,
+    causeFact, ...modelFacts, entry.statusCode ? `HTTP ${entry.statusCode}` : '',
+    isCompaction ? '' : triggerFact, reasonFact,
   ].filter(Boolean);
   const appendFacts = (parent: HTMLElement): void => {
     if (!facts.length) return;
     const factsNode = document.createElement('div');
     factsNode.className = 'activity-event__facts';
-    factsNode.textContent = facts.join(' · ');
+    if (causeFact && entry.reasonCode) {
+      const cause = document.createElement('span');
+      cause.className = 'activity-event__cause';
+      cause.textContent = causeFact;
+      cause.title = entry.reasonCode;
+      factsNode.appendChild(cause);
+      const rest = facts.slice(1).join(' · ');
+      if (rest) factsNode.appendChild(document.createTextNode(` · ${rest}`));
+    } else {
+      factsNode.textContent = facts.join(' · ');
+    }
     parent.appendChild(factsNode);
   };
   if (diagnostics) {
+    // The fold is the diagnostic shelf: raw reason, internal trigger id and
+    // routing facts. The main model is already visible in the turn header, so
+    // repeating "Main model: X" here is noise, not evidence.
     const routeFacts = [
       taskModel ? textFor(ports, 'activity.compaction.taskModel', 'Main model: {model}', { model: taskModel }) : '',
       entry.summaryProviderId,
+      entry.summarySelectedModel && !summaryModels.includes(entry.summarySelectedModel)
+        ? textFor(ports, 'activity.compaction.summarySelectedModel',
+          'Selected summary model: {model}', { model: entry.summarySelectedModel }) : '',
       entry.trigger,
     ].filter(Boolean);
     if (routeFacts.length) {
@@ -298,11 +356,7 @@ function buildActivityEventRow(
     content.className = 'activity-event__terminal-content';
     content.appendChild(
       buildFailureReceipt(document, terminalError, turn, ports));
-    const presentation = createErrorEnvelopePresentation({
-      ownerDocument: document,
-      translate: ((key: string, values?: Readonly<Record<string, unknown>>) =>
-        textFor(ports, key, key, activityInterpolationArgs(values))) as Translator,
-    });
+    const presentation = activityErrorPresentation(document, ports);
     const message = document.createElement('div');
     // The common presentation owner escapes every envelope field.
     message.innerHTML = presentation.renderErrorEnvelope(terminalError);
@@ -323,12 +377,31 @@ function buildActivityEventRow(
     content.appendChild(evidence);
     appendFacts(content);
 
-    if (diagnostics && diagnostics.childNodes.length > 1) content.appendChild(diagnostics);
+    if (diagnostics?.childNodes.length) content.appendChild(diagnostics);
     row.append(summary, content);
+  } else if (isCompaction) {
+    if (isCompaction && triggerFact) {
+      const cause = document.createElement('span');
+      cause.className = 'activity-event__compaction-trigger';
+      cause.textContent = triggerFact;
+      accounting!.appendChild(cause);
+    }
+    appendFacts(accounting!);
+    if (!accounting!.childNodes.length) accounting!.remove();
+    const disclosure = document.createElement('summary');
+    disclosure.className = 'activity-event__compaction-summary';
+    disclosure.append(marker, body);
+    row.appendChild(disclosure);
+    if (diagnostics?.childNodes.length) row.appendChild(diagnostics);
+    /* The snapshot button lives inside the summary's chip column; activating
+     * it must not also toggle the diagnostic fold. */
+    disclosure.addEventListener('click', (event) => {
+      if ((event.target as Element | null)?.closest('.activity-event__compaction-open')) {
+        event.preventDefault();
+      }
+    });
   } else {
     appendFacts(body);
-
-    if (diagnostics && diagnostics.childNodes.length > 1) body.appendChild(diagnostics);
     row.append(marker, body);
   }
   return row;
@@ -353,7 +426,10 @@ export function renderActivityEventGroupBlock(
     + 'conversation-block--activity-event-group';
 
   const details = document.createElement('details');
-  details.className = 'activity-event-group';
+  // A storm with any failed member reads as an error; pure waits/retries warn.
+  const failed = block.items.some(item => item.value.status === 'failed'
+    || item.value.severity === 'error');
+  details.className = `activity-event-group activity-event-group--${failed ? 'error' : 'warning'}`;
   details.open = defaultOpen;
 
   const summary = document.createElement('summary');
@@ -371,6 +447,25 @@ export function renderActivityEventGroupBlock(
     ports, 'activity.retryGroup.summary',
     '{count} failed or retried requests', { count: block.items.length },
   );
+  const causeCounts = new Map<string, number>();
+  for (const item of block.items) {
+    const kind = item.value.envelopeKind;
+    if (kind) causeCounts.set(kind, (causeCounts.get(kind) ?? 0) + 1);
+  }
+  if (causeCounts.size) {
+    const kindLabel = activityErrorPresentation(document, ports).fallbackKindLabel;
+    const causes = document.createElement('span');
+    causes.className = 'activity-event-group__causes';
+    // One cause reads as a plain label; a mixed storm shows each cause's
+    // share, most frequent first. Rows without a classified cause (retry
+    // beats, legacy rows) contribute none rather than a guess.
+    causes.textContent = [...causeCounts]
+      .sort((left, right) => right[1] - left[1])
+      .map(([kind, count]) => (causeCounts.size > 1
+        ? `${kindLabel(kind)} ×${count}` : kindLabel(kind)))
+      .join(' · ');
+    label.append(' · ', causes);
+  }
   const chips = document.createElement('span');
   chips.className = 'activity-event__chips';
   const models = [...new Set(block.items.flatMap(
@@ -440,7 +535,13 @@ export function renderActivityEventBlock(
     ),
   );
 
+  /* The settlement owns resumability: when it offers the ordinary in-place
+   * resume, that one control continues the saved progress and a second,
+   * freshly budgeted continuation card would only duplicate it. */
+  const resumesInPlace = turn?.finish?.resumeOptions?.some(option =>
+    option.operation === 'continue' || option.operation === 'checkpoint_resume') ?? false;
   const canCheckUsage = block.terminalError?.kind === 'execution_token_usage_unknown'
+    && !resumesInPlace
     && turn && ['completed', 'failed', 'interrupted', 'truncated', 'cancelled', 'superseded'].includes(turn.status)
     && turn.source.conversationId && turn.turnId
     && Number.isSafeInteger(turn.projectionRevision) && turn.projectionRevision >= 0;

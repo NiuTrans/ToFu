@@ -79,7 +79,13 @@ def test_delayed_same_file_listener_cannot_regress_round_snapshot(project, monke
 
     monkeypatch.setattr(mods, '_commit_record', observe_commit)
     monkeypatch.setattr(mods, '_live_change_listeners', [slow_listener])
-    monkeypatch.setattr(locks, '_wait_seconds', lambda: 0.05)
+    # Writers must be admitted at once while the earlier listener still runs.
+    # The verifying read below may wait out the second writer's own admission,
+    # which keeps the journal through file-history tracking after its commit.
+    ordinary_wait = locks._wait_seconds
+    verifier = threading.current_thread()
+    monkeypatch.setattr(locks, '_wait_seconds', lambda: (
+        ordinary_wait() if threading.current_thread() is verifier else 0.05))
 
     def second_round():
         result = write(project, 'C', 'second')
@@ -242,7 +248,9 @@ def test_cross_process_history_staging_retains_journal_commit_order(project, mon
         competitor, competitor_pipe = start('C', 'second')
         busy = result(competitor, competitor_pipe)
         assert busy['ok'] is False
-        assert 'Workspace lease contention is active' in busy['error']
+        # Write tools take no workspace lease; across processes the journal
+        # session lock is what refuses the competing write.
+        assert 'Project journal lock is busy' in busy['error']
         assert Path(project, 'first.txt').read_bytes() == b'B'
         release.set()
         assert result(first, first_pipe)['ok']

@@ -20,7 +20,7 @@ Endpoints:
 import asyncio
 import threading
 
-from flask import jsonify, request
+from quart import jsonify, request
 
 from tofu_trading.storage import DOMAIN_TRADING, _pool_get, _pool_put, get_thread_db
 from lib.log import get_logger

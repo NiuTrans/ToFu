@@ -42,7 +42,11 @@ describe('authored send-message card', () => {
     inspect(render(value), document => {
       expect(document.querySelector('summary')?.textContent).toContain('Message to researcher');
       expect(document.querySelector('code')?.textContent).toBe(args.content);
-      expect(document.querySelector('details')?.open).toBe(true);
+      // A routine send is one row: the first authored line previews it and the
+      // full escaped body stays one disclosure away.
+      expect(document.querySelector('details')?.open).toBe(false);
+      expect(document.querySelector('summary .ptool-line-preview')?.textContent)
+        .toBe('Please inspect <script>alert(1)</script> & keep');
       expect(document.querySelector('details')?.getAttribute('data-rn')).toBe('8');
       expect(document.querySelector('[data-test="inspector"]')).not.toBeNull();
       expect(document.querySelector('script, img')).toBeNull();
@@ -168,6 +172,8 @@ describe('actionable failures without invented submission', () => {
       { svg: '', td: {}, meta: {}, rootPill: '', q: 'Message to researcher' });
     inspect(html, document => {
       expect(document.querySelector('.ptool-agent-message.ptool-error')).not.toBeNull();
+      // Failures need the reader's attention and are never folded by default.
+      expect(document.querySelector<HTMLDetailsElement>('.ptool-agent-message')?.open).toBe(true);
       expect(document.querySelector('code')?.textContent).toBe(args.content);
       expect(document.querySelector('.ptool-agent-message-error')?.textContent).toContain('SAME idempotency_key');
     });

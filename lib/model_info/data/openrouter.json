@@ -12,6 +12,7 @@
     {"model_id": "openai/gpt-5.6-sol", "capabilities": ["text", "vision", "thinking"]},
     {"model_id": "google/gemini-3.8-flash", "capabilities": ["text", "vision", "thinking"]},
     {"model_id": "moonshotai/kimi-k3", "capabilities": ["text"]},
+    {"model_id": "moonshotai/kimi-k3.1-pro", "capabilities": ["text"]},
     {"model_id": "z-ai/glm-5.3", "capabilities": ["text"]},
     {"model_id": "meta/muse-spark-1.3", "capabilities": ["text", "vision", "thinking"]}
   ]

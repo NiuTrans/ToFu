@@ -60,6 +60,23 @@ describe('continuous history cursor isolation', () => {
     expect(next.turnsById.old).toBeTruthy();
     expect(next.historyByLane.main).toEqual({nextBeforeOrdinal: 99, hasMore: true, totalTurns: 100});
   });
+  it('adds detached Turns without overwriting streamed state or moving the revision', () => {
+    const streamed = reduceTurnState(tail(), {type: 'snapshot', snapshot: {conversationRevision: 40,
+      turns: [turn('live', 98, {status: 'running', projectionRevision: 9,
+        projection: {content: 'streamed further'}})],
+      attempts: [{attemptId: 'live-attempt', turnId: 'live', status: 'running', startedAt: 30}],
+    }});
+    const next = reduceTurnState(streamed, {type: 'snapshot', snapshot: {conversationRevision: 7,
+      turns: [turn('old', 4), turn('live', 98, {status: 'running', projectionRevision: 9,
+        projection: {content: 'read earlier'}})],
+      attempts: [{attemptId: 'live-attempt', turnId: 'live', status: 'running', startedAt: 3}],
+      laneId: 'main', beforeOrdinal: 99, nextBeforeOrdinal: 4, hasMore: true, totalTurns: 100,
+      historyMode: 'detached'}});
+    expect(next.turnsById.old).toBeTruthy();
+    expect(next.turnsById.live?.projection?.content).toBe('streamed further');
+    expect(next.attemptsById['live-attempt']).toMatchObject({startedAt: 30});
+    expect(next.conversationRevision).toBe(40);
+  });
   it('accepts only the continuous frontier and does not reset on a mismatched older page', () => {
     let next = reduceTurnState(tail(), {type: 'snapshot', snapshot: {
       turns: [turn('old', 4)], laneId: 'main', beforeOrdinal: 5,
@@ -118,5 +135,90 @@ describe('phase evidence after command acknowledgement', () => {
     expect(old.livePhase).toEqual(startup);
     const foreign = reduceTurnState(state, {type: 'event', event: {...frame(), attemptId: 'foreign'}});
     expect(foreign.livePhase).toEqual(startup);
+  });
+});
+
+
+describe('replacing tail-window snapshot keeps loaded history', () => {
+  const loaded = () => {
+    const tail = reduceTurnState(createTurnState('conversation'), {type: 'snapshot', snapshot: {
+      authoritativeFull: true, conversationRevision: 5,
+      turns: [turn('input', 3), turn('answer', 4), turn('live', 5, {status: 'running'})],
+      turnWindow: {laneId: 'main', hasMore: true, nextBeforeOrdinal: 3, totalTurns: 6},
+    }});
+    return reduceTurnState(tail, {type: 'snapshot', snapshot: {
+      conversationRevision: 5, laneId: 'main', beforeOrdinal: 3, nextBeforeOrdinal: 0,
+      hasMore: false, totalTurns: 6, historyMode: 'continuous',
+      turns: [turn('first', 0), turn('second', 1), turn('third', 2)],
+    }});
+  };
+  const recovered = (state = loaded()) => reduceTurnState(state, {type: 'snapshot', snapshot: {
+    authoritativeFull: true, conversationRevision: 9,
+    turns: [turn('live', 5, {status: 'running', projectionRevision: 4})],
+    turnWindow: {laneId: 'main', hasMore: true, nextBeforeOrdinal: 5, totalTurns: 6},
+  }});
+
+  it('keeps the same Turn objects below the window and marks them for re-reading', () => {
+    const before = loaded();
+    const next = recovered(before);
+    expect(next.laneOrder.main).toEqual(['first', 'second', 'third', 'input', 'answer', 'live']);
+    for (const id of ['first', 'second', 'third', 'input', 'answer']) {
+      expect(next.turnsById[id]).toBe(before.turnsById[id]);
+    }
+    expect(next.turnsById.live?.projectionRevision).toBe(4);
+    expect(next.historyByLane.main).toEqual({
+      nextBeforeOrdinal: 5, hasMore: true, totalTurns: 6, retainedFromOrdinal: 0,
+    });
+  });
+
+  it('is authoritative inside its window', () => {
+    const next = reduceTurnState(loaded(), {type: 'snapshot', snapshot: {
+      authoritativeFull: true, conversationRevision: 9,
+      turns: [turn('input', 3), turn('live', 5, {status: 'running'})],
+      turnWindow: {laneId: 'main', hasMore: true, nextBeforeOrdinal: 3, totalTurns: 5},
+    }});
+    expect(next.laneOrder.main).toEqual(['first', 'second', 'third', 'input', 'live']);
+    expect(next.turnsById.answer).toBeUndefined();
+  });
+
+  it('lets continuous frontier pages drop the retained Turns they omit', () => {
+    const partial = reduceTurnState(recovered(), {type: 'snapshot', snapshot: {
+      conversationRevision: 9, laneId: 'main', beforeOrdinal: 5, nextBeforeOrdinal: 2,
+      hasMore: true, totalTurns: 5, historyMode: 'continuous',
+      turns: [turn('third', 2), turn('input', 3)],
+    }});
+    expect(partial.laneOrder.main).toEqual(['first', 'second', 'third', 'input', 'live']);
+    expect(partial.historyByLane.main).toEqual({
+      nextBeforeOrdinal: 2, hasMore: true, totalTurns: 5, retainedFromOrdinal: 0,
+    });
+    const complete = reduceTurnState(partial, {type: 'snapshot', snapshot: {
+      conversationRevision: 9, laneId: 'main', beforeOrdinal: 2, nextBeforeOrdinal: 0,
+      hasMore: false, totalTurns: 4, historyMode: 'continuous', turns: [turn('first', 0)],
+    }});
+    expect(complete.laneOrder.main).toEqual(['first', 'third', 'input', 'live']);
+    expect(complete.historyByLane.main).toEqual({nextBeforeOrdinal: 0, hasMore: false, totalTurns: 4});
+  });
+
+  it('never deletes through detached or off-frontier pages', () => {
+    const state = recovered();
+    for (const snapshot of [
+      {beforeOrdinal: 5, historyMode: 'detached' as const},
+      {beforeOrdinal: 4, historyMode: 'continuous' as const},
+    ]) {
+      const next = reduceTurnState(state, {type: 'snapshot', snapshot: {
+        conversationRevision: 9, laneId: 'main', nextBeforeOrdinal: 0, hasMore: false,
+        totalTurns: 1, turns: [], ...snapshot,
+      }});
+      expect(next.laneOrder.main).toEqual(state.laneOrder.main);
+      expect(next.historyByLane.main?.retainedFromOrdinal).toBe(0);
+    }
+  });
+
+  it('replaces every Turn when the snapshot has no tail window', () => {
+    const next = reduceTurnState(loaded(), {type: 'snapshot', snapshot: {
+      authoritativeFull: true, conversationRevision: 9, turns: [turn('live', 5, {status: 'running'})],
+    }});
+    expect(next.laneOrder.main).toEqual(['live']);
+    expect(next.historyByLane.main).toEqual({nextBeforeOrdinal: null, hasMore: false, totalTurns: 1});
   });
 });

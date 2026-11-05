@@ -58,19 +58,15 @@ curl http://127.0.0.1:15001/api/v1/agent/run \
 
 ## 进程内嵌入
 
-不需要 HTTP 边界的 Python 应用可以直接传 `ProviderConfig`，也可以由进程环境统一
-注入 Provider：
-
-```bash
-export TOFU_AGENT_PROVIDER_BASE_URL=https://api.openai.com/v1
-export TOFU_AGENT_PROVIDER_API_KEY=sk-...
-export TOFU_AGENT_PROVIDER_MODEL=gpt-5.6
-```
+嵌入调用使用完整的 `tofu.model-routing/v2` 配置，包括模型选择和独立提供的凭据。
+结构见[模型路由契约](docs/DEVELOPER_RUNTIME.md#model-routing-ownership)。
+把完整 JSON 配置放入 `TOFU_AGENT_MODEL_ROUTING`，然后运行：
 
 ```python
-from tofu_agent import AgentRuntime
+from tofu_agent import AgentRuntime, ModelRoutingConfig
 
-with AgentRuntime.local() as agent:
+access = ModelRoutingConfig.from_env(required=True)
+with AgentRuntime.local(model_routing=access) as agent:
     result = agent.run(
         [{"role": "user", "content": "调研这个问题并给出修复方案"}],
         config={"tools": ["search", "fetch"], "thinking": "high"},
@@ -80,25 +76,10 @@ print(result.content)
 print(result.usage)
 ```
 
-Provider 只配置一次，后续调用可以不再传 endpoint、key 和 model。公开运行时同时
-提供 `run_async`、`stream`、`stream_async`、`start`、事件回放、取消、自定义工具和
-请求级 Provider 覆盖。如果业务希望完全不写 Provider 配置代码，使用上面的 Sidecar
-和远程 SDK 即可。
-
-本地 vLLM、Ollama、SGLang 等 OpenAI-compatible 服务可以留空 key：
-
-```python
-from tofu_agent import AgentRuntime, ProviderConfig
-
-provider = ProviderConfig(
-    base_url="http://127.0.0.1:8000/v1",
-    api_key="",
-    model="Qwen3.5-32B",
-)
-
-with AgentRuntime.local(provider=provider) as agent:
-    print(agent.run([{"role": "user", "content": "你好"}]).content)
-```
+配置一次后，后续请求可以省略模型配置。运行时还提供 `run_async`、`stream`、
+`stream_async`、`start`、任务事件回放、取消、自定义工具和单次请求的
+`model_routing` 覆盖。本地兼容引擎也通过同一 v2 连接和模型契约配置。
+由运维统一管理模型时，使用 sidecar 和远程 SDK。
 
 ## 生产部署 Sidecar
 
@@ -144,9 +125,8 @@ TOFU_API_KEY=<sidecar bearer token>
 无人值守部署仍可使用环境变量：
 
 ```text
-TOFU_AGENT_PROVIDER_BASE_URL
-TOFU_AGENT_PROVIDER_API_KEY
-TOFU_AGENT_PROVIDER_MODEL
+TOFU_AGENT_MODEL_ROUTING       # 完整 v2 配置的 JSON 值
+TOFU_AGENT_MODEL_ROUTING_FILE  # CLI 读取的完整 v2 配置文件路径
 ```
 
 命令行参数优先于环境变量，环境变量优先于 `/setup` 保存的配置。环境变量或命令行

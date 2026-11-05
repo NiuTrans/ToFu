@@ -151,7 +151,7 @@ def test_native_error_contract_uses_matched_blueprint_and_preserves_receipts():
 
     @native.get('/api/v4/conversations/native')
     def native_error():
-        return api_error({'kind': 'server_busy', 'message': 'Retry later'}, status=503,
+        return api_error({'kind': 'storage_unavailable', 'message': 'Retry later'}, status=503,
                          storageCode='database_timeout', retryAfterMs=125,
                          latestTurn=receipt)
 
@@ -169,7 +169,7 @@ def test_native_error_contract_uses_matched_blueprint_and_preserves_receipts():
         assert body['storageCode'] == 'database_timeout'
         assert body['retryAfterMs'] == 125
         assert body['latestTurn'] == receipt
-        assert body['error']['kind'] == 'server_busy'
+        assert body['error']['kind'] == 'storage_unavailable'
         response = await app.test_client().get('/api/v4/conversations/ordinary')
         assert response.status_code == 403
         assert response.content_type == 'application/problem+json'

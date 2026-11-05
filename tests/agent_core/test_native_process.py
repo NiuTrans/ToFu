@@ -434,6 +434,66 @@ class RoundHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replies[-1], ("round_ack", {"accepted": True}))
         self.assertIsNone(control.pending)
 
+    async def test_concurrent_settlement_acknowledges_the_bound_call_order(self):
+        from lib.agent_core.native_process import NativeToolOrder
+        replies, seen = [], []
+
+        class Policy:
+            async def reserve(self, request):
+                return True
+
+            async def settle(self, result):
+                seen.append(result.tool_order)
+                if result.tool_order is not None:
+                    result.tool_order.bind({'second': ['first']})
+
+        control = self.control(Policy())
+        control.concurrent_tools = True
+
+        async def send(process, kind, request_id, **values):
+            replies.append((kind, values))
+
+        control.send = send
+        await control.handle(self.frame(), None)
+        await control.handle(self.frame("round_settled"), None)
+        self.assertIsInstance(seen[0], NativeToolOrder)
+        self.assertEqual(replies[-1], ("round_ack", {"accepted": True,
+                                                    "tool_order": {'second': ['first']}}))
+        failed = self.frame("round_settled")
+        failed['evidence'] = {'kind': 'failed', 'error': {}}
+        failed['round'] = 1
+        frame = self.frame()
+        frame['round'] = 1
+        await control.handle(frame, None)
+        await control.handle(failed, None)
+        self.assertIsNone(seen[1])
+        self.assertEqual(replies[-1], ("round_ack", {"accepted": True}))
+        with self.assertRaises(ValueError):
+            seen[0].bind({})
+
+    async def test_concurrent_settlement_without_a_call_order_rejects_the_ack(self):
+        replies = []
+
+        class Policy:
+            async def reserve(self, request):
+                return True
+
+            async def settle(self, result):
+                return None
+
+        control = self.control(Policy())
+        control.concurrent_tools = True
+
+        async def send(process, kind, request_id, **values):
+            replies.append((kind, values))
+
+        control.send = send
+        await control.handle(self.frame(), None)
+        with self.assertRaises(NativeRoundError) as raised:
+            await control.handle(self.frame("round_settled"), None)
+        self.assertIsInstance(raised.exception.__cause__, TypeError)
+        self.assertEqual(replies[-1], ("round_ack", {"accepted": False}))
+
     async def test_ack_timeout_remains_bounded_after_cancellation(self):
         class Policy:
             async def reserve(self, request):

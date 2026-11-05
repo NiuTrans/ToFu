@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 
 import pytest
@@ -47,12 +46,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 _PROJECT_SRC = os.path.join(JS_DIR, 'project.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -288,8 +281,6 @@ _EXPECTED = (
 )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_workspace_reorder_and_root_at_top():
     output = _run(_PROJECT_SRC)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -327,8 +318,6 @@ def _nc(anchor, replacement, must_fail, must_still_pass):
         assert f.read() == original, 'shipped project.js must be byte-identical'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_reorder_move_is_load_bearing():
     """Neuter the splice-move in _mpReorder (repaint only) → every reorder
     check FAILs while the render / root-at-top checks still PASS."""
@@ -341,8 +330,6 @@ def test_NC_reorder_move_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_drop_index_compensation_is_load_bearing():
     """Drop the `from < to` shift compensation → a downward move into a MIDDLE
     slot overshoots by one, while upward moves (unaffected by the shift) still
@@ -356,8 +343,6 @@ def test_NC_drop_index_compensation_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_top_row_is_primary_is_load_bearing():
     """Mark the LAST row primary instead of the first → the root-at-top checks
     FAIL while the reorder mechanics still PASS."""

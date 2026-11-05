@@ -34,11 +34,13 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 
 import pytest
+from tests._jsdom import require_node_modules
+
+from tests._runtime_sections import anchor_relative_imports
 
 pytestmark = pytest.mark.unit
 
@@ -47,13 +49,6 @@ ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 _READER_SRC = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'recommend.ts')
 ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
-
-
-def _node_deps_available():
-    if not shutil.which('node'):
-        return False
-    return (os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
-            and os.path.isfile(ESBUILD))
 
 
 _DOM = r'''<!DOCTYPE html><body>
@@ -184,22 +179,16 @@ console.log('__RESULT__' + JSON.stringify(out));
 
 
 def _run(reader=_READER_SRC):
+    require_node_modules('vite')
     with tempfile.TemporaryDirectory(prefix='tofu-recommend-timeline-') as temp_dir:
         built = os.path.join(temp_dir, 'recommend.js')
         with open(reader, encoding='utf-8') as source_file:
             source = source_file.read()
-        dependency = os.path.join(
-            os.path.dirname(_READER_SRC), 'push-transport.ts').replace('\\', '/')
-        source = source.replace(
-            "from './push-transport';", f'from {json.dumps(dependency)};')
+        # The bundler materializes stdin in a temp dir, so anchor every
+        # relative specifier to the shipped module's own directory.
+        source = anchor_relative_imports(source, os.path.dirname(_READER_SRC))
         registry = os.path.join(
             ROOT, 'frontend', 'src', 'feature-registry.ts').replace('\\', '/')
-        source = source.replace(
-            "from '../../feature-registry';", f'from {json.dumps(registry)};')
-        html_safety = os.path.join(
-            ROOT, 'frontend', 'src', 'html-safety.ts').replace('\\', '/')
-        source = source.replace(
-            "from '../../html-safety';", f'from {json.dumps(html_safety)};')
         # Bridge the module-private feature registry onto the jsdom window,
         # mirroring how main.ts injects the production service table. Without
         # the connection the harness cannot see any installed global owner.
@@ -236,8 +225,6 @@ def _run(reader=_READER_SRC):
     raise AssertionError(f'no result line: {proc.stdout}\n{proc.stderr}')
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_recommend_research_renders_through_unified_tool_timeline():
     out = _run()
     # tool_start accumulates a chat-compatible round and paints it immediately.
@@ -264,8 +251,6 @@ def test_recommend_research_renders_through_unified_tool_timeline():
         f'the fetch_url round query must reach the renderer: {out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_tool_round_accumulation_is_load_bearing(tmp_path):
     """NC: drop the ``s.toolRounds.push(...)`` in the ``tool_start`` branch →
     research events arrive but nothing is accumulated → the timeline is empty.

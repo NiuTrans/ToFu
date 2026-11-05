@@ -266,7 +266,7 @@ def test_abort_during_tool_setup_cancels_prefetch_and_skips_context(monkeypatch)
 
 
 def test_external_edit_probe_does_no_io_for_preaborted_task(monkeypatch):
-    import lib.tasks_pkg.orchestrator._vu_startup as startup
+    import lib.tasks_pkg.orchestrator._startup as startup
 
     called = []
     monkeypatch.setattr(

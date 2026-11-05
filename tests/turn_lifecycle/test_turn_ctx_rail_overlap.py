@@ -1,18 +1,22 @@
 """Context rails share a gutter, including user and assistant in one round.
 
 Entry point: the real-app ``page`` fixture and the public
-``renderTurnCtxNote`` action. Only message shells/reply heights are synthetic;
-all rail/fold markup, layout, observers and scroll handling are production.
+``renderTurnCtxNote`` action. Only message shells/reply heights and the
+Surface's part wrapper are synthetic; all rail/fold markup, layout, observers
+and scroll handling are production.
 
 Protect parked/scroll/handoff separation, narrow-pane recovery, zero-space
 paint suppression/recovery, and an assistant rail inserted without resizing
-its host. Assertions inspect rendered geometry/content, never call the private
-follower or require its classes, transforms or height-budget implementation.
+its host. A rail's visible box is its card (``.tctx-card``), which travels
+inside the rail's track. Assertions inspect rendered geometry/content, never
+call the private track pass or require its state classes or lengths.
 """
 
 from __future__ import annotations
 
 import pytest
+
+from tests.support.context_rail_probe import RAIL_PROBE_STYLED, with_rail_probe_host, with_rail_probe_part
 
 pytestmark = [pytest.mark.visual, pytest.mark.slow]
 
@@ -23,7 +27,7 @@ _EPSILON = 1.0
 _TOP_EDGE_RANGE_PX = 12
 
 # Deliberately taller than the first, one-line user message. Otherwise a
-# follower which ignores the same-round assistant can pass while still wrong.
+# track pass which ignores the same-round assistant can pass while still wrong.
 _SNAPSHOT = {
     'model': 'claude-opus-5',
     'depth': 'think',
@@ -41,8 +45,8 @@ _SNAPSHOT = {
     ],
 }
 
-_PLANT = """({snapshot, assistantRail}) => {
-    const inner = document.querySelector('.chat-inner');
+_PLANT = with_rail_probe_host("""({snapshot, assistantRail}) => {
+    const inner = __RAIL_PROBE_HOST__;
     const render = window.TofuModules.resolveAction('renderTurnCtxNote');
     if (!inner || typeof render !== 'function') return 'missing app surface';
     const parts = render(snapshot);
@@ -64,13 +68,13 @@ _PLANT = """({snapshot, assistantRail}) => {
             + '<div class="message-body"><div class="md-content'
             + (user ? ' user-content' : '') + '">'
             + (user ? 'Short question ' : 'Reply ') + key
-            + '</div></div></div>' + (withRail ? parts.rail : '');
+            + '</div></div></div>' + (withRail ? __RAIL_PROBE_PART__(parts.rail) : '');
         return node;
     };
     inner.append(message('u1', true, true), message('a1', false, assistantRail),
                  message('u2', true, true), message('a2', false, false));
     return 'ok';
-}"""
+}""")
 
 _MEASURE = """() => {
     const cont = document.querySelector('.chat-container');
@@ -127,10 +131,11 @@ _MEASURE = """() => {
         hosts[key] = {...rect(hr), docTop: hr.top - cr.top + cont.scrollTop};
         const rail = host.querySelector(':scope > .turn-ctx');
         if (rail) {
-            const style = getComputedStyle(rail);
-            rails[key] = {...rect(rail.getBoundingClientRect()),
-                display: style.display, visibility: style.visibility,
-                scrollHeight: rail.scrollHeight, text: rail.textContent.trim(),
+            const card = rail.querySelector(':scope > .tctx-card');
+            rails[key] = {...rect(card.getBoundingClientRect()),
+                display: getComputedStyle(rail).display,
+                visibility: getComputedStyle(card).visibility,
+                scrollHeight: card.scrollHeight, text: rail.textContent.trim(),
                 paint: paintedBounds(rail)};
         }
         const fold = host.querySelector('.message-content .tctx-fold');
@@ -182,6 +187,7 @@ def _boot(page, *, assistant_rail=True):
         const rail = document.querySelector('[data-rail-overlap-host="u1"] > .turn-ctx');
         return rail && rail.getBoundingClientRect().width > 0;
     }""", timeout=5000)
+    page.wait_for_function(RAIL_PROBE_STYLED, timeout=10000)
     _settle(page)
     state = _measure(page)
     # App startup can leave earlier content above the probes. Align the first
@@ -287,20 +293,22 @@ def test_zero_space_rail_paints_nothing_and_recovers(page):
     page.evaluate("""() => {
         const user = document.querySelector('[data-rail-overlap-host="u1"]');
         const assistant = document.querySelector('[data-rail-overlap-host="a1"]');
-        assistant.style.position = 'relative';
-        assistant.style.top = (user.getBoundingClientRect().top
-            - assistant.getBoundingClientRect().top) + 'px';
+        user.style.marginBottom = (user.getBoundingClientRect().top
+            - assistant.getBoundingClientRect().top
+            + parseFloat(getComputedStyle(user).marginBottom)) + 'px';
     }""")
-    # A relative top change does not resize the chat. Use a real scroll event
-    # to reconcile it; neither the hidden state nor the follower is fabricated.
-    zero = _scroll_to(page, parked['scrollTop'] + 1)
+    # Pulling the assistant up onto the user is a real layout change: the
+    # transcript shrinks and the production observers reconcile the tracks.
+    # Neither the hidden state nor the track pass is fabricated, and the
+    # scroll below only restores the reader's position.
+    zero = _scroll_to(page, parked['scrollTop'])
     assert abs(zero['hosts']['u1']['top'] - zero['hosts']['a1']['top']) <= _EPSILON, zero
     assert zero['rails']['a1']['paint'], f'the successor must remain visible: {zero}'
     assert zero['rails']['u1']['paint'] is None, (
         f'zero free track still paints the preceding rail content: {zero}')
 
     page.evaluate("""() => {
-        document.querySelector('[data-rail-overlap-host="a1"]').style.removeProperty('top');
+        document.querySelector('[data-rail-overlap-host="u1"]').style.removeProperty('margin-bottom');
     }""")
     recovered = _scroll_to(page, parked['scrollTop'])
     _assert_disjoint(recovered, 'space restored')
@@ -316,14 +324,14 @@ def test_new_assistant_rail_reclamps_without_scroll_or_resize(page):
     assert before['rails']['u1']['bottom'] > before['hosts']['a1']['top'] + _EPSILON, (
         f'fixture must initially lend the assistant gutter to the user rail: {before}')
 
-    inserted = page.evaluate("""(snapshot) => {
+    inserted = page.evaluate(with_rail_probe_part("""(snapshot) => {
         const host = document.querySelector('[data-rail-overlap-host="a1"]');
         const parts = window.TofuModules.resolveAction('renderTurnCtxNote')(snapshot);
         if (!parts?.rail || !parts?.fold) return false;
         host.querySelector('.message-header').insertAdjacentHTML('afterend', parts.fold);
-        host.insertAdjacentHTML('beforeend', parts.rail);
+        host.insertAdjacentHTML('beforeend', __RAIL_PROBE_PART__(parts.rail));
         return true;
-    }""", _SNAPSHOT)
+    }"""), _SNAPSHOT)
     assert inserted, 'production renderer did not create the dynamic assistant rail'
     # No manual event, viewport change, or scheduler call: an absolute rail
     # and a wide-pane hidden fold do not change the observed content height.

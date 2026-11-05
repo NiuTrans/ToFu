@@ -14,7 +14,15 @@ grant tool execution authority.
 The projection is deliberately bounded.  Repeated retry/phase frames update a
 single span row, tool progress updates its tool row, and at most 128 rows are
 retained.  This keeps a multi-hour wait or long tool loop from turning a useful
-diagnostic surface into unbounded durable state.
+diagnostic surface into unbounded durable state.  A full window reclaims
+display-filtered rows before rendered ones and compaction receipts last
+(``_eviction_rank``), so a long loop cannot erase what the transcript shows.
+
+The Turn projection settles folded rows (``lib.conversation_sync.settled_rows``).
+A fold keeps the settled rows it does not change and replaces changed rows
+copy-on-write, never editing them, so normalization and byte budgeting reuse
+each unchanged row's result instead of redoing every row on every event.
+Freshly folded rows are returned as plain dictionaries.
 """
 
 from __future__ import annotations
@@ -29,6 +37,14 @@ from collections.abc import Mapping
 from typing import Any
 
 from lib.agent_core.events import EventType, Phase
+from lib.conversation_sync.settled_rows import (
+    SettledDict,
+    compact_json_bytes,
+    memo_get,
+    memo_put,
+    settle_unless_same,
+)
+from lib.error_envelope import KINDS as _ENVELOPE_KINDS
 from lib.logging_pkg.log_record_values import text_value
 from lib.tool_results.tool_rejection import (
     is_unavailable_tool_rejection,
@@ -87,6 +103,7 @@ _STRING_LIMITS: dict[str, int] = {
     'routeMode': 24,
     'routeDecision': 80,
     'failureStage': 80,
+    'envelopeKind': _IDENTIFIER_MAX_CHARS,
 
     'taskId': 256,
     'attemptId': 256,
@@ -229,6 +246,7 @@ def _summary_calls(value: Any) -> list[dict[str, Any]]:
         'costBasis', 'pricingSource', 'pricingSnapshot', 'source', 'currency',
         'provider', 'selectedPromptTokens', 'tierId', 'maxPromptTokens',
         'usdToCny', 'rates', 'input', 'output', 'cacheReadMul', 'cacheWriteMul',
+        'cacheWrite1hMul', 'cacheWrite1hTokens',
     }
 
     def clean(row: Mapping[str, Any], depth: int = 0) -> dict[str, Any]:
@@ -369,10 +387,47 @@ def _normalize_entry(raw: Any) -> dict[str, Any] | None:
     return entry
 
 
+# Info rows the browser renders anyway (activityEntryIsVisible in
+# frontend/src/conversation/presentation/activity-anchor.ts): the context
+# compaction receipt and the phase beat it replaces. The receipt is the only
+# transcript marker that an archive rewrote the model's context.
+_COMPACTION_RECEIPT_REASON_CODES = frozenset({'context_compaction', Phase.COMPACTING})
+
+
+def _eviction_rank(entry: Mapping[str, Any]) -> int:
+    """Order in which the bounded window reclaims rows; ties go oldest first.
+
+    Display-filtered rows go before rendered ones, so a long tool loop never
+    pushes a rendered fact out while routine rows remain: 0 status/model
+    beats, 1 other info rows (tool blocks already show them), 2 warnings,
+    3 errors and failed/switched outcomes, 4 compaction receipts.
+    """
+    if entry.get('reasonCode') in _COMPACTION_RECEIPT_REASON_CODES:
+        return 4
+    if (entry.get('severity') == 'error'
+            or entry.get('status') in {'failed', 'switched'}):
+        return 3
+    if entry.get('severity') != 'info':
+        return 2
+    return 0 if entry.get('kind') in {'status', 'model'} else 1
+
+
+def _eviction_index(entries: list[dict[str, Any]]) -> int:
+    """Index of the oldest row with the lowest ``_eviction_rank``."""
+    best_index, best_rank = 0, None
+    for index, entry in enumerate(entries):
+        rank = _eviction_rank(entry)
+        if rank == 0:
+            return index
+        if best_rank is None or rank < best_rank:
+            best_index, best_rank = index, rank
+    return best_index
+
+
 def _trim_entries(
     entries: list[dict[str, Any]], dropped_count: int,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Apply hard row/byte budgets, retaining diagnostics preferentially."""
+    """Apply hard row/byte budgets in ``_eviction_rank`` order."""
 
     def serialized_size() -> int:
         document = {
@@ -381,33 +436,48 @@ def _trim_entries(
             'entries': entries,
             **({'droppedCount': dropped_count} if dropped_count else {}),
         }
-        return len(json.dumps(
-            document, ensure_ascii=False, separators=(',', ':'),
-        ).encode('utf-8'))
+        return compact_json_bytes(document, row_fields=('entries',))
 
-    def removal_index() -> int:
-        removable = next((
-            index for index, entry in enumerate(entries)
-            if entry.get('severity') == 'info'
-            and entry.get('kind') in {'status', 'model'}
-            and entry.get('status') not in {'failed', 'switched'}
-        ), None)
-        if removable is not None:
-            return removable
-        return next((
-            index for index, entry in enumerate(entries)
-            if entry.get('severity') != 'error'
-            and entry.get('status') not in {'failed', 'switched'}
-        ), 0)
-
-    while entries and (
-        len(entries) > ACTIVITY_TIMELINE_MAX_ENTRIES
-        or serialized_size() > ACTIVITY_TIMELINE_MAX_JSON_BYTES
-    ):
-        removable = removal_index()
-        entries.pop(removable)
+    while len(entries) > ACTIVITY_TIMELINE_MAX_ENTRIES:
+        entries.pop(_eviction_index(entries))
         dropped_count = min(_COUNT_MAX, dropped_count + 1)
+    if not entries:
+        return entries, dropped_count
+    # Size the document once, then track each removal by its exact encoded
+    # length (the row plus one comma separator; removing the last row ends
+    # the loop, so its missing separator never matters). droppedCount is the
+    # only other field that changes; its key appears once, its digits grow.
+    size = serialized_size()
+    while entries and size > ACTIVITY_TIMELINE_MAX_JSON_BYTES:
+        removable = _eviction_index(entries)
+        row_bytes = len(json.dumps(
+            entries[removable], ensure_ascii=False, separators=(',', ':'),
+        ).encode('utf-8'))
+        entries.pop(removable)
+        previous_dropped = dropped_count
+        dropped_count = min(_COUNT_MAX, dropped_count + 1)
+        size -= row_bytes + 1
+        if previous_dropped:
+            size += len(str(dropped_count)) - len(str(previous_dropped))
+        elif dropped_count:
+            size += len(',"droppedCount":') + len(str(dropped_count))
     return entries, dropped_count
+
+
+_NORMALIZED_ENTRY_KEY = ('activity-normalized-entry',)
+_UNSET = object()
+
+
+def _normalized_entry(raw: Any) -> dict[str, Any] | None:
+    if type(raw) is SettledDict:
+        normalized = memo_get(raw, _NORMALIZED_ENTRY_KEY, _UNSET)
+        if normalized is _UNSET:
+            normalized = _normalize_entry(raw)
+            normalized = memo_put(raw, _NORMALIZED_ENTRY_KEY, (
+                None if normalized is None
+                else settle_unless_same(raw, normalized)))
+        return normalized
+    return _normalize_entry(raw)
 
 
 def normalize_activity_timeline(raw: Any) -> dict[str, Any] | None:
@@ -416,7 +486,7 @@ def normalize_activity_timeline(raw: Any) -> dict[str, Any] | None:
         return None
     entries = [
         normalized for item in (raw.get('entries') or [])
-        if (normalized := _normalize_entry(item)) is not None
+        if (normalized := _normalized_entry(item)) is not None
     ] if isinstance(raw.get('entries'), list) else []
     if not entries:
         return None
@@ -843,6 +913,14 @@ def _close_open_entries(
             entry['durationMs'] = max(
                 0, ended_at - int(entry.get('startedAt') or ended_at),
             )
+        if (entry.get('kind') == 'tool'
+                and entry.get('summaryKey') == 'activity.tool.started'
+                and status in {'aborted', 'failed', 'succeeded'}):
+            # Closing an open tool span is a terminal fact, not a new start.
+            # The summary follows the settled status and the last heartbeat
+            # ("run_command… (30s)") no longer describes the current state.
+            entry['summaryKey'] = f'activity.tool.{status}'
+            entry.pop('detail', None)
         normalized = _normalize_entry(entry)
         if normalized is not None:
             entries[index] = normalized
@@ -883,6 +961,7 @@ def _fold_model_complete(
     raw_status = str(raw_event.get('status') or '').lower()
     failed = raw_status == 'failed'
     aborted = raw_status == 'aborted'
+    envelope_kind = _text(raw_event.get('envelopeKind'), 160)
     model = _text(raw_event.get('model') or task.get('model') or '?', 160)
     span_id = _text(raw_event.get('spanId'), 160) or _stable_span(
         'model', task.get('_attemptId'), raw_event.get('requestTag'), model,
@@ -943,6 +1022,10 @@ def _fold_model_complete(
             # only for genuine failures.
             'reasonCode': ('' if aborted
                            else _text(raw_event.get('errorKind'), 160)),
+            # The user-facing cause; reasonCode keeps the raw class name.
+            'envelopeKind': (envelope_kind
+                             if failed and envelope_kind in _ENVELOPE_KINDS
+                             else ''),
             'detail': _diagnostic_text(raw_event.get('errorDetail')),
             'statusCode': _nonnegative_int(raw_event.get('statusCode')),
             'roundNum': _round_number(raw_event),
@@ -1154,7 +1237,8 @@ def _fold_tool_event(
             'occurredAt': started_at,
             'startedAt': started_at,
             'kind': 'tool',
-            'status': 'running',
+            'status': ('waiting' if raw_event.get('status') == 'queued'
+                       else 'running'),
             'severity': 'info',
             'summary': tool_name,
             'summaryKey': 'activity.tool.started',
@@ -1293,8 +1377,10 @@ def _fold_phase(
                    and entry.get('durationMs') == 0
                    and entry.get('startedAt') == entry.get('occurredAt')]
         if len(pending) == 1:
-            pending[0].update({**anchors, 'startedAt': now, 'endedAt': now,
-                               'durationMs': 0})
+            index = next(index for index, entry in enumerate(entries)
+                         if entry is pending[0])
+            entries[index] = {**pending[0], **anchors, 'startedAt': now,
+                              'endedAt': now, 'durationMs': 0}
             return
     _append_or_update(entries, {
         'id': _entry_id(task, seq, raw_event=raw_event),
@@ -1594,7 +1680,9 @@ def fold_activity_timeline(
 ) -> dict[str, Any] | None:
     """Fold one registered runtime fact into the durable timeline projection."""
     existing = normalize_activity_timeline(previous)
-    entries = [dict(item) for item in (existing or {}).get('entries', [])]
+    # Settled rows are replaced, never edited, by every fold below.
+    entries = [item if type(item) is SettledDict else dict(item)
+               for item in (existing or {}).get('entries', [])]
     dropped_count = int((existing or {}).get('droppedCount') or 0)
     event_type = str(raw_event.get('type') or '')
     seq = _nonnegative_int(raw_event.get('seq'))

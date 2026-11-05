@@ -14,6 +14,13 @@
   text-shadow: 0 0 0 currentColor;
 }
 
+/* Empty lanes sit in the same quiet card as populated ones (as on Display). */
+#settingsTab_devices .stg-empty {
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+}
+
 /* Bridge-token rows represent live credentials, not passive list items. */
 .devices-token-row {
   justify-content: space-between;
@@ -35,6 +42,31 @@
   padding: 5px 12px;
   font-size: 11px;
 }
+
+/* Device waits: conversations that continue when one of the devices reconnects. */
+.devices-wait-row {
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  margin-bottom: 6px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+  font-size: 12.5px;
+  color: var(--s-ink);
+}
+.devices-wait-row:last-child { margin-bottom: 0; }
+.devices-wait-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.devices-wait-device { font-weight: 700; }
+.devices-wait-row .stg-dim { margin-left: 6px; }
+.devices-wait-reason {
+  display: block;
+  margin-top: 3px;
+  color: var(--s-ink-soft);
+  white-space: pre-wrap;
+}
+.devices-wait-cancel-btn { flex: none; }
 
 /* A failed read is distinct from a successful empty device list. */
 .devices-load-failed {

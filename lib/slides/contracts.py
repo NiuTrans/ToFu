@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from itertools import islice
 
+from lib.error_envelope import BadRequest
+
 DEFAULT_SLIDE_PAGES = 12
 MIN_SLIDE_PAGES = 3
 MAX_SLIDE_PAGES = 20
@@ -19,6 +21,7 @@ ALLOWED_SLIDE_SIZES = (
     (720, 540),
 )
 MAX_SLIDE_TOPIC_CHARS = 4000
+MAX_SLIDE_MATERIAL_CHARS = 20000
 MAX_SLIDE_STYLE_CHARS = 2000
 MAX_SLIDE_MODEL_CHARS = 256
 MAX_SLIDE_IMAGE_REFERENCES = 64
@@ -48,6 +51,7 @@ __all__ = [
     'MAX_SLIDE_IMAGE_REFERENCES',
     'MAX_SLIDE_STYLE_CHARS',
     'MAX_SLIDE_TOPIC_CHARS',
+    'MAX_SLIDE_MATERIAL_CHARS',
     'MIN_SLIDE_PAGES',
     'normalise_slide_page_count',
     'normalise_slide_briefs',
@@ -56,6 +60,7 @@ __all__ = [
     'normalise_slide_size',
     'normalise_slide_style',
     'normalise_slide_topic',
+    'normalise_slide_material',
 ]
 
 
@@ -88,7 +93,8 @@ def normalise_slide_size(value) -> tuple[int, int]:
     if size not in ALLOWED_SLIDE_SIZES:
         allowed = ', '.join(f'{width}x{height}'
                             for width, height in ALLOWED_SLIDE_SIZES)
-        raise ValueError(f'unsupported slide size; expected one of {allowed}')
+        raise BadRequest(f'unsupported slide size; expected one of {allowed}',
+                         field='size')
     return size
 
 
@@ -96,16 +102,22 @@ def _bounded_request_text(value, *, name: str, maximum: int,
                           required: bool = False) -> str:
     text = str(value or '').strip()
     if required and not text:
-        raise ValueError(f'slide {name} is required')
+        raise BadRequest(f'slide {name} is required', field=name)
     if len(text) > maximum:
-        raise ValueError(
-            f'slide {name} exceeds the {maximum}-character limit')
+        raise BadRequest(
+            f'slide {name} exceeds the {maximum}-character limit', field=name)
     return text
 
 
 def normalise_slide_topic(value) -> str:
     return _bounded_request_text(
         value, name='topic', maximum=MAX_SLIDE_TOPIC_CHARS, required=True)
+
+
+def normalise_slide_material(value) -> str:
+    """Caller-supplied evidence a deck must be grounded in (bounded text)."""
+    return _bounded_request_text(
+        value, name='material', maximum=MAX_SLIDE_MATERIAL_CHARS)
 
 
 def normalise_slide_style(value) -> str:

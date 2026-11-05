@@ -62,7 +62,7 @@ def _docling_thread_count() -> int:
         except ValueError as e:
             logger.debug('[PDF/Docling] Invalid TOFU_DOCLING_THREADS=%r: %s',
                          override, e)
-    return min(8, _allowed_cpu_count())
+    return _allowed_cpu_count()
 
 
 # ORT/OMP environment hints are seeded in ``lib/pdf_parser/_common.py``.  The

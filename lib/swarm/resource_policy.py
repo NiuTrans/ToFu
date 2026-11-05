@@ -1,7 +1,8 @@
 """Launch sizing hints and explicit retry policy for swarm execution.
 
-Thread reuse and terminal-memory cache sizing follow the launch probe. Accepted
-children, waves and live sessions are demand-driven. Retry policy remains
+Thread reuse follows a fixed idle hint; only the evict-only terminal-memory
+cache follows the launch probe. Accepted children, waves and live sessions are
+demand-driven. Retry policy remains
 finite and does not change the user's inherited model/tool/token authority.
 """
 

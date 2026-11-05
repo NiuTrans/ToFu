@@ -37,8 +37,8 @@
 
   function _label(reading) {
     const { ms, state, connected } = reading;
-    if (!connected || state === 'offline') return t('net.offline') || '离线';
     if (state === 'timeout') return t('net.timeout') || '超时';
+    if (!connected || state === 'offline') return t('net.offline') || '离线';
     // SSE chat stream is reconnecting even though the push RTT looks fine — the
     // reply connection is the one in trouble, so say so rather than a green ms.
     if (_sseDegraded) return t('net.reconnecting') || '重连中';
@@ -49,11 +49,11 @@
   function _title(reading) {
     const { ms, state, connected } = reading;
     const head = t('net.title') || '网络延迟';
-    if (!connected || state === 'offline') {
-      return `${head}: ${t('net.offlineDesc') || '推送连接已断开'}`;
-    }
     if (state === 'timeout') {
       return `${head}: ${t('net.timeoutDesc') || '探测超时，网络可能很差'}`;
+    }
+    if (!connected || state === 'offline') {
+      return `${head}: ${t('net.offlineDesc') || '推送连接已断开'}`;
     }
     if (_sseDegraded) {
       const base = (ms == null) ? head : `${head}: ${ms}ms`;
@@ -67,7 +67,10 @@
   function _render(reading) {
     if (!_el) return;
     _lastReading = reading;
-    let state = (!reading.connected) ? 'offline' : (reading.state || 'unknown');
+    // The Push owner retires timed-out sockets immediately; keep that explicit
+    // cause while recovery proceeds instead of erasing it with the closed bit.
+    let state = reading.state === 'timeout' ? 'timeout'
+      : (!reading.connected) ? 'offline' : (reading.state || 'unknown');
     /* ① Merge the chat-SSE health: if any active reply stream is
      *    reconnecting/stalled, the badge must warn even when the push RTT is
      *    green. Show the WORSE of the two — but never DOWNGRADE a real push

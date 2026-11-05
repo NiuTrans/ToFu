@@ -17,7 +17,7 @@ describe('program lexical activity', () => {
       programStats:{tool_calls:0,successful_tool_calls:0},programResult:[]});
     expect(html).toContain('Script: look up prior results');
     expect(html).toContain('No source tools called again');
-    expect(html).toContain('Result: []');
+    expect(html).toMatch(/class="ptc-detail ptc-result" open><summary>Program result<\/summary><div class="ptool-result-body"><pre>\[\]<\/pre>/);
     expect(html).not.toContain('intent');
   });
 });

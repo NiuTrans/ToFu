@@ -21,7 +21,7 @@ final class SessionControllerTests: XCTestCase {
 
         /// GET /login 404 (form fallback) → POST 302 + session cookie → meta 404.
         func scriptSuccessfulLogin(host: String = "h.example") async {
-            await http.enqueue(makeResponse(404, url: "https://\(host)/login"))
+            await http.enqueue(makeResponse(200, body: gatewayForm(action: "/login"), url: "https://\(host)/login"))
             await http.enqueue(makeResponse(302, url: "https://\(host)/login", headers: [
                 "set-cookie": ["code-server-session=abc; Path=/"],
             ]))
@@ -37,7 +37,8 @@ final class SessionControllerTests: XCTestCase {
             authType: .codeServerPassword, secret: "pw"
         )
         guard case .duplicateAlias = result else { return XCTFail("expected duplicateAlias") }
-        XCTAssertEqual(await rig.http.requests.count, 0)
+        let actual1 = await rig.http.requests.count
+        XCTAssertEqual(actual1, 0)
     }
 
     /// code-server auth is per-HOST: a blank password field reuses the secret
@@ -72,7 +73,8 @@ final class SessionControllerTests: XCTestCase {
         guard case .added = result else { return XCTFail("expected added") }
         XCTAssertEqual(rig.secrets.secretFor("a"), "pw")
         // The login consumed the stored credential (form discovery + POST).
-        XCTAssertEqual(await rig.http.requests.count, 3)
+        let actual2 = await rig.http.requests.count
+        XCTAssertEqual(actual2, 3)
     }
 
     /// The secret is alias-keyed: a rename must MOVE it or login silently
@@ -109,10 +111,12 @@ final class SessionControllerTests: XCTestCase {
             current: current, newAlias: "a", newUrl: "https://new.example/proxy/15000/",
             newAuthType: .codeServerPassword, newSecret: ""
         )
-        XCTAssertEqual(await rig.cookies.purgedHosts, ["old.example"])
+        let actual3 = await rig.cookies.purgedHosts
+        XCTAssertEqual(actual3, ["old.example"])
         XCTAssertNil(result.persisted.cookieHost)
         XCTAssertEqual(result.persisted.baseUrl, "https://new.example/proxy/15000/")
-        XCTAssertEqual(await rig.store.getById(6)?.cookieHost, "new.example")
+        let actual4 = await rig.store.getById(6)?.cookieHost
+        XCTAssertEqual(actual4, "new.example")
     }
 
     /// The UI's list-rendered row may lag the store: activate must bump
@@ -126,29 +130,13 @@ final class SessionControllerTests: XCTestCase {
         let stale = Profile(id: 9, alias: "a", baseUrl: "https://h.example:15000",
                             authType: .none, cookieHost: "junk", lastUsedAt: 0)
         let result = await rig.controller.activate(stale)
-        XCTAssertEqual(await rig.store.touchCalls.map(\.at), [77])
+        let actual5 = await rig.store.touchCalls.map(\.at)
+        XCTAssertEqual(actual5, [77])
         XCTAssertEqual(result.persisted.lastUsedAt, 77)
         XCTAssertNil(result.persisted.cookieHost)
         guard case .success = result.login else { return XCTFail("got \(result.login)") }
-        XCTAssertEqual(await rig.http.requests.count, 0)   // NONE is zero-request
-    }
-
-    func test_migrate_fixes_only_proxy_urls_with_stale_none_auth() async {
-        let rig = Rig()
-        await rig.store.seed(Profile(id: 1, alias: "p1", baseUrl: "https://h.example/proxy/15000/",
-                                     authType: .none))
-        await rig.store.seed(Profile(id: 2, alias: "p2", baseUrl: "https://h.example/proxy/15000/",
-                                     authType: .codeServerPassword))
-        await rig.store.seed(Profile(id: 3, alias: "p3", baseUrl: "https://h.example:15000",
-                                     authType: .none))
-        let fixed = await rig.controller.migrateProxyAuthDefaults()
-        XCTAssertEqual(fixed, 1)
-        let writes = await rig.store.authTypeWrites
-        XCTAssertEqual(writes.count, 1)
-        XCTAssertEqual(writes[0].id, 1)
-        XCTAssertEqual(writes[0].authType, .codeServerPassword)
-        // Idempotent: a second pass fixes nothing.
-        XCTAssertEqual(await rig.controller.migrateProxyAuthDefaults(), 0)
+        let actual6 = await rig.http.requests.count
+        XCTAssertEqual(actual6, 0)   // NONE is zero-request
     }
 
     func test_delete_removes_secret_and_row() async {
@@ -158,6 +146,7 @@ final class SessionControllerTests: XCTestCase {
         rig.secrets.putSecret("pw", for: "a")
         await rig.controller.deleteProfile(p)
         XCTAssertNil(rig.secrets.secretFor("a"))
-        XCTAssertNil(await rig.store.getById(4))
+        let actual8 = await rig.store.getById(4)
+        XCTAssertNil(actual8)
     }
 }

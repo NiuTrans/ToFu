@@ -23,6 +23,11 @@ from urllib.parse import quote
 
 from lib.identity import PrincipalContext
 from lib.automations.errors import AutomationError
+from lib.runtime.pinned_helper_source import PinnedHelperSource
+
+# Payloads built below and the bootstraps that read them share one import.
+_ARCHIVE_BOOTSTRAP = PinnedHelperSource(Path(__file__).with_name('mtskills_archive.mjs'))
+_METADATA_BOOTSTRAP = PinnedHelperSource(Path(__file__).with_name('mtskills_metadata.mjs'))
 
 
 @lru_cache(maxsize=1)
@@ -184,8 +189,7 @@ class MTSkillsCLI:
         limits = dict(policy['metadata'], maximumOutputBytes=archive['maximumBytes'],
             timeoutSeconds=archive['timeoutSeconds'])
         try:
-            return self._invoke(Path(__file__).with_name('mtskills_archive.mjs'),
-                payload, cancelled, limits, binary=True)
+            return self._invoke(_ARCHIVE_BOOTSTRAP, payload, cancelled, limits, binary=True)
         except MTSkillsCLIError as exc:
             observations = dict(timed_out=exc.timed_out, cancelled=exc.cancelled,
                 output_limited=exc.output_limited, exit_code=exc.exit_code)
@@ -218,10 +222,9 @@ class MTSkillsCLI:
     def _metadata(self, args, principal, credential, cancelled):
         self._require_credential(principal, credential)
         limits = self._policy['metadata']
-        bootstrap = Path(__file__).with_name('mtskills_metadata.mjs')
         payload = {'cliPath': str(self.cli_path),
             'args': [*args, '--env', credential.environment], 'token': credential.token}
-        value = self._invoke(bootstrap, payload, cancelled, limits, binary=False)
+        value = self._invoke(_METADATA_BOOTSTRAP, payload, cancelled, limits, binary=False)
         _reject_echoed_secret(value, credential.token)
         return value
 
@@ -242,7 +245,7 @@ class MTSkillsCLI:
                 input_file.write(payload)
                 input_file.seek(0)
                 try:
-                    process = subprocess.Popen([str(self.node_path), str(bootstrap)],
+                    process = subprocess.Popen([str(self.node_path), bootstrap.path()],
                         stdin=input_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         cwd=home, env=environment, start_new_session=True)
                 except OSError:

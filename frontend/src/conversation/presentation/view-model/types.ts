@@ -3,7 +3,6 @@
  * Types only; generated DTOs remain wire authority.
  * Entry: presentation type exports.
  * Dependencies: conversation-sync.generated, errors, transient-turn, turn-finish. */
-import type { RecordedReasoningEffort } from '../turn-serving-route';
 import type { ToolEffectNotice } from '../tool-effect-presentation';
 import type { AutomationManagementPresentation } from '../../../api/automation.generated';
 import {
@@ -107,7 +106,6 @@ export interface ThinkingBlockViewModel extends ConversationBlockBase {
   displayMarkdown: string;
   displayMode: TranslationDisplayMode;
   terminal: boolean;
-  signature?: string;
   /** Projected reasoning identities represented by this disclosure, in order. */
   memberBlockIds: ReadonlyArray<string>;
 }
@@ -343,18 +341,7 @@ export type ConversationBlockViewModel =
   | QueueStatusBlockViewModel
   | LiveStatusBlockViewModel;
 
-/** Display-only observations. A recorded control is not hidden reasoning text
- * or a claim that an in-flight provider used the same effort. */
-export interface TurnReasoningViewModel {
-  effort: RecordedReasoningEffort | null;
-  tokens: number | null;
-  tokensSource: 'turn' | 'last-round' | null;
-  tokensLowerBound: boolean;
-  summary: 'readable' | 'unavailable' | 'not-received-yet' | 'not-received' | null;
-}
-
 export interface TurnMetadataViewModel {
-  reasoning?: TurnReasoningViewModel;
   taskTimePresentations?: ReadonlyArray<AutomationManagementPresentation>;
   model?: string;
   preset?: string;
@@ -489,6 +476,21 @@ export interface ConversationLaneViewModel {
     totalTurns: number;
   };
   turns: ReadonlyArray<ConversationTurnViewModel>;
+  /** Canonical child identities in Turn/descriptor order. Optional for external
+   * snapshots; navigation may use these only with this exact indexed lane. */
+  childLaneIds?: ReadonlyArray<string>;
+}
+
+export interface ConversationTurnLocation {
+  laneId: string;
+  index: number;
+}
+
+/** Latest composition's existing indexes, shared read-only with presentation
+ * consumers. Derived and non-durable; absent for cycle-rejected graphs. */
+export interface ConversationNavigationIndex {
+  lanes: ReadonlyMap<string, ConversationLaneViewModel>;
+  turnLocations: ReadonlyMap<string, ConversationTurnLocation>;
 }
 
 export interface ConversationQueueItemViewModel {
@@ -505,6 +507,7 @@ export interface ConversationViewModel {
   transport: string;
   mainLane: ConversationLaneViewModel;
   orphanLanes: ReadonlyArray<ConversationLaneViewModel>;
+  navigation?: ConversationNavigationIndex;
   queue: ReadonlyArray<ConversationQueueItemViewModel>;
   planDecision: PlanDecisionViewModel | null;
   /** Conversation-level sync-channel degradation; null when healthy. Never a

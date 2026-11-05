@@ -1,49 +1,23 @@
-"""tofu_search.search.engines.xhs — Xiaohongshu (小红书 / RED) search.
+"""Xiaohongshu search through explicitly captured host capabilities.
 
-Xiaohongshu has no usable public search API; real keyword search needs a
-logged-in cookie. This engine reuses the **auth-source provider** seam
-(:mod:`tofu_search.providers`): when a host has registered a provider and the
-user has connected ``xiaohongshu.com`` (cookies stored + enabled), we drive
-the headless Playwright pool to the logged-in search-results page and scrape
-the note cards from the rendered DOM.
+Entry points: search_xhs and xhs_search_available. Native SiteSearchProvider
+results, empties and terminal refusals remain authoritative. Compatibility
+browser reads and cookie replay retain the configured access_strategy order;
+None means unavailable and permits fallback, while [] is an observed empty.
 
-If no provider is registered, or the source isn't connected, the engine
-returns ``[]`` immediately — it never blocks the multi-engine pipeline.
-
-Account-risk guard
-------------------
-XHS polices automated access at the ACCOUNT level (限流 / 滑块 / 封号), and
-this engine runs only when explicitly selected — without pacing, the
-user's chat frequency becomes the request rate against their logged-in
-session. :class:`_RiskGuard` applies the three cross-project consensus
-mitigations for a read-only search scenario (see sibling MCP/crawler
-projects: xiaohongshu-mcp, MediaCrawler, ReaJason/xhs, Spider_XHS):
-
-  1. **Pacing + jitter** — a minimum interval between two real page loads,
-     randomized a little, so requests never arrive at chat speed. A wait
-     that would blow the engine's latency budget SKIPS the call instead of
-     stalling the whole pipeline.
-  2. **Same-keyword TTL cache** — a chat assistant re-asks near-identical
-     queries constantly; each repeat served from cache is one less
-     logged-in hit.
-  3. **Consecutive-empty backoff** — a risk-control wall (captcha / forced
-     login redirect) scrapes as ZERO note cards, indistinguishable from a
-     legit no-hits query in isolation. SEVERAL consecutive empties across
-     different queries is not: after ``_BACKOFF_AFTER_EMPTY`` of them the
-     engine stops touching XHS for ``xhs_backoff_cooldown_s``. Hammering a
-     flagged account escalates the flag; the pause is the mitigation.
-
-All three knobs live on :class:`tofu_search.config.SearchConfig`
-(``xhs_min_interval_s`` / ``xhs_cache_ttl_s`` / ``xhs_backoff_cooldown_s``).
+_provider_scope owns captured views; _xhs_sessions owns their reconstructible
+state and credential snapshots; _xhs_guard owns existing pacing/backoff policy.
+Browser results always reenter the provider, which owns current access checks.
+Only enabled, unchanged replay credentials may reuse normalized result rows.
+Native outcomes never read or settle either compatibility guard.
 """
 
 from __future__ import annotations
 
-import random
-import threading
 import time
 from urllib.parse import quote
 
+from tofu_search._provider_scope import auth_source_scope, browser_scope
 from tofu_search.config import get_config
 from tofu_search.log import get_logger
 from tofu_search.providers import (
@@ -53,8 +27,10 @@ from tofu_search.providers import (
     get_browser_provider,
     get_site_knowledge_provider,
     get_site_search_provider,
+    with_bound_optional_providers,
 )
 from tofu_search.search._common import clean_text
+from tofu_search.search.engines._xhs_sessions import SourceSnapshot, browser_guard, capture_source
 
 logger = get_logger(__name__)
 
@@ -65,13 +41,6 @@ _SEARCH_URL = 'https://www.xiaohongshu.com/search_result?keyword={kw}&source=web
 
 _WAIT_SELECTOR = 'section.note-item, div.note-item, a[href*="/search_result/"], a[href*="/explore/"]'
 
-# Consecutive empty scrapes that trip the risk-control backoff.
-_BACKOFF_AFTER_EMPTY = 3
-# A pacing wait longer than this would push the engine past the orchestrator's
-# per-engine timeout once the page load itself is added — skip instead.
-_MAX_THROTTLE_WAIT_S = 6.0
-# Same-keyword cache ceiling (FIFO eviction; entries are tiny).
-_CACHE_MAX_ENTRIES = 64
 
 _CARD_EXTRACT_JS = r"""
 (() => {
@@ -171,96 +140,6 @@ def _knowledge() -> dict | None:
     return None
 
 
-class _RiskGuard:
-    """Process-local XHS request pacing, query cache, and backoff state.
-
-    One instance guards the one XHS account the process holds cookies for;
-    the lock serializes real page loads so two concurrent chat searches can
-    never hit XHS in the same instant (the pacing decision + wait happen
-    under the lock — serializing XHS searches is precisely the point).
-    """
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._last_request_ts = 0.0
-        self._consecutive_empty = 0
-        self._cooldown_until = 0.0
-        self._cache: dict = {}  # normalized query -> (stored_ts, results)
-
-    def reset(self):
-        """Test hook: drop all pacing/backoff/cache state."""
-        with self._lock:
-            self._last_request_ts = 0.0
-            self._consecutive_empty = 0
-            self._cooldown_until = 0.0
-            self._cache.clear()
-
-    def in_cooldown(self) -> bool:
-        with self._lock:
-            return time.time() < self._cooldown_until
-
-    def cached_results(self, query: str, ttl_s: int):
-        """Fresh cached results for ``query``, or None. Defensive copies."""
-        if ttl_s <= 0:
-            return None
-        key = query.strip().lower()
-        now = time.time()
-        with self._lock:
-            hit = self._cache.get(key)
-            if not hit:
-                return None
-            ts, results = hit
-            if now - ts > ttl_s:
-                self._cache.pop(key, None)
-                return None
-            return [dict(r) for r in results]
-
-    def wait_turn(self, min_interval_s: float) -> bool:
-        """Block until this thread may fire the next page load.
-
-        Returns False when the required wait would exceed
-        ``_MAX_THROTTLE_WAIT_S`` — the caller then skips this round rather
-        than blowing the engine's latency budget.
-        """
-        if min_interval_s <= 0:
-            return True
-        with self._lock:
-            now = time.time()
-            wait = (self._last_request_ts + min_interval_s
-                    + random.uniform(0.0, min(3.0, min_interval_s))) - now
-            if wait > _MAX_THROTTLE_WAIT_S:
-                return False
-            if wait > 0:
-                time.sleep(wait)
-            self._last_request_ts = time.time()
-            return True
-
-    def report_outcome(self, query: str, results: list, *, ttl_s: int,
-                       cooldown_s: int) -> None:
-        """Fold one real page load's outcome into cache + backoff state."""
-        key = query.strip().lower()
-        with self._lock:
-            if results:
-                self._consecutive_empty = 0
-                if ttl_s > 0:
-                    self._cache[key] = (time.time(), list(results))
-                    while len(self._cache) > _CACHE_MAX_ENTRIES:
-                        self._cache.pop(next(iter(self._cache)))
-                return
-            self._consecutive_empty += 1
-            if self._consecutive_empty >= _BACKOFF_AFTER_EMPTY and cooldown_s > 0:
-                self._cooldown_until = time.time() + cooldown_s
-                self._consecutive_empty = 0
-                logger.warning(
-                    '[Search] XHS: %d consecutive empty scrapes — entering %ds '
-                    'cooldown. A risk-control wall (安全验证/滑块) or an expired '
-                    'cookie scrapes as zero note cards; continuing to hit a '
-                    'flagged account escalates the flag. Re-check the account '
-                    'in Settings → 需要登录的来源.',
-                    _BACKOFF_AFTER_EMPTY, cooldown_s)
-
-
-_GUARD = _RiskGuard()
 
 
 def _get_source():
@@ -300,8 +179,24 @@ def _browser_connected() -> bool:
         return False
 
 
+def _search_via_native(query: str, max_results: int):
+    """Delegate admission and execution to the bound native site owner."""
+    provider = get_site_search_provider()
+    if provider is None:
+        return None
+    try:
+        raw = provider.search('xiaohongshu', query, max_results=max_results)
+        return _split_extraction(raw) if raw is not None else None
+    except SiteSearchTerminalError:
+        raise
+    except Exception as error:
+        logger.warning('[Search] XHS: site-search provider unavailable, trying '
+                       'compat browser provider: %s', error)
+        return None
+
+
 def _search_via_browser(url: str, query: str = '', max_results: int = 10):
-    """Scrape the search page through the user's REAL logged-in browser.
+    """Compatibility scrape through the user's REAL logged-in browser.
 
     The page's own JS signs every request and the IP/fingerprint match the
     site's trust decisions — nothing is exported or replayed, which is exactly
@@ -310,19 +205,6 @@ def _search_via_browser(url: str, query: str = '', max_results: int = 10):
     or None when the browser path failed. Selectors come from the host's
     site-knowledge store when pinned (drift re-pin), else the built-ins.
     """
-    site_provider = get_site_search_provider()
-    if site_provider is not None:
-        try:
-            raw = site_provider.search('xiaohongshu', query,
-                                       max_results=max_results)
-            if raw is not None:
-                return _split_extraction(raw)
-        except SiteSearchTerminalError:
-            # Native pacing/validation/execution decisions are authoritative.
-            raise
-        except Exception as e:
-            logger.warning('[Search] XHS: site-search provider failed, trying '
-                           'compat browser provider: %s', e)
     provider = get_browser_provider()
     if provider is None:
         return None
@@ -360,109 +242,113 @@ def xhs_search_available() -> bool:
     return bool(src.get('cookies')) or _browser_connected()
 
 
+def _legacy_attempt(guard, load, *, query, max_results, cfg, via, url,
+                    started, unavailable):
+    """One admitted legacy transport; only replay credentials can reuse rows."""
+    if guard.in_cooldown():
+        logger.info('[Search] XHS %s session in cooldown', via)
+        return []
+    cache_ttl = cfg.xhs_cache_ttl_s if via == 'pool' else 0
+    if cache_ttl > 0:
+        hit = guard.cached_results(query, cache_ttl, max_results=max_results)
+        if hit is not None:
+            return hit
+    if not guard.wait_turn(cfg.xhs_min_interval_s):
+        logger.info('[Search] XHS %s session throttled', via)
+        return []
+    outcome = load()
+    if outcome is None:
+        unavailable.append(guard)
+        return None
+    return _finish_search(
+        *outcome, url=url, query=query, max_results=max_results, via=via,
+        started=started, legacy_guard=guard, legacy_config=cfg,
+        cache_ttl_s=cache_ttl)
+
+
+@with_bound_optional_providers
 def search_xhs(query, max_results=10, freshness=''):
-    """Search Xiaohongshu via the user's logged-in session.
+    """Search through captured native/browser/source authority in declared order.
 
-    Returns ``{title, snippet, url, source}`` dicts, or ``[]`` when the source
-    isn't connected, the guard skips the round (pacing / cooldown), or the
-    scrape yields nothing. ``freshness`` is accepted for signature uniformity
-    but unused.
+    Native ownership is authoritative. Compatibility browser calls always
+    reenter scrape's live access check; only an enabled, exact cookie snapshot
+    can reuse rows. Empty or throttled outcomes stop transport fallback.
     """
-    t0 = time.time()
-    src = _get_source()
-    site_provider_live = get_site_search_provider() is not None and _browser_connected()
-    if not (src and src.get('enabled')) and not site_provider_live:
-        logger.debug('[Search] XHS not enabled — skipping')
-        return []
-    if not src:
-        src = {'enabled': True, 'access_strategy': 'browser_first', 'cookies': []}
-    strategy = str(src.get('access_strategy') or 'browser_first').strip()
-    if strategy == 'public':
-        # The registry says this site needs NO identity — the engine's whole
-        # value is the logged-in session, so there is nothing to do.
-        logger.debug('[Search] XHS: access_strategy=public — identity paths '
-                     'disabled, skipping')
-        return []
-    cookies = src.get('cookies') or []
+    started = time.time()
+    try:
+        snapshot = capture_source(auth_source_scope.current_binding(), _DOMAIN)
+    except Exception as error:
+        logger.debug('[Search] XHS: source snapshot unavailable: %s', error)
+        snapshot = SourceSnapshot(None, None)
+    source = snapshot.source
     browser_live = _browser_connected()
-    if not cookies and not browser_live:
-        logger.debug('[Search] XHS: no cookies and no live browser — skipping')
+    native_live = get_site_search_provider() is not None and browser_live
+    if not (source and source.get('enabled')) and not native_live:
         return []
-
-    cfg = get_config()
-
-    if _GUARD.in_cooldown():
-        logger.info('[Search] XHS in risk-control cooldown — skipping query=%r', query[:60])
+    strategy = str((source or {}).get('access_strategy') or 'browser_first').strip()
+    if strategy == 'public':
         return []
-
-    hit = _GUARD.cached_results(query, cfg.xhs_cache_ttl_s)
-    if hit is not None:
-        logger.info('[Search] XHS: %d cached results query=%r', len(hit), query[:60])
-        return hit[:max_results]
-
-    if not _GUARD.wait_turn(cfg.xhs_min_interval_s):
-        logger.info('[Search] XHS throttled (next slot beyond latency budget) — '
-                    'skipping query=%r', query[:60])
-        return []
-
     url = _SEARCH_URL.format(kw=quote(query))
+    cfg = get_config()
+    unavailable = []
 
-    # Path ORDER comes from the registry's access_strategy (P2):
-    #   browser_first (default) — the user's live Chrome is primary (native
-    #     login/signing, matching IP+fingerprint); the pool's cookie replay —
-    #     a headless browser on a foreign IP, THE account risk-control
-    #     trigger — only runs when the browser path is unavailable (None),
-    #     never when it merely returned zero cards ([] = real empty, feeds
-    #     the backoff below).
-    #   cookies_replay — the OLD order, for risk-tolerant sites or a browser
-    #     that is usually offline: pool replay primary, browser fallback.
-    # Either way a path only falls through when it returned None
-    # (unavailable), never when it returned [] (real empty).
-    items = None
-    probe = None
-    via = 'none'
-
-    def _try_browser():
-        nonlocal items, probe, via
+    def browser_path():
         if not browser_live:
-            return
-        got = _search_via_browser(url, query=query, max_results=max_results)
-        if got is not None:
-            items, probe = got
-            via = 'browser'
+            return None
+        native = _search_via_native(query, max_results)
+        if native is not None:
+            return _finish_search(
+                *native, url=url, query=query, max_results=max_results,
+                via='native', started=started)
+        binding = browser_scope.current_binding()
+        if binding is None:
+            return None
+        return _legacy_attempt(
+            browser_guard(binding), lambda: _search_via_browser(url),
+            query=query, max_results=max_results, cfg=cfg, via='browser',
+            url=url, started=started, unavailable=unavailable)
 
-    def _try_pool():
-        nonlocal items, via
-        if not cookies:
-            return
-        from tofu_search.fetch.playwright_pool import _pw_pool
-        got = _pw_pool.search_authenticated(
-            url,
-            cookies=cookies,
-            proxy=src.get('proxy') or '',
-            timeout=20,
-            extractor_js=_EXTRACTOR_JS,
-            wait_selector=_WAIT_SELECTOR,
-        )
-        if got is not None:
-            items = got
-            via = 'pool'
+    def replay_path():
+        if snapshot.guard is None:
+            return None
 
-    if strategy == 'cookies_replay':
-        _try_pool()
-        if items is None:
-            _try_browser()
-    else:
-        _try_browser()
-        if items is None:
-            _try_pool()
+        def load():
+            from tofu_search.fetch.playwright_pool import _pw_pool
+            raw = _pw_pool.search_authenticated(
+                url, cookies=source['cookies'], proxy=source.get('proxy') or '',
+                timeout=20, extractor_js=_EXTRACTOR_JS, wait_selector=_WAIT_SELECTOR)
+            return (raw, None) if raw is not None else None
+
+        return _legacy_attempt(
+            snapshot.guard, load, query=query, max_results=max_results, cfg=cfg,
+            via='pool', url=url, started=started, unavailable=unavailable)
+
+    paths = ((replay_path, browser_path) if strategy == 'cookies_replay'
+             else (browser_path, replay_path))
+    for path in paths:
+        result = path()
+        if result is not None:
+            return result
+    # Unavailable paths count as an empty failure only when no transport
+    # delivered. Native outcomes never settle a compatibility guard.
+    for guard in unavailable:
+        guard.report_outcome(query, [], max_results=max_results, ttl_s=0,
+                             cooldown_s=cfg.xhs_backoff_cooldown_s)
+    return _finish_search(
+        None, None, url=url, query=query, max_results=max_results,
+        via='none', started=started)
+
+
+def _finish_search(items, probe, *, url, query, max_results, via, started,
+                   legacy_guard=None, legacy_config=None, cache_ttl_s=0):
+    """Project one result; only legacy execution updates the legacy guard."""
 
     # Selector-drift signal: the page rendered note anchors (probe saw them)
     # yet extraction made ZERO cards — the selectors, not the query, are at
     # fault. Distinct from a real empty (anchors==0) and from a risk wall
     # (a wall renders no note anchors at all). Only the browser path carries
     # a probe; the pool runs the SAME selectors and drifts alike.
-    if via == 'browser' and not items and probe \
+    if via in ('browser', 'native') and not items and probe \
             and int(probe.get('anchors') or 0) > 0:
         logger.warning(
             '[Search] XHS: SELECTOR DRIFT suspected — page rendered %d note '
@@ -470,14 +356,17 @@ def search_xhs(query, max_results=10, freshness=''):
             'site DOM changed; re-pinning knowledge is the fix, not retry.',
             int(probe.get('anchors') or 0), probe.get('title') or '')
         _emit_site_drift(_DOMAIN, url, {
+            'transport': via,
             'anchors': int(probe.get('anchors') or 0),
             'page_title': probe.get('title') or '',
             'knowledge': 'pinned' if _knowledge() else 'builtin',
         })
     if not items:
-        _GUARD.report_outcome(query, [], ttl_s=cfg.xhs_cache_ttl_s,
-                              cooldown_s=cfg.xhs_backoff_cooldown_s)
-        logger.info('[Search] XHS: 0 results in %.1fs query=%r', time.time() - t0, query[:60])
+        if legacy_guard is not None:
+            legacy_guard.report_outcome(
+                query, [], max_results=max_results, ttl_s=cache_ttl_s,
+                cooldown_s=legacy_config.xhs_backoff_cooldown_s)
+        logger.info('[Search] XHS: 0 results in %.1fs query=%r', time.time() - started, query[:60])
         return []
 
     results = []
@@ -497,8 +386,10 @@ def search_xhs(query, max_results=10, freshness=''):
         if len(results) >= max_results:
             break
 
-    _GUARD.report_outcome(query, results, ttl_s=cfg.xhs_cache_ttl_s,
-                          cooldown_s=cfg.xhs_backoff_cooldown_s)
+    if legacy_guard is not None:
+        legacy_guard.report_outcome(
+            query, results, max_results=max_results, ttl_s=cache_ttl_s,
+            cooldown_s=legacy_config.xhs_backoff_cooldown_s)
     logger.info('[Search] XHS: %d results in %.1fs via=%s query=%r',
-                len(results), time.time() - t0, via, query[:60])
+                len(results), time.time() - started, via, query[:60])
     return results

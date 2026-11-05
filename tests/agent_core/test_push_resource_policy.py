@@ -10,14 +10,19 @@ pytestmark = pytest.mark.unit
 
 
 def test_push_file_and_idle_reuse_hints_follow_launch_capacity():
-    small = resolve_push_budget({'TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY': '128', 'TOFU_AGENT_WORKERS': '4'})
-    large = resolve_push_budget({'TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY': '2048', 'TOFU_AGENT_WORKERS': '128'})
+    small = resolve_push_budget({'TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY': '128', 'TOFU_SYNC_WORKERS': '4'})
+    large = resolve_push_budget({'TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY': '2048', 'TOFU_SYNC_WORKERS': '128'})
     assert large.spool_segment_bytes > small.spool_segment_bytes
     assert large.worker_reuse_target > small.worker_reuse_target
 
 
+def test_frame_worker_reuse_follows_short_job_probe_not_agent_concurrency():
+    budget = resolve_push_budget({'TOFU_SYNC_WORKERS': '16', 'TOFU_AGENT_WORKERS': '1200'})
+    assert budget.worker_reuse_target == 16
+
+
 def test_retired_event_limit_knobs_do_not_change_reuse_policy():
-    environment = {'TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY': '128', 'TOFU_AGENT_WORKERS': '4'}
+    environment = {'TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY': '128', 'TOFU_SYNC_WORKERS': '4'}
     before = resolve_push_budget(environment)
     environment.update({key: '1' for key in (
         'TOFU_PUSH_EVENT_QUEUE_MAX_MIB',
@@ -25,11 +30,11 @@ def test_retired_event_limit_knobs_do_not_change_reuse_policy():
     assert resolve_push_budget(environment) == before
 
 
-def test_push_event_queue_capacity_scales_with_launch_probe():
-    small = resolve_push_event_queue_capacity({'TOFU_AGENT_WORKERS': '2'})
-    large = resolve_push_event_queue_capacity({'TOFU_AGENT_WORKERS': '128'})
-    assert small == 8192
-    assert large == 16384
+def test_push_event_queue_default_is_the_envelope_maximum_on_every_host():
+    assert resolve_push_event_queue_capacity({}) == 16384
+    for workers in ('1', '16', '128'):
+        assert resolve_push_event_queue_capacity(
+            {'TOFU_AGENT_WORKERS': workers}) == 16384
 
 
 def test_push_event_queue_explicit_override_is_bounded():

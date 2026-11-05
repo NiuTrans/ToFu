@@ -4,6 +4,10 @@ Exercise the real wire translator, SSE parser, early UI accumulator, final
 parser and pipeline. Replace only expensive tools/provider transport seams.
 """
 
+import lib.tasks_pkg.llm_fallback._pool as _fallback_pool
+import lib.tasks_pkg.llm_fallback._retry as _fallback_retry
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+
 import asyncio
 import importlib
 import json
@@ -277,7 +281,7 @@ def test_transport_never_retries_flood(monkeypatch, asynchronous):
 
 def test_failure_is_request_scoped_and_displayed_as_upstream_error():
     from lib.error_envelope import from_exception
-    from lib.tasks_pkg.llm_fallback._call import _is_request_payload_error
+    from lib.tasks_pkg.llm_fallback._errors import _is_request_payload_error
     from lib.tasks_pkg.turn_retry import should_auto_retry_turn
     error = ProviderToolCallFloodError(tool_name='get_conversation', count=33, limit=32)
     assert _is_request_payload_error(error)
@@ -302,9 +306,9 @@ def test_root_loop_does_not_fallback_or_rescue_flood(monkeypatch, task, prior_to
     def unexpected_rescue(*a, **kw):
         pytest.fail('Flood must not launch pool rescue')
 
-    monkeypatch.setattr(fallback, 'stream_llm_response', fail)
-    monkeypatch.setattr(fallback, '_get_fallback_model', lambda _: 'fallback-model')
-    monkeypatch.setattr(fallback, '_attempt_pool_rescue', unexpected_rescue)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', fail)
+    monkeypatch.setattr(_fallback_retry, '_get_fallback_model', lambda _: 'fallback-model')
+    monkeypatch.setattr(_fallback_pool, '_attempt_pool_rescue', unexpected_rescue)
     args = (task, {'model': 'test-model'}, 'test-model', 2, 512,
             prior_tools, None, [{'role': 'user', 'content': 'continue'}],
             'low', False, {}, [])

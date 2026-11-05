@@ -49,9 +49,11 @@ opt out:        set either value to 0
 
 Fixed automatic L2 starts with a one-round ROI horizon, then predicts prefix lifetime from the shortest of the four most recent successful compaction gaps and the current window's already-observed age, capped at six and by the hard remaining API-round budget. Total task age no longer grants a longer horizon. Break-even resolves prices separately for the current and candidate prompt, compares only the observed warm prefix before/after, and records any pricing tier crossing. Manual, reactive and hard-window compaction still bypass the economic gate; adaptive policy retains its explicit expected-value horizon.
 
-Default L1 request projection is bounded by both 40 results and 48K estimated tokens. The newest complete tool-call batch always survives even if it alone exceeds the token budget; older results become placeholders only in the current model request outside the cache prefix. Settled Turn projections remain byte-identical: L1 performs no transcript-authority read or write. This slows working-set growth before an expensive L2 prefix rewrite without deleting durable user history.
+Default L1 request projection is bounded by both 40 results and 48K estimated tokens. The newest complete tool-call batch always survives even if it alone exceeds the token budget; older results become placeholders only in the current model request, either outside the previously sent request or in its last tool step when the next-request price admits the edit ([section 8](#8-l1-edits-of-the-previously-sent-request)). Settled Turn projections remain byte-identical: L1 performs no transcript-authority read or write. This slows working-set growth before an expensive L2 prefix rewrite without deleting durable user history.
 
 On 2026-08-27, nine distinct long tasks' earliest declines projected 1.18–3.89 rounds to repay; all ran past break-even, a rough 70.3M prompt-token exposure upper bound. This is not billed savings: cache discounts, prompt evolution and behavioral effects require actual receipts. Retry witnesses record their horizon; a longer observed compaction window or a cooler cache witness invalidates them and reruns exact economics.
+
+Each `[CacheRoundRecord]` log line carries `lane` (`conversation` for the root agent, `isolated` for a child or transient invocation, or `unscoped`), `tools` (the task's logical tool count), `wire_tools` and `wire_tool_name_bytes` (the provider-visible surface actually sent, `sum(len(name) + 1)`), and `cold_group` while the round belongs to the cold side of a live split. `lib/tasks_pkg/cache_tracking/_health.py` owns the split: per model it compares read share across lane, tool-surface size (`<=16`, `17-32`, `33-64`, `>64`) and sent name bytes (`<=128` … `>1024`), and flags a model whose worst group (at least 20 rounds) reads back less than half of its best group's share. `scripts/cache_waste_report.py`, the in-process monitor (one `[CacheHealth]` WARNING per model per hour over a rolling 60-minute window, an INFO line when it clears) and the nightly optimizer evidence (see section 6) all use that one rule. A gateway can serve requests with the same key, URL and beta header from caches that behave differently by request shape, even for byte-identical prefixes: when root agents and sub-agents diverge, check whether the split follows the tool surface rather than the lane before attributing a miss to request bytes or to orchestration. `tools` counts definitions only; for Claude on the Sankuai Anthropic face the measured discriminator is the joined byte length of the tool names ([section 6](#6-gateway-tool-name-budget)).
 
 The collapsed finish footer shows total input, uncached input, cache reads and output together. Top-level turn cost is the sum of per-API-round prices under each round's own model/provider/tier; mixed main, fallback and compaction calls are never flattened and repriced under the final model.
 
@@ -97,6 +99,86 @@ That ¥16.4289 is an opportunity ceiling, not an observed saving: under the corr
 
 Serial-call observations remain diagnostic, not grounds for model intervention. The six-round efficiency reminder and three-round local-PTC adoption prompt are removed: successful serial calls do not establish independence, and a batched read is still one tool call. Existing tool instructions describe batching; actual tool results and measured quality/cost remain the evidence for optimization.
 
+### 6. Gateway tool-name budget
+
+**Problem (2026-10-27/28):** root-lane Claude rounds through `your-llm-gateway.example.com/v1/anthropic` (`kunlunbedrock.claude-opus-5.5-m17`) read back 3.4% of their prompt (779 rounds: 6.7M read versus 192M written, 679 zero-read rounds), while sub-agents on the same key, URL, beta header and model read 96.5%. General-role sub-agents with the root-sized surface read only 3.6%. Raw archives showed byte-identical tools, system and message prefixes round over round, including the 1h tools/system breakpoint, so the `upstream_identical`/`cache_write_unsettled` verdicts were correct but not actionable. Each root round re-prefilled 100K–280K uncached tokens.
+
+**Evidence:** standalone probes built by the repository's `prepare_request` and posted through the shared transport, each sent identically two or three times 10–15 s apart with a unique ~6K-token tail, varying one input at a time (about 45 variants). Reuse followed the tool *names* alone. With `sum(len(name) + 1)` at or below 492 bytes a probe read its own write back; at 496 bytes or more it never did, at 8, 10, 20 and 35 tools alike. Thirty-five synthetic tools flipped from hit to miss when only their names became the root's real names; the root's real schemas and descriptions under synthetic names hit. Tool count, schema size (35 small tools; 11 tools padded past the root's schema tokens), description text, tool order, the system prompt, salted leading bytes and an `Mt-Session-Id` header changed nothing on this edge (the header pins the upstream account and cannot repair a miss keyed on names; account hopping is [section 7](#7-cache-affinity-carriers)). The root surface carried 606 bytes (35 tools, including eight `mcp__server__tool` names worth 233 bytes); the 11-tool coder surface carried 150. Replaying the real root round R61 (124 messages, 117K tokens): as-is it wrote 117,399 tokens on three sends and read nothing; with the projected 30-tool surface (448 bytes) it wrote 109,677 once and then read 109,677 on both repeats. The only healthy historical root window (2026-10-28 01:43–01:49, 585 bytes, 81–96% read) streamed a different SSE flavor (`estimated_tokens`, `context_management`), so it was served by a different upstream path. The edge is Claude-specific: `kimi-k3.1-pro` on the same face read 98% across 70 root rounds with the 53-tool root surface.
+
+**Decision:** `lib/llm/tool_wire.py` enforces a route-scoped provider constraint at the final tool-visibility boundary. For Claude models (`is_claude`) on the Anthropic protocol at host `your-llm-gateway.example.com`, provider-visible names must fit `SANKUAI_ANTHROPIC_TOOL_NAME_BUDGET_BYTES` (448, about 44 bytes below the measured edge to absorb gateway key material Tofu cannot observe). Only `kunlunbedrock.claude-opus-5.5-m17` was measured; the probe key had no quota for the face's other Claude deployments, which share the gateway's Claude routing and the low cost of a false positive. Over budget, the longest optional names are hidden first, which keeps the most tools directly callable; equal lengths hide the later wire position. Hiding happens only while `search_tools` and `execute_tools` are on the wire, and never touches the floor: discovery/execution gateways, `poll`/`kill`, required direct names (code floor, `tool_choice`, declared direct tools) and the local swarm launch/result pair. Hidden tools stay in `_executable_tool_catalog`, remain discoverable through `search_tools` and callable through `execute_tools`, and are reported in `tool_wire_projection.budgetDroppedNames` plus one `[ToolWire] tool-name budget` INFO line. Every budgeted request also records `toolNameBytes` and `toolNameBudgetBytes` on `tool_wire_projection`; a request still over budget after projection logs `[ToolWire] tool-name budget … NOT met` at WARNING with the reason. Survivors keep their order and bytes, so the cached prefix stays stable; the surface changes only when its inputs change. Other routes are unchanged. Specifications: `tests/llm/test_tool_wire_name_budget.py`, `tests/cache/test_cache_tool_name_budget_wire.py`, `tests/tasks_pkg/test_root_lane_tool_name_budget_wire.py`.
+
+**Alternatives rejected:** client prefix repairs (the prefix was already byte-stable); a session-affinity header, tool reordering or salted leading bytes (measured no effect on this edge); ranking pins above built-ins as `tools.schemaBudgetTokens` does (R61 would hide ten built-ins to keep eight auto-preselected MCP schemas instead of hiding five long names); a budget on every route or every model on the face (Kimi on the same face reads 98% with the same surface, and other providers showed no such edge); aliasing long names (model-visible names are shared by guidance, search results and execution authority); waiting for a gateway fix (every root round pays a full rewrite meanwhile). The mechanism is inside the gateway, which looks consistent with a ~512-byte key built from the joined names; report it to the gateway owner and re-measure the edge before raising the budget.
+
+**Explicit Tool Search `off` (2026-10-28):** `tools.toolSearch=off` resolves to the `full` backend, which keeps every tool direct with no `search_tools`/`execute_tools`, so hiding has no discovery path. **Decision:** the setting is honored; such a request goes out over budget and logs the WARNING above (`no search_tools/execute_tools discovery path, Tool Search backend=full`) on every request, so the cost is visible per round and in the read-share split. The same applies to small or all-eager catalogs where `local` adds no gateway. No deployment default sets `off` (`tools.toolSearch` defaults to `auto`). **Alternatives rejected:** forcing the discovery pair onto this route when over budget (it overrides an explicit setting for cost, not correctness: the request still succeeds); hiding tools without a discovery path (they would become unreachable); aliasing names (rejected above).
+
+**Detection (2026-10-28):** the lane split was in the 2026-10-23 logs (`cache_waste_report.py` printed root 0.03 against children 0.94) but nothing ran the report, and each cold round's own `upstream_identical`/`cache_write_unsettled` verdict pointed away from the request. **Decision:** `_health.read_share_monitor` folds every round record into a bounded per-minute window and warns while one request group on a model is cold and another warm; the cold side's break reports say so instead of attributing the miss upstream. The nightly optimizer streams the last 24 hours of rotated `app.log` files (personal deployments only, since process logs carry no owner), puts any split first in the proposer prompt with a rule to propose an investigation and never a TTL change, and keeps it in the run summary's `evidence_summary`. `scripts/cache_ab_probe.py --arm` is the manual single-variable A/B for the next quirk; the diagnosis order is in `lib/tasks_pkg/cache_tracking/AGENTS.md`. **Alternatives rejected:** duplicate, keep-alive or warm-up requests to raise reuse (they spend money to hide the signal); automatic probing from production (unbudgeted model calls outside execution accounting); a per-round verdict change (one round cannot know another group is warm, and the bucket stays the factual evidence class). Specifications: `tests/cache/test_cache_read_share_health.py`, `tests/cache/test_cache_record_lane.py`, `tests/optimizer/test_cache_read_share_evidence.py`, `tests/cache/test_cache_ab_probe.py`.
+
+### 7. Cache affinity carriers
+
+**Problem (2026-11-02):** each hop between Tofu and the model picks a cache domain for every request: Tofu picks an API key, a gateway picks an upstream account, a provider picks a shard. FRIDAY (`your-llm-gateway.example.com`) serves each model from several accounts, keeps caches per account, and hashes the `Mt-Session-Id` header to pick the vendor and then the account (学城 2762588777 《Claude 模型接入推荐实践》 §5.1). Tofu sent only a random per-request `M-TraceId`, so the gateway placed each request independently.
+
+- Conversation `mvywcu5qqy5ocy` (21 rounds, `kunlunbedrock.claude-opus-5.5-m17`, one Tofu key throughout) sent byte-identical prefixes less than a minute apart (TTL 5 min). Thirteen of its 20 follow-up rounds landed on a different account than their predecessor: six read nothing and seven read exactly an *older* round's cached total. Two of them answered in another vendor's SSE format. Input cost was ¥31.03, against ¥7.44 had every round read its predecessor; ¥23.48 of the gap was account hopping.
+- Across 3,954 Claude rounds that afternoon, previous-entry reads stayed at 30–42% whether 3 or more than 25 Claude requests were in flight, while Kimi on the same gateway read 94–99.7%.
+- From 14:54 to 16:39, `upstream_identical` was 95.8% of recoverable cache waste.
+
+**Decision:** `lib/llm/cache_affinity.py` derives one key per lineage and hands it to every hop through the carrier that hop documents.
+
+- **Lineage key.** `cache_affinity_key` is a UUID-shaped SHA-256 digest of the request lineage. The lineage is the child invocation for a child (`invocation_affinity_id`, the scope Tofu's own key stickiness already uses), else the conversation, else the L2 summary series' own id, else the task. Round requests and rebuilt fallback attempts carry it in `_cache_affinity_scope`. The digest equals what Responses `prompt_cache_key` and the Codex session headers already sent, so live keys did not rotate. One key per lineage keeps each key at the pace of one agent loop.
+- **Carriers.** Each carrier is a provider contract, declared per route as a closed-world route feature `cache_affinity_<carrier>` (`lib/llm/route_features.py`) and bound to its header in `CACHE_AFFINITY_HEADER_CARRIERS`.
+- **Where headers are added.** Both outbound header assemblies (`_sse_core.prepare_request` and non-streaming `chat.py`) call `merge_cache_affinity_headers`. An owner-configured header of the same name wins.
+- **YourProvider declaration.** The template declares `cache_affinity_mt_session_id` on its `anthropic` and `kunlun` faces, and template supply converges it onto installed face Connections. The owner-territory default chat face does not carry it.
+- **Feature merge.** Feature maps now resolve per feature across model, offering, connection and deployment, so a face's binding no longer erases model-level features.
+- **Evidence.** The routing fingerprint carries `affinity` (the carrier slots plus a short digest of the key), so a lineage whose key or carrier changes shows as `<ns>affinity`. `[CacheRoundRecord]` records `affinity`, and the read-source table of `scripts/cache_waste_report.py` splits by it. An `older` read on a lineage that carried a key means a hop ignored it; report it to the provider with the M-TraceIds.
+- **Adding a provider.** Add one carrier entry with its source, register the feature (a gateway header in `_GATEWAY_FEATURES`; a body field gets its own protocol binding and serializer, like `responses_prompt_cache`), declare the feature on the template face, and add a test.
+
+Specs: `tests/llm/test_cache_affinity.py`, `tests/model_routing/test_template_supply_sync.py::test_cache_affinity_carrier_converges_onto_installed_claude_face`, `tests/model_routing/test_route_inference_contract.py::test_route_features_resolve_per_feature_across_entities`, `tests/cache/test_cache_waste_report.py`.
+
+**Verification:** the effect is measured on ordinary traffic after deployment with that read-source table: rows with `Mt-Session-Id` should read `older` close to 0%. No warm-up or duplicate request is sent (owner decision 1). Result on 2026-11-03 (`--model claude-opus-5.5 --since '2026-11-03 09:14:32' --until '2026-11-03 10:57:49'`): not met. Claude follow-up rounds read their predecessor in 72–75% of rounds (30–42% before the carrier) and `older` in 5–7%, while Kimi on the same gateway and carrier read 98–100% with no `older` rows. `upstream_identical` and `cache_write_unsettled` were 96% of the ¥1,369 recoverable in those 1.7 hours. The Claude hops are synchronized across independent lineages (a miss made a miss in another lineage sent within ±5 s 2.8× likelier), 21% of misses returned to an older round's exact entry on the next round, and three inspected A→B→A hops kept the same SSE format: account moves inside one vendor, which FRIDAY's hash-modulo affinity (§5.1) produces for nearly every session whenever its account set changes. Thinking parameters stayed constant inside every lineage, and one `cache_namespace_switch` remained after the 2026-11-03 account-status fix. Tofu cannot see the serving account: the gateway forwards no workspace header and does not deliver the request `diagnostics` object to the API (a two-request synthetic check with a changed system prompt returned `null`, which [cache diagnostics](https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics) rules out once the object arrives). Open with the gateway owner, with M-TraceIds: consistent or rendezvous hashing so a membership change moves only the affected account's sessions, and forwarding `diagnostics` plus an opaque account label.
+
+**Alternatives rejected:**
+
+- Keep-alive, duplicate or warm-up requests (owner decision 1).
+- Concurrency gates or launch staggering: previous-entry reads did not depend on concurrency.
+- One conversation-wide key for every child. It concentrates a swarm on one upstream account, and on OpenAI it exceeds the documented per-key overflow rate.
+- Deriving carriers from the gateway host at request time. That bypasses the routing aggregate that owns route capabilities and is invisible per Connection.
+- A placeholder value in `extra_headers`. Every other sender of those headers (probes, discovery, native routes) would have to substitute it or would leak it.
+- A new Connection schema field. It needs a migration and editor work for what the closed-world feature map already expresses.
+- A 1h tail TTL. It makes each hop dearer, because 1h writes cost 2.0× input against 1.25×.
+
+### 8. L1 edits of the previously sent request
+
+**Problem (2026-11-02):** prefix protection left the last `EDITABLE_TAIL_COUNT` (2) api-form messages of the previous request editable, and L1 never priced an edit there. In round 3 of conversation `mvywcu5qqy5ocy` the previous request ended in a four-result parallel batch, so the count-2 tail split one Anthropic user message. `strip_cold_images` replaced one 778×76 crop (~80 tokens) with a ~60-token stub. That re-wrote the whole merged message: 3,624 tokens at the 1.25× write rate to remove about 20 tokens.
+
+**Decision:**
+
+- **Protection.** The previous request's api-form messages are the provider-cached prefix. `get_cache_prefix_count` returns the whole sent count, and the durable high-water mark records the same count.
+- **Admission.** L1 may edit only that request's last tool step, after a detached dry run, and only when `after_tokens × cacheWriteMul < before_tokens × cacheReadMul` on the main route's verified rates (`_cache_economics.sent_step_rewrite_economics`). Unverified pricing keeps the bytes.
+- **Advertising.** Admitted edits are advertised as bounded rewrites (`notify_compaction(intended_rewrite_index=...)`), and every decision logs one `[L1] ... sent-step edit admitted|refused` line.
+- **Image pricing.** On Claude routes, images in that estimate and in `strip_cold_images`' savings report are priced from their pixel size (Anthropic's documented `w×h/750` after downscaling), not a flat 800.
+- **Effect.** The incident edit is now refused. A consumed 20K-token result shrunk to a 200-token stub still compacts (375 < 2,010 input-token equivalents).
+- **Diagnosis.** `EDITABLE_TAIL_COUNT` remains a diagnosis tolerance for wire-tail representation only. The detector's prior-prefix position test now counts wire messages on both sides, so a re-bill of the previous request's last wire message is recorded as a tail re-bill (`wire_changed`, culprits named per tool result), not a whole-prefix break.
+
+Specs: `tests/compaction/test_l1_sent_step_admission.py` and `tests/cache/test_cache_prefix_mutation_attribution.py`.
+
+**Alternatives rejected:**
+
+- Protecting every sent byte. This loses compaction of large consumed results that pays for itself on the next request.
+- A multi-round payback horizon. That is a tuned knob.
+- Keeping the count-2 tail. It splits parallel batches and prices nothing.
+
+### 9. Stable-head cache TTL
+
+**Problem (2026-11-03):** `cache_extended_ttl` was on by default, so every write of the Claude system+tools head was billed at the 1h rate (2.0× input) instead of 1.25×. On the Sankuai Claude route the upstream account hops of §7 re-write the head on most misses. The retained logs for 2026-11-03 (06:48 to 16:00) hold 5,681 Claude `[CacheRoundRecord]` rounds. The conversation lane wrote its ~28.2K-token head 1,277 times: 19 first rounds and 1,258 zero-read rounds inside a chain. The isolated lane wrote its ~10.2K-token head 120 times. Together that is a 27.94M base-input-token premium. Only 31 rounds read an entry after a 5–60 min gap, 281 read only the head, and 11 first rounds read a head another lineage wrote. Even counting all 323 as saved re-writes (1.2 × head each), the 1h head saved at most 10.65M, a net loss of at least 17.29M (conversation lane 16.53M, isolated lane 0.76M). Every log window was negative on its own. Conversation `mw0a6pf2lv6qf4` (17 rounds) re-wrote its head 12 times (334K tokens) and cost ¥34.83; with a 5-minute head it would have cost ¥27.58. FRIDAY's guidance (学城 2762588777 §1.3) recommends 5m for high-frequency agent loops and considering 1h only at a steady read share ≥ 90% with call intervals over 5 minutes; this route read its previous entry on 72–75% of rounds.
+
+**Decision:** `cache_extended_ttl` defaults to off. Every Claude breakpoint is a bare 5-minute marker, and the `extended-cache-ttl` beta header is not sent. The per-task latch is unchanged: a running task keeps its layout and the next task uses the new one, so each conversation writes its prefix once under the new markers. Owners can still opt in through `cache_extended_ttl` in `features.json`, `POST /api/v1/features` (hot reload) or `CACHE_EXTENDED_TTL=1`; the opt-in keeps the 1h head and the 5-minute tail. Spec: `tests/cache/test_cache_stable_head_ttl_default.py`. Method for re-measuring: per lane, take the head size H as the median head-only read; the premium is 0.75 × H per head write (a first round or a zero-read round), and the saving is at most 1.2 × H per read after a 5–60 min gap, head-only read, or first-round read of another lineage's head.
+
+**Alternatives rejected:**
+
+- Keeping the 1h head on by default. Measured net-negative above.
+- Gating the 1h head per route or lane on a measured read share. That is a tuned threshold (owner decision 5).
+- Predicting long gaps from history. The tail measurement above found precision 0.09.
+- Removing the option. A route that keeps a session on one cache domain and has long user pauses can still profit.
+
 ## Claude effort and prompt cache
 
 Anthropic's [effort](https://platform.claude.com/docs/en/build-with-claude/effort) and [thinking/cache](https://platform.claude.com/docs/en/build-with-claude/thinking#thinking-and-prompt-caching) contracts render resolved effort/thinking configuration into the prompt: changing effort changes the prefix, not necessarily deleting an entry. Message breakpoints miss; tool/system breakpoints may also miss. Omitted versus explicit default high is not an effort change. Keep effort stable when cache reuse matters.
@@ -105,21 +187,103 @@ The [Opus 5 migration](https://platform.claude.com/docs/en/models/opus-5/migrati
 
 Exact-route verification holds prefix, breakpoints, model/account/headers and TTL constant, varying only effort in A/A/B/B/A. Establish A's warm read, then B's miss/rewarm and A's reuse from raw usage. Missing cache fields mean unknown, not zero; HTTP 200, latency and offline final-wire tests do not prove upstream consumption or cache hits.
 
+### Long waits and the conversation-tail TTL
+
+**Problem:** two waits returned early only so another provider request would land before the 5-minute conversation-tail cache entry expired: `poll` clamped `wait_s` to 60 s and `run_command` handed a still-running command to the background after 60 s. Each forced round re-reads the whole prefix and adds output tokens and latency; on 2026-10-27/28 the root lane made 87 such polls (median prefix 382K tokens, ~3.3M base-input equivalents) and swarm workers 34 (~0.58M). Owner decision 1 (2026-10-28): no model request may be added just to keep a prompt cache warm, because extra requests cost money and time.
+
+**Decision:** waiting costs no model request. `poll` blocks up to `POLL_WAIT_CAP_S` (1500 s) and returns as soon as the handle finishes, input is waiting for a conversation-owning turn (a user steer or another background completion, both drained at the next round boundary), or Stop arrives; Stop ends a swarm wait without cancelling the longer-lived session. `run_command` hands a running command off after `AUTO_BACKGROUND_AFTER_S` (1500 s). Both clamp through `reaper_safe_wait_s` to `TOFU_STUCK_TASK_MAX_SILENT_SECS` (default 1800 s) minus 300 s, never below the former 60 s: an ordinary tool's heartbeat does not refresh the reaper clocks (owner ruling 2026-07-31), so a silent wait must end first. `poll` declares a 1560 s tool timeout so the 300 s parallel-pool ceiling cannot cut it short ([timeouts](contracts/TOOL_EXECUTION_POLICY.md#timeouts-and-loop-guards)). The tail keeps the 5-minute TTL: a wait longer than five minutes re-writes the tail once (1.15 × body in base-input units), which costs less than the removed 60 s polls (0.1 × prefix each) beyond about 11.5 minutes and more between 5 and 11.5 minutes. Cache diagnostics take the expected-expiry window from the previous round's shortest wire-marker TTL, so only a gap beyond the TTL actually sent is filed as `ttl_expiry`.
+
+**Alternatives rejected:** keep-alive requests during a wait (on the same history 82 extra requests costing ~1.68M base-input equivalents plus output tokens and latency; owner decision 1); keeping the 60 s forced rounds (the cost above); a reaper exemption for a waiting `poll` (reserved for human waits; a bounded wait needs none); a history-predicted 1h tail ("previous gap was long" marked 68 requests, 6 then waited long: precision 0.09, net −6.0M).
+
+**Held: a uniform 1h tail.** Giving the tail the latched 1h TTL (every Claude breakpoint 1h) removes the re-write after any wait under an hour. It is implemented, tested and live-verified as the commit "perf(cache): give the Claude conversation-tail breakpoint the latched 1h TTL" on branch `perf/ttl-waits-20261028b`, but not merged. Its proposal priced the premium at 0.75 × min(write, median steady delta ≈ 1.8K) per round: +7.5M net on 1,695 swarm rounds (1.74M premium against 9.29M saved on 46 long-gap re-writes of 8.08M). A 1h marker, however, bills every token it writes at 2.0 instead of 1.25: first rounds, large tool results, compaction rebuilds and re-writes after upstream misses. Over every Claude `[CacheRoundRecord]` from 2026-10-27 00:00 to 2026-10-28 16:50:
+
+| lane | rounds | 5–60 min gaps | saved | tail writes (upstream misses) | net, all writes | net, misses excluded |
+|---|---:|---:|---:|---:|---:|---:|
+| root | 2,897 | 6 | 3.6M | 487M (418M) | −359M | −46M |
+| swarm | 7,522 | 115 | 28.5M | 847M (609M) | −588M | −131M |
+
+Since the tool-name budget took effect (2026-10-28 14:14, about 2.6 hours) the nets are −30M / −6.4M (root) and −128M / −11.2M (swarm). They bound the premium from above, because records do not separate the system/tools writes that are already 1h. Merge condition: on a fresh measurement, long-gap re-writes exceed about 40% of all tail writes (each re-written token saves 1.15, every other written token costs 0.75 more), which first needs the remaining `upstream_identical` misses fixed (after 14:14 the 54-tool swarm surface missed on 354 of 1,009 rounds; cause and fix in [Sibling cache affinity](#sibling-cache-affinity)).
+
+Live A/B (2026-10-28, `claude-opus-5.5` as `kunlunbedrock.claude-opus-5.5-m17` on the Sankuai Anthropic face, `scripts/cache_tail_ttl_probe.py` through the repository request path; identical bodies re-sent after 402 s):
+
+| arm | send | prompt | cache_read | cache_write 1h / 5m |
+|---|---|---:|---:|---:|
+| tail 1h | first | 59,208 | 0 | 59,204 / 0 |
+| tail 5m (control) | first | 59,208 | 0 | 10,710 / 48,494 |
+| tail 1h | after 6.7 min | 59,208 | 59,204 | 0 / 0 |
+| tail 5m (control) | after 6.7 min | 59,208 | 10,710 | 0 / 48,494 |
+
+The gateway accepts a 1h tail marker and serves it after the gap, while the control re-writes its body. In base-input units the 1h arm costs 124K against 144K with one long gap, and 118K against 82K without one.
+
+### Sibling cache affinity
+
+**Problem (2026-10-28):** a change merged that morning and live from the 14:04 worker restart moved each swarm worker's run identity into a `worker_team` carrier after the objective, so same-role siblings sent byte-identical tools+system prefixes and could share one system entry. Afterwards sub-agent rounds stopped reading back their own previous round. A round read the previous round's entry when `cache_read` equals that round's `cache_read + cache_write`; it read an *older* entry when the read equals an earlier round's total, which happens only when consecutive rounds are served by different upstream cache domains that each keep their own entries. Wire hashes and routing were identical on these rounds and gaps were far below the TTL, so they are neither byte drift nor expiry. Isolated-lane `[CacheRoundRecord]` rounds on `claude-opus-5.5`, excluding first rounds and `ttl_expiry`:
+
+| window (worker process) | requesters | rounds | previous entry | older entry | tools+system only | none |
+|---|---|---:|---:|---:|---:|---:|
+| 10-27 22:18–10-28 03:46 | 11-tool siblings, per-sibling system | 1,295 | 98.6% | 0.1% | 0.3% | 1.0% |
+| 10-28 03:46–14:03 | 11-tool siblings, per-sibling system | 2,212 | 99.0% | 0.0% | 0.1% | 0.9% |
+| 10-28 14:04–21:24 | 11-tool siblings, shared system | 1,424 | 84.1% | 5.8% | 6.0% | 4.1% |
+| 10-28 14:04–21:24 | 54-tool siblings, shared system | 1,433 | 49.7% | 21.6% | 23.4% | 5.2% |
+| 10-28 14:04–21:24 | root conversations (own system) | 2,060 | 89.1% | 2.6% | 2.1% | 6.1% |
+
+Between the windows before 05:20 and after 16:00 the comparable-round read share fell from 98.3% to 83.9% and `upstream_identical` rose from 0.8% to 13.4% of comparable rounds. The loss followed same-prefix concurrency: a 54-tool round read its previous entry 81% of the time with no same-prefix sibling in flight at request start, 54% with two and 30–35% with three to five; by hour it was 28–57% while six siblings ran (14–16h) and 88–100% once one to three remained (17–20h), while root conversations read 85–92% during 14–16h. The shared entry itself had no measured benefit: all 17 first calls after 14:04 read nothing, 16 because their launch wave started before any sibling had written it and the one later same-role sibling because its request landed where the entry was absent.
+**Decision:** the run identity again ends the role part of the `worker_policy` system contract (`build_child_messages`), so every sibling sends its own system prefix, as before 14:04, when swarms of up to 18 such siblings read their previous entry on 98.6–99.0% of rounds. The `worker_team` injection ID stays registered only for checkpoints written in between; rebuild drops those carriers. Spec: `tests/context/test_context_injection_aux.py`.
+**Live A/B and its limit:** concurrent synthetic siblings (4–6 per arm, arms interleaved) through the repository request path (`build_body` → `stream_chat`, 39–57K-token prompts; 284 requests including controls, about 12.7M base-input-equivalent tokens) read their own previous or older entries on 31 of 92 rounds with per-sibling bytes at the start of the system region against 17 of 92 with a shared system (Fisher two-sided p ≈ 0.03); a unique final system block after the shared ones read 6 of 35. The runs (21:51–22:26) fell into a gateway-wide degradation: single sequential conversations in the same window read their previous entry on only 8 of 25 rounds, and the production root lane read nothing on 56% of its rounds at 22:30, so the absolute levels say nothing about a healthy gateway. Re-measure with the read-source table of `scripts/cache_waste_report.py` (it reproduces the table above from the logs) once root conversations read their previous entry again; until then the production before/after comparison is the evidence.
+**Alternatives rejected:** keeping the shared prefix (386 `upstream_identical` re-writes in seven hours for six 54-tool siblings at a mean prompt of ~400K tokens, against at most one ~12–21K-token system write per later-wave sibling); a unique final system block that keeps the shared entry (no better than the shared arm in the A/B, and it needs a composer ordering change); staggering launches or capping same-prefix concurrency (delays user work, and the latency policy above keeps holds opt-in); keep-alive or duplicate requests (owner decision 1); a mid-history stepping-stone breakpoint (it shortens lookback distance, but a different cache domain holds no entry to step on).
+
 ## Model continuation lifecycle
 
 - Completed ordinary chat tasks retain their final bounded working context through `lib/storage/model_continuation.py`, not the disposable node-local replay cache.
 - One latest value per owner/conversation/lane is capped at 8 MiB, 16,384 messages and 4,096 Turn witnesses; no TTL, resident payload index or new worker. Publication runs once after settlement.
 - Sidecar ownership and frontier CAS prevent foreign/stale replacement; restore validates the complete historical prefix and policy. Deletion removes derived state.
 - Edits, incompatible policy, missing media or unavailable storage trigger explicit cold-rebuild diagnostics. A valid durable checkpoint survives restart and temporary cache eviction.
-- Text-only model/route switches (v2 ModelRef, preferred provider, routing, preset, thinking depth) reuse verified continuation without old composer carriers or model-specific wire latches. History-carrier private fields are portable text metadata; unknown provider/private or multimodal state remains conservatively nonportable.
+- Route and effort switches (v2 ModelRef, preferred provider, routing, preset, thinking depth/enablement) reuse the verified continuation's portable text without old composer carriers or model-specific wire latches; provider reasoning, signatures and opaque native items are stripped. History-carrier and inbox private fields are portable text metadata; unknown private or multimodal state remains conservatively nonportable ([decision](CONTEXT_COMPACTION.md#continuation-checkpoints)).
 - For Opus 4.7+ with thinking still enabled, an additional fixed-size policy witness permits depth-only changes to retain the full signed working view and tool latch (`restored_effort`). On that effort witness, model, v2 ModelRef/provider preference/routing intent, policy, permissions, sources and on/off changes remain guarded. Old checkpoints without that witness may cold-rebuild once. This checks requested policy, not actual provider/credential affinity; it does not promise an upstream cache hit or newly certify arbitrary gateway/failover replay. The official thinking signature format is portable across Claude API/Bedrock/Google Cloud, so a raw-key equality rule would not be an API-derived requirement.
+- Deferred input translation re-pins the history proof. **Problem:** the command pins the proof before the worker records the input's translation verdict, a model-visible content write to the input Turn, so every translated turn either refused publication (`authority_changed`) or stored a proof the next restore rejected (`history_changed`); translated conversations never replayed and re-sent all injected context each turn. **Decision:** `restore_prefix` also pins a fingerprint of the proven suffix headers without the input's revision; after its own verdict the worker (`model_replay.rebind_history_proof`, called from `spawn.py`) re-reads the context and adopts the fresh proof only when that fingerprint, the settled input revision and the model view's input text all match. Any other change keeps the pinned proof and its refusal. **Alternatives rejected:** counting the verdict as a display-only revision (it changes model-visible content, so the proof must change); rebuilding the model view after the verdict (re-derives ingress policy witnesses from a runtime-mutated config); translating in the command (restores the acceptance latency removed in `docs/modules/ingest_media.md`). Specs: `tests/model_routing/test_model_context_read.py` (both authorities) and `tests/conversation/test_deferred_input_translation.py`.
 - Full transcript authority is unchanged; no persistence failure rolls back a settled user turn.
 - `tests/model_routing/test_model_continuation_store.py` covers real-Sidecar restart, owner/lane isolation, stale publication, bounds and deletion; `tests/model_routing/test_model_replay_stability.py` and `tests/model_routing/test_model_continuation_policy.py` cover prefix parity and cross-model compatibility.
 - The old bounded `ModelReplayCache` remains a disposable repository utility/test fixture, not the production continuation lifecycle.
 
+## Cache diagnostic ownership
+
+Problem: unused warm-prefix aggregation and same-model activity counters still
+looked like live compaction or cache-miss policy. Decision: cache consumers use
+`cache_tracking._state.get_prev_turn_cache_read`, which freezes the completed
+same-owner, same-lane predecessor at invocation entry. Active sibling reads do
+not replace it; prefix protection stays in `_prefix`, and `_ttl` owns only the
+session-stable TTL latch. The unused aggregators and their isolated tests are
+removed. Alternatives rejected: reusing the largest recent read would replace
+an actual cold predecessor with older warm history; counting concurrent callers
+cannot establish provider cache contention. Verify cache accounting lifecycle,
+prefix protection, TTL-latch and miss-attribution tests.
+
 ## Expected interpretation
 
 Prompt caching reduces a matching prefix's unit price; it does not make growth free. Progressive schemas reduce the fixed floor while working-set policy bounds history. Cache misses from eviction, rerouting or real prefix changes remain distinguishable through request-wire and cache-write evidence. Native result-surface policies compact repeated launch input, declared artifact defaults and gateway transport presentation only after canonical capture and before unchanged budgets; original decoded/program values and frontend task objectives remain intact. Unknown application fields, failures, signed cursors and media survive; no generic lossy truncation or cache is added. `benchmarks/tool_result_projection.py` compares exact UTF-8 view sizes and declared repository-counter estimates offline, not provider invoices or full-agent quality. Source-read budgets/ranges are unchanged: wrapper savings do not solve repeated wide reads.
+
+Partial text previews: **Problem:** ordinary truncated tool summaries still paid
+JSON escaping costs for code, quoted records and multiline output. **Decision:**
+`partialProjectionText` in `tool_result_surfaces_v1.json` selects the shared
+length-labelled Unicode framing for the summary when the complete view uses fewer
+UTF-8 bytes. Existing budgets still measure the delivered model view. Body text
+stays opaque; items, exact integers, source references, continuation positions,
+recovery advice and program-read metadata retain their values. Canonical capture,
+decoded program input and stored source bytes remain unchanged. Observation and
+persisted launch-receipt readers use the common decoder, including exact run
+identity matching. **Alternatives rejected:** stripping recovery metadata loses
+access to omitted evidence; increasing budgets preserves escaping overhead;
+parsing framed body text as application JSON invents authority.
+
+Seven fixed previews preserved every body and metadata value while exact
+`o200k_base` counts fell from 7,299 to 6,532 tokens (10.5%). Plain paragraphs,
+short quotes and non-display control-character samples stayed byte-identical.
+This measures preview formatting, not provider invoices, latency or whole-task
+savings; byte-based selection does not guarantee fewer tokens for every string.
+The shared formatter uses transient strings under existing result bounds, with
+no new cache, worker or persisted copy. Verify partial-text projection/backends,
+program snapshots, aggregate budgets, restart/ownership recovery, launch snapshots
+and exact OpenAI/Responses/Anthropic request text.
 
 ## Safe A/B channel
 
@@ -198,7 +362,7 @@ this channel has enough coverage and a semantic-quality evaluator.
 
 Request-local switches support single-factor ablation without process-global
 state. Public GPT-5.6 Responses requests additionally get automatic native
-Tool Search for the non-pinned residual catalog:
+Tool Search for the declared-searchable residual catalog; eager tools stay direct:
 
 ```json
 {
@@ -231,7 +395,9 @@ Tool Search for the non-pinned residual catalog:
   implicit behavior.
 - `tools.nativeExposure=routed` conservatively selects native tool families
   from the latest task while retaining read/inspection, MCP discovery and
-  custom/plugin safety surfaces. `full` is unchanged. The report records both
+  custom/plugin safety surfaces. The selection narrows eager families only;
+  searchable families stay candidates that every Tool Search backend defers
+  and search-off sends direct. `full` is unchanged. The report records both
   exposed tool count and exact schema-token cost so routing is judged on token
   reduction and discovery recall, not catalog size alone. The routed set is
   union-sticky per owner+conversation: a family any earlier turn exposed stays
@@ -241,7 +407,11 @@ Tool Search for the non-pinned residual catalog:
   region for a ~1–2k-token schema saving. Turn-1 routing keeps its cold-start
   saving; explicit allow/denylists still apply after assembly, and the complete
   executable catalog is preserved before routing, so the union neither grants
-  nor retracts authority.
+  nor retracts authority. With discovery disabled, the full catalog stays direct;
+  a provider's external tool-name cache limit can therefore make reuse
+  impossible. Capability is preserved instead of silently hiding those tools.
+  Local admission measures the initial projected local surface, and native
+  admission measures its actual projected surface, not the deferred catalog.
 - `tools.toolSearch=auto` never removes tools from the task authority catalog.
   Eager tools, explicit caller tools, the current task's MCP active set and a
   forced `tool_choice` remain direct; searchable residual tools are deferred
@@ -258,8 +428,8 @@ Tool Search for the non-pinned residual catalog:
 - `compaction.evidenceLedger=true` additionally persists exact L1 cold tool
   results and adds their recovery handles to that ledger. It remains opt-in
   because durable raw-result storage has a different privacy/I/O trade-off.
-- `tools.programmaticCalling=on|auto|off` defaults to `auto`. Verified provider features plus reviewed eligibility select native OpenAI PTC; other tool-capable routes default to direct tools and JSON batches. Explicit `on` enables local async JavaScript with the complete task-executable catalog; `off` disables programs. [The gateway contract](contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md) owns interface selection, eligibility, approval, runtime bounds, replay and recovery; local execution never gains hosted-only authority.
-  Local projection is additive and cache-stable. `on` exposes an available resident tier; `auto` selects batching for bounded many-result intent or observed read fan-out. `TOFU_PTC_TIER=program|batch` is an explicit evaluation/operator override, never a model-size heuristic. Native-to-local fallback keeps auto's JSON interface. Productive single-read chains neither force adoption nor change the wire schema; historical `serial_gateway` settings remain readable only for explicit experiments. Actual completed `programRuns` and backend/evidence identity establish adoption; byte counts and `expectedSavings.basis=program_surface_unmeasured` do not establish model cost or latency gains.
+- `tools.programmaticCalling=on|auto|off` defaults to `auto`, which behaves like `on`. Verified provider features plus reviewed eligibility select native OpenAI PTC; other tool-capable routes keep direct tools and add local async JavaScript (`execute_program`) over the complete task-executable catalog; `off` disables programs. [The gateway contract](contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md) owns interface selection, eligibility, approval, runtime bounds, replay and recovery; local execution never gains hosted-only authority.
+  Local projection is additive and cache-stable: active modes expose the resident program tier whenever executable tools exist, independent of request wording or observed fan-out, and repeated authoring failures move one task to JSON batches. `TOFU_PTC_TIER=program|batch` is an explicit evaluation/operator override, never a model-size heuristic. Native-to-local fallback uses the local program tier. Productive single-read chains neither force adoption nor change the wire schema; historical `serial_gateway` settings remain readable only for explicit experiments. Actual completed `programRuns` and backend/evidence identity establish adoption; byte counts and `expectedSavings.basis=program_surface_unmeasured` do not establish model cost or latency gains.
   Historical production calibration: 93 calls, 107 tools, 7.149M prompt tokens (6.945M cache reads), ¥23.05, 2,286.3 seconds; 45 gateway offers and zero program runs. Five serial-read chains covered 24 model rounds; 19-call and nine-call counterfactual opportunity ceilings are theoretical, not savings. The [paired public-SDK pilot](../evaluations/programmatic_pilot/README.md) measures optional adoption, complete-evidence answer quality, actual usage and latency before promotion.
 - `responses.promptProfile=auto` selects compact GPT-5.6 but keeps Kimi on full.
   Explicit Kimi lean/ablation arms emit applied profile, SHA-256 and token proof;
@@ -338,6 +508,21 @@ It also computes cost from a frozen public price card so subscription runs can
 report throughput/limit consumption and a comparable shadow cost without
 pretending the monthly subscription is a per-task API invoice.
 
+Exact cost evidence reads provider counters only through `lib.cost`.
+Problem: the Responses branch of `canonical_benchmark_usage` read
+`input_tokens_details.cached_tokens` itself. Pricing re-read cache keys from
+the canonical dictionary. Both reads bypassed the alias SSOT that
+`tests/meta/test_usage_cache_ssot_guard.py` protects. Decision: a declared
+Responses usage is respelled as the cache-inclusive OpenAI shape
+(`input_tokens` -> `prompt_tokens`, `input/output_tokens_details` ->
+`prompt/completion_tokens_details`). `validate_reported_usage_counters`,
+`normalize_usage` and `split_input_tokens` then own every alias read and
+rejection, and pricing reads `normalize_usage(canonical)`. Alternatives
+rejected: allowlisting the module in the guard exempts every future raw read.
+The Responses SSE translator clamps malformed counters to zero, but benchmark
+evidence must reject them. Verify
+`tests/benchmark_contract/test_benchmark_usage_evidence.py` and the SSOT guard.
+
 Confirmation uses paired oracle results. A candidate with no fewer resolved
 tasks but a negative one-sided 95% lower bound is reported as an observed tie
 without a population-level non-inferiority claim. Cost per successful task is
@@ -352,8 +537,30 @@ final-message replay. No live check runs implicitly.
 
 ## Long-agent Codex parity contract (v2)
 
+### Quality-first release policy (owner decision 2026-10-26)
+
+Problem: a mandatory cost/success reduction could reject a candidate with
+verified quality gains solely because it spent more. The owner explicitly
+prioritizes making Tofu the leading agent harness without a cost constraint.
+
+Decision: `tofu-long-agent-quality-first/v1` makes monetary cost diagnostic,
+never a release veto or a substitute for quality. The existing comparison
+matrix, paired quality/family gates, blind judgments, critical-incident gate,
+latency gate, infrastructure evidence and actual orchestration checks remain.
+Per-call usage, failed calls, compaction and paid tools still reconcile against
+the frozen price card. Report contract v2 explicitly names this policy, so a
+new assessment cannot be confused with the former cost-gated report. Earlier
+immutable evidence and historical v1 experiment decisions are not rewritten.
+
+Alternatives rejected: merely increasing a cost ceiling still vetoes quality;
+dropping cost evidence hides failed attempts and breaks reproducibility;
+loosening quality or safety to make expensive candidates pass defeats the goal.
+Verify `tests/benchmark_contract/test_quality_first_release.py` and the paired
+release-report/store contracts. A policy change is not evidence of a leaderboard
+win; a complete, reproducible comparison is still required.
+
 The 2026-08-24 comparison keeps the model fixed: Tofu and Codex CLI 0.149.1
-both call the same Meituan `kimi-k3` slot with the same thinking setting. The
+both call the same YourProvider `kimi-k3` slot with the same thinking setting. The
 isolated loopback-only `evaluations/codex_kimi_proxy` translates one Codex
 Responses request into exactly one Kimi Chat Completions request. It preserves
 instructions/messages, strict function schemas, tool choice, thinking, usage,
@@ -395,8 +602,9 @@ output $13.81/M, with cache reads at 0.1× input.
 
 The release decision is deliberately conjunctive: paired quality must meet the
 Codex point/lower-bound gates, every family remain within -5pp, both blind
-judges pass, critical incidents remain zero, cost/success and P90 oracle-ready
-remain at most 85% of Codex, and infrastructure failures stay preregistered.
+judges pass, critical incidents remain zero, P90 oracle-ready remains at most
+85% of Codex, and infrastructure failures stay preregistered. Cost/success is
+reported with no acceptance threshold under the quality-first policy above.
 The full task records must also contain real program and agent trajectories
 with zero projection-as-adoption claims. A failed gate yields `not
 demonstrated`; no family or unused orchestration lane is hidden by an average.
@@ -417,7 +625,7 @@ The v2 runtime contracts are:
   blocks, one deterministic global budget, explicit suppression/hash/token/
   recovery evidence, and cache epochs that advance only on semantic changes;
 - `ToolContractV2`/`ToolResultEnvelopeV2`: every model defaults uncapped; an explicit
-  neutral local budget preserves the code core, with 600/8,000/24,000-token gateway/result/round targets and owner-scoped artifact cursors. The envelope is internal evidence; provider messages receive a sparse semantic projection while a bounded non-model sidecar preserves harness and loop-guard facts;
+  neutral local budget preserves the code core and the never-compacted gateway pair, with 8,000/24,000-token result/round targets and owner-scoped artifact cursors. The envelope is internal evidence; provider messages receive a sparse semantic projection while a bounded non-model sidecar preserves harness and loop-guard facts;
 - four explainable orchestration shapes—direct, bounded PTC reduction,
   independent read-only agents, or a verified loop—and a no-progress ledger
   that cannot infer completion from non-empty prose;

@@ -22,15 +22,17 @@ def test_task_functions_need_no_hosted_review(name, mode):
         messages=[{'role': 'user', 'content': 'filter and aggregate all rows'}],
         tools=[tool(name)], round_num=1)
     assert decision['programmaticCalling'] == mode
+    assert decision['programmaticReason'] == 'resident_task_tools'
     assert decision['programmaticEligibleTools'] == []
-    assert decision['programmaticTier'] == ('program' if mode == 'on' else 'batch')
+    assert decision['programmaticTier'] == 'program'
 
 
+@pytest.mark.parametrize('mode', ['on', 'auto'])
 @pytest.mark.parametrize('catalog', [[], [tool('execute_tools'), tool('execute_program'), tool('search_tools')],
                                     [{'type': 'web_search'}], [None]])
-def test_empty_or_gateway_only_catalog_stays_off(catalog):
+def test_empty_or_gateway_only_catalog_stays_off(catalog, mode):
     decision = resolve_tool_orchestration(
-        requested_programmatic='on', requested_multi_agent='off',
+        requested_programmatic=mode, requested_multi_agent='off',
         messages=[], tools=catalog, round_num=1)
     assert decision['programmaticCalling'] == 'off'
     assert local_programmatic_tool_names(catalog) == set()

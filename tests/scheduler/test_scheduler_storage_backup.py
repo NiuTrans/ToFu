@@ -183,9 +183,11 @@ def test_scheduler_bootstrap_respects_storage_backup_ownership(
     calls: list[str] = []
 
     class FakeManager:
-        def start(self, *, principal):
+        def start(self, *, principal, startup_tasks):
             assert principal.owner_user_id == 1
             calls.append('start')
+            for bootstrap in startup_tasks:
+                bootstrap()
 
         def _ensure_default_optimizer_task(self):
             calls.append('optimizer')
@@ -237,10 +239,11 @@ def test_ownerless_distributed_scheduler_resumes_without_personal_bootstraps(
     calls: list[str] = []
 
     class FakeManager:
-        def start(self, *, principal):
+        def start(self, *, principal, startup_tasks):
             assert principal.kind == 'system'
             assert principal.owner_user_id is None
             assert principal.scopes == frozenset({'scheduler:run'})
+            assert startup_tasks == ()
             calls.append('start')
 
         def _ensure_default_optimizer_task(self):

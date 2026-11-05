@@ -1,6 +1,7 @@
 import { featureRegistry } from '../../feature-registry';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
 import type { I18nKey } from '../../i18n';
+import { createButton } from '../../ui/button';
 
 interface ShareRoot {
   name?: string;
@@ -26,9 +27,25 @@ interface DevicesResponse {
   tokens?: BridgeToken[];
 }
 
+/** One pending await_device registration (contracts/device_waits_v1.schema.json publicWait). */
+interface DeviceWait {
+  waitId?: string;
+  conversationId?: string;
+  reason?: string;
+  createdAt?: number;
+  device?: { selector?: string; agentId?: string | null; name?: string | null };
+}
+
+interface DeviceWaitPage {
+  waits?: DeviceWait[];
+  nextCursor?: string | null;
+}
+
 interface DesktopApi {
   devices(): Promise<DevicesResponse | null>;
   revokeToken(keyId: string): Promise<unknown>;
+  deviceWaits(cursor?: string): Promise<DeviceWaitPage | null>;
+  cancelDeviceWait(waitId: string): Promise<unknown>;
 }
 
 type DevicesWindow = Window & {
@@ -45,6 +62,7 @@ type DevicesWindow = Window & {
 
 let loadGeneration = 0;
 let tokenScope: LifecycleScope | null = null;
+let waitScope: LifecycleScope | null = null;
 
 function globals(): DevicesWindow {
   return featureRegistry as unknown as DevicesWindow;
@@ -83,6 +101,28 @@ function loadingLine(): HTMLElement {
   return element('p', 'stg-loading', translate('settings.loading'));
 }
 
+/** The waits lane is optional: older fragments carry only agents and tokens. */
+function waitsLane(): HTMLElement | null {
+  const lane = document.getElementById('devicesWaitsList');
+  return lane instanceof HTMLElement ? lane : null;
+}
+
+function loadFailedBox(error?: unknown): HTMLElement {
+  let detail = '';
+  if (error instanceof Error) detail = error.message;
+  else if (error && typeof error === 'object' && 'message' in error) {
+    detail = String((error as { message?: unknown }).message ?? '');
+  }
+  const box = element('div', 'devices-load-failed');
+  box.append(element('span', 'devices-load-failed-icon', '⚠'));
+  const text = element('span', '', translate('devices.loadFailed'));
+  if (detail) {
+    text.append(' ', element('span', 'devices-load-failed-detail', detail));
+  }
+  box.append(text);
+  return box;
+}
+
 function formatCreatedAt(timestamp: number | undefined): string {
   if (!timestamp) return '—';
   const date = new Date(timestamp * 1000);
@@ -94,25 +134,8 @@ export function renderDevicesLoadFailed(error?: unknown): void {
   if (!current) return;
   tokenScope?.destroy();
   tokenScope = null;
-
-  let detail = '';
-  if (error instanceof Error) detail = error.message;
-  else if (error && typeof error === 'object' && 'message' in error) {
-    detail = String((error as { message?: unknown }).message ?? '');
-  }
-
-  const failure = (): HTMLElement => {
-    const box = element('div', 'devices-load-failed');
-    box.append(element('span', 'devices-load-failed-icon', '⚠'));
-    const text = element('span', '', translate('devices.loadFailed'));
-    if (detail) {
-      text.append(' ', element('span', 'devices-load-failed-detail', detail));
-    }
-    box.append(text);
-    return box;
-  };
-  current.agents.replaceChildren(failure());
-  current.tokens.replaceChildren(failure());
+  current.agents.replaceChildren(loadFailedBox(error));
+  current.tokens.replaceChildren(loadFailedBox(error));
 }
 
 export function renderDeviceAgents(agents: readonly DesktopAgent[]): void {
@@ -210,10 +233,83 @@ export function renderDeviceTokens(tokens: readonly BridgeToken[]): void {
   target.replaceChildren(fragment);
 }
 
+export function renderDeviceWaits(waits: readonly DeviceWait[]): void {
+  const target = waitsLane();
+  if (!target) return;
+  waitScope?.destroy();
+  const scope = createLifecycleScope();
+  waitScope = scope;
+
+  if (waits.length === 0) {
+    const empty = element('p', 'stg-empty', translate('devices.noWaits'));
+    empty.dataset.i18n = 'devices.noWaits';
+    target.replaceChildren(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const wait of waits) {
+    const id = String(wait.waitId ?? '');
+    const device = wait.device ?? {};
+    const row = element('div', 'stg-row devices-wait-row');
+    row.dataset.waitId = id;
+    const label = element('span', 'devices-wait-label');
+    label.append(
+      element('span', 'devices-wait-device',
+        String(device.name || device.selector || device.agentId || '')),
+      element('span', 'stg-dim', [
+        formatCreatedAt(wait.createdAt ? wait.createdAt / 1000 : undefined),
+        String(wait.conversationId ?? ''),
+      ].join(' · ')),
+      element('span', 'devices-wait-reason', String(wait.reason ?? '')),
+    );
+    const cancel = createButton({
+      label: translate('devices.waitCancel'), variant: 'secondary', size: 'sm',
+    });
+    cancel.classList.add('devices-wait-cancel-btn');
+    cancel.dataset.waitId = id;
+    scope.listen(cancel, 'click', () => devicesCancelWait(id, cancel));
+    row.append(label, cancel);
+    fragment.append(row);
+  }
+  target.replaceChildren(fragment);
+}
+
 export function destroyDevicesTab(): void {
   loadGeneration += 1;
   tokenScope?.destroy();
   tokenScope = null;
+  waitScope?.destroy();
+  waitScope = null;
+}
+
+/** Every pending wait: the server pages its pending index by device, so rows are
+ * collected across pages and shown in registration order. */
+async function populateDeviceWaits(generation: number): Promise<void> {
+  const target = waitsLane();
+  if (!target) return;
+  waitScope?.destroy();
+  waitScope = null;
+  target.replaceChildren(loadingLine());
+  const waits: DeviceWait[] = [];
+  let cursor = '';
+  try {
+    do {
+      const page = await desktopApi().deviceWaits(cursor);
+      if (generation !== loadGeneration) return;
+      if (!page) {
+        target.replaceChildren(loadFailedBox());
+        return;
+      }
+      waits.push(...(page.waits ?? []));
+      cursor = page.nextCursor ?? '';
+    } while (cursor);
+  } catch (error: unknown) {
+    if (generation !== loadGeneration) return;
+    target.replaceChildren(loadFailedBox(error));
+    return;
+  }
+  renderDeviceWaits(waits.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)));
 }
 
 export async function populateDevicesTab(): Promise<void> {
@@ -224,20 +320,22 @@ export async function populateDevicesTab(): Promise<void> {
   tokenScope = null;
   current.agents.replaceChildren(loadingLine());
   current.tokens.replaceChildren(loadingLine());
+  const waits = populateDeviceWaits(generation);
 
   try {
     const response = await desktopApi().devices();
-    if (generation !== loadGeneration) return;
-    if (!response) {
-      renderDevicesLoadFailed();
-      return;
+    if (generation === loadGeneration) {
+      if (response) {
+        renderDeviceAgents(response.agents ?? []);
+        renderDeviceTokens(response.tokens ?? []);
+      } else {
+        renderDevicesLoadFailed();
+      }
     }
-    renderDeviceAgents(response.agents ?? []);
-    renderDeviceTokens(response.tokens ?? []);
   } catch (error: unknown) {
-    if (generation !== loadGeneration) return;
-    renderDevicesLoadFailed(error);
+    if (generation === loadGeneration) renderDevicesLoadFailed(error);
   }
+  await waits;
 }
 
 export async function devicesRevokeToken(
@@ -253,6 +351,22 @@ export async function devicesRevokeToken(
   } catch {
     if (button?.isConnected) button.disabled = false;
     globals().showToast?.(translate('devices.revokeFailed'));
+  }
+}
+
+export async function devicesCancelWait(
+  waitId: string | null,
+  button: HTMLButtonElement | null = null,
+): Promise<void> {
+  if (!waitId) return;
+  if (button) button.disabled = true;
+  try {
+    await desktopApi().cancelDeviceWait(waitId);
+    await populateDevicesTab();
+    globals().showToast?.(translate('devices.waitCancelled'));
+  } catch {
+    if (button?.isConnected) button.disabled = false;
+    globals().showToast?.(translate('devices.waitCancelFailed'));
   }
 }
 

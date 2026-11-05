@@ -92,8 +92,8 @@ checkpoint publications resume this certified state and scan only the terminal a
 the settled terminal and compare its full authority witness, including model
 revision and attempt identity. They materialize every selected Turn and preserve
 public proof bytes, coverage, pagination, media eligibility and output bounds.
-The certificate does not change the 10,000-header support limit. Full output
-reconstruction remains proportional to the selected output.
+Full output reconstruction remains proportional to the selected output; lane
+length has no support limit (see the streamed proof walk below).
 
 Every compact-header publication crosses `put_lane_compaction_index`. When a
 header below the certificate's anchor ordinal changes its v2-protected fields,
@@ -154,6 +154,105 @@ production rollout is gated on the independent public-interface differential
 and progression matrix; the logical work figures alone do not establish a
 latency or complete Harness improvement.
 
+## Streamed proof walks without a Turn ceiling
+
+Problem: proofs, certificates and client paging stopped at 10,000 main-lane
+Turns ([Router R6](ROUTER.md)). The native header scan collected every header
+in memory, answered `supported: false` beyond `MAX_LIST_ROWS` and failed after
+`MAX_SCAN_PAGES` pages; the certificate codec and both `encode_projection`
+implementations refused counts of 10,000 or more; the SQL authority fetched at
+most `MAX_CONTEXT_HEADERS + 1` rows; `ModelContinuationStore` refused to page
+past 10,000 Turns. A lane that crossed the ceiling could neither restore nor
+publish a checkpoint, so every later Turn rebuilt cold history exactly when
+history was largest.
+
+Decision: the proof walk is a stream, not a list. Native `HeaderWalk` holds
+one engine index page (`INDEX_PAGE_ROWS`) and has no page-count cap; the SQL
+authority reads the same headers as keyset statements of that row count. Both
+feed every header into SHA-256 and retain only the response page:
+
+- The checkpoint anchor (its proof count) decides coverage when the walk
+  reaches it; covered history is never materialized.
+- Uncovered history is paged as it streams by when coverage is known up front
+  (replay disabled, no v2 checkpoint) or once the anchor is proven.
+- Only a refuted anchor (`history_changed`, `terminal_changed`,
+  `checkpoint_not_before_target`) leaves the lane head uncovered after the walk
+  passed it. The page is then walked again from the lane head or just after the
+  caller's cursor and stops when full: at most the page's compact headers.
+- Certified suffixes still walk only their terminal and new headers, and
+  advancing certification resumes from any previous count.
+- `historyProof.count`, `covered` and the certificate count are plain
+  counters. The certificate stores a u64 checked structurally, `count <=
+  ordinal` (the headers before a terminal hold distinct lower ordinals); public
+  proof counts are bounded only by exact JSON integers, 2^53-1 (RFC 7493).
+- `MAX_TURN_WITNESSES` bounds only legacy per-Turn witness lists; a proof
+  checkpoint carries exactly one terminal witness.
+- Client paging needs no Turn cap: every page must add unseen Turns under one
+  unchanged proof, so the fixed selected suffix ends paging, and any repeated
+  Turn restarts assembly.
+- Per-response bytes stay bounded by the Turn response ceiling and
+  `nextTurnId` paging; that wire bound is unchanged.
+
+The epoch fence and `before_header_write` invalidation are unchanged: a
+certificate still never authorizes skipping a mutated prefix, and the first
+read after every reopen is a full streamed walk.
+
+Alternatives considered: raising the ceilings postpones the same cliff while
+the resident header list grows with history; a Merkle or segment proof would
+change the public v2 contract and its SQL reference; trusting a cold walk's
+result across reopen would accept state minted by a possibly older writer,
+which the epoch fence exists to refuse; retaining all headers before a refuted
+anchor to avoid the page re-walk would restore O(history) memory for the rare
+stale-checkpoint read; the client Turn cap only guarded against non-advancing
+cursors, which the unseen-Turn rule now enforces structurally.
+
+Costs: a cold read (first read after reopen, replay disabled, stale
+checkpoint) visits every header once, O(history) time in O(page) memory;
+certified reads and advancing saves stay O(suffix). Each page of a multi-page
+uncovered read re-proves the prefix, so paging N uncovered Turns in P pages
+walks N·P headers. No worker, cache, persisted record, setting or new tuning
+constant is added; the certificate keeps its size.
+
+Measured 2026-11-01 with `benchmarks/tofudb_context_read.py`, which now also
+times `reopened_continuation`: replay reads after `restart_cycle`, when the
+new epoch declines the certificate and each read proves the anchor with one
+full walk. Fixture: 512-byte escaped evidence per Turn, authority on tmpfs
+(`/dev/shm`, so fixture appends pay no device barrier), embedded strict native
+and the WAL/FULL SQLite Sidecar, Python 3.12.13, 91-CPU shared host at load
+average 14–22 with other agents running. Each row pools two fresh processes
+with 20 timed reads per workload, ordered old/new/SQLite/SQLite/new/old at
+8,000 Turns and new/SQLite/SQLite/new at 20,000; all 600 timed responses and
+150 untimed warm-up reads matched exact content and independently recomputed
+proofs. P50 milliseconds
+(P99 in parentheses):
+
+| History + 2 appended | Read | Old native | New native | SQLite Sidecar |
+|---|---|---:|---:|---:|
+| 8,000 | Full rebuild (8,002 Turns returned) | 279.4 (692.4) | 269.9 (454.6) | 778.3 (839.8) |
+| 8,000 | Certified two-Turn continuation | 0.178 (0.217) | 0.179 (0.227) | 54.5 (75.9) |
+| 8,000 | Reopened-epoch continuation | 20.8 (39.0) | 16.6 (17.5) | 54.9 (72.6) |
+| 20,000 | Full rebuild (20,002 Turns returned) | `supported: false` | 667.0 (710.3) | 2,034 (2,325) |
+| 20,000 | Certified two-Turn continuation | `supported: false` | 0.163 (0.179) | 150.0 (206.1) |
+| 20,000 | Reopened-epoch continuation | `supported: false` | 42.2 (47.2) | 131.7 (146.7) |
+
+The certified continuation is flat in history length; the reopened walk costs
+about 2.1 µs per header natively, and the first read after reopen (cold engine
+caches) took 286 and 71 ms in the two 20,000-Turn processes. Below the old
+ceiling the streamed walk did not regress the collected one. SQL continuation
+reads always walk every header because the SQL authority has no certificate.
+Caller RSS high-water (about 1.35 GiB at 20,000 Turns) is dominated by the
+decoded 20,002-Turn rebuild responses and is not a walk-memory measurement;
+walk memory is bounded structurally by one index page plus the response page.
+These are storage-operation clocks, not task-speed claims. Engine sources:
+old `13c5ce98624bd53283d3357bcce3d236f00b69dade10d8f7073649737eb20061`, new
+`68d92742a2fd1e644c0be14a09f415a0f45e6777df5ccd6aa1a9c4deb49bcb27`. Reproduce:
+
+```sh
+python3 benchmarks/tofudb_context_read.py --engine tofudb \
+  --binary /pinned/build/tofu-db --directory /dev/shm/context --history 20000 \
+  --payload-bytes 512 --pattern escaped --count 20 --output /scratch/native.json
+```
+
 ## Verification and reproduction
 
 - `response_json::tests` compares byte lengths, floats, Unicode, reserved
@@ -164,6 +263,13 @@ latency or complete Harness improvement.
   terminal witnesses, continuation invalidation and reopen on real authorities.
 - `tests/tofudb/test_context_read_measure.py` rejects wrong content, incomplete
   pages, changed coverage and invalid proof evidence in measurement results.
+- `packages/tofu-db/src/turn/model_context/tests.rs` crosses the former ceiling
+  with a 10,050-Turn lane (certification, certified suffix, reopened cold read,
+  recertification, old-header edit) and checks cursor selection on certified,
+  anchored, stale-anchor and uncovered paths with exact header-walk counts.
+- `tests/storage/test_model_context_long_history.py` does the same on the SQL
+  authority, proves the keyset page size never changes a response, and pages
+  client assemblies past 10,000 Turns.
 
 Run fresh processes in old/native/SQLite/SQLite/native/old order, using matching
 release executable/library pairs and the same fixture and measurement script:

@@ -164,6 +164,52 @@ def test_cumulative_projection_is_updated_inside_the_emit_ordering_boundary():
     ]
 
 
+def test_background_flush_waits_for_the_task_event_order_without_blocking_provider_text():
+    import time
+    from lib.tasks_pkg.event_delivery import DeliveryLane
+    task = _stream_task()
+    lane = task['_eventDeliveryLane'] = DeliveryLane(task)
+    emitted = []
+
+    def append_event(_task, event):
+        # The production append sequences each task event under this lock.
+        with lane.producer_lock:
+            emitted.append(event.get('content') or '')
+
+    coalescer = TaskTextDeltaCoalescer(task, append_event, on_first_delta=lambda: None,
+        on_after_delta=lambda: None, delay_s=.01, max_chars=1 << 20)
+    holding, release, provided = threading.Event(), threading.Event(), threading.Event()
+
+    def concurrent_barrier():
+        with lane.producer_lock:
+            holding.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=concurrent_barrier)
+    provider = threading.Thread(target=lambda: (
+        coalescer.on_content('b'), coalescer.on_content('c'), provided.set()))
+    try:
+        coalescer.on_content('lead')
+        holder.start()
+        assert holding.wait(2)
+        coalescer.on_content('a')
+        # The trailing window is now due; its flush must wait for the order.
+        time.sleep(.05)
+        provider.start()
+        assert provided.wait(1), 'provider text waited behind a background emit'
+        assert emitted == ['lead']
+        release.set()
+        holder.join(2)
+        provider.join(2)
+        coalescer.flush()
+    finally:
+        release.set()
+        coalescer.close()
+    assert ''.join(emitted) == 'leadabc'
+    assert task['content'] == 'leadabc'
+    assert coalescer.stats['pending_chars'] == coalescer.stats['worker_alive'] == 0
+
+
 def test_resource_budget_bounds_buffer_worker_and_burst_event_count():
     emitted = []
     coalescer = BoundedTextDeltaCoalescer(

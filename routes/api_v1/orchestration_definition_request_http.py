@@ -5,6 +5,7 @@ from __future__ import annotations
 from quart import request
 
 from lib.api_response import api_bad_request
+from lib.error_envelope import BadRequest
 from lib.orchestration.application_provider_ports import DefinitionResolver
 from lib.orchestration.application_result_ports import ResolvedDefinitionPort
 from lib.orchestration.definition_selection_contract import (
@@ -34,7 +35,7 @@ def definition_precondition():
             parse_definition_write_precondition(
                 request.headers.get(header)),
         )
-    except ValueError as error:
+    except BadRequest as error:
         return OrchestrationHttpPreparation.reject(
             api_bad_request(str(error), field=header))
 

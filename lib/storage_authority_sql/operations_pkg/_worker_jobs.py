@@ -314,6 +314,46 @@ def _worker_job_claim_next(session: Session, payload: Mapping[str, Any]) -> Any:
     return _job_document(claimed)
 
 
+def _worker_job_claim_horizon(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Read-only answer to: when can ``worker_job.claim_next`` claim these kinds?
+
+    ``claimableInMs`` is 0 when a claim would succeed now, the delay until the
+    earliest queued/suspended availability or current-epoch lease expiry by
+    the same authority clocks, or None when no such job exists. It reuses the
+    claim's indexed probes without row locks, so an empty answer never enters
+    the writer; ``claim_next`` re-validates everything it claims.
+    """
+    _, kinds = _claim_kind_filter(payload)
+    epoch, now_ms, utc_now_ms = _lease_authority(session)
+    delays = []
+    for kind in kinds:
+        for relation in ('<', '>'):
+            if session.fetch_one(
+                "SELECT task_id FROM storage_worker_jobs WHERE status='running' "
+                f'AND task_kind=? AND lease_authority_epoch {relation} ? LIMIT 1',
+                (kind, epoch),
+            ) is not None:
+                return {'claimableInMs': 0}
+        lease = session.fetch_one(
+            'SELECT lease_deadline_ms FROM storage_worker_jobs '
+            "WHERE status='running' AND task_kind=? AND lease_authority_epoch=? "
+            'ORDER BY lease_deadline_ms LIMIT 1',
+            (kind, epoch),
+        )
+        if lease is not None:
+            delays.append(max(0, int(lease['lease_deadline_ms']) - now_ms))
+    for status in ('queued', 'suspended'):
+        queued = session.fetch_one(
+            'SELECT available_at_ms FROM storage_worker_jobs WHERE status=? '
+            f"AND task_kind IN ({', '.join('?' for _ in kinds)}) "
+            'ORDER BY available_at_ms LIMIT 1',
+            (status, *kinds),
+        )
+        if queued is not None:
+            delays.append(max(0, int(queued['available_at_ms']) - utc_now_ms))
+    return {'claimableInMs': min(delays) if delays else None}
+
+
 def _worker_job_defer(session: Session, payload: Mapping[str, Any]) -> Any:
     """Release a proved claim into indexed durable nonterminal waiting.
 
@@ -574,6 +614,7 @@ def _worker_job_complete(session: Session, payload: Mapping[str, Any]) -> Any:
 __all__ = [
     "_MAX_JOB_PAYLOAD_BYTES",
     "_WORKER_JOB_COLUMNS",
+    "_worker_job_claim_horizon",
     "_worker_job_claim_next",
     "_worker_job_claim_state",
     "_worker_job_complete",

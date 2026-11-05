@@ -38,6 +38,8 @@ SCOPES = (
             "lib/identity.py",
             "lib/process_roles.py",
             "lib/storage/connection_probe.py",
+            "lib/storage_authority_sql/config.py",
+            "lib/storage_authority_sql/migrate.py",
         ),
     ),
 )

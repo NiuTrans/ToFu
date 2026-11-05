@@ -2,6 +2,7 @@
  * Synthetic metadata remains primary; no stats are derived from code/results.
  * Parsing is bounded and call-local. Durable records are never changed.
  */
+import { isActiveToolStatus } from './tool-execution-groups';
 import { resolveToolResultText } from './tool-result-surfaces';
 
 type Row = Readonly<Record<string, unknown>>;
@@ -33,7 +34,7 @@ export function normalizeProgramPresentation(value: unknown): Row {
   }
   return { ...row, programCode: typeof source === 'string' ? source : '',
     programResult: result, programStats: undefined,
-    programStatus: row.status === 'searching' ? 'running'
+    programStatus: isActiveToolStatus(row.status) ? 'running'
       : row.status === 'error' || row.status === 'failed' ? 'error'
         : row.status === 'done' ? 'returned' : 'incomplete',
     _programGatewayPresentation: true, _programResultComplete: complete,

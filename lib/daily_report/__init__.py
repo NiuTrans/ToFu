@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from importlib import import_module
+from typing import Any
 
 __all__ = [
     '_REPORTS_DIR', '_active_jobs', '_jobs_lock',
@@ -92,7 +93,7 @@ _CHILD_MODULES = {
 }
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     module_name = _EXPORT_MODULES.get(name)
     if module_name is None and name in _CHILD_MODULES:
         module_name = f'lib.daily_report.{name}'

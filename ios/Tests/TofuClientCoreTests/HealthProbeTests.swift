@@ -23,7 +23,8 @@ final class HealthProbeTests: XCTestCase {
         let outcome = await probe.probe("junk")
         XCTAssertEqual(outcome.verdict, .unreachable)
         XCTAssertEqual(outcome.status, 0)
-        XCTAssertEqual(await http.requests.count, 0)
+        let actual1 = await http.requests.count
+        XCTAssertEqual(actual1, 0)
     }
 
     /// The cookie is the whole point: behind the vscode proxy a cookie-less
@@ -43,7 +44,7 @@ final class HealthProbeTests: XCTestCase {
         XCTAssertEqual(requests.count, 1)
         XCTAssertEqual(requests[0].url, "https://h.example/proxy/15000/api/health")
         XCTAssertEqual(requests[0].headers["Cookie"], "code-server-session=abc")
-        XCTAssertTrue(requests[0].followRedirects)
+        XCTAssertFalse(requests[0].followRedirects)
     }
 
     func test_tofu_envelope_401_is_tofus_own_gate() async {

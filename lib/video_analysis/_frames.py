@@ -6,8 +6,9 @@ adds the moments uniform sampling misses — quick cuts, slide changes. The two
 are merged, deduped (±1s) and sorted by time. Uniform sampling grows with
 duration; nonredundant scene cuts have no count ceiling.
 
-Frames are scaled to ≤1568px long side and JPEG-encoded AT EXTRACTION (the
-``_CLAUDE_IMAGE_MAX_PX`` rationale: born cache-stable, never re-encoded later),
+Frames are scaled to ≤1568px long side and JPEG-encoded AT EXTRACTION (under
+every Claude image cap in ``lib.llm.body._images``: born cache-stable, never
+re-encoded later),
 then persisted into the SAME ``uploads/images`` store regular uploads use —
 so they ride the existing ``/api/images/`` serving + ``_validate_image_blocks``
 disk-resolution path unchanged, and survive conversation reload / resume /
@@ -152,9 +153,14 @@ def _merge_scene_extras(uniform_ts: list[float], cut_times: list[float]) -> list
     return picked
 
 
-def extract_frames(video_path: str, duration_s: float, scratch_dir: str) -> list[dict]:
-    """Extract duration-scaled uniform and all nonredundant scene frames."""
-    uniform_count = frame_target_for_duration(duration_s)
+def extract_frames(video_path: str, duration_s: float, scratch_dir: str, *,
+                   source_fps: float = 0.0) -> list[dict]:
+    """Extract duration-scaled uniform and all nonredundant scene frames.
+
+    ``source_fps`` (the probed frame rate) bounds the uniform layer by the
+    frames that exist, so short spans are not padded with duplicates.
+    """
+    uniform_count = frame_target_for_duration(duration_s, source_fps)
 
     ffmpeg = _ffmpeg()
     if not ffmpeg:

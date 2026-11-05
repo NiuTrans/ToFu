@@ -37,16 +37,15 @@ def _restore_data_root_after_test():
 
 
 def _fresh_marker_module(data_dir):
-    """Import lib.shutdown_marker with data_root pinned to a temp dir.
+    """Import a fresh lib.shutdown_marker whose files live in ``data_dir``.
 
-    runtime_paths resolves _BASE once at import, so we set TOFU_DATA_DIR and
-    reload both modules to bind the temp dir.
+    runtime_path_policy chooses the runtime base once per process, so neither
+    TOFU_DATA_DIR nor reloading runtime_paths can move it; pin the reloaded
+    module's data_root instead (the autouse fixture reloads it afterwards).
     """
-    os.environ['TOFU_DATA_DIR'] = data_dir
-    import lib.runtime.runtime_paths as rp
-    importlib.reload(rp)
     import lib.shutdown_marker as sm
     importlib.reload(sm)
+    sm.data_root = lambda: data_dir
     return sm
 
 
@@ -140,6 +139,29 @@ def test_report_and_arm_rearms_dirty():
         cls3 = sm.classify_previous_shutdown()
         assert cls3['verdict'] == sm.VERDICT_UNCLEAN, cls3
         print('OK report_and_arm re-arms dirty')
+
+
+def test_retried_boot_phase_keeps_the_first_previous_exit_verdict(caplog):
+    """A retried boot phase re-enters report_and_arm in the same live process.
+
+    The first call already re-armed the marker for THIS process, so a retry
+    must return the first verdict instead of reporting the live process as an
+    unclean previous exit, and must not record a second boot.
+    """
+    import logging
+
+    with tempfile.TemporaryDirectory() as d:
+        sm = _fresh_marker_module(d)
+        sm.arm()
+        sm.mark_clean('restart')
+        first = sm.report_and_arm()
+        boots = sm.read_json(sm._boots_path())
+        with caplog.at_level(logging.ERROR, logger='lib.shutdown_marker'):
+            retried = sm.report_and_arm()
+        assert first['verdict'] == sm.VERDICT_CLEAN
+        assert retried == first
+        assert not [r for r in caplog.records if 'UNCLEAN' in r.getMessage()]
+        assert sm.read_json(sm._boots_path()) == boots
 
 
 def test_corrupt_marker_treated_as_unclean():

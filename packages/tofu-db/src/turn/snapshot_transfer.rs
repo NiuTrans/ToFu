@@ -69,8 +69,7 @@ impl TransferState {
                 }
                 let mut bytes = Vec::new();
                 bytes.try_reserve_exact(size).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::OutOfMemory,
+                    crate::resource_exhaustion::reservation_failure(
                         "Turn transfer allocation refused",
                     )
                 })?;

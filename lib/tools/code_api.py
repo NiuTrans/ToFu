@@ -15,7 +15,11 @@ import re
 from urllib.parse import unquote
 
 
-MAX_CODE_API_TOKENS = 1200
+# Inline documentation target, not a schema limit: a complete API larger than
+# this switches to on-demand discovery, whose index lists only the entries that
+# fit. Fixed action text above it still compiles discovery with an empty index;
+# additive exposure would carry that same text plus every direct schema.
+CODE_API_INLINE_TARGET_TOKENS = 1200
 MAX_CODE_API_BYTES = 32768
 MAX_CODE_API_METHODS = 64
 MAX_CODE_API_INDEX_SUMMARY_CHARS = 120
@@ -193,7 +197,7 @@ def _compile_complete_code_api_action(catalog, action, *, count_tokens, excluded
         result = copy.deepcopy(action)
         result['function']['description'] += '\n' + documentation
         tokens = count_tokens([result])
-        if tokens > MAX_CODE_API_TOKENS:
+        if tokens > CODE_API_INLINE_TARGET_TOKENS:
             return None, {'reason': 'code_api_token_bound', 'projectedTokens': tokens}
         return result, {'reason': 'code_api_compiled', 'schemaTokens': tokens,
                         'methodNames': sorted(seen), 'schemaGroupCount': len(groups),
@@ -275,14 +279,11 @@ def compile_code_api_action(catalog, action, *, count_tokens, excluded_names,
                 ','.join(entries[:count]) + ']')
             return count_tokens([result])
 
-        tokens = render_index(0)
-        if tokens > MAX_CODE_API_TOKENS:
-            return None, {'reason': 'code_api_token_bound', 'projectedTokens': tokens}
         # Tokenize logarithmically rather than once for every catalog member.
         lower, upper = 0, len(entries)
         while lower < upper:
             middle = (lower + upper + 1) // 2
-            if render_index(middle) <= MAX_CODE_API_TOKENS:
+            if render_index(middle) <= CODE_API_INLINE_TARGET_TOKENS:
                 lower = middle
             else:
                 upper = middle - 1

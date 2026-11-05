@@ -13,8 +13,10 @@
 export interface TurnInlineEditorSubmit {
   readonly text: string;
   readonly resend: boolean;
-  /** Projection-ready entries for images pasted during the session; the
-   * caller appends them to the turn's images when it commits the edit. */
+  /** The turn's images AFTER this edit, in display order: entries kept from
+   * the submitted message plus anything pasted during the session. The
+   * caller REPLACES the projection's images with it — a submitted image is
+   * editable/removable, so appending would make removal impossible. */
   readonly images: ReadonlyArray<Record<string, unknown>>;
 }
 
@@ -33,6 +35,10 @@ export interface TurnInlineEditorOptions {
   readonly allowEmpty?: boolean;
   /** Human turns followed by a generated turn expose Save & Resend. */
   readonly canResend?: boolean;
+  /** Images already submitted with this turn. They seed the attachment strip
+   * so the editor shows (and can drop) the original attachments instead of
+   * hiding them behind the replaced blocks. */
+  readonly existingImages?: ReadonlyArray<TurnInlineEditorImage>;
   /** Paste-to-attach port: compress + upload one clipboard image. Resolves
    * to the projection entry and chip preview, or null to drop the chip
    * (the caller has already reported the failure). */
@@ -454,7 +460,12 @@ export function openTurnInlineEditor(
     saveButton: null as unknown as HTMLButtonElement,
     resendButton: null as unknown as HTMLButtonElement,
     cancelButton: null as unknown as HTMLButtonElement,
-    images: [],
+    images: (options.existingImages ?? []).map((image) => ({
+      payload: image.payload,
+      preview: image.preview,
+      processing: false,
+      objectUrl: null,
+    })),
     hadFocus: false,
     busy: false,
     closed: false,
@@ -462,6 +473,10 @@ export function openTurnInlineEditor(
     selectionEnd: options.text.length,
   };
   buildEditorDom(record, turnNode.ownerDocument);
+  /* Seeding happens after the DOM exists so the strip renders the images the
+   * submitted message already carries — otherwise entering edit mode hides
+   * them behind the replaced blocks and they can neither be seen nor dropped. */
+  rebuildAttachmentStrip(record);
   activeEditors.set(options.turnId, record);
   if (!positionHost(record, turnNode)) {
     activeEditors.delete(options.turnId);

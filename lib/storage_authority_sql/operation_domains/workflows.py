@@ -50,9 +50,17 @@ OPERATIONS = {
     'swarm.session.delete': ops.OperationSpec(
         'command', True, ops._swarm_session_delete),
     'swarm.agent.save': ops.OperationSpec('command', True, ops._swarm_agent_save),
+    'swarm.agent.append': ops.OperationSpec('command', True, ops._swarm_agent_append),
+    'swarm.agent.checkpoint.mark': ops.OperationSpec(
+        'command', True, ops._swarm_agent_checkpoint_mark),
     'swarm.agents.mark_delivered': ops.OperationSpec(
         'command', True, ops._swarm_agents_mark_delivered),
+    'swarm.agents.acknowledge_results': ops.OperationSpec(
+        'command', True, ops._swarm_agents_acknowledge_results),
     'swarm.session.get': ops.OperationSpec('query', False, ops._swarm_session_get),
+    'swarm.agents.page': ops.OperationSpec('query', False, ops._swarm_agents_page),
+    'swarm.agent.state.get': ops.OperationSpec(
+        'query', False, ops._swarm_agent_state_get),
     'swarm.resumable.list': ops.OperationSpec(
         'query', False, ops._swarm_resumable_list),
 }

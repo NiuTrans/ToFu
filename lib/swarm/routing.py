@@ -14,9 +14,12 @@ This module also owns the read-only tool filter shared by local Swarm workers
 and native multi-agent dispatch enforcement.  Request handlers remain the
 execution authority; wire projection is guidance only.
 
+It also defines the leaf worker (:func:`is_leaf_worker`) whose ``poll`` and
+``kill`` reach only the background commands it started.
+
 Entry points: :func:`resolve_multi_agent_backend`,
-:func:`project_multi_agent_wire_tools`, and
-:func:`read_only_swarm_tools`.
+:func:`project_multi_agent_wire_tools`, :func:`read_only_swarm_tools` and
+:func:`is_leaf_worker`.
 """
 
 from __future__ import annotations
@@ -36,8 +39,10 @@ SPAWN_AGENTS_NAME = 'spawn_agents'
 READ_ONLY_AGENT_EXTRA_BAN = frozenset({
     'ask_human', 'spawn_agents', 'manage_agents', 'await_agents', 'get_agent_result',
     'await_task', 'set_approval_delegate',
-    # poll can wait on another orchestration lane (same deadlock class as
-    # await_task); kill is control-plane authority over sibling work.
+    # A read-only leaf holds no run_command, so it owns no command handle to
+    # poll or kill. A provider-native subagent executes inside the root task,
+    # where the own-command scope of is_leaf_worker cannot tell it from the
+    # root; poll there could wait on another lane and deadlock the root.
     'poll', 'kill',
 })
 
@@ -56,6 +61,20 @@ def catalog_has_spawn_agents(catalog: Any) -> bool:
     """Whether *catalog* carries local Swarm execution authority."""
     return any(tool_schema_name(tool) == SPAWN_AGENTS_NAME
                for tool in (catalog or ()))
+
+
+def is_leaf_worker(task: dict[str, Any] | None, catalog: Any) -> bool:
+    """Whether *task* is a delegated run that cannot start agents of its own.
+
+    Such a worker's ``poll``/``kill`` reach only the ``bg_*`` commands it
+    started: waiting on or stopping another agent, task or command could
+    deadlock its coordinator. A root, or a delegated run whose executable
+    *catalog* still carries ``spawn_agents`` (a chat Goal worker), keeps
+    every owner-scoped handle for the agents it coordinates.
+    """
+    from lib.tasks_pkg.invocation import is_child_invocation
+    return (isinstance(task, dict) and is_child_invocation(task)
+            and not catalog_has_spawn_agents(catalog))
 
 
 def resolve_multi_agent_backend(
@@ -191,6 +210,7 @@ __all__ = [
     'READ_ONLY_AGENT_EXTRA_BAN',
     'SPAWN_AGENTS_NAME',
     'catalog_has_spawn_agents',
+    'is_leaf_worker',
     'project_multi_agent_wire_tools',
     'read_only_agent_banned_names',
     'read_only_swarm_tools',

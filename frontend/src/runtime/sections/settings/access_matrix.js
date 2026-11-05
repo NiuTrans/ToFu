@@ -2,7 +2,7 @@
 /* ═══════════════════════════════════════════════════════════════════
    settings/access matrix — per-(credential × wire id) capability grid.
 
-   Some gateways (e.g. Meituan AIGC) give each credential a *different*
+   Some gateways (e.g. YourProvider AIGC) give each credential a *different*
    quota and a *different* set of accessible models. The flat model list
    can't express that: the v2 authority stores the grant as
    ``credential.authorization.models`` (an allow-list of ModelRefs), which
@@ -21,7 +21,7 @@
    keys from the owner-scoped secret store — the browser never sees them —
    and sends a tiny request to EVERY (credential × wire id) pair, granted
    or not: discovering reachable pairs the allow-list does not grant yet
-   is the matrix's whole point on gateways like Meituan. Progress is
+   is the matrix's whole point on gateways like YourProvider. Progress is
    persisted server-side under data/config/probe_cache/, so closing
    Settings (or restarting the server) never loses it — the UI re-attaches
    by provider id and keeps polling. Only "Retest" (force) discards the
@@ -259,45 +259,9 @@ function _matrixCredentials(context) {
  *  legacy enabled:false inputs. All inherit the Offering and ModelRef grants.
  *  ``deploymentByWire`` maps ids to GLOBAL deployment indices for deletion.
  *  An offering without deployments has no request names. */
+// Shared read owner; this bridge retires with the retained probe handlers.
 function _matrixModelRows(context) {
-  var out = [];
-  if (!context) return out;
-  context.offerings.forEach(function(item) {
-    var offering = item.row;
-    var pending = offering.identity_state === 'pending_identity' || !offering.model;
-    var canonical = pending
-      ? String(offering.pending_model_id || offering.offering_id || '').trim()
-      : String(offering.model.model_id || '').trim();
-    if (!canonical) return;
-    var wireIds = [], deploymentByWire = {};
-    context.deployments.forEach(function(dep) {
-      if (dep.row.offering_id !== offering.offering_id) return;
-      var wire = String(dep.row.wire_model_id || '').trim();
-      if (!wire) return;
-      if (wireIds.indexOf(wire) < 0) {
-        wireIds.push(wire);
-        deploymentByWire[wire] = dep.index;
-      }
-    });
-    var modelKey = pending
-      ? '' : (String(offering.model.creator_id || '') + '::' + canonical);
-    out.push({
-      offering: offering,
-      offeringIndex: item.index,
-      canonical: canonical,
-      pending: pending,
-      retired: !pending && context.modelLifecycles[modelKey] === 'retired',
-      releaseDate: pending ? '' : (context.modelReleaseDates[modelKey] || ''),
-      pricing: pending ? null
-        : (offering.actual_pricing || context.modelListPricing[modelKey] || null),
-      catalogPrice: !pending && !offering.actual_pricing &&
-        !!context.modelListPricing[modelKey],
-      wireIds: wireIds,
-      deploymentByWire: deploymentByWire,
-      capabilities: (offering.capabilities || []).slice(),
-    });
-  });
-  return out;
+  return providerSupplyRows(context);
 }
 
 /** Exclusive-bucket status filter + substring match over every id the
@@ -417,8 +381,8 @@ function _mxMetaHtml(entry) {
 /** Build the full access-matrix table for a provider — the provider's
  *  always-on model-supply manager: search + status buckets + add-model on
  *  the manage row, probe tools on the second toolbar row. */
-function _renderAccessMatrix(providerId) {
-  var context = _modelRoutingProviderContext(providerId);
+function _renderAccessMatrix(providerId, context) {
+  context = context || _modelRoutingProviderContext(providerId);
   if (!context) return '';
   var credentials = _matrixCredentials(context);
   var allRows = _matrixModelRows(context);

@@ -205,6 +205,42 @@ def test_circuit_cooldown_expiry(monkeypatch):
     assert cb.is_open("DDG") is False
 
 
+def test_last_call_failed_tracks_the_most_recent_outcome():
+    cb = _EngineCircuit()
+    assert cb.last_call_failed("Bing") is False
+    cb.record_failure("Bing")  # one failure: not tripped, but a probe next time
+    assert cb.is_open("Bing") is False and cb.last_call_failed("Bing") is True
+    cb.record_success("Bing")
+    assert cb.last_call_failed("Bing") is False
+
+
+def test_cooled_down_circuit_is_half_open_and_one_failed_probe_reopens(monkeypatch):
+    cb = _EngineCircuit()
+    for _ in range(cb.FAIL_THRESHOLD):
+        cb.record_failure("Marginalia")
+    assert cb.is_open("Marginalia") is True  # still cooling down
+    real_time = common.time.time()
+    monkeypatch.setattr(common.time, "time", lambda: real_time + cb.COOLDOWN + 1)
+    assert cb.is_open("Marginalia") is False
+    assert cb.last_call_failed("Marginalia") is True
+
+    cb.record_failure("Marginalia")  # a single failed recovery probe
+    assert cb.is_open("Marginalia") is True
+
+
+def test_successful_recovery_probe_closes_circuit(monkeypatch):
+    cb = _EngineCircuit()
+    for _ in range(cb.FAIL_THRESHOLD):
+        cb.record_failure("Brave")
+    real_time = common.time.time()
+    monkeypatch.setattr(common.time, "time", lambda: real_time + cb.COOLDOWN + 1)
+    cb.record_success("Brave")
+    assert cb.is_open("Brave") is False
+    assert cb.last_call_failed("Brave") is False
+    cb.record_failure("Brave")  # a fresh failure run needs the full threshold
+    assert cb.is_open("Brave") is False
+
+
 # ── http_search_get envelope ──
 
 @pytest.fixture(autouse=True)

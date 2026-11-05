@@ -23,12 +23,64 @@ records `unknown`; refused entry records `not_started` in the surviving process.
 acknowledgement can leave `entered` on disk even when this executor never entered. The restored interface
 preserves that uncertainty. Tool verdict, Turn completion, and effect outcome remain independent.
 
+A pre-execution admission refusal is a known no-effect outcome, never an unknown one.
+`run_command.CommandAdmissionRefusal` (a `ValueError`, so existing callers keep working) is raised while
+acquiring runtime-setup admission, before the command or any dependency preparation body runs (model tool
+calls take no workspace lease since 2026-10-28, so command write-scope refusals no longer exist; see
+[`GIT_WORKSPACE_GUARD.md`](../runbooks/GIT_WORKSPACE_GUARD.md)). The effect boundary corrects the optimistic `entered` record to `not_started` when this typed
+refusal surfaces, so the occurrence settles as the refusal itself (`tool_execution_failed` carrying the
+`Error [workspace-*]: ... command was not started` text) instead of a false `tool_effect_unknown` that would
+imply a possible external side effect. Only a still-`entered`/`unknown` record is corrected; a `returned`
+record already proves the handler finished. An untyped `ValueError` from inside the handler retains `unknown`,
+since it may follow real writes.
+Verify `tests/tasks_pkg/test_tool_admission_refusal_effect.py`,
+`test_pre_execution_admission_refusal_is_typed` and the command-admission refusal suites.
+
+Problem: dependency setup timed out behind a tree writer before a Git inspection could start, but the common
+executor reported a possible write. Decision: only lease **entry** refusals carry that no-effect proof;
+exceptions after setup entry, including admission failure on a later repository after earlier setup, retain
+uncertainty. `CommandAdmissionCancelled` additionally preserves owner Stop through the shared cancellation
+predicate. Alternatives rejected: classifying every `WorkspaceBusyError` as no-effect loses partial setup
+writes; matching diagnostic text cannot establish entry. Verify `test_runtime_preparation_outcome.py`.
+
+Problem: Git read preparation refused a `git worktree remove` before the shell started, but scope
+resolution signals refusal with an untyped `ValueError`, so the call settled as `tool_effect_unknown`
+and its card read "Operation outcome unknown" although nothing had run (2026-11-01). Decision: every
+refusal raised before `prepare_git_inspections` yields the command (scope resolution or private-index
+preparation) becomes `CommandAdmissionRefusal` with the `Error [git-inspection-preparation]: … Command
+was not started.` text and settles `not_started`. Exceptions after the yield keep their own type and
+effect. Alternatives rejected: returning the refusal as command output settled a refused call as
+completed; classifying every handler `ValueError` as no-effect loses real writes. Verify
+`test_git_inspection_execution.py`.
+
+Handler presentation is not an effect verdict. `_publish_tool_round` writes the round's results and status
+before emitting its `tool_result` frame, so a lane that stopped admitting frames (Stop, server shutdown)
+loses only that display: `EventDeliveryError` at that seam is logged and swallowed, the handler returns its
+real output and the effect stays `returned`. The pipeline's `tool_complete` emission was already non-fatal.
+Problem: during shutdown a finished `run_command` had already stamped its real result when the refused frame
+escaped as an untyped `EventDeliveryCancelled`, which rewrote the occurrence as `tool_effect_unknown` and
+replaced the command's output in the model replay. Decision: presentation delivery cannot demote a captured
+result to an unknown effect; `EventDeliveryRevoked` still propagates because a revoked lane must not keep
+writing. Alternatives rejected: classifying every delivery cancellation as `not_started` is false for a
+command that ran; settling `unknown` keeps telling the user the harness lost an outcome it already had.
+Verify `tests/tasks_pkg/test_tool_outcome_finality.py::test_refused_presentation_frame_keeps_the_returned_outcome`.
+
 Unknown non-idempotent results carry a canonical non-retryable `tool_effect_unknown` error directing the
 caller to query the destination. Tool/program cards show the warning without opening results; a terminal Turn
 with only an `entered` record gets the same warning. Old rounds without effect metadata retain their existing
 presentation. Current operation IDs identify occurrences; they are not yet provider idempotency keys or
 cross-attempt replay receipts. This boundary adds no automatic retry or exactly-once promise. The tracked
 local file adapter below supplies outcome inspection. Every subsequent execution still uses ordinary approval.
+
+Tool-card badges and collapsed failure summaries use the same effect projection: known non-entry reads
+“Not started”; an uncertain effect reads “Operation outcome unknown” once, in the header chip. The chip
+carries `data-tool-effect-outcome="unknown"`; when the mounted header carries it, the effect notice shows only
+the recovery guidance instead of repeating the same heading, and the summary adds no third copy. Cards whose
+header renders no chip keep the full notice. Raw diagnostics stay in the expandable result, including on
+deferred/reloaded cards, and the evidence disclosure stays collapsed. The UI never rewrites old effect records
+or infers non-entry from error prose. Alternatives rejected: a generic failed badge contradicts uncertainty;
+hiding the warning loses recovery evidence; dropping the chip entirely would leave headers without a mounted
+notice with no outcome. Verify tool-header/result/effect presentation and the tool-effect browser journeys.
 
 Problem: declared deadlines and pool collection timeouts replaced recovery evidence with unclassified prose.
 Decision: handler `TimeoutError`, declared deadlines and pool deadlines use the same effect-aware error
@@ -64,6 +116,34 @@ errors. Alternatives rejected: keyword matching cannot prove a network failure o
 safe replay; terminating useful work on every tool error loses completed siblings.
 Verify `test_tool_exception_recovery.py`, timeout/effect finality, collection gaps,
 and installed native parallel recovery across a subsequent provider round.
+
+Diagnostic text cannot replace the original exception type, effect evidence,
+cancellation or recovery classification. Unprintable exceptions use the shared
+safe formatter through handler and worker collection paths; bounded feedback
+explicitly marks unavailable text. See the diagnostic invariant in
+[DEFENSIVE_PATTERNS.md](../DEFENSIVE_PATTERNS.md#failure-diagnostics-cannot-replace-the-original-failure).
+
+Problem: typed storage pressure became a nonretryable generic tool failure,
+so repeated temporary outages could stop the root loop before recovery.
+Decision: this projection preserves a direct `StorageError`'s canonical code
+and reuses `TRANSIENT_STORAGE_CODES` from the backend-neutral storage contract.
+Transient recovery advice still requires agreement between the current and
+captured read-only/idempotent tool policies. A storage RPC's `retryable` flag,
+operation ID or nondispatch receipt cannot authorize replay of the whole tool.
+An outer terminal storage verdict wins over an older transient cause; arbitrary
+application wrappers, exception text and similarly named attributes grant no retry.
+Unknown writes retain `tool_effect_unknown`, their parent operation/inspection
+evidence and the storage code in diagnostics. For admitted recovery, normalized
+`retry_after_ms` becomes a millisecond wait hint in the existing `nextAction`.
+Recovery keeps the selected storage authority and original source identity.
+No new retry loop, sleep, pool, persistence or backend fallback is introduced;
+subsequent attempts reenter the ordinary gateway and authorization boundary.
+Alternatives rejected: using the RPC flag as tool authority can repeat earlier
+effects; treating every storage failure as permanent stops useful work; walking
+arbitrary causes can override the final storage verdict. Verify
+`test_tool_storage_recovery.py`, real root-loop continuation and terminal-error
+stopping in `test_tool_storage_continuity.py`, Artifact query recovery, and
+installed native parallel recovery with successful siblings retained.
 
 Problem: the shared HTTP clients preserve HTTPX/Requests exceptions, which do not
 inherit Python's built-in `ConnectionError` or `TimeoutError`. Decision: this same

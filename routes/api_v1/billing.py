@@ -43,6 +43,7 @@ from lib.billing import (
     list_redeem_codes, mint_redeem_codes, redeem_code,
 )
 from lib.billing.users import get_user
+from lib.error_envelope import BadRequest
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta, media_responses
@@ -219,8 +220,8 @@ async def get_ledger_route():
     try:
         limit = max(1, min(int(request.args.get('limit') or 100), 500))
         offset = max(0, int(request.args.get('offset') or 0))
-    except (ValueError, TypeError):
-        return api_bad_request('limit/offset must be integers', field='limit')
+    except (ValueError, TypeError) as exc:
+        raise BadRequest('limit/offset must be integers', field='limit') from exc
     kinds_raw = request.args.get('kinds') or ''
     kinds = [k.strip() for k in kinds_raw.split(',') if k.strip()] or None
     entries = list_entries(user_id, limit=limit, offset=offset, kinds=kinds)
@@ -416,8 +417,8 @@ async def list_codes_route():
     try:
         limit = max(1, min(int(request.args.get('limit') or 100), 1000))
         offset = max(0, int(request.args.get('offset') or 0))
-    except (ValueError, TypeError):
-        return api_bad_request('limit/offset must be integers', field='limit')
+    except (ValueError, TypeError) as exc:
+        raise BadRequest('limit/offset must be integers', field='limit') from exc
     rows = await asyncio.to_thread(
         list_redeem_codes,
         batch=batch,
@@ -486,6 +487,8 @@ async def alipay_notify_route():
     from lib.billing.payments import handle_alipay_notify
     from quart import Response as _Resp
     submitted = await request.form
+    if any(len(submitted.getlist(key)) != 1 for key in submitted):
+        return _Resp('fail', status=400, content_type='text/plain; charset=utf-8')
     form = {k: submitted.get(k, '') for k in submitted.keys()}
     status, text = handle_alipay_notify(form)
     return _Resp(text, status=status, content_type='text/plain; charset=utf-8')
@@ -523,10 +526,10 @@ async def create_checkout_route():
         try:
             out_trade_no, url = create_alipay_order(
                 user_id=user_id,
-                amount_yuan=amount_minor / 100.0,
+                amount_yuan=f'{amount_minor // 100}.{amount_minor % 100:02d}',
                 notify_url=notify_url,
                 return_url=return_url)
-        except RuntimeError as e:
+        except BadRequest as e:
             return api_bad_request(str(e), error_kind='not_configured')
         return api_ok(provider='alipay', redirect_url=url,
                        out_trade_no=out_trade_no)
@@ -543,7 +546,7 @@ async def create_checkout_route():
                 currency=currency,
                 success_url=success_url,
                 cancel_url=cancel_url)
-        except RuntimeError as e:
+        except BadRequest as e:
             return api_bad_request(str(e), error_kind='stripe_checkout_failed')
         return api_ok(provider='stripe', redirect_url=url,
                        session_id=session_id)
@@ -565,8 +568,8 @@ async def list_payments_route():
     try:
         limit = max(1, min(int(request.args.get('limit') or 50), 500))
         offset = max(0, int(request.args.get('offset') or 0))
-    except (ValueError, TypeError):
-        return api_bad_request('limit/offset must be integers', field='limit')
+    except (ValueError, TypeError) as exc:
+        raise BadRequest('limit/offset must be integers', field='limit') from exc
     status = (request.args.get('status') or '').strip()
     rows = list_payments(user_id=user_id, status=status,
                           limit=limit, offset=offset)

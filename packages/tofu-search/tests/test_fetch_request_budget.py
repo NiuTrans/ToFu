@@ -6,6 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import copy_context
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib import import_module
+from types import SimpleNamespace
 
 import pytest
 import requests
@@ -232,15 +234,24 @@ def test_concurrent_requests_do_not_inherit_each_others_deadline():
         assert calls == ['/page', '/page']
 
 
-def delay_after_response_headers(monkeypatch):
-    """Pause the caller after receiving headers, before deciding on another hop."""
+def expire_after_response_headers(monkeypatch):
+    """Expire the request only after the real origin has returned its headers."""
     received = []
     original = urllib3.connectionpool.HTTPConnectionPool._make_request
+    clock = SimpleNamespace(elapsed=0)
+    scoped_time = SimpleNamespace(
+        time=lambda: time.time() + clock.elapsed,
+        monotonic=lambda: time.monotonic() + clock.elapsed,
+        sleep=time.sleep,
+    )
+    monkeypatch.setattr(fetch_http, 'time', scoped_time)
+    budget_module = import_module('tofu_search.fetch.request_budget')
+    monkeypatch.setattr(budget_module, 'time', scoped_time)
 
     def delayed(*args, **kwargs):
         response = original(*args, **kwargs)
         received.append(response)
-        time.sleep(0.08)
+        clock.elapsed += 31
         return response
 
     monkeypatch.setattr(urllib3.connectionpool.HTTPConnectionPool, '_make_request', delayed)
@@ -248,20 +259,20 @@ def delay_after_response_headers(monkeypatch):
 
 
 def test_budget_expiring_after_error_headers_keeps_status_and_closes_response(monkeypatch):
-    received = delay_after_response_headers(monkeypatch)
+    received = expire_after_response_headers(monkeypatch)
     with origin(lambda h, n: reply(h, 503)) as (url, calls):
         with pytest.raises(fetch_http.HttpError) as error:
-            fetch_http.do_request(url, 1, deadline_ts=time.time() + 0.05)
+            fetch_http.do_request(url, 5, deadline_ts=time.time() + 30)
         assert error.value.status_code == 503
         assert calls == ['/page']
         assert received[0].closed
 
 
 def test_redirect_cannot_restart_an_expired_request_budget(monkeypatch):
-    received = delay_after_response_headers(monkeypatch)
+    received = expire_after_response_headers(monkeypatch)
     with origin(lambda h, n: reply(h, 302, {'Location': '/next'})) as (url, calls):
         with pytest.raises(requests.Timeout):
-            fetch_http.do_request(url, 1, deadline_ts=time.time() + 0.05)
+            fetch_http.do_request(url, 5, deadline_ts=time.time() + 30)
         assert calls == ['/page']
         assert received[0].closed
 

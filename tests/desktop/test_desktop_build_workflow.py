@@ -1704,6 +1704,17 @@ def test_install_linux_script_contract():
     assert bash.returncode == 0, f'bash syntax check failed: {bash.stderr}'
 
 
+def _home_only_env(home):
+    """HOME selects the data directory; an inherited XDG_DATA_HOME would win.
+
+    Shells started by a running Tofu server export its own XDG_DATA_HOME, so
+    keeping it would install the menu entry and icon into that live directory.
+    """
+    env = dict(os.environ, HOME=str(home))
+    env.pop('XDG_DATA_HOME', None)
+    return env
+
+
 def test_install_linux_script_end_to_end(tmp_path):
     """Behaviour, not just contract: lay out a SIMULATED bundle (binary +
     icon + template + install.sh), run the script with HOME redirected to a
@@ -1729,7 +1740,7 @@ def test_install_linux_script_end_to_end(tmp_path):
     shutil.copy(_DESKTOP_ENTRY, bundle / 'tofu.desktop')
     shutil.copy(_INSTALL_LINUX, bundle / 'install.sh')
 
-    env = dict(os.environ, HOME=str(home))
+    env = _home_only_env(home)
     r = subprocess.run(['bash', str(bundle / 'install.sh')],
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0, f'install.sh failed: {r.stderr}'
@@ -1783,7 +1794,7 @@ def test_install_linux_honours_xdg_data_home(tmp_path):
 
 
 def test_install_linux_help_and_unknown_args_are_side_effect_free(tmp_path):
-    env = dict(os.environ, HOME=str(tmp_path / 'home'))
+    env = _home_only_env(tmp_path / 'home')
 
     help_result = subprocess.run(
         ['bash', str(_INSTALL_LINUX), '--help'],
@@ -1820,7 +1831,7 @@ def test_install_linux_uninstall_removes_only_desktop_integration(tmp_path):
     shutil.copy(_INSTALL_LINUX, bundle / 'install.sh')
     home = tmp_path / 'home'
     home.mkdir()
-    env = dict(os.environ, HOME=str(home))
+    env = _home_only_env(home)
 
     installed = subprocess.run(
         ['bash', str(bundle / 'install.sh')],

@@ -6,8 +6,8 @@
 //! families are changed by the same Authority transaction.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -39,41 +39,71 @@ const STREAM_DOMAIN: &str = "task_event";
 /// estimate: existing tree/overlay state, duplicate rows and large-event blob
 /// indirection can change actual carried bytes. Engine admission stays final.
 fn append_composition_metadata_bytes(task_id: &str, event_type: &str) -> io::Result<usize> {
-    let entry = IndexEntry { application_sequence: 1, physical_sequence: 1,
-        created_at_ms: 1, payload_digest: [0; 32] };
-    let retention = RetentionEntry { task_id: task_id.to_owned(),
-        event_type: event_type.to_owned(), kind_class: 0, index: entry }.encode()?;
+    let entry = IndexEntry {
+        application_sequence: 1,
+        physical_sequence: 1,
+        created_at_ms: 1,
+        payload_digest: [0; 32],
+    };
+    let retention = RetentionEntry {
+        task_id: task_id.to_owned(),
+        event_type: event_type.to_owned(),
+        kind_class: 0,
+        index: entry,
+    }
+    .encode()?;
     let writes = [
         (index_key(1, 1, task_id, 1)?, entry.encode().len()),
         (physical_index_key(1, 1, task_id, 1)?, entry.encode().len()),
-        (metadata_key(1, 1, task_id)?, Metadata::default().encode().len()),
-        (retention_key(1, 1, RetentionClass::Streaming, 1, task_id, 1)?, retention.len()),
-        (type_index_key(1, 1, task_id, event_type, 1)?, entry.encode().len()),
-        (type_age_key(1, 1, task_id, event_type, 1, 1)?, entry.encode().len()),
-        (type_catalog_key(1, 1, task_id, event_type)?, TypeMetadata::default().encode().len()),
+        (
+            metadata_key(1, 1, task_id)?,
+            Metadata::default().encode().len(),
+        ),
+        (
+            retention_key(1, 1, RetentionClass::Streaming, 1, task_id, 1)?,
+            retention.len(),
+        ),
+        (
+            type_index_key(1, 1, task_id, event_type, 1)?,
+            entry.encode().len(),
+        ),
+        (
+            type_age_key(1, 1, task_id, event_type, 1, 1)?,
+            entry.encode().len(),
+        ),
+        (
+            type_catalog_key(1, 1, task_id, event_type)?,
+            TypeMetadata::default().encode().len(),
+        ),
     ];
-    let indexed_bytes: usize = writes.iter().map(|(key, value_bytes)|
-        8 + key.encoded().len() + value_bytes).sum();
-    Ok(indexed_bytes + crate::stream::append_composition_catalog_bytes(
-        &stream_key(1, 1, task_id)?)?)
+    let indexed_bytes: usize = writes
+        .iter()
+        .map(|(key, value_bytes)| 8 + key.encoded().len() + value_bytes)
+        .sum();
+    Ok(indexed_bytes
+        + crate::stream::append_composition_catalog_bytes(&stream_key(1, 1, task_id)?)?)
 }
 
 pub(crate) fn event_batch_composition_budget() -> serde_json::Value {
     // These one-character synthetic identities are valid without source IO.
     let sample = append_composition_metadata_bytes("t", "x").expect("valid format sample");
-    let task_copies = append_composition_metadata_bytes("tt", "x").expect("valid format sample") - sample;
-    let type_copies = append_composition_metadata_bytes("t", "xx").expect("valid format sample") - sample;
-    let (segment_header, event_header) = crate::stream::append_composition_segment_overhead(STREAM_DOMAIN);
-    let envelope = serde_json::to_vec(&serde_json::json!({"v": crate::generated_tofudb_ir::EVENT_FORMAT_VERSION}))
-        .expect("integer event format envelope");
+    let task_copies =
+        append_composition_metadata_bytes("tt", "x").expect("valid format sample") - sample;
+    let type_copies =
+        append_composition_metadata_bytes("t", "xx").expect("valid format sample") - sample;
+    let (segment_header, event_header) =
+        crate::stream::append_composition_segment_overhead(STREAM_DOMAIN);
+    let envelope = serde_json::to_vec(
+        &serde_json::json!({"v": crate::generated_tofudb_ir::EVENT_FORMAT_VERSION}),
+    )
+    .expect("integer event format envelope");
     // For a nonempty object, stamping replaces neither producer fields nor
     // bytes: add comma plus the interior of {"v":N}. Empty/scalar costs less.
     let envelope_bytes = envelope.len() - 1;
-    let cap = crate::transaction::MAX_CARRIED_PAYLOAD_BYTES;
     serde_json::json!({
         "contract": crate::generated_storage_v2::NATIVE_EVENT_BATCH_COMPOSITION_CONTRACT,
-        "maximumCarriedPayloadBytes": cap,
-        "transactionHeadroomBytes": cap / 4,
+        "maximumCarriedPayloadBytes": crate::transaction::MAX_CARRIED_PAYLOAD_BYTES,
+        "transactionHeadroomBytes": crate::transaction::CARRIED_TRANSACTION_HEADROOM_BYTES,
         "streamSegmentHeaderBytes": segment_header,
         "streamEventHeaderBytes": event_header,
         "eventEnvelopeBytes": envelope_bytes,
@@ -181,6 +211,7 @@ pub(crate) struct ListRequest {
     pub types: Vec<String>,
     pub type_prefixes: Vec<String>,
     pub payload_types: Option<Vec<String>>,
+    pub inspector_projection: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -508,7 +539,9 @@ fn retention_sweep_cursor_key(
 }
 
 fn encode_retention_sweep_cursor(swept_through_ms: i64, slice_ms: i64) -> io::Result<Vec<u8>> {
-    if swept_through_ms <= 0 || !(RETENTION_SWEEP_MIN_SLICE_MS..=RETENTION_SWEEP_MAX_SLICE_MS).contains(&slice_ms) {
+    if swept_through_ms <= 0
+        || !(RETENTION_SWEEP_MIN_SLICE_MS..=RETENTION_SWEEP_MAX_SLICE_MS).contains(&slice_ms)
+    {
         return Err(invalid_input("event retention sweep cursor is invalid"));
     }
     let mut bytes = Vec::with_capacity(24);
@@ -527,7 +560,9 @@ fn decode_retention_sweep_cursor(raw: &[u8]) -> io::Result<(i64, i64)> {
     if swept_through_ms <= 0
         || !(RETENTION_SWEEP_MIN_SLICE_MS..=RETENTION_SWEEP_MAX_SLICE_MS).contains(&slice_ms)
     {
-        return Err(invalid_data("event retention sweep cursor is out of bounds"));
+        return Err(invalid_data(
+            "event retention sweep cursor is out of bounds",
+        ));
     }
     Ok((swept_through_ms, slice_ms))
 }
@@ -796,8 +831,19 @@ fn materialize_event_payload<'a>(
 }
 
 fn project_event(entry: IndexEntry, payload: &[u8]) -> io::Result<Vec<u8>> {
-    let value: Value = serde_json::from_slice(payload)
+    project_event_with_view(entry, payload, false)
+}
+
+fn project_event_with_view(
+    entry: IndexEntry,
+    payload: &[u8],
+    inspector: bool,
+) -> io::Result<Vec<u8>> {
+    let mut value: Value = serde_json::from_slice(payload)
         .map_err(|_| invalid_data("indexed event JSON is invalid"))?;
+    if inspector {
+        value = crate::request_inspector_projection::project(value);
+    }
     serde_json::to_vec(&json!({"sequence": entry.application_sequence, "event": value, "created_at_ms": entry.created_at_ms}))
         .map_err(|_| invalid_data("indexed event projection failed"))
 }
@@ -811,7 +857,7 @@ fn project_event_metadata(entry: IndexEntry, event: &StreamEvent) -> io::Result<
     }
     serde_json::to_vec(&json!({"sequence": entry.application_sequence,
         "event": {"type": event.event_type}, "created_at_ms": entry.created_at_ms}))
-        .map_err(|_| invalid_data("indexed event metadata projection failed"))
+    .map_err(|_| invalid_data("indexed event metadata projection failed"))
 }
 
 fn logical_event_type_from_json(payload: &[u8]) -> io::Result<String> {
@@ -1046,8 +1092,7 @@ pub(crate) fn prune(
     // reconciliation pass is separately bounded; see the incident note at
     // the delete loop).
     let prune_started = Instant::now();
-    let over_budget =
-        || prune_started.elapsed() >= PRUNE_CALL_TIME_BUDGET || deadline_elapsed();
+    let over_budget = || prune_started.elapsed() >= PRUNE_CALL_TIME_BUDGET || deadline_elapsed();
     let now_ms = i64::try_from(request.now_unix_ms).unwrap_or(i64::MAX);
     // Deletion horizon vs sweep ceiling: every row older than
     // `created_before_ms` is deletable (the caller's cutoff, however far
@@ -1170,14 +1215,14 @@ pub(crate) fn prune(
                     }
                 }
                 Err(error)
-                    if error.kind() == io::ErrorKind::OutOfMemory
+                    if crate::resource_exhaustion::is_refusal(&error)
                         && slice_ms > RETENTION_SWEEP_MIN_SLICE_MS
                         && shrink_attempts < RETENTION_SWEEP_MAX_SHRINK_ATTEMPTS =>
                 {
                     shrink_attempts += 1;
                     slice_ms = (slice_ms / 2).max(RETENTION_SWEEP_MIN_SLICE_MS);
                 }
-                Err(error) if error.kind() == io::ErrorKind::OutOfMemory => {
+                Err(error) if crate::resource_exhaustion::is_refusal(&error) => {
                     if selected.is_empty() && swept_through_ms == sweep_start_ms {
                         return Err(error);
                     }
@@ -1467,26 +1512,76 @@ pub(crate) fn append_batch(
     .map_err(|_| invalid_data("indexed event batch projection failed"))
 }
 
-fn next_type_entry(
+fn type_entry_batch(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
     task_id: &str,
-    event_type: &str,
+    event_types: &[String],
     after_sequence: Option<u64>,
-) -> io::Result<Option<IndexEntry>> {
-    let (start, end) = type_index_range(
-        transaction.tenant_id(),
-        transaction.owner_user_id(),
-        task_id,
-        event_type,
-        after_sequence,
-    )?;
-    database
-        .entity_scan(transaction, &start, &end, 1)?
-        .into_iter()
-        .next()
-        .map(|(_, raw)| IndexEntry::decode(&raw))
-        .transpose()
+    limit: usize,
+    mut observed_scan_rows: Option<&mut Vec<usize>>,
+) -> io::Result<Vec<(String, IndexEntry)>> {
+    let mut cursors = Vec::with_capacity(event_types.len());
+    for event_type in event_types {
+        let (mut start, end) = type_index_range(
+            transaction.tenant_id(),
+            transaction.owner_user_id(),
+            task_id,
+            event_type,
+            after_sequence,
+        )?;
+        let mut entries = VecDeque::new();
+        while entries.len() < limit {
+            let batch = (limit - entries.len()).min(METADATA_SCAN_PAGE_ROWS);
+            let rows = database.entity_scan(transaction, &start, &end, batch)?;
+            if let Some(scan_rows) = observed_scan_rows.as_deref_mut() {
+                scan_rows.push(rows.len());
+            }
+            let short = rows.len() < batch;
+            for (_, raw) in rows {
+                let entry = IndexEntry::decode(&raw)?;
+                entries.push_back(entry);
+                start = type_index_key(
+                    transaction.tenant_id(),
+                    transaction.owner_user_id(),
+                    task_id,
+                    event_type,
+                    entry
+                        .application_sequence
+                        .checked_add(1)
+                        .ok_or_else(|| invalid_input("event cursor is exhausted"))?,
+                )?;
+            }
+            if short {
+                break;
+            }
+        }
+        cursors.push((event_type.clone(), entries));
+    }
+    let mut ready: BinaryHeap<Reverse<(u64, usize)>> = cursors
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, entries))| {
+            entries
+                .front()
+                .map(|entry| Reverse((entry.application_sequence, index)))
+        })
+        .collect();
+    let mut selected = Vec::with_capacity(limit);
+    while selected.len() < limit {
+        let Some(Reverse((_, index))) = ready.pop() else {
+            break;
+        };
+        let (event_type, entries) = &mut cursors[index];
+        let entry = entries
+            .pop_front()
+            .ok_or_else(|| invalid_data("event type cursor disappeared"))?;
+        selected.push((event_type.clone(), entry));
+        if let Some(next) = entries.front() {
+            ready.push(Reverse((next.application_sequence, index)));
+        }
+    }
+    Ok(selected)
 }
 
 fn visit_metadata_range<F>(
@@ -1521,6 +1616,15 @@ fn filtered_entries(
     transaction: &mut AuthorityTransaction,
     request: &ListRequest,
 ) -> io::Result<Vec<(String, IndexEntry)>> {
+    filtered_entries_with_scan_log(database, transaction, request, None)
+}
+
+fn filtered_entries_with_scan_log(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &ListRequest,
+    observed_scan_rows: Option<&mut Vec<usize>>,
+) -> io::Result<Vec<(String, IndexEntry)>> {
     let tenant = transaction.tenant_id();
     let owner = transaction.owner_user_id();
     let mut event_types = request.types.iter().cloned().collect::<BTreeSet<_>>();
@@ -1543,41 +1647,81 @@ fn filtered_entries(
         })?;
     }
 
+    type_entry_batch(
+        database,
+        transaction,
+        &request.task_id,
+        &event_types.into_iter().collect::<Vec<_>>(),
+        request.after_sequence,
+        request.limit,
+        observed_scan_rows,
+    )
+}
+
+#[cfg(test)]
+fn filtered_entries_reference(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &ListRequest,
+    mut observed_scan_rows: Option<&mut Vec<usize>>,
+) -> io::Result<Vec<(String, IndexEntry)>> {
+    assert!(request.type_prefixes.is_empty());
+    let next = |event_type: &str,
+                after_sequence: Option<u64>,
+                transaction: &mut AuthorityTransaction,
+                observed_scan_rows: &mut Option<&mut Vec<usize>>| {
+        let (start, end) = type_index_range(
+            transaction.tenant_id(),
+            transaction.owner_user_id(),
+            &request.task_id,
+            event_type,
+            after_sequence,
+        )?;
+        let rows = database.entity_scan(transaction, &start, &end, 1)?;
+        if let Some(scans) = observed_scan_rows.as_deref_mut() {
+            scans.push(rows.len());
+        }
+        rows.into_iter()
+            .next()
+            .map(|(_, raw)| IndexEntry::decode(&raw))
+            .transpose()
+    };
+    let event_types = request.types.iter().cloned().collect::<BTreeSet<_>>();
     let mut cursors = event_types
         .into_iter()
         .map(|event_type| {
-            let entry = next_type_entry(
-                database,
-                transaction,
-                &request.task_id,
+            let entry = next(
                 &event_type,
                 request.after_sequence,
+                transaction,
+                &mut observed_scan_rows,
             )?;
             Ok((event_type, entry))
         })
         .collect::<io::Result<Vec<_>>>()?;
-    let mut ready: BinaryHeap<Reverse<(u64, usize)>> = cursors.iter().enumerate()
-        .filter_map(|(index, (_, entry))| entry.map(|entry| Reverse((entry.application_sequence, index))))
+    let mut ready: BinaryHeap<Reverse<(u64, usize)>> = cursors
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, entry))| {
+            entry.map(|entry| Reverse((entry.application_sequence, index)))
+        })
         .collect();
     let mut selected = Vec::with_capacity(request.limit);
     while selected.len() < request.limit {
-        let Some(Reverse((_, cursor_index))) = ready.pop() else {
+        let Some(Reverse((_, index))) = ready.pop() else {
             break;
         };
-        let (event_type, current) = &mut cursors[cursor_index];
-        let entry = current
-            .take()
-            .ok_or_else(|| invalid_data("event type cursor disappeared"))?;
+        let (event_type, current) = &mut cursors[index];
+        let entry = current.take().unwrap();
         selected.push((event_type.clone(), entry));
-        *current = next_type_entry(
-            database,
-            transaction,
-            &request.task_id,
+        *current = next(
             event_type,
             Some(entry.application_sequence),
+            transaction,
+            &mut observed_scan_rows,
         )?;
         if let Some(next) = current {
-            ready.push(Reverse((next.application_sequence, cursor_index)));
+            ready.push(Reverse((next.application_sequence, index)));
         }
     }
     Ok(selected)
@@ -1622,28 +1766,35 @@ pub(crate) fn list(
         let event = events
             .get(&entry.physical_sequence)
             .ok_or_else(|| invalid_data("indexed event is missing"))?;
-        let include_payload = request.payload_types.as_ref()
+        let include_payload = request
+            .payload_types
+            .as_ref()
             .is_none_or(|types| types.contains(&event.event_type));
         let projected = if include_payload {
-            let payload = materialize_event_payload(
-                database, transaction, &request.task_id, entry, event)?;
+            let payload =
+                materialize_event_payload(database, transaction, &request.task_id, entry, event)?;
             if filtered && logical_event_type_from_json(&payload)? != indexed_type {
                 return Err(invalid_data("event type index witness mismatch"));
             }
-            project_event(entry, &payload)?
+            project_event_with_view(entry, &payload, request.inspector_projection)?
         } else {
             if filtered && event.event_type != indexed_type {
                 return Err(invalid_data("event type index witness mismatch"));
             }
             project_event_metadata(entry, event)?
         };
-        let additional = projected.len().checked_add(usize::from(offset > 0))
+        let additional = projected
+            .len()
+            .checked_add(usize::from(offset > 0))
             .and_then(|length| length.checked_add(1))
             .ok_or_else(|| invalid_input("event page length overflow"))?;
-        output.len().checked_add(additional)
+        output
+            .len()
+            .checked_add(additional)
             .ok_or_else(|| invalid_input("event page length overflow"))?;
-        output.try_reserve(additional)
-            .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory,"cannot allocate complete event page"))?;
+        output.try_reserve(additional).map_err(|_| {
+            crate::resource_exhaustion::reservation_failure("cannot allocate complete event page")
+        })?;
         if offset > 0 {
             output.push(b',');
         }
@@ -1769,8 +1920,11 @@ pub(crate) fn bounds(
         task_id,
     )?;
     let value = database.entity_get(transaction, &key)?;
-    let whole_count = value.as_ref().map(|raw| Metadata::decode(raw).map(|meta| meta.count))
-        .transpose()?.unwrap_or(0);
+    let whole_count = value
+        .as_ref()
+        .map(|raw| Metadata::decode(raw).map(|meta| meta.count))
+        .transpose()?
+        .unwrap_or(0);
     let mut result = match value {
         None => json!({"retained_count": 0, "base_cursor": 0, "next_cursor": 0}),
         Some(raw) => {
@@ -1778,34 +1932,69 @@ pub(crate) fn bounds(
             json!({"retained_count": meta.count, "base_cursor": meta.minimum, "next_cursor": meta.maximum.checked_add(1).ok_or_else(|| invalid_data("event cursor overflow"))?})
         }
     };
-    let scope = types.map(|types| types.iter().cloned().collect::<BTreeSet<_>>()
-        .into_iter().collect::<Vec<_>>());
+    let scope = types.map(|types| {
+        types
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    });
     if let Some(types) = &scope {
-        if types.is_empty() || types.len() > crate::generated_storage_operations::EVENT_READ_GUARD_MAX_TYPES
-            || types.iter().any(|value| value.is_empty() || value.chars().count() > 128) {
+        if types.is_empty()
+            || types.len() > crate::generated_storage_operations::EVENT_READ_GUARD_MAX_TYPES
+            || types
+                .iter()
+                .any(|value| value.is_empty() || value.chars().count() > 128)
+        {
             return Err(invalid_input("invalid event guard types"));
         }
         let mut count = 0_u64;
         let mut minimum = u64::MAX;
         let mut maximum = 0_u64;
         for event_type in types {
-            let type_key = type_catalog_key(transaction.tenant_id(), transaction.owner_user_id(), task_id, event_type)?;
-            let Some(raw) = database.entity_get(transaction, &type_key)? else { continue; };
+            let type_key = type_catalog_key(
+                transaction.tenant_id(),
+                transaction.owner_user_id(),
+                task_id,
+                event_type,
+            )?;
+            let Some(raw) = database.entity_get(transaction, &type_key)? else {
+                continue;
+            };
             let meta = TypeMetadata::decode(&raw)?;
-            if meta.count == 0 { continue; }
-            count = count.checked_add(meta.count).ok_or_else(|| invalid_data("event scope count overflow"))?;
-            let (start, end) = type_index_range(transaction.tenant_id(), transaction.owner_user_id(), task_id, event_type, None)?;
+            if meta.count == 0 {
+                continue;
+            }
+            count = count
+                .checked_add(meta.count)
+                .ok_or_else(|| invalid_data("event scope count overflow"))?;
+            let (start, end) = type_index_range(
+                transaction.tenant_id(),
+                transaction.owner_user_id(),
+                task_id,
+                event_type,
+                None,
+            )?;
             let first = database.entity_scan(transaction, &start, &end, 1)?;
             let last = database.entity_scan_reverse(transaction, &start, &end, 1)?;
-            let first = first.first().ok_or_else(|| invalid_data("event scope minimum is missing"))?;
-            let last = last.first().ok_or_else(|| invalid_data("event scope maximum is missing"))?;
+            let first = first
+                .first()
+                .ok_or_else(|| invalid_data("event scope minimum is missing"))?;
+            let last = last
+                .first()
+                .ok_or_else(|| invalid_data("event scope maximum is missing"))?;
             let first = IndexEntry::decode(&first.1)?.application_sequence;
             let last = IndexEntry::decode(&last.1)?.application_sequence;
-            if first > last { return Err(invalid_data("event scope bounds are invalid")); }
+            if first > last {
+                return Err(invalid_data("event scope bounds are invalid"));
+            }
             minimum = minimum.min(first);
             maximum = maximum.max(last);
         }
-        if count > whole_count { return Err(invalid_data("event scope count exceeds source")); }
+        if count > whole_count {
+            return Err(invalid_data("event scope count exceeds source"));
+        }
         result = if count == 0 {
             json!({"retained_count": 0, "base_cursor": 0, "next_cursor": 0})
         } else {
@@ -1818,7 +2007,11 @@ pub(crate) fn bounds(
         // retirement. Retention alone strictly decreases the retained count.
         // Bind the stamp to this authority lease: reopen/restore cannot recycle
         // a previously admitted source identity; replicas share that epoch.
-        let stream = stream_key(transaction.tenant_id(), transaction.owner_user_id(), task_id)?;
+        let stream = stream_key(
+            transaction.tenant_id(),
+            transaction.owner_user_id(),
+            task_id,
+        )?;
         let append_position = database.transaction_stream_next_sequence(transaction, &stream)?;
         let revision = if scope.is_some() {
             // Canonical appends consume exactly one physical position. A and
@@ -1826,15 +2019,24 @@ pub(crate) fn bounds(
             // Pruning unselected rows increases the revision; pruning selected
             // rows changes the scoped bounds, including empty/reinsert ABA.
             let selected_count = result["retained_count"].as_u64().unwrap();
-            append_position.checked_sub(whole_count - selected_count)
+            append_position
+                .checked_sub(whole_count - selected_count)
                 .ok_or_else(|| invalid_data("event scope append watermark is invalid"))?
-        } else { append_position };
+        } else {
+            append_position
+        };
         let mut identity = json!([
-            database.authority_uuid().to_string(), database.event_read_epoch().to_string(),
-            transaction.tenant_id(), transaction.owner_user_id(), task_id,
-            revision, result,
+            database.authority_uuid().to_string(),
+            database.event_read_epoch().to_string(),
+            transaction.tenant_id(),
+            transaction.owner_user_id(),
+            task_id,
+            revision,
+            result,
         ]);
-        if let Some(types) = &scope { identity.as_array_mut().unwrap().push(json!(types)); }
+        if let Some(types) = &scope {
+            identity.as_array_mut().unwrap().push(json!(types));
+        }
         let identity = serde_json::to_vec(&identity)
             .map_err(|_| invalid_data("event read identity projection failed"))?;
         result["read_guard"] = json!({
@@ -1842,7 +2044,8 @@ pub(crate) fn bounds(
             "stamp": blake3::hash(&identity).to_hex().to_string(),
         });
         if let Some(types) = &scope {
-            result["read_guard"]["contract"] = json!(crate::generated_storage_operations::EVENT_READ_GUARD_SCOPED_CONTRACT);
+            result["read_guard"]["contract"] =
+                json!(crate::generated_storage_operations::EVENT_READ_GUARD_SCOPED_CONTRACT);
             result["read_guard"]["types"] = json!(types);
         }
     }
@@ -1885,6 +2088,98 @@ pub(crate) fn latest(
     }
     let payload = materialize_event_payload(database, transaction, task_id, entry, &event.event)?;
     project_event(entry, &payload).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filtered_list_scans_each_type_once_instead_of_probing_per_returned_row() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let mut writes = database.begin(7, 11).unwrap();
+        let task = "read-fanout".to_owned();
+        for index in 0..12_u64 {
+            append(
+                &database,
+                &mut writes,
+                &AppendRequest {
+                    task_id: task.clone(),
+                    application_sequence: index * 2 + 1,
+                    event_type: if index % 2 == 0 {
+                        "round_start"
+                    } else {
+                        "round_usage"
+                    }
+                    .into(),
+                    payload_json: serde_json::to_vec(&json!({
+                        "type": if index % 2 == 0 { "round_start" } else { "round_usage" },
+                        "round": index
+                    }))
+                    .unwrap(),
+                    created_at_ms: index as i64 + 1,
+                },
+            )
+            .unwrap();
+        }
+        database.commit(writes).unwrap();
+        let mut reads = database.begin(7, 11).unwrap();
+        let reference = filtered_entries_reference(
+            &database,
+            &mut reads,
+            &ListRequest {
+                task_id: task.clone(),
+                after_sequence: None,
+                limit: 100,
+                types: vec!["round_start".into(), "round_usage".into()],
+                type_prefixes: Vec::new(),
+                payload_types: None,
+                inspector_projection: false,
+            },
+            None,
+        )
+        .unwrap();
+        let mut before_scans = Vec::new();
+        filtered_entries_reference(
+            &database,
+            &mut reads,
+            &ListRequest {
+                task_id: task.clone(),
+                after_sequence: None,
+                limit: 100,
+                types: vec!["round_start".into(), "round_usage".into()],
+                type_prefixes: Vec::new(),
+                payload_types: None,
+                inspector_projection: false,
+            },
+            Some(&mut before_scans),
+        )
+        .unwrap();
+        assert_eq!(
+            before_scans,
+            vec![1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+            "the reference retains the original one-row scan shape"
+        );
+        let mut scans = Vec::new();
+        let batch = filtered_entries_with_scan_log(
+            &database,
+            &mut reads,
+            &ListRequest {
+                task_id: task.clone(),
+                after_sequence: None,
+                limit: 100,
+                types: vec!["round_start".into(), "round_usage".into()],
+                type_prefixes: Vec::new(),
+                payload_types: None,
+                inspector_projection: false,
+            },
+            Some(&mut scans),
+        )
+        .unwrap();
+        assert_eq!(batch, reference);
+        assert_eq!(scans, vec![6, 6], "one range scan per event type");
+    }
 }
 
 #[cfg(test)]

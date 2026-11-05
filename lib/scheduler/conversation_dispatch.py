@@ -25,10 +25,27 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class ScheduledTurnDispatch:
-    """Typed scheduler outcome; ``task_id`` exists only for ``started``."""
+    """Typed scheduler outcome.
 
-    disposition: Literal["started", "busy", "target_missing", "start_failed"]
+    ``task_id`` exists only for ``started``. ``steered`` and ``queued`` are
+    ACCEPTED deliveries into a lane that was busy at dispatch time: the message
+    is already durable inside the live turn's inbox or the conversation queue,
+    so the caller's obligation is settled even though no executor task of its
+    own exists yet. ``busy`` means nothing was accepted and the caller owns a
+    retry.
+    """
+
+    disposition: Literal[
+        "started", "steered", "queued", "busy", "target_missing",
+        "start_failed",
+    ]
     task_id: str = ""
+    queue_id: str = ""
+
+    @property
+    def accepted(self) -> bool:
+        """The input is durable and will reach the model without a retry."""
+        return self.disposition in ("started", "steered", "queued")
 
 
 def _build_swarm_continuation_config(
@@ -43,7 +60,6 @@ def _build_swarm_continuation_config(
     policy must still fail replay validation rather than be guessed here.
     """
     from lib.conv_config import resolve_conv_config
-    from lib.tasks_pkg.chat_mode import apply_chat_mode
 
     controls = {'_swarmAutoContinue': True, 'schedulerEnabled': False}
     if tools_config or any(
@@ -68,13 +84,22 @@ def _build_swarm_continuation_config(
         # pretending a guidance=False clamp would survive that boundary.
         return None
 
-    # Chat mode can expand atomic flags later in model_config. Preserve the
-    # legacy swarm's narrower tool choices instead of granting tools for parity.
+    _drop_expanding_chat_mode(config)
+    config.update(controls)
+    return config
+
+
+def _drop_expanding_chat_mode(config: dict[str, Any]) -> None:
+    """Keep chat mode only when its flag expansion would grant no tool.
+
+    Chat mode can expand atomic flags later in model_config. A scheduled turn
+    keeps its narrower tool choices instead of gaining tools for parity.
+    """
+    from lib.tasks_pkg.chat_mode import apply_chat_mode
+
     if any(config.get(key) != value
            for key, value in apply_chat_mode(config).items() if key != 'chatMode'):
         config.pop('chatMode', None)
-    config.update(controls)
-    return config
 
 
 def dispatch_scheduled_turn(
@@ -93,8 +118,18 @@ def dispatch_scheduled_turn(
 
     require_parent_not_stopped: bool = False,
     config_overrides: dict[str, Any] | None = None,
+    inject_mode: str = "",
 ) -> ScheduledTurnDispatch:
-    """Create one input/output pair and start its bound executor atomically."""
+    """Create one input/output pair and start its bound executor atomically.
+
+    ``inject_mode`` selects the conversation-command delivery lane for a busy
+    target: ``steer`` commits the message into the live attempt (falling back
+    to ``queue`` when the steer window has closed), ``queue`` always waits for
+    the next turn, and the empty default preserves the historical bare
+    ``lane_busy`` outcome. A caller that treats any non-``started`` outcome as
+    a failure must keep the default; a readiness watcher opts in because its
+    due obligation has no other owner.
+    """
     owner_id = int(user_id)
     if owner_id < 1:
         raise ValueError("A positive scheduler owner is required")
@@ -142,8 +177,19 @@ def dispatch_scheduled_turn(
                         log_prefix)
             return ScheduledTurnDispatch('start_failed')
     else:
+        from lib.tasks_pkg.plan_mode import plan_mode_enabled
+
+        if plan_mode_enabled(settings):
+            # Plan mode is read-only and runs with human guidance, which a
+            # scheduled turn never gains; delivering now would escape the
+            # plan. Nothing is accepted: a timer keeps its ready verdict and
+            # retries without a new check.
+            logger.info('%s Conversation is in Plan mode; scheduled turn deferred',
+                        log_prefix)
+            return ScheduledTurnDispatch('busy')
         task_config = build_task_config(parsed_tools, settings)
         task_config.update(dict(config_overrides or {}))
+        _drop_expanding_chat_mode(task_config)
     if '_ctx' not in projection and 'contextSnapshot' not in projection:
         ctx_snapshot = build_turn_ctx_snapshot(task_config)
         if ctx_snapshot is not None:
@@ -165,6 +211,7 @@ def dispatch_scheduled_turn(
                 "requireParentIsLaneTail": require_parent_is_lane_tail,
 
                 "requireParentNotStopped": require_parent_not_stopped,
+                **({"injectMode": inject_mode} if inject_mode else {}),
             },
             request_started_at=time.time(),
         ).value
@@ -178,6 +225,24 @@ def dispatch_scheduled_turn(
     except AttemptStartFailure:
         logger.error("%s Durable turn exists but executor start failed", log_prefix)
         return ScheduledTurnDispatch("start_failed")
+    if outcome.get("steered"):
+        logger.info(
+            "%s Delivered into the live turn (steer) conv=%s block=%s",
+            log_prefix,
+            conversation_id[:12],
+            str(outcome.get("blockId") or "")[:12],
+        )
+        return ScheduledTurnDispatch("steered")
+    queue_id = str(outcome.get("queueId") or "")
+    if outcome.get("queued") and queue_id:
+        logger.info(
+            "%s Queued behind the live turn conv=%s queue=%s position=%s",
+            log_prefix,
+            conversation_id[:12],
+            queue_id[:8],
+            outcome.get("position"),
+        )
+        return ScheduledTurnDispatch("queued", queue_id=queue_id)
     task_id = str((outcome.get("attempt") or {}).get("taskId") or "")
     if not task_id:
         logger.warning("%s Turn command returned no executor task", log_prefix)

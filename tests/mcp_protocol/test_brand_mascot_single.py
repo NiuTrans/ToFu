@@ -43,6 +43,7 @@ from pathlib import Path
 import pytest
 
 from lib.mcp.registry import is_opensource_build
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -66,18 +67,8 @@ REMOVED_SKIN_SYMBOLS = (
 
 def _node() -> str:
     exe = shutil.which("node")
-    if not exe:
-        pytest.skip("node not available")
+    require_node_modules('jsdom')
     return exe
-
-
-def _has_jsdom() -> bool:
-    try:
-        subprocess.run([_node(), "-e", "require('jsdom')"],
-                       cwd=ROOT, capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
 
 
 HARNESS = textwrap.dedent("""
@@ -133,7 +124,6 @@ def _static_mascot_tokens() -> list:
 
 # ── 1. one mascot, no wardrobe ────────────────────────────────────────────
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_the_module_resolves_exactly_one_mascot_url():
     out = _run(_source())
     assert MASCOT in out["url"], "the resolved mascot must be the shipped original"
@@ -143,7 +133,6 @@ def test_the_module_resolves_exactly_one_mascot_url():
     )
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_no_skin_registry_is_exported():
     """RATCHET (owner, 2026-07-29): mascot switching is not coming back."""
     out = _run(_source())
@@ -183,7 +172,6 @@ def test_no_candidate_assets_remain_registered():
 
 # ── 2 + 3. cache-bust, and the token copies agreeing ──────────────────────
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_every_resolved_url_is_cache_busted():
     """The reason this module exists: icons ship with max-age=86400."""
     out = _run(_source())
@@ -198,7 +186,6 @@ def test_every_resolved_url_is_cache_busted():
     )
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_static_tags_carry_the_same_version_token_as_the_module():
     """index.html writes the token by hand; brand_logo.js holds the constant.
 
@@ -249,7 +236,6 @@ def test_the_mascot_survives_every_export_level():
 
 # ── Neuters ───────────────────────────────────────────────────────────────
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NC_bumping_only_the_module_token_is_caught():
     """Neuter: bump LOGO_VER in the module alone → the parity guard must red."""
     src = _source()
@@ -264,7 +250,6 @@ def test_NC_bumping_only_the_module_token_is_caught():
     )
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NC_reintroducing_a_skin_export_is_caught():
     """Neuter: re-export one skin symbol → the ratchet must red."""
     src = _source()
@@ -279,7 +264,6 @@ def test_NC_reintroducing_a_skin_export_is_caught():
     )
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NC_dropping_the_cache_bust_is_caught():
     """Neuter: serve a bare path → the cache-bust guard must red."""
     src = _source()

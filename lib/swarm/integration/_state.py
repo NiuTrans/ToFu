@@ -14,9 +14,9 @@ value. So the cleanup functions read/write those scalars THROUGH the facade
 package (``lib.swarm.integration``) as well, keeping ``integ._last_cleanup`` (a
 seam the swarm tests reset) authoritative.
 
-Also holds the auto-continue state (``_autocontinue_chain`` /
-``_autocontinue_inflight`` / ``_autocontinue_lock``) — the ``_autocontinue``
-submodule imports these BY REFERENCE and never rebinds the containers.
+Also holds the auto-continue in-flight latch (``_autocontinue_inflight`` /
+``_autocontinue_lock``) — the ``_autocontinue`` submodule imports these BY
+REFERENCE and never rebinds the containers.
 """
 
 from __future__ import annotations
@@ -43,9 +43,6 @@ logger = get_logger(__name__)
 #  Auto-continue (Phase 2) shared state
 # ═══════════════════════════════════════════════════════════
 
-#: conv key → number of consecutive auto-continuations since the last
-#: human turn. Guarded by ``_autocontinue_lock``.
-_autocontinue_chain: dict[str, int] = {}
 #: conv keys with an auto-continue in flight (latch against double-fire when
 #: several agents settle near-simultaneously / from spawn-more waves).
 _autocontinue_inflight: set[str] = set()
@@ -80,6 +77,12 @@ def task_has_running_agents(*, task_id: str, user_id: int) -> bool:
 _cleanup_timer_starts = 0
 _cleanup_timer_retirements = 0
 _RETIRED_ALIAS_CAPACITY = max(8, MAX_SESSIONS * 4)
+#: Keys whose TTL teardown (inbox clear, durable delete, abort) runs on a
+#: retirement worker after the session left the registry. A re-registration
+#: of the same key waits for that key's event: a late delete would otherwise
+#: remove the durable rows the new session persists right after registering.
+_retiring_sessions: dict[str, threading.Event] = {}
+_retirement_workers: set[threading.Thread] = set()
 
 
 class SwarmSessionConflict(RuntimeError):
@@ -141,9 +144,10 @@ def _session_is_producing(swarm_key: str) -> bool:
     — whose spawning turn has already finished, the exact case TTL is supposed
     to serve — does not have.
 
-    So consult the same ``ProgressBeacon`` the driver and the per-agent guard
-    read (``lib/swarm/liveness.py``): a session whose agents are still
-    producing is NOT stale at any age. Failure is treated as "producing"
+    So consult the same ``ProgressBeacon`` the driver reads
+    (``lib/swarm/liveness.py``; bound agents follow the shared judge in
+    ``lib/tasks_pkg/liveness.py``): a session whose agents are still
+    producing or waiting on an explained owner is NOT stale at any age. Failure is treated as "producing"
     because wrongly aborting live work costs far more than reaping late.
     """
     try:
@@ -183,7 +187,12 @@ def _session_is_producing(swarm_key: str) -> bool:
 
 
 def _cleanup_stale_sessions():
-    """Retire inactive memory by TTL; capacity targets never revoke live work."""
+    """Retire inactive memory by TTL; capacity targets never revoke live work.
+
+    Caller holds ``_sessions_lock``. Expired sessions leave the registry here;
+    their storage teardown runs on a retirement worker, never under the lock
+    that Stop, await_agents, poll/kill and the status routes all take.
+    """
     global _last_cleanup
     # ``_last_cleanup`` is a scalar rebound via ``global`` — unlike the registry
     # dicts it cannot be shared with the facade by reference. Route the throttle
@@ -208,28 +217,15 @@ def _cleanup_stale_sessions():
         and not _key_is_live(key)
         and not _session_is_producing(key)
     ]
+    expired = []
     for key in stale_ids:
         session = _active_sessions.pop(key, None)
         _session_timestamps.pop(key, None)
-        agent_inbox.clear(key, modes=['swarm-update'])
         _purge_aliases(key)
-        try:
-            from lib.swarm import persistence
-            persistence.delete_session(key)
-        except Exception as e:
-            logger.debug('[Swarm:%s] persisted session delete (TTL) failed: %s', key, e)
-        # Drop the auto-continue bookkeeping for a reaped conversation so the
-        # chain counter / inflight latch don't accumulate stale keys.
-        with _autocontinue_lock:
-            _autocontinue_chain.pop(key, None)
-            _autocontinue_inflight.discard(key)
-        if session:
-            logger.info('[Swarm:%s] Session expired after %ds TTL — cleaning up',
-                        key, SESSION_TTL_SECONDS)
-            try:
-                session.abort()
-            except Exception as e:
-                logger.debug('[Swarm:%s] cleanup abort failed: %s', key, e, exc_info=True)
+        _retiring_sessions[key] = threading.Event()
+        expired.append((key, session))
+    if expired:
+        _start_retirement_worker_locked(expired)
 
     excess = len(_active_sessions) - MAX_SESSIONS
     if excess > 0:
@@ -238,6 +234,112 @@ def _cleanup_stale_sessions():
         terminal_keys.sort(key=lambda key: _session_timestamps.get(key, 0))
         for key in terminal_keys[:excess]:
             _retire_terminal_session_locked(key)
+
+
+def _start_retirement_worker_locked(expired: list[tuple[str, object]]) -> None:
+    """Hand expired sessions' teardown to one worker. Caller holds the lock."""
+    worker = threading.Thread(
+        target=_retire_expired_sessions, args=(expired,),
+        name='swarm-session-retire', daemon=True)
+    _retirement_workers.add(worker)
+    try:
+        worker.start()
+    except BaseException:
+        # Without a worker nobody would release these keys, and a later
+        # registration of one of them would wait forever. The sessions stay
+        # out of memory; their durable rows remain for restart recovery.
+        _retirement_workers.discard(worker)
+        for key, _session in expired:
+            event = _retiring_sessions.pop(key, None)
+            if event is not None:
+                event.set()
+        raise
+
+
+def _retire_expired_sessions(expired: list[tuple[str, object]]) -> None:
+    """Tear down TTL-expired sessions without holding the registry lock.
+
+    Each key's retiring event is set once its teardown ends, whatever the
+    outcome, so a same-key registration waiting on it always proceeds.
+    """
+    try:
+        for key, session in expired:
+            try:
+                _retire_expired_session(key, session)
+            finally:
+                with _sessions_lock:
+                    event = _retiring_sessions.pop(key, None)
+                if event is not None:
+                    event.set()
+    finally:
+        with _sessions_lock:
+            _retirement_workers.discard(threading.current_thread())
+
+
+def _record_results_then_delete(key: str, session) -> bool:
+    """Reclaim a retired session's resumable rows once its results are durable.
+
+    The conversation-keyed session/agent rows are resumable state; each agent
+    outcome is user state recorded under its ``swarm_run_id``. If any settled
+    result cannot be recorded, the rows stay (status, recovery and
+    ``get_agent_result`` keep reading them) instead of deleting it silently.
+    Returns True when the rows were handed to the delete.
+    """
+    from lib.swarm import persistence
+    try:
+        recorded = (session.record_run_results() if session is not None
+                    else persistence.archive_session_results(key))
+    except Exception:
+        logger.warning('[Swarm:%s] run result recording failed', key, exc_info=True)
+        recorded = False
+    if not recorded:
+        logger.warning('[Swarm:%s] run results not all recorded; durable session '
+                       'rows retained instead of deleted', key)
+        return False
+    persistence.delete_session(key)
+    return True
+
+
+def retire_previous_run_rows(swarm_key: str, swarm_run_id: str) -> None:
+    """Record and reclaim rows an earlier run left under this conversation key.
+
+    A run's rows can outlive its in-memory session (a restart that did not
+    rehydrate a terminated run, or a teardown that kept unrecorded results).
+    Before a new run claims the key, those rows are recorded under their own
+    ``swarm_run_id``; left in place they would be re-attributed to the new
+    run and deleted, unrecorded, at its teardown. One header read when none
+    remain.
+    """
+    from lib.swarm import persistence
+    try:
+        header = persistence.load_session(
+            swarm_key, include_agents=False, required=True)
+    except Exception:
+        # load_session already logged the storage failure.
+        logger.debug('[Swarm:%s] earlier-run rows not checked before a new run',
+                     swarm_key)
+        return
+    if header is None or header.get('task_id') == swarm_run_id:
+        return
+    _record_results_then_delete(swarm_key, None)
+
+
+def _retire_expired_session(key: str, session) -> None:
+    try:
+        agent_inbox.clear(key, modes=['swarm-update'])
+    except Exception as e:
+        logger.warning('[Swarm:%s] expired session inbox clear failed: %s', key, e)
+    _record_results_then_delete(key, session)
+    # Drop the in-flight latch of a reaped conversation so it never strands.
+    with _autocontinue_lock:
+        _autocontinue_inflight.discard(key)
+    if session:
+        logger.info('[Swarm:%s] Session expired after %ds TTL — cleaning up',
+                    key, SESSION_TTL_SECONDS)
+        try:
+            session.abort()
+        except Exception as e:
+            logger.debug('[Swarm:%s] cleanup abort failed: %s', key, e, exc_info=True)
 
 
 def _publish_cleanup_timer(timer: threading.Timer | None) -> None:
@@ -337,19 +439,27 @@ def _start_cleanup_timer() -> bool:
 
 
 def stop_swarm_cleanup_timer(timeout: float = 2.0) -> bool:
-    """Cancel and bounded-join the current timer without deleting sessions."""
+    """Cancel the timer; bounded-join it and in-flight TTL teardown.
+
+    Sessions are not deleted. False means a timer or teardown worker was
+    still running when the deadline passed.
+    """
     with _sessions_lock:
         timer = _retire_cleanup_timer_locked()
-    if timer is None:
+        workers = list(_retirement_workers)
+    threads = ([timer] if timer is not None else []) + workers
+    if not threads:
         return True
     try:
         wait_seconds = max(0.0, float(timeout))
     except (TypeError, ValueError, OverflowError) as exc:
         logger.debug('[Swarm] invalid cleanup stop timeout; using 2.0: %s', exc)
         wait_seconds = 2.0
-    if timer is not threading.current_thread():
-        timer.join(timeout=wait_seconds)
-    return not timer.is_alive()
+    deadline = time.monotonic() + wait_seconds
+    for thread in threads:
+        if thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    return not any(thread.is_alive() for thread in threads)
 
 
 def swarm_cleanup_snapshot() -> dict:
@@ -398,7 +508,6 @@ def _retire_terminal_session_locked(key: str) -> None:
     for alias in retired_aliases[:-_RETIRED_ALIAS_CAPACITY]:
         _key_aliases.pop(alias, None)
     with _autocontinue_lock:
-        _autocontinue_chain.pop(key, None)
         _autocontinue_inflight.discard(key)
     logger.info(
         '[Swarm:%s] retired terminal in-memory session at cache target '
@@ -411,11 +520,18 @@ def reserve_session(swarm_key: str):
 
     A published key remains reserved until activation exits this context.
     Reservation protects that identity; unrelated sessions can enter freely.
+    A key still being torn down after TTL expiry is waited out first, so its
+    durable delete always precedes the recovered session's writes.
     """
-    with _sessions_lock:
-        if swarm_key in _active_sessions or swarm_key in _session_reservations:
-            raise SwarmSessionConflict('swarm session already admitted')
-        _session_reservations.add(swarm_key)
+    while True:
+        with _sessions_lock:
+            retiring = _retiring_sessions.get(swarm_key)
+            if retiring is None:
+                if swarm_key in _active_sessions or swarm_key in _session_reservations:
+                    raise SwarmSessionConflict('swarm session already admitted')
+                _session_reservations.add(swarm_key)
+                break
+        retiring.wait()
     try:
         yield
     finally:
@@ -429,54 +545,69 @@ def _set_session(swarm_key: str, session: MasterOrchestrator, *,
 
     ``task_id`` (when distinct) is recorded as an alias so route callers and
     the orchestrator teardown — which only know the task id — still resolve
-    to this session.
+    to this session. A same-key session still being torn down after TTL
+    expiry is waited out first: the spawn persists this session right after
+    registering, and the old teardown's durable delete must not follow it.
     """
-    with _sessions_lock:
-        _cleanup_stale_sessions()
-        if swarm_key in _session_reservations and not reserved:
-            raise SwarmSessionConflict('swarm recovery admission already reserved')
-        missing = object()
-        previous_session = _active_sessions.get(swarm_key, missing)
-        previous_timestamp = _session_timestamps.get(swarm_key, missing)
-        has_alias = bool(task_id and task_id != swarm_key)
-        previous_alias = _key_aliases.get(task_id, missing)
-        timestamp = time.time()
-        _active_sessions[swarm_key] = session
-        _session_timestamps[swarm_key] = timestamp
+    while True:
+        with _sessions_lock:
+            _cleanup_stale_sessions()
+            retiring = _retiring_sessions.get(swarm_key)
+            if retiring is None:
+                _register_session_locked(
+                    swarm_key, session, task_id=task_id, reserved=reserved)
+                return
+        retiring.wait()
+
+
+def _register_session_locked(swarm_key: str, session: MasterOrchestrator, *,
+                             task_id: str, reserved: bool) -> None:
+    """Publish one registration. Caller holds ``_sessions_lock``."""
+    if swarm_key in _session_reservations and not reserved:
+        raise SwarmSessionConflict('swarm recovery admission already reserved')
+    missing = object()
+    previous_session = _active_sessions.get(swarm_key, missing)
+    previous_timestamp = _session_timestamps.get(swarm_key, missing)
+    has_alias = bool(task_id and task_id != swarm_key)
+    previous_alias = _key_aliases.get(task_id, missing)
+    timestamp = time.time()
+    _active_sessions[swarm_key] = session
+    _session_timestamps[swarm_key] = timestamp
+    if has_alias:
+        _key_aliases[task_id] = swarm_key
+    try:
+        _reconcile_cleanup_timer_locked()
+    except BaseException:
+        # Publication is not acknowledged until cleanup residency succeeds.
+        # Restore only this registration's writes; never delete durable truth
+        # or unrelated aliases, including an alias overwritten by this turn.
+        if previous_session is missing:
+            _active_sessions.pop(swarm_key, None)
+        else:
+            _active_sessions[swarm_key] = previous_session
+        if previous_timestamp is missing:
+            _session_timestamps.pop(swarm_key, None)
+        else:
+            _session_timestamps[swarm_key] = previous_timestamp
         if has_alias:
-            _key_aliases[task_id] = swarm_key
-        try:
-            _reconcile_cleanup_timer_locked()
-        except BaseException:
-            # Publication is not acknowledged until cleanup residency succeeds.
-            # Restore only this registration's writes; never delete durable truth
-            # or unrelated aliases, including an alias overwritten by this turn.
-            if previous_session is missing:
-                _active_sessions.pop(swarm_key, None)
+            if previous_alias is missing:
+                _key_aliases.pop(task_id, None)
             else:
-                _active_sessions[swarm_key] = previous_session
-            if previous_timestamp is missing:
-                _session_timestamps.pop(swarm_key, None)
-            else:
-                _session_timestamps[swarm_key] = previous_timestamp
-            if has_alias:
-                if previous_alias is missing:
-                    _key_aliases.pop(task_id, None)
-                else:
-                    _key_aliases[task_id] = previous_alias
-            raise
+                _key_aliases[task_id] = previous_alias
+        raise
 
 
 def _remove_session(task_id: str, *, preserve_durable: bool = False):
     """Remove the session resolved from *task_id* (task id or swarm key).
 
-    Also drops the durable DB rows — ``_remove_session`` is only called on
-    genuine teardown (explicit abort or the task ended with a terminated
-    swarm), never on DETACH, so the persisted state is no longer needed.
+    Also reclaims the resumable DB rows — ``_remove_session`` is only called
+    on genuine teardown (explicit abort, launch rollback, or a terminated
+    swarm replaced by a new wave), never on DETACH. Every settled result is
+    first recorded under its ``swarm_run_id`` (``_record_results_then_delete``).
     """
     key = _resolve_key(task_id)
     with _sessions_lock:
-        _active_sessions.pop(key, None)
+        session = _active_sessions.pop(key, None)
         _session_timestamps.pop(key, None)
         for alias in [a for a, k in _key_aliases.items() if k == key]:
             _key_aliases.pop(alias, None)
@@ -489,11 +620,7 @@ def _remove_session(task_id: str, *, preserve_durable: bool = False):
     # strand their durable rows until settlement (the stuck "result
     # delivered-unconfirmed" banner).
     agent_inbox.clear(key, modes=['swarm-update'])
-    try:
-        from lib.swarm import persistence
-        persistence.delete_session(key)
-    except Exception as e:
-        logger.debug('[Swarm:%s] persisted session delete failed: %s', key, e)
+    _record_results_then_delete(key, session)
 
 
 def add_session_alias(task_id: str, swarm_key: str):
@@ -737,3 +864,36 @@ def abort_swarm(task_id: str, *, user_id: int) -> dict:
         logger.error('[swarm] Error aborting %s: %s', task_id, e, exc_info=True)
         _remove_session(task_id)
         return {'success': False, 'error': str(e)}
+
+
+_STOPPABLE_AGENT_STATUSES = frozenset({'running', 'retrying'})
+
+
+def stop_swarm_agent(swarm_id: str, agent_id: str, *, user_id: int) -> dict:
+    """Stop one running agent of the owner's live run; siblings keep running.
+
+    Sends the ``kill`` tool's signal (``MasterOrchestrator.kill_agent``): the
+    worker settles ``cancelled`` through its ordinary abort checkpoints and its
+    coordinator receives that settlement. ``swarm_id`` is the run identity that
+    ``list_active_swarms`` publishes (``session.task_id``), never a session key
+    or task alias: a later run that reuses the conversation key or the agent ID
+    is not reachable from an older row. A pending agent has no live invocation
+    to signal.
+
+    Returns ``{'outcome': 'stopped' | 'not_running' | 'not_found', 'status'}``
+    where ``status`` is the agent status the decision was made on.
+    """
+    owner_user_id = require_user_id(user_id, context='swarm agent stop')
+    with _sessions_lock:
+        session = next((candidate for candidate in _active_sessions.values()
+                        if candidate.task_id == swarm_id
+                        and int(candidate.user_id) == owner_user_id), None)
+    if session is None:
+        return {'outcome': 'not_found', 'status': ''}
+    status = str((session.get_status().get(agent_id) or {}).get('status') or '')
+    if not status:
+        return {'outcome': 'not_found', 'status': ''}
+    if status not in _STOPPABLE_AGENT_STATUSES or not session.kill_agent(agent_id):
+        return {'outcome': 'not_running', 'status': status}
+    logger.info('[swarm] owner stopped agent %s of run %s', agent_id, swarm_id)
+    return {'outcome': 'stopped', 'status': status}

@@ -4,7 +4,7 @@ import { featureRegistry as runtimeScope } from '../feature-registry';
 import { t } from '../i18n/index';
 import { escapeHtml } from '../html-safety';
 import { createProjectBrowseCoordinator } from '../core/project-browse-coordinator';
-import { createProjectDirectoryBrowser } from '../features/project/directory-browser';
+import { createFolderBrowser } from '../features/project/folder-browser';
 import { PROJECT_PRESENTATION_ASSETS } from '../features/project/presentation-assets';
 
 const Api = runtimeScope.Api;
@@ -35,12 +35,8 @@ const reconcileConversationCatalogMetadata = runtimeScope.reconcileConversationC
 if (typeof reconcileConversationCatalogMetadata !== 'function') throw new Error('project-presenters runtime dependency is unavailable: reconcileConversationCatalogMetadata');
 const renderConversationList = runtimeScope.renderConversationList;
 if (typeof renderConversationList !== 'function') throw new Error('project-presenters runtime dependency is unavailable: renderConversationList');
-const showAlert = runtimeScope.showAlert;
-if (typeof showAlert !== 'function') throw new Error('project-presenters runtime dependency is unavailable: showAlert');
 const showConfirm = runtimeScope.showConfirm;
 if (typeof showConfirm !== 'function') throw new Error('project-presenters runtime dependency is unavailable: showConfirm');
-const showPrompt = runtimeScope.showPrompt;
-if (typeof showPrompt !== 'function') throw new Error('project-presenters runtime dependency is unavailable: showPrompt');
 const showToast = runtimeScope.showToast;
 if (typeof showToast !== 'function') throw new Error('project-presenters runtime dependency is unavailable: showToast');
 /* ===== migrated source: project.js ===== */
@@ -106,6 +102,7 @@ function openProjectModal() {
   pmMobileTab("browse");
   // Docked browser: populate it from the primary folder (or home) on open.
   browseDirectory(_mpFolders.length ? _mpFolders[0] : "~");
+  _renderRemoteDevicesSection();
   _attachFolderDropZone();
   _attachMpReorder();
   setTimeout(() => document.getElementById("mpPathInput").focus(), 100);
@@ -114,7 +111,8 @@ function openProjectModal() {
 function closeProjectModal() {
   document.getElementById("projectModal").classList.remove("open");
   runtimeScope._tofuProjectModalOpen = false;
-  _projectBrowseCoordinator.cancel();
+  if (_projectFolderBrowserHandle) _projectFolderBrowserHandle.cancel();
+  else _projectBrowseCoordinator.cancel();
 }
 
 // The eager Project state owner uses this optional port only after this chunk
@@ -149,6 +147,7 @@ function _mpRenderTags() {
   const mCountEl = document.getElementById("pmMobileCount");
   if (mCountEl) mCountEl.textContent = _mpFolders.length ? `${_mpFolders.length}` : '';
   const _t = (typeof t === "function") ? t : (k) => k;
+  _syncBrowserAddedState();
   if (!_mpFolders.length) {
     container.innerHTML = '<div class="mp-empty-hint">' + escapeHtml(_t("pm.emptyFolders")) + '</div>';
     return;
@@ -369,6 +368,10 @@ function _mpRemove(index) {
    so reconciliation may rewrite the bar — that's fine and expected.
    On failure we revert to the previous state and reopen the modal. */
 async function mpApplyFolders() {
+  // A folder delete in flight may still restore a staged root it removed.
+  if (_projectFolderBrowserHandle && _projectFolderBrowserHandle.busy()) {
+    await _projectFolderBrowserHandle.settled();
+  }
   if (!_mpFolders.length) return;
   // Ensure we have an active conversation
   if (!ProjectPresentationShellState.activeConversationId) {
@@ -521,14 +524,17 @@ function _renderRecentList() {
     .map((item) => {
       const name = _recentName(item.path);
       if (item.exists === false) {
-        return `<div class="recent-path-item recent-path-missing" data-tofu-action="beginRelinkRecent('${escapeHtml(item.path)}')" title="${escapeHtml(_t("pm.recentMissingTitle", { path: item.path }))}">
+        // JSON-encode the path as the action's string argument, then escape it
+        // for the attribute: quotes in a directory name cannot end the string
+        // and add arguments or calls to the action expression.
+        return `<div class="recent-path-item recent-path-missing" data-tofu-action="beginRelinkRecent(${escapeHtml(JSON.stringify(item.path))})" title="${escapeHtml(_t("pm.recentMissingTitle", { path: item.path }))}">
          <span class="recent-path-text">
            <span class="recent-path-name">${_recentHighlight(name, q)}<span class="recent-missing-badge">${escapeHtml(_t("pm.recentMissing"))}</span></span>
            <span class="recent-path-full">${_recentHighlight(item.path, q)}</span>
          </span>
        </div>`;
       }
-      return `<div class="recent-path-item" data-tofu-action="selectRecentProject('${escapeHtml(item.path)}')" title="${escapeHtml(item.path)}">
+      return `<div class="recent-path-item" data-tofu-action="selectRecentProject(${escapeHtml(JSON.stringify(item.path))})" title="${escapeHtml(item.path)}">
          <span class="recent-path-text">
            <span class="recent-path-name">${_recentHighlight(name, q)}</span>
            <span class="recent-path-full">${_recentHighlight(item.path, q)}</span>
@@ -633,7 +639,6 @@ function useGitRootHint() {
   _gitRootHint = null;
   _mpRenderTags();
   _renderProjectModalHint();
-  _renderBrowseList();
 }
 
 function dismissGitRootHint() {
@@ -646,6 +651,7 @@ function beginRelinkRecent(path) {
   _relinkOldPath = path;
   _gitRootHint = null;
   _renderProjectModalHint();
+  _syncBrowserAddedState();
   // Land the browser near the old location so the user can spot the
   // renamed/moved directory, then arm the browser's + as the relink target.
   const parts = String(path).split("/").filter(Boolean);
@@ -656,6 +662,7 @@ function beginRelinkRecent(path) {
 function cancelRelinkRecent() {
   _relinkOldPath = "";
   _renderProjectModalHint();
+  _syncBrowserAddedState();
 }
 
 async function _confirmRelinkRecent(newPath) {
@@ -667,6 +674,7 @@ async function _confirmRelinkRecent(newPath) {
     if (!data) throw new Error(_t("pm.relinkFailed"));
     _relinkOldPath = "";
     _renderProjectModalHint();
+    _syncBrowserAddedState();
     if (typeof showToast === "function") {
       showToast(_t("pm.relinkedToast", { path: newPath }), "success");
     }
@@ -707,114 +715,57 @@ function _updateProjectModalStatus() {
 // ══════════════════════════════════════════════════════
 //  Folder Browser
 // ══════════════════════════════════════════════════════
-
-let _browseState = {
-  path: "", dirs: [], parent: null, showHidden: false, truncated: false
-};
+/* The typed shared browser (features/project/folder-browser) owns
+   navigation, filtering, folder create/delete and rendering. This section
+   only binds the workbench's staged workspace list, drop zone and remote
+   devices group to it; browseDirectory serves this section's open, recent
+   and relink flows. */
 const _projectBrowseCoordinator = createProjectBrowseCoordinator(function () {
   return ProjectPresentationShellState.sessionStorage;
 });
-const _projectDirectoryBrowser = createProjectDirectoryBrowser({
-  escapeHtml: escapeHtml,
-  translate: function (key, values) {
-    return (typeof t === "function") ? t(key, values) : key;
-  },
-  assets: PROJECT_PRESENTATION_ASSETS,
-});
+let _projectFolderBrowserHandle = null;
 
-function _applyBrowseData(data) {
-  _browseState.path = data.path;
-  _browseState.dirs = data.dirs;
-  _browseState.parent = data.parent;
-  _browseState.filesCount = data.filesCount;
-  _browseState.truncated = data.truncated;
-  _renderBreadcrumb(data.path);
-  const back = document.getElementById("browseBackBtn");
-  if (back) back.disabled = !data.parent;
-  _renderBrowseList();
-}
-
-async function browseDirectory(path) {
-  const listEl = document.getElementById("browseList");
-  if (!listEl) return;
-  const requestedPath = String(path || "~");
-  if (_projectDirectoryBrowser.resetForNavigation(
-    _browseState.path, requestedPath)) _syncBrowseFilterUi(false);
-  const showHidden = !!_browseState.showHidden;
-  const load = _projectBrowseCoordinator.load(
-    requestedPath,
-    showHidden,
-    function (signal) {
-      return Api.project.browse(
-        requestedPath, showHidden, signal ? { signal: signal } : {});
+function _projectFolderBrowser() {
+  if (_projectFolderBrowserHandle) return _projectFolderBrowserHandle;
+  const handle = createFolderBrowser({
+    t: function (key, values) {
+      return (typeof t === "function") ? t(key, values) : key;
     },
-  );
-  const cached = load.cached;
-  if (cached) {
-    _applyBrowseData(cached);
-  } else {
-    listEl.innerHTML =
-      '<div class="fb-state"><div class="fb-state-spinner"></div><span>' +
-      escapeHtml(typeof t === 'function' ? t('common.loading') : 'Loading…') +
-      '</span></div>';
-  }
-  _renderRemoteDevicesSection();
-  const outcome = await load.completion;
-  if (outcome.kind === 'cancelled') return;
-  if (outcome.kind === 'failed') {
-    if (!cached) listEl.innerHTML =
-      '<div class="fb-state fb-state-error"><span>' +
-      escapeHtml(outcome.message) +
-      "</span></div>";
-    return;
-  }
-  _applyBrowseData(outcome.data);
+    coordinator: _projectBrowseCoordinator,
+    browse: function (path, showHidden, signal) {
+      return Api.project.browse(path, showHidden, signal ? { signal: signal } : {});
+    },
+    mkdir: function (parent, name) { return Api.project.mkdir(parent, name); },
+    rmdir: function (path) { return Api.project.rmdir(path); },
+    // Relink mode arms every + as "this is the moved folder", staged or not.
+    isAdded: function (path) { return !_relinkOldPath && _mpFolders.includes(path); },
+    onAdd: mpAddBrowsedPath,
+    onDeleted: _unstageDeletedFolder,
+    notify: function (message, variant) {
+      if (typeof showToast === "function") showToast(message, variant);
+    },
+    prelude: document.getElementById("remoteDevicesSection"),
+  });
+  // The drop zone and its tests address the browser by this stable id.
+  handle.el.id = "folderBrowser";
+  const pane = document.querySelector("#projectModal .pm-browser-pane");
+  if (pane) pane.append(handle.el);
+  _projectFolderBrowserHandle = handle;
+  // The pane lives for the page; its copy follows UI language switches.
+  window.addEventListener("tofu:language-change", function () { handle.relabel(); });
+  return handle;
 }
 
-function _renderBrowseList() {
-  const listEl = document.getElementById("browseList");
-  if (!listEl) return;
-  listEl.innerHTML = _projectDirectoryBrowser.render(_browseState, _mpFolders);
+function browseDirectory(path) {
+  return _projectFolderBrowser().navigate(path || "~");
 }
 
-/* Render a clickable breadcrumb trail (VS Code style) for the current path.
-   Each crumb navigates to that ancestor on click. */
-function _renderBreadcrumb(path) {
-  const el = document.getElementById("browseCrumbs");
-  if (!el) return;
-  const parts = path.split("/").filter(Boolean);
-  const isAbs = path.startsWith("/");
-  const crumbs = [];
-  // Root crumb: "/" for absolute paths, else the first segment.
-  const rootPath = isAbs ? "/" : (parts[0] || path);
-  crumbs.push(
-    '<button class="pm-crumb pm-crumb-root" data-tofu-action="browseDirectory(\'' +
-    rootPath.replace(/\\/g, "\\\\").replace(/'/g, "\\'") +
-    '\')" title="' + escapeHtml(rootPath) + '">' +
-    PROJECT_PRESENTATION_ASSETS.home +
-    '</button>'
-  );
-  let walk = isAbs ? "" : parts[0] || "";
-  const startIdx = isAbs ? 0 : 1;
-  for (let i = startIdx; i < parts.length; i++) {
-    walk = walk + "/" + parts[i];
-    const full = isAbs ? walk : walk.replace(/^\//, "");
-    const last = i === parts.length - 1;
-    const safe = full.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-    crumbs.push('<span class="pm-crumb-sep">/</span>');
-    crumbs.push(
-      '<button class="pm-crumb' + (last ? ' pm-crumb-current' : '') +
-      '" data-tofu-action="browseDirectory(\'' + safe + '\')" title="' + escapeHtml(full) + '">' +
-      escapeHtml(parts[i]) + '</button>'
-    );
-  }
-  el.innerHTML = crumbs.join("");
-  // Scroll to the end so the deepest crumb is visible.
-  el.scrollLeft = el.scrollWidth;
+/* Repaint the browser's added markers after the staged workspace changed. */
+function _syncBrowserAddedState() {
+  if (_projectFolderBrowserHandle) _projectFolderBrowserHandle.syncAdded();
 }
 
-/* Add a folder shown in the browser straight into the workspace list.
-   Re-renders the current directory so the row's "added" state updates. */
+/* Add a folder shown in the browser straight into the workspace list. */
 function mpAddBrowsedPath(path) {
   if (!path) return;
   // Relink mode armed: the browser's + names the moved directory's new home.
@@ -822,9 +773,26 @@ function mpAddBrowsedPath(path) {
   if (!_mpFolders.includes(path)) {
     _mpFolders.push(path);
     _mpRenderTags();
-    _renderBrowseList();
     _checkGitRootHint(path);
   }
+}
+
+/* A deleted directory leaves the staged workspace in the same task as the
+   confirmation (the server moves it to a recoverable trash bin); the
+   returned function re-stages it if the server refuses the delete. */
+function _unstageDeletedFolder(path) {
+  const index = _mpFolders.indexOf(path);
+  if (index === -1) return undefined;
+  const wasReadOnly = _mpReadOnly.has(path);
+  _mpFolders.splice(index, 1);
+  _mpReadOnly.delete(path);
+  _mpRenderTags();
+  return function () {
+    if (_mpFolders.includes(path)) return;
+    _mpFolders.splice(Math.min(index, _mpFolders.length), 0, path);
+    if (wasReadOnly) _mpReadOnly.add(path);
+    _mpRenderTags();
+  };
 }
 
 /* RWA P4b-2a(拍板 6A):目录浏览弹窗顶部「远程设备」分组。
@@ -879,133 +847,6 @@ async function _renderRemoteDevicesSection() {
   });
 }
 
-function browseParent() {
-  if (_browseState.parent) browseDirectory(_browseState.parent);
-}
-
-function _syncBrowseFilterUi(focusInput) {
-  const filter = _projectDirectoryBrowser.filterValue();
-  const input = document.getElementById("browseSearchInput");
-  if (input) {
-    input.value = filter;
-    if (focusInput) input.focus();
-  }
-  const clear = document.getElementById("browseSearchClear");
-  if (clear) clear.hidden = !filter;
-}
-
-function _filterBrowseDirs(value) {
-  _projectDirectoryBrowser.setFilter(value);
-  _syncBrowseFilterUi(false);
-  _renderBrowseList();
-}
-
-function _clearBrowseSearch() {
-  _projectDirectoryBrowser.clearFilter();
-  _syncBrowseFilterUi(true);
-  _renderBrowseList();
-}
-
-/* Create a new sub-folder inside the directory the browser is currently
-   showing, then navigate straight into it (owner directive 2026-08-31) —
-   the parent listing is still invalidated so going back up shows it. */
-async function mpNewFolder() {
-  const parent = _browseState.path;
-  if (!parent) return;
-  const name = await showPrompt(t('folder.createInHint', { dir: parent }), {
-    title: t('folder.createTitle'),
-    placeholder: t('folder.namePh'),
-    okText: t('folder.create'),
-  });
-  if (name == null) return; // cancelled
-  const clean = String(name).trim();
-  if (!clean) return;
-  try {
-    const resp = await Api.project.mkdir(parent, clean);
-    const data = resp ? await resp.json().catch(() => ({})) : {};
-    if (resp && resp.ok && data.ok) {
-      if (typeof showToast === 'function') showToast(t('folder.created'), 'success');
-      _projectBrowseCoordinator.invalidate(parent);
-      browseDirectory(data.path || (parent.replace(/\/+$/, "") + "/" + clean));
-    } else {
-      await showAlert((data && data.error) || t('folder.createFailed'),
-        { title: t('folder.createFailed') });
-    }
-  } catch (e) {
-    await showAlert(e.message || t('folder.createFailed'),
-      { title: t('folder.createFailed') });
-  }
-}
-
-/* Delete a folder shown in the browser (moved to a recoverable trash bin),
-   then refresh the current directory. */
-async function mpDeleteFolder(path, name) {
-  if (!path) return;
-  if (!await showConfirm(
-    t('folder.deleteDirConfirm', { name: name || path }) + '\n' +
-    t('folder.deleteDirHint'),
-    { danger: true, title: t('folder.deleteTitle') })) return;
-  /* INSTANT-UI (owner directive 2026-07-31, ): the row
-   *   leaves the browser list AND the staged workspace tag disappears in the
-   *   SAME task as the confirm — the old code awaited the rmdir RTT first.
-   *   The deletion lands in .tofu_trash (recoverable by design), so the
-   *   optimistic removal is the safest in the app: on failure we re-fetch
-   *   the directory (server truth restores the row) and re-stage the tag. */
-  const _rowIdx = _browseState.dirs.findIndex((d) => d.path === path);
-  _projectBrowseCoordinator.invalidate(_browseState.path);
-  if (_rowIdx >= 0) {
-    _browseState.dirs.splice(_rowIdx, 1);
-    _renderBrowseList();
-  }
-  const _stagedIdx = _mpFolders.indexOf(path);
-  const _wasStaged = _stagedIdx !== -1;
-  if (_wasStaged) { _mpFolders.splice(_stagedIdx, 1); _mpRenderTags(); }
-  try {
-    const resp = await Api.project.rmdir(path);
-    const data = resp ? await resp.json().catch(() => ({})) : {};
-    if (resp && resp.ok && data.ok) {
-      if (typeof showToast === 'function') showToast(t('folder.deleted'), 'success');
-      _mpReadOnly.delete(path);
-      browseDirectory(_browseState.path);
-    } else {
-      throw new Error((data && data.error) || t('folder.deleteFailed'));
-    }
-  } catch (e) {
-    /* Rollback: re-stage the workspace tag at its original index, then
-     *   re-fetch the list so the row comes back from server truth. */
-    if (_wasStaged) {
-      _mpFolders.splice(Math.min(_stagedIdx, _mpFolders.length), 0, path);
-      _mpRenderTags();
-    }
-    browseDirectory(_browseState.path);
-    await showAlert(e.message || t('folder.deleteFailed'),
-      { title: t('folder.deleteFailed') });
-  }
-}
-
-function toggleHiddenDirs() {
-  _browseState.showHidden = !_browseState.showHidden;
-  var btn = document.getElementById("browseHiddenBtn");
-  btn.classList.toggle("active", _browseState.showHidden);
-  btn.title = _browseState.showHidden
-    ? (typeof t === 'function' ? t('pm.hideHidden') : "Hide hidden dirs")
-    : (typeof t === 'function' ? t('pm.showHidden') : "Show hidden dirs");
-  browseDirectory(_browseState.path);
-}
-
-function selectBrowsedFolder() {
-  // Docked browser: add the current open directory to the workspace list.
-  // Single-click now navigates, so the footer button targets the dir the
-  // browser is currently showing. The browser stays open for more adds.
-  const input = document.getElementById("mpPathInput");
-  const path = input.value.trim() || _browseState.path;
-  if (path && !_mpFolders.includes(path)) {
-    _mpFolders.push(path);
-    _mpRenderTags();
-    _renderBrowseList();
-  }
-  input.value = "";
-}
 
 /* ═══════════════════════════════════════════════════════
    Drag-and-drop files INTO a project folder (folder browser)
@@ -1024,15 +865,15 @@ var _folderDropAttached = false;
 /** Resolve which directory a drop landed on: a specific folder row's path,
  *  else the directory currently shown in the browser. Returns '' if unknown. */
 function _folderDropTargetDir(target) {
-  var row = target && target.closest ? target.closest('.folder-item[data-dir-path]') : null;
+  var row = target && target.closest ? target.closest('.folder-browser-row[data-dir-path]') : null;
   if (row && row.dataset.dirPath) return row.dataset.dirPath;
-  return (typeof _browseState !== 'undefined' && _browseState.path) ? _browseState.path : '';
+  return _projectFolderBrowserHandle ? _projectFolderBrowserHandle.currentPath() : '';
 }
 
 function _clearFolderDropHighlight() {
   var el = document.getElementById('folderBrowser');
   if (el) el.classList.remove('fb-drop-active');
-  document.querySelectorAll('.folder-item.fb-drop-row')
+  document.querySelectorAll('.folder-browser-row.fb-drop-row')
     .forEach(function (r) { r.classList.remove('fb-drop-row'); });
 }
 
@@ -1108,8 +949,8 @@ function _attachFolderDropZone() {
     e.stopPropagation();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
     el.classList.add('fb-drop-active');
-    var row = e.target.closest ? e.target.closest('.folder-item[data-dir-path]') : null;
-    document.querySelectorAll('.folder-item.fb-drop-row')
+    var row = e.target.closest ? e.target.closest('.folder-browser-row[data-dir-path]') : null;
+    document.querySelectorAll('.folder-browser-row.fb-drop-row')
       .forEach(function (r) { if (r !== row) r.classList.remove('fb-drop-row'); });
     if (row) row.classList.add('fb-drop-row');
   }, true);
@@ -1227,9 +1068,8 @@ async function _runFolderDrop(files, dir) {
     try { runtimeScope._paperPreviewDiscover(_dropConvId, { path: extracted[0].path }); } catch (_e) { /* hint only */ }
   }
   // Refresh so the newly-saved files reflect in the browser's file count.
-  if (typeof browseDirectory === 'function' && typeof _browseState !== 'undefined' && _browseState.path) {
-    _projectBrowseCoordinator.invalidate(_browseState.path);
-    browseDirectory(_browseState.path);
+  if (_projectFolderBrowserHandle && _projectFolderBrowserHandle.currentPath()) {
+    _projectFolderBrowserHandle.refresh();
   }
   // Surface the write in the project bar's file-changes affordance.
   if (typeof loadProjectStatus === 'function') { try { loadProjectStatus(); } catch (_e) { /* best-effort */ } }
@@ -1237,30 +1077,21 @@ async function _runFolderDrop(files, dir) {
 
 // BEGIN GENERATED LAZY RUNTIME PORTS — project-presenters
 runtimeScope.ProjectModalPresentation = ProjectModalPresentation;
-runtimeScope.mpAddBrowsedPath = mpAddBrowsedPath;
-runtimeScope.mpDeleteFolder = mpDeleteFolder;
 // END GENERATED LAZY RUNTIME PORTS
 // BEGIN GENERATED LAZY RUNTIME ACTIONS — project-presenters
-runtimeScope._clearBrowseSearch = _clearBrowseSearch;
 runtimeScope._clearRecentSearch = _clearRecentSearch;
-runtimeScope._filterBrowseDirs = _filterBrowseDirs;
 runtimeScope._filterRecentProjects = _filterRecentProjects;
 runtimeScope._mpRemove = _mpRemove;
 runtimeScope._mpToggleReadOnly = _mpToggleReadOnly;
 runtimeScope.beginRelinkRecent = beginRelinkRecent;
-runtimeScope.browseDirectory = browseDirectory;
-runtimeScope.browseParent = browseParent;
 runtimeScope.cancelRelinkRecent = cancelRelinkRecent;
 runtimeScope.clearRecentProjects = clearRecentProjects;
 runtimeScope.closeProjectModal = closeProjectModal;
 runtimeScope.dismissGitRootHint = dismissGitRootHint;
 runtimeScope.mpAddFolder = mpAddFolder;
 runtimeScope.mpApplyFolders = mpApplyFolders;
-runtimeScope.mpNewFolder = mpNewFolder;
 runtimeScope.openProjectModal = openProjectModal;
 runtimeScope.pmMobileTab = pmMobileTab;
-runtimeScope.selectBrowsedFolder = selectBrowsedFolder;
 runtimeScope.selectRecentProject = selectRecentProject;
-runtimeScope.toggleHiddenDirs = toggleHiddenDirs;
 runtimeScope.useGitRootHint = useGitRootHint;
 // END GENERATED LAZY RUNTIME ACTIONS

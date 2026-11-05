@@ -61,7 +61,7 @@ def check(binary, grammar_directory, *, scanner_type=NativeBatchScanner, initial
                     calls_before_refusal = scanner.calls
                     refused = candidate.port.invoke(candidate.task, {}, lambda *_args, **kw: statuses.append(kw['status']),
                                                     project_root=base / 'foreign')
-                    assert refused[2] and statuses == ['error']
+                    assert refused[2] is False and statuses == ['error']
                     assert scanner.calls == calls_before_refusal
                     try:
                         candidate.port.scope.scan(OWNER + 1)

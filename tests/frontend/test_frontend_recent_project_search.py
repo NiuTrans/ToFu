@@ -22,7 +22,6 @@ Skips cleanly without node/jsdom.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -35,12 +34,6 @@ ROOT = _legacy_test_root()
 REPOSITORY_ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 _PROJECT_SRC = os.path.join(JS_DIR, 'project.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -161,8 +154,6 @@ _EXPECTED = (
 )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_recent_project_search():
     output = _run(_PROJECT_SRC)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -198,8 +189,6 @@ def _nc(anchor, replacement, must_fail, must_still_pass):
         assert f.read() == original, 'shipped project.js must be byte-identical'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_filter_is_load_bearing():
     """Neuter the substring filter (always keep every item) → the narrow /
     empty-state / count-fraction checks flip to FAIL, while highlight+escape
@@ -212,8 +201,6 @@ def test_NC_filter_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_highlight_escape_is_load_bearing():
     """Neuter the highlight escaping (emit the raw match) → the XSS-escape check
     flips to FAIL, while the filter narrowing (separate concern) still passes."""
@@ -338,8 +325,6 @@ def _run_i18n(project_src, i18n_src=None):
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_recent_search_i18n_zh():
     """Authoritative zh catalogue → label / placeholder / tooltips / empty
     states all render Chinese, no raw key leaks."""
@@ -380,8 +365,6 @@ def _nc_i18n(target_file, anchor, replacement, must_fail, must_still_pass):
         assert f.read() == original, f'shipped {os.path.basename(target_file)} must be byte-identical'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_empty_state_uses_t():
     """Revert the empty-state to a hardcoded English literal → the zh empty
     checks FAIL, while the static-attr localization (separate concern) passes."""
@@ -394,8 +377,6 @@ def test_NC_empty_state_uses_t():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_i18n_keys_defined():
     """Blank the zh value of pm.recentSearchPlaceholder → its placeholder check
     FAILs (renders empty), while the empty-state (separate key) still passes."""

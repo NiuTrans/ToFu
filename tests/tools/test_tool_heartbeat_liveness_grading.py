@@ -208,13 +208,15 @@ def test_run_command_stdout_chunk_is_real_evidence(no_db_persist):
 # ═════════════════════════════════════════════════════════════════════
 
 def _reaper_harness(monkeypatch, task):
+    import lib.tasks_pkg.liveness as liveness
     import lib.tasks_pkg.manager._maintenance as _maintenance
-    from tests.support.chat_tasks import chat_task_registry
-    monkeypatch.setattr(_maintenance, '_stuck_task_max_silent_secs',
+    from tests.support.chat_tasks import chat_task_registry, isolated_reaper_registry
+    monkeypatch.setattr(liveness, 'stall_threshold_seconds',
                         lambda: 1800, raising=True)
     monkeypatch.setattr(_maintenance, '_finalize_reaped_stuck_task',
                         lambda t: None, raising=True)
     monkeypatch.setitem(chat_task_registry, task['id'], task)
+    isolated_reaper_registry(monkeypatch)[task['id']] = task
     return _maintenance
 
 

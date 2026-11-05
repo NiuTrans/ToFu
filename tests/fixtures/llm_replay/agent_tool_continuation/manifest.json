@@ -1,0 +1,5 @@
+{
+  "description": "Ordinary Chat starts an owned slide job through the real tool handler and production runtime, then writes an independent file in a later provider round. Rendering readiness and worker launch are isolated; the accepted deck stays pending while Chat settles. Provider streams are synthetic and replayed with strict request digests.",
+  "recorded_at": "2026-10-27",
+  "mode": "replay"
+}

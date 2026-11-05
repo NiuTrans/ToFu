@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.frontend_visual import frontend_visual_origin, frontend_visual_page as frontend_visual_page  # noqa: F401
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.visual
@@ -12,6 +13,7 @@ pytestmark = pytest.mark.visual
 
 @pytest.fixture(scope='module')
 def navigation_browser_bundle(tmp_path_factory):
+    require_node_modules('vite')
     folder = tmp_path_factory.mktemp('exact-navigation-browser')
     entry = folder / 'navigation.ts'
     entry.write_text(f"export {{createTurnNavigation}} from '{ROOT}/frontend/src/features/conversation-bar/turn-navigation.ts';")
@@ -90,8 +92,9 @@ def test_exact_round_keyboard_numeric_first_last_and_bounded_page(
 
 @pytest.mark.parametrize('phase', ['read', 'hydrate'])
 @pytest.mark.parametrize('change', ['head', 'switch'])
-def test_jump_invalidation_releases_busy_and_refreshes_current_view(
+def test_jump_invalidation_re_resolves_or_abandons_and_refreshes_current_view(
         frontend_visual_page, navigation_browser_bundle, tmp_path, phase, change):
+    """A rank change re-resolves the jump and lands it; a switch abandons it."""
     page = frontend_visual_page
     page.evaluate("document.body.innerHTML='<main><div id=turnNav></div></main>'")
     page.add_script_tag(path=str(navigation_browser_bundle))
@@ -112,12 +115,11 @@ def test_jump_invalidation_releases_busy_and_refreshes_current_view(
     page.evaluate('block=true')
     page.locator('[data-direction=previous]').click()
     page.wait_for_function("typeof releaseJump==='function'")
-    page.evaluate("change=>{head++;nav.update(change==='head'?'a':'b',state);releaseJump();}", change)
+    page.evaluate("change=>{head++;nav.update(change==='head'?'a':'b',state);block=false;releaseJump();}", change)
     page.wait_for_function("document.getElementById('turnNav').getAttribute('aria-busy')==='false' && document.querySelector('.turn-nav-readout').textContent==='5 / 5'")
-    assert page.evaluate('scrolls') == []
+    assert page.evaluate('scrolls') == (['a-3'] if change == 'head' else [])
     assert page.evaluate('reads.at(-1)') == {'id': 'a' if change == 'head' else 'b', 'limit': 50}
-    page.evaluate('block=false')
     page.locator('[data-direction=previous]').click()
-    page.wait_for_function('scrolls.length===1')
+    page.wait_for_function('scrolls.length===%d' % (2 if change == 'head' else 1))
     page.screenshot(path=str(tmp_path / f'jump-refresh-{change}-{phase}.png'))
     page.evaluate('nav.destroy()')

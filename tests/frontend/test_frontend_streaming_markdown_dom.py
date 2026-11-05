@@ -39,7 +39,11 @@ const prefixes=['<p>stable</p>\n','<blockquote><p>quote</p></blockquote>\n',
 const tails=['<p>tail</p>\n','<p>tail <em>rich</em></p>\n','<pre><code>code</code></pre>\n',
   '<p>tail<br>line</p>\n','<p id="tail">tail</p>\n','<p><b>tail</p>\n',
   '<p>tail</p><!--comment-->','<p>tail</p> non-whitespace',
-  '<p>tail<table><tr><td>x</td></tr></table></p>', '<p>tail</p><p>tail</p>'];
+  '<p>tail<table><tr><td>x</td></tr></table></p>', '<p>tail</p><p>tail</p>',
+  '<ul>\n<li>a</li>\n</ul>\n','<ul>\n<li>a</li>\n<li>b <strong>c</strong></li>\n</ul>\n',
+  '<ol start="3">\n<li>x</li>\n</ol>\n','<blockquote>\n<p>q</p>\n</blockquote>\n','<h2>head</h2>\n',
+  '<div class="md-table-wrapper"><table>\n<thead>\n<tr>\n<th>a</th>\n</tr>\n</thead>\n<tbody><tr>\n<td>1</td>\n</tr>\n</tbody></table></div>',
+  '<ul><li>open', '<table><tr><td>implicit</td></tr></table>'];
 for(const prefix of prefixes)for(const before of tails)for(const after of tails){
   check(prefix+before,prefix+after);
 }
@@ -47,6 +51,17 @@ check('<p>stable</p><p>rich</p><p>later</p>',
       '<p>stable</p><pre><code>changed</code></pre><p>end</p>',true);
 check('<p>stable</p><table><tbody><tr><td>a</td></tr></tbody></table>',
       '<p>stable</p><table><tbody><tr><td>b</td></tr></tbody></table>',true);
+const list=w.document.createElement('div');
+w.setManagedHtml(list,'<p>stable</p>\n<ul>\n<li>a</li>\n</ul>\n');
+const listPrefix=list.firstElementChild;
+const outerHTML=Object.getOwnPropertyDescriptor(w.Element.prototype,'outerHTML');
+const serialized=[];
+Object.defineProperty(w.Element.prototype,'outerHTML',{configurable:true,
+  get(){serialized.push(this.tagName);return outerHTML.get.call(this);}});
+w.setStreamingMarkdownHtml(list,'<p>stable</p>\n<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n');
+Object.defineProperty(w.Element.prototype,'outerHTML',outerHTML);
+assert.equal(list.firstElementChild,listPrefix);
+assert.deepEqual(serialized,['UL']);
 const actual=w.document.createElement('div');w.document.body.append(actual);
 w.setManagedHtml(actual,'<p>stable</p>\n<p>tail</p>\n');
 const tail=actual.lastElementChild.firstChild;

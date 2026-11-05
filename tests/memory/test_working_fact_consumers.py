@@ -1,4 +1,6 @@
 """Task dependency history, provider uncertainty and targeted correction impact."""
+
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
 import asyncio
 import copy
 import threading
@@ -205,9 +207,9 @@ def test_ordinary_physical_request_and_verified_return_own_confirmation(facts, q
         if outcome == 'cancelled':
             target['abort_event'].set()
         return stream
-    monkeypatch.setattr(fallback, 'stream_llm_response', provider)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', provider)
     def model(*args, **kwargs):
-        stream = fallback._stream_with_message_receipts(task, {'messages': messages})
+        stream = _fallback_transport._stream_with_message_receipts(task, {'messages': messages})
         return {'assistant_msg': {'role': 'assistant', 'content': 'answer'},
             'finish_reason': stream.finish_reason, 'stream_result': stream, 'usage': None,
             'model': 'fixture', 'preset': None, 'thinking_enabled': False, '_loop_action': 'proceed'}

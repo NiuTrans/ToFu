@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import re
 import sqlite3
 import threading
 import time
@@ -542,3 +543,68 @@ def test_user_writer_wait_uses_caller_deadline_beyond_old_two_second_cap():
         if second.ident is not None:
             second.join(5)
         writer.close()
+
+
+def test_expired_writer_submission_reports_no_entry_budget_without_claiming_contention(caplog):
+    connection = sqlite3.connect(':memory:', check_same_thread=False)
+    writer = _FairWriter(connection, transaction_timeout_s=5)
+    executed = []
+    try:
+        # Keep the idle writer from taking the job before the submitting caller
+        # observes its already-expired deadline. No scheduling race is needed.
+        with writer._condition, caplog.at_level(
+            'WARNING', logger='tofu.storage.sidecar.sqlite',
+        ):
+            with pytest.raises(StorageError) as raised:
+                writer.submit(
+                    lambda _session: executed.append(True),
+                    'event', time.monotonic() - 1,
+                    operation_name='event.expired-on-entry',
+                )
+        assert raised.value.code == 'database_timeout'
+        assert raised.value.retryable is True
+        assert not executed
+        assert not any(writer.queue_depths().values())
+        assert 'deadline_state=expired_on_entry' in caplog.text
+        assert 'held_by=None' in caplog.text
+        assert 'writer is occupied' not in caplog.text
+        assert float(re.search(r'entry_remaining_ms=(-?[\d.]+)', caplog.text)[1]) < 0
+        assert 'wait_budget_ms=0.000' in caplog.text
+        assert float(re.search(r'wait_elapsed_ms=([\d.]+)', caplog.text)[1]) >= 0
+    finally:
+        writer.close()
+
+
+def test_writer_acquisition_timeout_reports_observed_holder_and_wait(caplog):
+    connection = _CommitStallConnection()
+    writer = _FairWriter(
+        connection, transaction_timeout_s=5, stall_grace_s=10, hard_kill_s=20,
+    )
+    errors = []
+    first = threading.Thread(
+        target=_submit_in_thread, args=(writer, lambda _session: 1, errors),
+    )
+    executed = []
+    try:
+        first.start()
+        assert connection.commit_started.wait(1)
+        with caplog.at_level('WARNING', logger='tofu.storage.sidecar.sqlite'):
+            with pytest.raises(StorageError) as raised:
+                writer.submit(
+                    lambda _session: executed.append(True),
+                    'event', time.monotonic() + 0.1,
+                    operation_name='event.waiting-for-writer',
+                )
+        assert raised.value.code == 'database_timeout'
+        assert not executed
+        assert not any(writer.queue_depths().values())
+        assert 'deadline_state=expired_while_waiting' in caplog.text
+        assert 'writer-budget.background' in caplog.text
+        assert "'phase': 'commit'" in caplog.text
+        assert float(re.search(r'entry_remaining_ms=(-?[\d.]+)', caplog.text)[1]) > 0
+        assert float(re.search(r'wait_elapsed_ms=([\d.]+)', caplog.text)[1]) > 0
+    finally:
+        connection.release_commit.set()
+        first.join(5)
+        writer.close()
+    assert not first.is_alive() and not errors

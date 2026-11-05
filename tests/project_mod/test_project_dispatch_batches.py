@@ -139,8 +139,10 @@ def test_batch_shape_and_aggregate_limits_fail_before_write(batch_context, chang
     elif change == 'bool': request['workers'][1]['budget']['maxTokens'] = True
     elif change in ('nan', 'inf'): request['budget']['deadline'] = float(change)
     elif change == 'objective-empty': request['objective'] = ''
-    elif change == 'objective-long': request['objective'] = 'x' * 4097
-    elif change == 'derived-brief': request['objective'] = 'x' * 4096
+    elif change == 'objective-long':
+        request['objective'] = 'x' * (CONTRACT['$defs']['request']['properties']['brief']['maxLength'] + 1)
+    elif change == 'derived-brief':
+        request['objective'] = 'x' * CONTRACT['$defs']['request']['properties']['brief']['maxLength']
     elif change == 'extra': request['automaticReview'] = True
     elif change == 'caller-id': request['workers'][0]['id'] = 'caller-picked'
     elif change == 'child-source': request['workers'][0]['authorizationSource'] = request['authorizationSource']

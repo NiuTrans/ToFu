@@ -24,8 +24,8 @@ def apply_limits(memory_bytes: int, seconds: float):
             signal.setitimer(signal.ITIMER_REAL, seconds)
         return None
     import ctypes
-    from ctypes import wintypes
     import threading
+    from ctypes import wintypes
     size = ctypes.c_size_t
     class BasicLimits(ctypes.Structure):
         _fields_ = [('process_time', ctypes.c_int64), ('job_time', ctypes.c_int64),
@@ -97,8 +97,9 @@ def bind_parent_lifetime(parent_pid: int):
         if os.getppid() != parent_pid:
             os._exit(4)
         return
-    import psutil
     import threading
+
+    import psutil
     parent = psutil.Process(parent_pid)
     created = parent.create_time()
     def watch():

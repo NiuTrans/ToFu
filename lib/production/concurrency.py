@@ -2,28 +2,21 @@
 
 Callers drain all owned work. Launch policy sizes idle reuse only; accepted
 work gets a worker without a count quota. The generic worker executor owns
-pre-entry cancellation and unstarted thread failures. Observations aggregate
-live pool owners without per-job metric labels; retirement waits for workers.
+pre-entry cancellation and unstarted thread failures. Scrapes aggregate live
+pool owners without per-job metric work; retirement waits for workers.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
 import sys
 
-from lib.observability import (ExecutorObservation, _EXECUTOR_OBSERVATIONS,
-                               publish_executor_state)
+from lib.observability import ExecutorObservation, _EXECUTOR_OBSERVATIONS
 from lib.log import get_logger
 
 logger = get_logger(__name__)
 
 
 _POOL_SNAPSHOTS = _EXECUTOR_OBSERVATIONS
-
-
-class _PoolObservation(ExecutorObservation):
-    def __init__(self, name):
-        super().__init__(name, publisher=lambda pool, **snapshot:
-                         publish_executor_state(pool, **snapshot))
 
 
 @contextmanager
@@ -37,18 +30,14 @@ def production_executor(*, name: str, idle_reuse_hint=None):
         idle_reuse_hint = max(1, int(idle_reuse_hint))
     except (TypeError, ValueError, OverflowError) as error:
         raise ValueError('idle reuse hint must be an integer') from error
-    observation = _PoolObservation(name)
-    try:
-        with RecoverableAgentExecutor(
-                max_workers=idle_reuse_hint, queue_capacity=0,
-                max_abandoned_workers=idle_reuse_hint,
-                thread_name_prefix=name, metric_pool=name,
-                state_publisher=observation.publish) as executor:
-            yield executor
-    finally:
-        # An interrupted join retains physical ownership. A later worker
-        # snapshot repays the observation when its last carrier actually exits.
-        observation.retire()
+    # Exiting retires the observation; an interrupted join keeps the live
+    # carriers observed until a later scrape sees them exit.
+    with RecoverableAgentExecutor(
+            max_workers=idle_reuse_hint, queue_capacity=0,
+            max_abandoned_workers=idle_reuse_hint,
+            thread_name_prefix=name, metric_pool=name,
+            observation=ExecutorObservation(name)) as executor:
+        yield executor
 
 
 @contextmanager

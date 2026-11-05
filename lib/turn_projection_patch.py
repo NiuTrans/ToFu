@@ -6,6 +6,10 @@ events carry these patches so a growing tool timeline is not retransmitted on
 every frame.  The wire contract is mirrored by
 ``frontend/src/core/projection-patch.ts`` and documented in
 ``docs/contracts/API_CONTRACT.md`` §2.5.
+
+It also owns the per-turn ``contextSnapshot`` block: normalization of the
+legacy ``_ctx`` overlay and derivation of the block from the task config for
+inputs created without a browser (``with_turn_context_snapshot``).
 """
 
 from __future__ import annotations
@@ -13,6 +17,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from lib.conversation_sync.settled_rows import (
+    SettledDict,
+    SettledList,
+    memo_get,
+    memo_put,
+    settle_unless_same,
+)
 from lib.plan_contract import plan_execution_document, proposed_plan_document
 from lib.turn_activity_timeline import normalize_activity_timeline
 
@@ -66,10 +77,10 @@ _ROLLED_BACK_FIELDS = frozenset({
 })
 _ROLLED_BACK_MAX_ENTRIES = 4
 
-_VALID_INITIATORS = frozenset({
-    'human', 'autopilot', 'proactive', 'timer', 'brain', 'peer', 'operator',
-    'swarm',
-})
+# One vocabulary with the writers (lib/turn_initiation.py): a stamped
+# initiator missing here used to be rewritten to ``human`` on persistence.
+from lib.turn_initiation import VALID_INITIATORS as _VALID_INITIATORS  # noqa: E402
+_CHANNEL_ORIGIN_FIELDS = frozenset({'channel', 'thread', 'eventIds', 'title'})
 _BRAIN_FIELDS = frozenset({
     'epicId', 'epicTitle', 'originatorConv', 'originatorTitle', 'route',
     'method', 'answered',
@@ -80,8 +91,9 @@ _TRANSLATION_FIELDS = frozenset({
 })
 _ORIGIN_FIELDS = frozenset({
     'blockId', 'initiator', 'sourceConversationId', 'peerHuman', 'brain',
-    'autopilotRunId', 'boardTaskId', 'scheduledTaskId',
+    'autopilotRunId', 'boardTaskId', 'scheduledTaskId', 'channel', 'forwardedFrom',
 })
+_FORWARDED_FROM_FIELDS = frozenset({'conversationId', 'turnId', 'steerId', 'instructionId'})
 _COMPACTION_FIELDS = frozenset({
     'blockId', 'archiveId', 'conversationId', 'trigger', 'timestamp',
     'tokensBefore', 'tokensAfter', 'messagesBefore', 'messagesAfter',
@@ -132,6 +144,20 @@ def _normalize_origin(projection: Mapping[str, Any]) -> dict[str, Any] | None:
         origin['brain'] = brain
     else:
         origin.pop('brain', None)
+    channel = _copy_named_mapping(origin.get('channel'), _CHANNEL_ORIGIN_FIELDS)
+    if channel.get('channel') and channel.get('thread'):
+        origin['channel'] = {
+            key: ([str(item) for item in value] if isinstance(value, list) else [])
+            if key == 'eventIds' else str(value)
+            for key, value in channel.items()}
+    else:
+        origin.pop('channel', None)
+    # Router forwards keep their provenance pointer; anything malformed is not
+    # a forward. require_human_turn verifies the pointer before any authority.
+    forwarded = _copy_named_mapping(origin.pop('forwardedFrom', None), _FORWARDED_FROM_FIELDS)
+    if (all(isinstance(value, str) and value for value in forwarded.values())
+            and {'conversationId', 'turnId'} <= set(forwarded)):
+        origin['forwardedFrom'] = forwarded
 
     initiator = origin.get('initiator')
     if initiator not in _VALID_INITIATORS:
@@ -219,6 +245,71 @@ def _normalize_context(projection: Mapping[str, Any]) -> dict[str, Any] | None:
     if isinstance(legacy, Mapping):
         return {'blockId': 'turn-context', 'snapshot': dict(legacy)}
     return None
+
+
+def build_turn_ctx_snapshot(task_config: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Derive the per-turn context note from the config an input runs with.
+
+    The browser captures this snapshot from its live composer
+    (``buildTurnCtxSnapshot`` in ``frontend/src/runtime/sections/info-rail.js``).
+    Inputs created without a browser (scheduler and background-command
+    wakes, peer messages, Feishu, plan execution) get the same shape from
+    their task config instead. Mirrors the chip mapping of
+    ``_collectTools()``/``_short()`` in info-rail.js. ``depth``/``modes`` stay
+    empty: the done frame's fact card (actualModel/actualDepth/actualModes)
+    settles them. MCP/desktop chips are client-only state and stay absent —
+    the note records what THIS config guarantees. The always-on browser is a
+    default tool and, like the scheduler, never gets a chip.
+    """
+    tools = []
+    search_mode = str(task_config.get('searchMode') or 'off')
+    if search_mode != 'off':
+        tools.append({
+            'label': 'Search' if search_mode == 'single' else 'Search ×N',
+            'tone': 'search',
+        })
+    for key, label, tone in (
+        ('fetchEnabled', 'Fetch', 'net'),
+        ('codeExecEnabled', 'Code Exec', 'code'),
+        ('memoryEnabled', 'Memory', 'ai'),
+        ('imageGenEnabled', 'Image Gen', 'ai'),
+        ('autoTranslate', 'Translate', 'ai'),
+    ):
+        if task_config.get(key):
+            tools.append({'label': label, 'tone': tone})
+    roots = []
+    project_path = str(task_config.get('projectPath') or '')
+    if project_path:
+        parts = [p for p in project_path.split('/') if p]
+        short = '/'.join(parts[-2:]) if len(parts) > 2 else project_path
+        read_only = task_config.get('readOnlyPaths')
+        ro = isinstance(read_only, (list, tuple)) and project_path in read_only
+        roots.append({'short': short, 'path': project_path, 'ro': ro})
+    model = str(task_config.get('model') or '')
+    if not tools and not roots and not model:
+        return None
+    return {
+        'roots': roots,
+        'tools': tools,
+        'modes': [],
+        'model': model,
+        'depth': '',
+    }
+
+
+def with_turn_context_snapshot(
+    projection: Any, config: Mapping[str, Any] | None,
+) -> Any:
+    """Give an input projection the context block it lacks; a supplied one wins."""
+    if not isinstance(projection, Mapping) or _normalize_context(projection) is not None:
+        return projection
+    snapshot = build_turn_ctx_snapshot(config or {})
+    if snapshot is None:
+        return projection
+    return {
+        **projection,
+        'contextSnapshot': {'blockId': 'turn-context', 'snapshot': snapshot},
+    }
 
 
 def _positive_int(value: Any) -> int | None:
@@ -363,17 +454,31 @@ def _normalize_tool_rounds(value: Any) -> Any:
     """
     if not isinstance(value, list):
         return value
-    from lib.background_command_projection import normalize_handoff_round
     normalized: list[Any] = []
     for item in value:
         if not isinstance(item, Mapping):
             normalized.append(item)
             continue
-        round_record = dict(item)
-        if round_record.get('results') is None:
-            round_record.pop('results', None)
-        normalized.append(normalize_handoff_round(round_record))
+        if type(item) is SettledDict:
+            public = memo_get(item, _PUBLIC_TOOL_ROUND_KEY)
+            if public is None:
+                public = memo_put(item, _PUBLIC_TOOL_ROUND_KEY, settle_unless_same(
+                    item, _public_tool_round(item)))
+            normalized.append(public)
+            continue
+        normalized.append(_public_tool_round(item))
     return normalized
+
+
+_PUBLIC_TOOL_ROUND_KEY = ('public-tool-round',)
+
+
+def _public_tool_round(item: Mapping[str, Any]) -> dict[str, Any]:
+    from lib.background_command_projection import normalize_handoff_round
+    round_record = dict(item)
+    if round_record.get('results') is None:
+        round_record.pop('results', None)
+    return normalize_handoff_round(round_record)
 
 
 def _normalize_rolled_back(value: Any) -> list[dict[str, Any]] | None:
@@ -456,7 +561,8 @@ def normalize_projection_document(raw: Any) -> dict[str, Any]:
     if isinstance(result.get('segments'), list):
         # Segment-owned rounds override toolRounds; normalize both read shapes.
         result['segments'] = [
-            {**segment, '_round': _normalize_tool_rounds([segment['_round']])[0]}
+            segment if (type(segment) in _DICT_KINDS and '_round' not in segment)
+            else {**segment, '_round': _normalize_tool_rounds([segment['_round']])[0]}
             if isinstance(segment, Mapping) and isinstance(segment.get('_round'), Mapping)
             else segment for segment in result['segments']
         ]
@@ -707,6 +813,10 @@ def _diff_value(
     path: list[str | int],
     operations: list[dict[str, Any]],
 ) -> None:
+    # Settled history keeps its identity across revisions; an identical
+    # container is equal without walking it (scalars keep ``==``: NaN).
+    if before is after and type(before) in _IDENTITY_EQUAL_CONTAINERS:
+        return
     if before == after:
         return
 
@@ -737,8 +847,12 @@ def _diff_value(
     if (_is_json_sequence(before) and _is_json_sequence(after)):
         before_list = list(before)
         after_list = list(after)
+        start, evicted = _evicted_run(before_list, after_list)
+        for _ in range(evicted):
+            operations.append({"op": "remove", "path": [*path, start]})
+        del before_list[start:start + evicted]
         shared = min(len(before_list), len(after_list))
-        for index in range(shared):
+        for index in range(start, shared):
             _diff_value(
                 before_list[index], after_list[index], [*path, index], operations,
             )
@@ -754,6 +868,58 @@ def _diff_value(
         return
 
     operations.append({"op": "set", "path": list(path), "value": after})
+
+
+def _same_item(before: Any, after: Any) -> bool:
+    """Equality with ``_diff_value``'s settled-container identity shortcut."""
+    return (before is after and type(before) in _IDENTITY_EQUAL_CONTAINERS) \
+        or before == after
+
+
+def _unaligned_items(before: list[Any], after: list[Any], offset: int) -> int:
+    """Count items re-sent when ``after[i]`` is diffed against ``before[offset + i]``."""
+    overlap = min(len(before) - offset, len(after))
+    changed = sum(
+        1 for index in range(overlap)
+        if not _same_item(before[offset + index], after[index])
+    )
+    return changed + len(after) - overlap
+
+
+def _evicted_run(before: list[Any], after: list[Any]) -> tuple[int, int]:
+    """Return ``(start, count)``: the first divergence and the run evicted there.
+
+    Activity timelines and trace status histories keep their newest rows; once
+    full, each new row shifts every later index, so an index-aligned diff
+    rewrites every field of every later row. The evicted run starts at the
+    first divergence: the head, or behind rows the window retains (an error,
+    a compaction receipt). Removing it keeps the retained rows aligned. The
+    count is zero unless that re-sends fewer items than index alignment, so
+    append-only and in-place updates keep their existing patch. Items before
+    ``start`` are equal; the caller diffs from there.
+    """
+    shared = min(len(before), len(after))
+    start = next(
+        (index for index in range(shared)
+         if not _same_item(before[index], after[index])),
+        shared,
+    )
+    if start == shared:
+        return start, 0
+    evicted = next(
+        (offset for offset in range(1, len(before) - start)
+         if _same_item(before[start + offset], after[start])),
+        0,
+    )
+    if not evicted:
+        return start, 0
+    before, after = before[start:], after[start:]
+    shifted = evicted + _unaligned_items(before, after, evicted)
+    return start, (evicted if shifted < _unaligned_items(before, after, 0) else 0)
+
+
+_IDENTITY_EQUAL_CONTAINERS = frozenset({dict, list, SettledDict, SettledList})
+_DICT_KINDS = (dict, SettledDict)
 
 
 def _is_json_sequence(value: Any) -> bool:

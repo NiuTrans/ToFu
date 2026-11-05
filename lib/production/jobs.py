@@ -30,7 +30,7 @@ def write_manifest(workdir: str, task: dict, *, fields: Iterable[str],
         fields: task keys to persist. ``None`` values are skipped so a missing
             optional param doesn't overwrite a default with null on resume.
         kind: capability kind, recorded for diagnostics + the resume scanner.
-        state: ``'running'`` | ``'done'`` | ``'error'`` — only ``running`` is
+        state: ``'running'`` | ``'done'`` | ``'error'`` | ``'aborted'`` — only ``running`` is
             re-spawned.
         log_label: log prefix.
 

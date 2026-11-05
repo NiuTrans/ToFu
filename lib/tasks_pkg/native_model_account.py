@@ -76,8 +76,10 @@ class NativeModelAccountPolicy:
                 or not callable(resolver) or not self.budget.authorizes_model_owner(self.task,self.owner)):
             raise ValueError('native credential binding differs')
         from lib.model_routing.native_route import NativeCredentialRequest, route_binding_sha256
-        from lib.llm.responses_outbound import responses_cache_affinity_key
-        cache_key = responses_cache_affinity_key({'_conv_id':self.task.get('convId'), '_task_id':self.task_id})
+        from lib.llm.cache_affinity import CACHE_AFFINITY_SCOPE_KEY, cache_affinity_key
+        from lib.tasks_pkg.invocation import invocation_affinity_id
+        cache_key = cache_affinity_key({CACHE_AFFINITY_SCOPE_KEY: invocation_affinity_id(self.task),
+                                        '_task_id': self.task_id})
         headers_json = json.dumps(extra_headers,ensure_ascii=False,allow_nan=False).encode()
         credential_id, wire_model = metadata['credential_id'], metadata['wire_model']
         identifiers = {key:metadata[key] for key in ('provider_id','offering_id','connection_id','deployment_id')}

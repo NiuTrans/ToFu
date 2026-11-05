@@ -136,8 +136,7 @@ def test_business_observation_is_rendered_as_a_return_value(frontend_visual_page
     assert card.evaluate('node=>node.open') is False
     card.locator('.ptc-head').click()
     assert card.locator('.ptc-result summary').inner_text() == 'Program result'
-    assert card.locator('.ptc-result').evaluate('node=>node.open') is False
-    card.locator('.ptc-result summary').click()
+    assert card.locator('.ptc-result').evaluate('node=>node.open') is True
     assert json.loads(card.locator('.ptc-result pre').inner_text()) == {
         'kind':'observation','reason':'a business field','data':[1]}
 
@@ -178,13 +177,13 @@ def test_gateway_lookup_has_one_standard_header(frontend_visual_page, width, tmp
     assert 'No source tools called again' not in header.inner_text()
     assert 'No source tools called again' in card.locator('.ptc-measurements').text_content()
     assert 'Result: []' not in header.inner_text()
-    assert card.locator('.ptc-preview').text_content() == 'Result: []'
+    assert card.locator('.ptc-preview,.ptc-tool-chip').count() == 0
     assert header.get_attribute('class') == 'ptc-head ptool-line'
     assert card.evaluate('node=>node.getBoundingClientRect().right<=innerWidth+1 && node.scrollWidth<=node.clientWidth+1')
     header.focus()
     page.keyboard.press('Enter')
     assert card.evaluate('node=>node.open')
-    card.locator('.ptc-result summary').click()
+    assert card.locator('.ptc-result').evaluate('node=>node.open') is True
     assert card.locator('.ptc-result pre').inner_text() == '[]'
     page.screenshot(path=str(tmp_path/f'unified-program-{width}.png'), full_page=True)
 
@@ -239,7 +238,7 @@ def test_saved_result_reads_have_plain_chinese_headers(frontend_visual_page, wid
     page.evaluate("""messages=>{
       document.body.innerHTML='<main id="card"></main>';
       const text=(key,fallback,values)=>String(messages[key]||fallback)
-        .replace(/\{(\w+)\}/g,(_,k)=>values?.[k]??'');
+        .replace(/\\{(\\w+)\\}/g,(_,k)=>values?.[k]??'');
       const node=document.getElementById('card');
       renderProgramExecutionCard(node,{programStatus:'completed',
         programCode:'return tools.keep(value);',
@@ -256,7 +255,7 @@ def test_saved_result_reads_have_plain_chinese_headers(frontend_visual_page, wid
     assert '已保存程序结果（21.6 KiB）' in header.inner_text()
     assert 'input_' not in header.inner_text()
     header.click()
-    card.locator('.ptc-result summary').click()
+    assert card.locator('.ptc-result').evaluate('node=>node.open') is True
     assert 'input_' in card.locator('.ptc-result pre').inner_text()
     page.evaluate('renderSavedRead()')
     assert '读取已保存的结果 1 次' in header.inner_text()

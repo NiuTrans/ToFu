@@ -793,7 +793,7 @@ body.artifact-panel-open {
 
 /* ── Sidebar: soft vertical gradient + inner edge highlight reads as a raised panel ── */
 html:not([data-theme="light"]):not([data-theme="tofu"]) .sidebar{
-  background:linear-gradient(180deg,#121217 0%,#0e0e12 100%);
+  background:var(--bg-secondary);
   border-right:1px solid #1f1f27;
   box-shadow:inset -1px 0 0 var(--sb-edge);
 }
@@ -823,7 +823,7 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .conv-item.active{
 
 /* ── Topbar: frosted glass + gradient + a real separating shadow instead of a flat hairline ── */
 html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
-  background:linear-gradient(180deg,rgba(20,20,26,0.85),var(--tb-glass));
+  background:var(--bg-primary);
   -webkit-backdrop-filter:blur(12px) saturate(1.2);
   backdrop-filter:blur(12px) saturate(1.2);
   border-bottom:1px solid #1f1f27;

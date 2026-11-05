@@ -1,347 +1,598 @@
-"""Content shadow: local-disk mirror of indexed project trees for fast grep.
+"""Demand-filled local file cache for indexed project search.
 
-The tree index already knows every indexed file's ``(path, size, mtime)``.
-The shadow copies file CONTENTS to a local-disk mirror so grep's ripgrep
-pass reads a fast volume instead of the project's network filesystem — on
-this repo's FUSE mount that turns a ~900 ms candidate read into ~10 ms.
-
-Design contract:
-
-- **Reconstructible cache, never authority.**  Every shadow entry is
-  validated by ``(size, mtime)`` against the live tree-index columns before
-  it may serve; the project filesystem stays the only source of truth.
-  Copies skip fsync by design (a crash just forces a re-copy).
-- **Output parity.**  grep runs the same ripgrep binary with the same flags
-  over the shadow tree and rewrites result path prefixes back to the real
-  root, so ranking/line/context/count semantics are unchanged.
-- **Bounded everywhere.**  Per-root file/byte caps, per-round sync budgets,
-  a global byte cap with LRU root eviction, one background sync worker per
-  root, and graceful fallback to the live walk whenever the shadow is
-  absent, incomplete, stale, or not covering a query's candidates.
-- **Tofu-owned writes stay exact.**  The tree index bumps its mutation
-  revision on synchronized writes; a mismatched shadow manifest is rebuilt
-  in the background while the current query falls back to the live path.
+Entry points: candidate_view (a leased, freshness-checked mixed source/cache
+view), warm, invalidate, shadow_metrics. Only requested candidates are copied;
+large projects and large individual files always remain searchable in place.
+Source files are the authority. A cache miss, full volume, copy race or missing
+cache is transparent. Reads validate nanosecond identities before AND after
+search. The shared placement policy chooses local storage; flock protects
+readers/builders across processes and eviction only removes private cache data.
 """
-
 from __future__ import annotations
 
+from contextlib import contextmanager
+from collections import OrderedDict
+import bisect
+from dataclasses import dataclass, field
 import hashlib
 import json
 import os
+from pathlib import Path
 import shutil
+import stat
 import tempfile
 import threading
 import time
 
-from lib.log import get_logger
-from lib.project_mod import tree_index
+from serverctl_pkg import local_placement
+from bootstrap_pkg.resource_policy_generated import RESOURCE_FALLBACKS
 
-logger = get_logger(__name__)
 
-# Master switch / bounds (env-overridable, matching repo conventions).
-_ENABLED = os.environ.get('TOFU_CONTENT_SHADOW', '1') not in ('0', 'false', 'False')
-_MAX_FILE_BYTES = int(os.environ.get('TOFU_CONTENT_SHADOW_MAX_FILE_BYTES',
-                                     str(8 * 1024 * 1024)))
-_ROOT_MAX_FILES = int(os.environ.get('TOFU_CONTENT_SHADOW_ROOT_MAX_FILES', '200000'))
-_ROOT_MAX_BYTES = int(os.environ.get('TOFU_CONTENT_SHADOW_ROOT_MAX_BYTES',
-                                     str(1024 * 1024 * 1024)))
-_GLOBAL_MAX_BYTES = int(os.environ.get('TOFU_CONTENT_SHADOW_GLOBAL_MAX_BYTES',
-                                       str(4 * 1024 * 1024 * 1024)))
+def _limit(value, default):
+    try:
+        return max(0, int(value))
+    except ValueError:
+        return default
+
+
+_ENABLED = os.environ.get('TOFU_CONTENT_SHADOW', '1').lower() not in ('0', 'false', 'off')
+_DEFAULTS = RESOURCE_FALLBACKS['personal']
+_MAX_FILE_BYTES = _limit(os.environ.get('TOFU_CONTENT_SHADOW_MAX_FILE_BYTES', ''),
+                         _DEFAULTS['TOFU_CONTENT_SHADOW_MAX_FILE_BYTES'])
+# For tiny files, two freshness observations cost as much as reading the
+# source. Their directory/index acceleration already has a separate owner.
+_MIN_FILE_BYTES = 64 * 1024
+_ROOT_MAX_FILES = _limit(os.environ.get('TOFU_CONTENT_SHADOW_ROOT_MAX_FILES', ''),
+                         _DEFAULTS['TOFU_CONTENT_SHADOW_ROOT_MAX_FILES'])
+_ROOT_MAX_BYTES = _limit(os.environ.get('TOFU_CONTENT_SHADOW_ROOT_MAX_BYTES', ''),
+                         _DEFAULTS['TOFU_CONTENT_SHADOW_ROOT_MAX_BYTES'])
+_GLOBAL_MAX_BYTES = _limit(os.environ.get('TOFU_CONTENT_SHADOW_GLOBAL_MAX_BYTES', ''),
+                           _DEFAULTS['TOFU_CONTENT_SHADOW_GLOBAL_MAX_BYTES'])
 _SYNC_ROUND_FILES = 2000
 _SYNC_ROUND_BYTES = 64 * 1024 * 1024
-_SYNC_ROUND_SLEEP_S = 0.05
-
-_lock = threading.RLock()
+_SYNC_ROUND_SECONDS = 0.25
+_TTL_SECONDS = 7 * 24 * 60 * 60
+_FORMAT = 'tofu.content-shadow/v2'
+_HOT_REQUESTS = 3
+_HEAT_TTL_SECONDS = 10 * 60
+_HEAT_MAX_ENTRIES = 8192
+_UNSTABLE_BACKOFF_SECONDS = 60
+_lock = threading.Lock()
 _workers: dict[str, threading.Thread] = {}
-_last_used: dict[str, float] = {}
+_heat: OrderedDict[tuple[str, str], tuple[int, float]] = OrderedDict()
+_unstable: OrderedDict[str, float] = OrderedDict()
 
 
-# ── Location ─────────────────────────────────────────────────────────────
-
-def _shadow_home() -> str:
+def _home(root):
+    if os.name != 'posix':
+        return None
     override = os.environ.get('TOFU_CONTENT_SHADOW_DIR', '').strip()
     if override:
-        return override
-    xdg = os.environ.get('XDG_CACHE_HOME', '').strip()
-    if xdg:
-        return os.path.join(xdg, 'tofu', 'content-shadow')
-    home = os.path.expanduser('~')
-    if home and home != '~':
-        return os.path.join(home, '.cache', 'tofu', 'content-shadow')
-    return os.path.join(tempfile.gettempdir(),
-                        f'tofu-content-shadow-{os.getuid()}')
-
-
-def _root_dir(root: str) -> str:
-    digest = hashlib.sha1(root.encode('utf-8')).hexdigest()[:16]
-    return os.path.join(_shadow_home(), digest)
-
-
-def _manifest_path(root_dir: str) -> str:
-    return os.path.join(root_dir, 'manifest.json')
-
-
-def _tree_dir(root_dir: str) -> str:
-    return os.path.join(root_dir, 'tree')
-
-
-# ── Manifest ─────────────────────────────────────────────────────────────
-
-def _load_manifest(root_dir: str) -> dict | None:
-    try:
-        with open(_manifest_path(root_dir), encoding='utf-8') as f:
-            manifest = json.load(f)
-        if not isinstance(manifest, dict) or not isinstance(
-                manifest.get('entries'), dict):
+        path = Path(override)
+        if not path.is_absolute():
             return None
-        return manifest
-    except (OSError, ValueError):
-        return None
+    else:
+        placement = local_placement.index_cache_placement(root)
+        if not placement.selected:
+            return None
+        path = Path(placement.root) / 'content'
+    source = os.path.realpath(root)
+    if os.path.commonpath((source, os.path.realpath(path))) == source:
+        return None  # a mirror inside its source would index/copy itself
+    local_placement.ensure_private_directory(path)
+    return path
 
 
-def _write_manifest_atomic(root_dir: str, manifest: dict) -> None:
-    os.makedirs(root_dir, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=root_dir, suffix='.tmp', prefix='.manifest_')
+def _root_dir(root, home):
+    return home / hashlib.sha256(os.fsencode(root)).hexdigest()
+
+
+def _relative(root, path):
+    prefix = root.rstrip(os.sep) + os.sep
+    if not path.startswith(prefix):
+        raise ValueError('candidate outside source root')
+    relative = path[len(prefix):]
+    if not relative or any(part in ('', '.', '..') for part in relative.split(os.sep)):
+        raise ValueError('non-canonical candidate path')
+    return relative
+
+
+def _identity(path):
+    metadata = os.lstat(path)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError('not a regular file')
+    return [metadata.st_dev, metadata.st_ino, metadata.st_size,
+            metadata.st_mtime_ns, metadata.st_ctime_ns, stat.S_IMODE(metadata.st_mode)]
+
+
+@contextmanager
+def _lease(directory, exclusive=False):
+    import fcntl
+    fd = None
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(manifest, f, separators=(',', ':'))
-        os.replace(tmp, _manifest_path(root_dir))
-    except BaseException:
+        # Fixed cache-lock shards avoid leaving one permanent inode per project.
+        # Contention is a cache miss, never a wait or refusal of user work.
+        name = (directory.parent / ('.lease-' + directory.name[:2])
+                if len(directory.name) == 64 else Path(str(directory) + '.lock'))
+        fd = os.open(name,
+                     os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        metadata = os.fstat(fd)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) & 0o077):
+            raise OSError('unsafe cache lease')
+        fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+        fd = None
+    try:
+        yield fd is not None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _read_json(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'r', encoding='utf-8') as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError('unsafe cache metadata')
+        return json.load(stream)
+
+
+def _manifest(directory):
+    try:
+        if directory.is_symlink():
+            return {}
+        data = _read_json(directory / 'manifest.json')
+        if (data.get('format') == _FORMAT and isinstance(data.get('entries'), dict)
+                and all(isinstance(value, dict)
+                        and type(value.get('storageBytes')) is int
+                        and value['storageBytes'] >= 0
+                        and isinstance(value.get('identity'), list)
+                        and len(value['identity']) == 6
+                        and all(type(item) is int and item >= 0 for item in value['identity'])
+                        for value in data['entries'].values())):
+            return data
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {}
+
+
+def _owned(directory, root=None):
+    try:
+        if directory.is_symlink():
+            return False
+        owner = _read_json(directory / '.owner.json')
+        source = owner['root']
+        return (owner.get('format') == _FORMAT
+                and hashlib.sha256(os.fsencode(source)).hexdigest() == directory.name
+                and (root is None or source == root))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def _claim_root(directory, root):
+    if _owned(directory, root):
+        return True
+    if any(directory.iterdir()):
+        return False
+    # Persist ownership before any payload. A lost/corrupt disposable manifest
+    # can then be reclaimed without guessing that arbitrary files are a cache.
+    with (directory / '.owner.json').open('x') as stream:
+        json.dump({'format': _FORMAT, 'root': root}, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def _publish(directory, manifest):
+    fd, name = tempfile.mkstemp(prefix='.manifest-', dir=directory)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(manifest, stream, separators=(',', ':'))
+        os.replace(name, directory / 'manifest.json')
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def _cached_path(directory, relative):
+    # Flat names prevent parent symlinks, traversal and deep directory overhead.
+    return directory / hashlib.sha256(os.fsencode(relative)).hexdigest()
+
+
+def _entry_bytes(size, relative, *, allocated=0):
+    # Include allocation rounding and conservative JSON metadata overhead, so
+    # empty files and very long names cannot bypass the disk retention budget.
+    return max(allocated, ((size + 4095) // 4096) * 4096) + len(os.fsencode(relative)) * 6 + 512
+
+
+def _hot_candidates(root, candidates):
+    now = time.monotonic()
+    selected = []
+    with _lock:
+        for path in candidates:
+            key = (root, path)
+            count, seen = _heat.pop(key, (0, now))
+            count = count + 1 if now - seen <= _HEAT_TTL_SECONDS else 1
+            if count >= _HOT_REQUESTS:
+                selected.append(path)
+            else:
+                _heat[key] = (count, now)
+        while len(_heat) > _HEAT_MAX_ENTRIES:
+            _heat.popitem(last=False)
+    return selected
+
+
+def _valid_cached(directory, relative, state):
+    try:
+        path = _cached_path(directory, relative)
+        metadata = path.lstat()
+        current = (stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+                and metadata.st_size == state['identity'][2]
+                and [metadata.st_mtime_ns, metadata.st_ctime_ns] == state['cachedTimes'])
+        if not current:
+            return False
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return False
+            return hashlib.file_digest(stream, 'sha256').hexdigest() == state['sha256']
+    except (OSError, KeyError, TypeError, IndexError):
+        return False
+
+
+@dataclass
+class CandidateView:
+    paths: list[str]
+    root: str = ''
+    replacements: dict[str, str] = field(default_factory=dict)
+    identities: dict[str, list] = field(default_factory=dict)
+    executor: object = None
+
+    def current(self):
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+            current = all(_validate_groups(
+                self.executor, list(self.identities.items()),
+                lambda item: _identity(item[0]) == item[1]))
+        except (OSError, ValueError):
+            current = False
+        if not current:
+            # Moving sources (including delayed network metadata) should not
+            # repeatedly pay for a cached pass followed by a live retry.
+            with _lock:
+                _unstable[self.root] = time.monotonic() + _UNSTABLE_BACKOFF_SECONDS
+                _unstable.move_to_end(self.root)
+                while len(_unstable) > 256:
+                    _unstable.popitem(last=False)
+        return current
+
+    def rewrite(self, raw):
+        # Only rewrite the filename field. Matched source content is opaque.
+        if not self.replacements:
+            return raw
+        replacements = {os.fsencode(k): os.fsencode(v) for k, v in self.replacements.items()}
+        lines = []
+        for line in raw.splitlines(keepends=True):
+            if b'\0' in line:
+                path, separator, tail = line.partition(b'\0')
+            else:  # rg count output uses the last colon before the integer.
+                path, separator, tail = line.rpartition(b':')
+            lines.append(replacements.get(path, path) + separator + tail)
+        return b''.join(lines)
+
+    def rewrite_withheld(self, withheld):
+        if not withheld or not self.replacements:
+            return withheld
+        return {**withheld, 'files': tuple(sorted((
+            (self.replacements.get(row[0], row[0]), *row[1:])
+            for row in withheld.get('files', ())), key=lambda row: (-row[1], row[0])))}
 
 
-def _columns_digest(entry) -> tuple[int, int, int]:
-    return (len(entry.paths), sum(entry.sizes), sum(entry.mtimes))
+def _validate_groups(executor, items, function):
+    """Eight physical I/O groups; reuse the project's demand executor owner.
 
-
-# ── Sync worker ──────────────────────────────────────────────────────────
-
-def _sync_worker(root: str, root_dir: str) -> None:
-    """Incrementally mirror the live index's file contents into the shadow.
-
-    Bounded rounds copy only new/changed files and delete removed ones; the
-    manifest flips ``complete`` only after a fully converged round, so a
-    crash anywhere just resumes on the next warm.  This thread never blocks
-    a foreground query — the grep path falls back to the live walk until
-    the shadow is complete and current.
+    The grouping is hardware-independent and covers every candidate. It keeps
+    metadata validation from serializing network round trips or creating one
+    carrier per file. Every submitted group starts through the demand executor.
     """
-    tree = _tree_dir(root_dir)
+    if executor is None or len(items) < 128:
+        return [function(item) for item in items]
+    width = (len(items) + 7) // 8
+    groups = [items[start:start + width] for start in range(0, len(items), width)]
+    futures = [executor.submit(lambda group=group: [function(item) for item in group])
+               for group in groups]
+    return [value for future in futures for value in future.result()]
+
+
+def _candidate_hit(directory, candidate):
+    _index, path, relative, state = candidate
     try:
-        while True:
-            entry = tree_index.acquire(root)
-            if entry is None or not entry.complete:
-                return  # no trustworthy index; a later warm retries
-            manifest = _load_manifest(root_dir) or {
-                'root': root, 'entries': {}, 'complete': False,
-            }
-            if manifest.get('root') != root:
-                manifest = {'root': root, 'entries': {}, 'complete': False}
-            entries = manifest['entries']
-            digest = _columns_digest(entry)
-            if manifest.get('complete') and manifest.get('digest') == list(digest):
-                manifest['source_revision'] = entry.mutation_revision
-                _write_manifest_atomic(root_dir, manifest)
-                return
+        return (_identity(path) == state['identity']
+                and _valid_cached(directory, relative, state))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
-            wanted: dict[str, tuple[int, int]] = {}
-            overflow = False
-            total_bytes = 0
-            for rel, size, mtime in zip(entry.paths, entry.sizes, entry.mtimes):
-                if len(wanted) >= _ROOT_MAX_FILES:
-                    overflow = True
-                    break
-                if size > _MAX_FILE_BYTES:
-                    continue
-                if total_bytes + size > _ROOT_MAX_BYTES:
-                    overflow = True
-                    break
-                wanted[rel] = (int(size), int(mtime))
-                total_bytes += size
 
-            copied = 0
-            copied_bytes = 0
-            # Delete shadow files that are no longer wanted.
-            for rel in list(entries):
-                if rel not in wanted:
+@contextmanager
+def candidate_view(root, candidates, *, entry=None):
+    """Keep hits leased until search and freshness verification have finished."""
+    root = os.path.abspath(root)
+    view = CandidateView(candidates, root=root)
+    with _lock:
+        cooling = _unstable.get(root, 0) > time.monotonic()
+    if cooling:
+        yield view
+        return
+    pending, used = [], []
+    home = None
+    try:
+        home = _home(root) if _ENABLED else None
+    except OSError:
+        pass
+    if home is None:
+        yield view
+        return
+    directory = _root_dir(root, home)
+    try:
+        with _lease(directory) as held:
+            if held:
+                entries = _manifest(directory).get('entries', {})
+                candidates_to_check = []
+                for index, path in enumerate(candidates):
+                    if not entries and len(pending) >= _SYNC_ROUND_FILES:
+                        break
+                    relative = None
                     try:
-                        os.unlink(os.path.join(tree, rel))
+                        relative = _relative(root, path)
+                        state = entries.get(relative)
+                        if state:
+                            if state['identity'][2] < _MIN_FILE_BYTES:
+                                continue
+                            candidates_to_check.append((index, path, relative, state))
+                            continue
+                    except (OSError, ValueError, KeyError, TypeError):
+                        pass
+                    if relative is None:
+                        continue
+                    if len(pending) < _SYNC_ROUND_FILES:
+                        if entry is not None:
+                            position = bisect.bisect_left(entry.paths, relative)
+                            if (position >= len(entry.paths) or entry.paths[position] != relative
+                                    or not _MIN_FILE_BYTES <= entry.sizes[position] <= _MAX_FILE_BYTES):
+                                continue
+                        pending.append(path)
+                if len(candidates_to_check) >= 128:
+                    from lib.observability import InstrumentedThreadPoolExecutor
+                    view.executor = InstrumentedThreadPoolExecutor(
+                        max_workers=4, metric_pool='project-read',
+                        thread_name_prefix='content-validation')
+                hits = _validate_groups(view.executor, candidates_to_check,
+                                        lambda candidate: _candidate_hit(directory, candidate))
+                for (index, path, relative, state), hit in zip(candidates_to_check, hits):
+                    if not hit:
+                        if len(pending) < _SYNC_ROUND_FILES:
+                            pending.append(path)
+                        continue
+                    cached = str(_cached_path(directory, relative))
+                    if not view.replacements:
+                        view.paths = list(candidates)
+                    view.paths[index] = cached
+                    view.replacements[cached] = path
+                    view.identities[path] = state['identity']
+                    used.append(relative)
+                if view.replacements:
+                    try:
+                        os.utime(directory / 'manifest.json')
                     except OSError:
                         pass
-                    entries.pop(rel, None)
-            for rel, (size, mtime) in wanted.items():
-                state = entries.get(rel)
-                if state and state[0] == size and state[1] == mtime:
-                    continue
-                if copied >= _SYNC_ROUND_FILES or copied_bytes >= _SYNC_ROUND_BYTES:
-                    break
-                src = os.path.join(root, rel)
-                dst = os.path.join(tree, rel)
-                try:
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
-                    fd, tmp = tempfile.mkstemp(
-                        dir=os.path.dirname(dst), suffix='.shadowtmp')
-                    try:
-                        with os.fdopen(fd, 'wb') as out, open(src, 'rb') as inp:
-                            shutil.copyfileobj(inp, out, 256 * 1024)
-                        os.replace(tmp, dst)
-                    except BaseException:
-                        try:
-                            os.unlink(tmp)
-                        except OSError:
-                            pass
-                        raise
-                    entries[rel] = [size, mtime]
-                    copied += 1
-                    copied_bytes += size
-                except OSError as e:
-                    logger.debug('[ContentShadow] copy failed %s: %s', src, e)
+            yield view
+    finally:
+        if view.executor is not None:
+            view.executor.shutdown(wait=True, cancel_futures=False)
+        # Start only after releasing our read lease. Work is bounded to the
+        # requested hot set; a cold query never waits for copying.
+        warm(root, _hot_candidates(root, pending), home=home, used=used)
 
-            # Converged when every wanted file is mirrored (deletions ran
-            # first, so extras are gone) and no cap cut the wanted set.
-            # A budget-limited round simply leaves converged=False and the
-            # next round resumes where this one stopped.
-            converged = (not overflow) and all(rel in entries for rel in wanted)
-            manifest.update({
-                'root': root,
-                'entries': entries,
-                'complete': bool(converged and not overflow),
-                'digest': list(digest),
-                'source_revision': entry.mutation_revision,
-                'updated_at': time.time(),
-            })
-            _write_manifest_atomic(root_dir, manifest)
-            _enforce_global_cap()
-            if converged or overflow:
+
+def _copy(root, path, directory, relative, identity):
+    if (os.path.realpath(path) != path
+            or not local_placement.source_timestamp_is_stable(*identity[3:5])):
+        return None
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    temporary = None
+    try:
+        with os.fdopen(fd, 'rb') as source:
+            before = os.fstat(source.fileno())
+            if [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                    before.st_ctime_ns, stat.S_IMODE(before.st_mode)] != identity:
+                return None
+            out_fd, temporary = tempfile.mkstemp(prefix='.copy-', dir=directory)
+            with os.fdopen(out_fd, 'wb') as output:
+                remaining = identity[2]
+                digest = hashlib.sha256()
+                while remaining:
+                    data = source.read(min(256 * 1024, remaining))
+                    if not data:
+                        return None
+                    output.write(data)
+                    digest.update(data)
+                    remaining -= len(data)
+                if source.read(1) or _identity(path) != identity:
+                    return None
+        destination = _cached_path(directory, relative)
+        os.replace(temporary, destination)
+        metadata = destination.stat()
+        return {'identity': identity,
+                'sha256': digest.hexdigest(),
+                'cachedTimes': [metadata.st_mtime_ns, metadata.st_ctime_ns],
+                'storageBytes': _entry_bytes(identity[2], relative,
+                                            allocated=getattr(metadata, 'st_blocks', 0) * 512),
+                'used': time.time()}
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _prune(home, keep=None):
+    """Evict idle roots under byte/inode pressure; active readers always win."""
+    with _lease(home / '.retention', exclusive=True) as held:
+        if not held:
+            return
+        roots = []
+        for directory in home.iterdir():
+            if len(directory.name) != 64 or any(c not in '0123456789abcdef' for c in directory.name):
+                continue
+            manifest = _manifest(directory)
+            if not _owned(directory):
+                continue
+            try:
+                if manifest:
+                    size = sum(state['storageBytes'] for state in manifest['entries'].values())
+                    metadata = (directory / 'manifest.json').stat()
+                    size += getattr(metadata, 'st_blocks', 0) * 512
+                else:
+                    # Exclusive collection still fences readers/builders below.
+                    # Missing manifests must not create an unaccounted disk leak.
+                    metadata = (directory / '.owner.json').stat()
+                    size = sum(max(path.stat().st_size, getattr(path.stat(), 'st_blocks', 0) * 512)
+                               for path in directory.iterdir() if path.is_file() and not path.is_symlink())
+                size += (directory / '.owner.json').stat().st_size
+                roots.append((metadata.st_mtime, directory, size))
+            except (OSError, TypeError, KeyError, IndexError):
+                continue
+        total = sum(row[2] for row in roots)
+        for used, directory, size in sorted(roots):
+            if directory == keep:
+                continue
+            if (total <= _GLOBAL_MAX_BYTES and time.time() - used < _TTL_SECONDS
+                    and local_placement.has_free_space(home)):
+                continue
+            with _lease(directory, exclusive=True) as claimed:
+                if claimed and not directory.is_symlink():
+                    shutil.rmtree(directory)
+                    total -= size
+
+
+def _sync_worker(root, candidates, home, used_paths=()):
+    directory = _root_dir(root, home)
+    try:
+        _prune(home)
+        with _lease(directory, exclusive=True) as held:
+            if not held:
                 return
-            time.sleep(_SYNC_ROUND_SLEEP_S)
-    except Exception as e:
-        logger.debug('[ContentShadow] sync worker for %s failed: %s', root, e)
+            local_placement.ensure_private_directory(directory)
+            if not _claim_root(directory, root):
+                return
+            manifest = _manifest(directory)
+            if not manifest:
+                manifest = {'format': _FORMAT, 'root': root, 'entries': {}}
+                _publish(directory, manifest)
+            if manifest.get('root') != root:
+                return
+            entries = manifest.get('entries', {})
+            for relative in used_paths:
+                if relative in entries:
+                    entries[relative]['used'] = time.time()
+            owned = {_cached_path(directory, relative).name for relative in entries}
+            for path in directory.iterdir():
+                if path.name.startswith(('.copy-', '.manifest-')) or (
+                        len(path.name) == 64 and all(c in '0123456789abcdef' for c in path.name)
+                        and path.name not in owned):
+                    if path.is_file() and not path.is_symlink():
+                        path.unlink()
+            used = sum(state['storageBytes'] for state in entries.values())
+            copied = copied_bytes = 0
+            deadline = time.monotonic() + _SYNC_ROUND_SECONDS
+            for path in candidates:
+                if (copied >= _SYNC_ROUND_FILES or copied_bytes >= _SYNC_ROUND_BYTES
+                        or time.monotonic() >= deadline):
+                    break
+                relative = _relative(root, path)
+                try:
+                    identity = _identity(path)
+                    size = identity[2]
+                    required = _entry_bytes(size, relative)
+                    if not _MIN_FILE_BYTES <= size <= min(_MAX_FILE_BYTES, _ROOT_MAX_BYTES, _GLOBAL_MAX_BYTES):
+                        continue
+                    old = entries.get(relative)
+                    if old and old['identity'] == identity and _valid_cached(directory, relative, old):
+                        old['used'] = time.time()
+                        continue
+                    # Admission applies only to a disposable copy. Always leave
+                    # space and inodes for the original command and user writes.
+                    while entries and (used + required > min(_ROOT_MAX_BYTES, _GLOBAL_MAX_BYTES)
+                            or len(entries) >= _ROOT_MAX_FILES
+                            or not local_placement.has_free_space(home, required)):
+                        victim = min(entries, key=lambda rel: entries[rel].get('used', 0))
+                        state = entries.pop(victim)
+                        _cached_path(directory, victim).unlink(missing_ok=True)
+                        used -= state['storageBytes']
+                    if (not _ROOT_MAX_FILES or used + required > min(_ROOT_MAX_BYTES, _GLOBAL_MAX_BYTES)
+                            or not local_placement.has_free_space(home, required)):
+                        break
+                    state = _copy(root, path, directory, relative, identity)
+                    if state:
+                        if relative in entries:
+                            used -= entries[relative]['storageBytes']
+                        entries[relative] = state
+                        used += state['storageBytes']
+                        copied += 1
+                        copied_bytes += size
+                except (OSError, ValueError):
+                    continue
+            _publish(directory, {'format': _FORMAT, 'root': root, 'entries': entries})
+        _prune(home, keep=directory)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass  # every failed cache operation leaves the original source usable
     finally:
         with _lock:
             _workers.pop(root, None)
 
 
-def warm(root: str) -> None:
-    """Kick a background shadow sync for *root*.  Non-blocking."""
-    if not _ENABLED or not root:
+def warm(root, candidates, *, home=None, used=()):
+    if not _ENABLED or not candidates:
         return
-    root = os.path.abspath(root)
-    with _lock:
-        if root in _workers and _workers[root].is_alive():
-            return
-        worker = threading.Thread(
-            target=_sync_worker,
-            args=(root, _root_dir(root)),
-            name='content-shadow-sync', daemon=True)
-        _workers[root] = worker
-        worker.start()
-
-
-def invalidate(root: str) -> None:
-    """Drop a root's shadow (destructive commands may have mutated content)."""
-    if not root:
-        return
-    root = os.path.abspath(root)
-    with _lock:
-        _workers.pop(root, None)
-    # The worker re-reads the (invalidated) index and rebuilds honestly; the
-    # directory removal just forces a full re-copy.
-    shutil.rmtree(_root_dir(root), ignore_errors=True)
-
-
-# ── Global LRU cap ───────────────────────────────────────────────────────
-
-def _enforce_global_cap() -> None:
     try:
-        home = _shadow_home()
-        totals = []
-        for name in os.listdir(home):
-            root_dir = os.path.join(home, name)
-            manifest = _load_manifest(root_dir)
-            if manifest is None:
-                continue
-            used = manifest.get('updated_at') or 0.0
-            size = sum(state[0] for state in manifest['entries'].values()
-                       if isinstance(state, list) and len(state) == 2)
-            totals.append((used, root_dir, size))
+        home = home or _home(root)
+        if home is None:
+            return
+        with _lock:
+            if root in _workers or _unstable.get(root, 0) > time.monotonic():
+                return
+            worker = threading.Thread(target=_sync_worker,
+                                      args=(root, list(candidates), home, tuple(used)),
+                                      name='content-shadow-sync', daemon=True)
+            _workers[root] = worker
+            try:
+                worker.start()
+            except (OSError, RuntimeError):
+                _workers.pop(root, None)
     except OSError:
-        return
-    total = sum(size for _, _, size in totals)
-    for _, root_dir, size in sorted(totals):
-        if total <= _GLOBAL_MAX_BYTES:
-            break
-        shutil.rmtree(root_dir, ignore_errors=True)
-        total -= size
+        pass
 
 
-# ── Query admission ──────────────────────────────────────────────────────
+def invalidate(root):
+    """Invalidate only an idle cache. Busy readers verify freshness themselves."""
+    try:
+        home = _home(root)
+        if home is None:
+            return
+        directory = _root_dir(root, home)
+        with _lease(directory, exclusive=True) as held:
+            if held and _owned(directory, root):
+                shutil.rmtree(directory)
+    except OSError:
+        pass
 
-def shadow_candidates(root: str, entry, cand_abs: list[str]) -> list[str] | None:
-    """Map real candidate paths to shadow paths, or ``None`` (fall back).
 
-    Every candidate must be present in the shadow manifest with the exact
-    ``(size, mtime)`` the live index reports — one partial file is never
-    served.  On any miss the caller keeps the live walk and a background
-    sync is kicked so later queries converge to the shadow.
-    """
-    if not _ENABLED or entry is None or not getattr(entry, 'complete', False):
-        return None
-    root_dir = _root_dir(root)
-    manifest = _load_manifest(root_dir)
-    if manifest is None or not manifest.get('complete'):
-        warm(root)
-        return None
-    if manifest.get('root') != root:
-        return None
-    if (manifest.get('source_revision') != entry.mutation_revision
-            and manifest.get('digest') != list(_columns_digest(entry))):
-        warm(root)
-        return None
-    entries = manifest['entries']
-    tree = _tree_dir(root_dir)
-    base = root.rstrip('/') + '/'
-    # Per-candidate (size, mtime) must match the LIVE index columns exactly:
-    # the manifest-level revision/digest pre-check only decides freshness,
-    # it cannot prove the mirrored bytes equal what the index reports now.
-    live_state = {}
-    for abs_path in cand_abs:
-        if not abs_path.startswith(base):
-            return None
-        live_state[abs_path[len(base):]] = None
-    import bisect as _bisect
-    paths = entry.paths
-    for rel in list(live_state):
-        i = _bisect.bisect_left(paths, rel)
-        if i >= len(paths) or paths[i] != rel:
-            return None  # candidate not in the index at all — live path owns it
-        live_state[rel] = (int(entry.sizes[i]), int(entry.mtimes[i]))
-    mapped = []
-    for rel, state in live_state.items():
-        if entries.get(rel) != [state[0], state[1]]:
-            warm(root)
-            return None
-        mapped.append(os.path.join(tree, rel))
+def shadow_metrics():
     with _lock:
-        _last_used[root_dir] = time.time()
-    return mapped
-
-
-def rewrite_output_paths(raw: bytes, root: str) -> bytes:
-    """Rewrite shadow-root result prefixes back to the real project root."""
-    tree_prefix = _tree_dir(_root_dir(root)).encode('utf-8') + b'/'
-    real_prefix = root.rstrip('/').encode('utf-8') + b'/'
-    return raw.replace(tree_prefix, real_prefix)
-
-
-def shadow_metrics() -> dict:
-    """Bounded, content-free telemetry for diagnostics/tests."""
-    with _lock:
-        return {
-            'enabled': _ENABLED,
-            'workers': len([w for w in _workers.values() if w.is_alive()]),
-            'home': _shadow_home(),
-        }
+        return {'enabled': _ENABLED, 'workers': len(_workers)}

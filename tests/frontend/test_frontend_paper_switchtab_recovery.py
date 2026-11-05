@@ -193,8 +193,6 @@ def _run_harness(
             pass
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_switchtab_enters_recovery_path_for_pdf_only_paper():
     proc = _run_harness(PAPER_JS)
     out = proc.stdout.strip()
@@ -204,8 +202,6 @@ def test_switchtab_enters_recovery_path_for_pdf_only_paper():
     assert out.count('PASS') >= 7, f'expected >=7 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_source_level_negative_control_narrow_guard_dead_ends():
     """Revert the guard to text||hash only and prove the PDF-only paper
     dead-ends on the message again. The shipped file is never modified."""

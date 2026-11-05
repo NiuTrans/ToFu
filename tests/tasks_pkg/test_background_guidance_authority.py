@@ -173,17 +173,21 @@ def test_discovery_projects_rich_help_without_mutating_contracts(controls):
     assert (catalog, documents) == before
 
 
-@pytest.mark.parametrize('role,expected_controls', [
-    ('reviewer', set()), ('coder', set()), ('analyst', set()),
-    ('general', {'poll'}),
+@pytest.mark.parametrize('role,expected', [
+    ('reviewer', {'run_command', 'poll', 'kill'}),
+    ('coder', {'run_command', 'poll', 'kill'}),
+    ('analyst', {'run_command', 'poll', 'kill'}),
+    ('general', {'run_command', 'poll', 'kill'}),
+    ('researcher', set()), ('writer', set()), ('browser', set()),
 ])
-def test_actual_leaf_scope_never_restores_denied_controls(role, expected_controls):
+def test_actual_leaf_scope_pairs_command_controls_with_run_command(role, expected):
+    """A worker that can background a command can also collect and stop it."""
     catalog = scope_tools_for_role(role, _catalog((POLL_TOOL, KILL_TOOL)))
-    assert _names(catalog) == {'run_command', *expected_controls}
-    task = {'_executable_tool_catalog': catalog}
-    _assert_guidance(background_command_result(
-        'unit-command', 'bg_unit', task=task), expected_controls)
-    assert 'kill' not in _names(catalog)
+    assert _names(catalog) == expected
+    if expected:
+        task = {'_executable_tool_catalog': catalog}
+        _assert_guidance(background_command_result(
+            'unit-command', 'bg_unit', task=task), {'poll', 'kill'})
 
 
 def test_automatic_handoff_renders_current_parent_authority(monkeypatch):

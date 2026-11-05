@@ -613,12 +613,14 @@ mod tests {
     ) {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            if relay.metrics().acknowledged_records == count {
+            let metrics = relay.metrics();
+            if metrics.acknowledged_records == count {
                 return;
             }
+            assert!(!metrics.terminal, "relay stopped: {:?}", relay.terminal_error());
             assert!(
                 Instant::now() < deadline,
-                "relay did not drain pending work"
+                "relay did not drain {count} records: {metrics:?}"
             );
             thread::sleep(Duration::from_millis(5));
         }
@@ -655,13 +657,29 @@ mod tests {
         }
     }
 
+    fn relay_test_vfs(path: &std::path::Path) -> Arc<DeterministicVfs> {
+        // The two-second guard detects a stuck relay, not host fsync latency.
+        // Keep actual engine commits and durable reopen on the deterministic
+        // VFS. outbox_sink/outbox_multi_sink retain real-filesystem reopen tests.
+        let vfs = Arc::new(DeterministicVfs::new(None));
+        vfs.create_dir(path).unwrap();
+        vfs.sync_directory(std::path::Path::new("/")).unwrap();
+        vfs
+    }
+
+    fn relay_test_authority(seed: u8) -> (AuthorityDatabase, Arc<DeterministicVfs>) {
+        let path = std::path::Path::new("/authority");
+        let vfs = relay_test_vfs(path);
+        let mut database = AuthorityDatabase::initialize_with_vfs(path, vfs.clone()).unwrap();
+        database
+            .configure_logical_outbox(&[seed; 32], 1024 * 1024, 128 * 1024)
+            .unwrap();
+        (database, vfs)
+    }
+
     #[test]
     fn relay_automatically_publishes_and_acknowledges_without_holding_authority() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
-        database
-            .configure_logical_outbox(&[41; 32], 1024 * 1024, 128 * 1024)
-            .unwrap();
+        let (mut database, _) = relay_test_authority(41);
         for ordinal in 1..=3 {
             commit_outbox(&mut database, ordinal);
         }
@@ -684,11 +702,7 @@ mod tests {
 
     #[test]
     fn one_bounded_worker_round_robins_hot_and_quiet_owner_scopes() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
-        database
-            .configure_logical_outbox(&[45; 32], 1024 * 1024, 128 * 1024)
-            .unwrap();
+        let (mut database, _) = relay_test_authority(45);
         for ordinal in 1..=4 {
             commit_outbox_scope(&mut database, 7, 11, ordinal);
         }
@@ -752,11 +766,7 @@ mod tests {
 
     #[test]
     fn retryable_failure_for_one_owner_does_not_starve_another_owner() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
-        database
-            .configure_logical_outbox(&[46; 32], 1024 * 1024, 128 * 1024)
-            .unwrap();
+        let (mut database, _) = relay_test_authority(46);
         commit_outbox_scope(&mut database, 7, 11, 1);
         commit_outbox_scope(&mut database, 7, 12, 1);
         let authority = Arc::new(Mutex::new(database));
@@ -847,11 +857,7 @@ mod tests {
 
     #[test]
     fn lost_sink_response_is_retried_and_acknowledged_exactly_once() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
-        database
-            .configure_logical_outbox(&[42; 32], 1024 * 1024, 128 * 1024)
-            .unwrap();
+        let (mut database, _) = relay_test_authority(42);
         commit_outbox(&mut database, 1);
         let authority = Arc::new(Mutex::new(database));
         let relay = start_relay(Arc::clone(&authority), true);
@@ -902,17 +908,16 @@ mod tests {
 
     #[test]
     fn concrete_authority_relay_and_engine_sink_reopen_at_the_same_prefix() {
-        let directory = tempfile::tempdir().unwrap();
-        let authority_path = directory.path().join("authority");
-        let sink_path = directory.path().join("sink");
-        let mut database = AuthorityDatabase::initialize(&authority_path).unwrap();
-        database
-            .configure_logical_outbox(&[44; 32], 1024 * 1024, 128 * 1024)
-            .unwrap();
+        let authority_path = std::path::Path::new("/authority");
+        let sink_path = std::path::Path::new("/sink");
+        let (mut database, authority_vfs) = relay_test_authority(44);
+        let sink_vfs = relay_test_vfs(sink_path);
         commit_outbox(&mut database, 1);
         commit_outbox(&mut database, 2);
         let authority = Arc::new(Mutex::new(database));
-        let sink = EngineLogicalOutboxSink::initialize(&sink_path, 7, 11, 1024 * 1024).unwrap();
+        let sink = EngineLogicalOutboxSink::initialize_with_vfs(
+            sink_path, sink_vfs.clone(), 7, 11, 1024 * 1024,
+        ).unwrap();
         let worker =
             LogicalOutboxWorker::start(sink, LogicalOutboxWorkerConfig::default()).unwrap();
         let relay = LogicalOutboxRelay::start(
@@ -935,7 +940,10 @@ mod tests {
         drop(sink);
         drop(authority);
 
-        let mut reopened_authority = AuthorityDatabase::open(&authority_path).unwrap();
+        authority_vfs.crash().unwrap();
+        sink_vfs.crash().unwrap();
+        let mut reopened_authority =
+            AuthorityDatabase::open_with_vfs(authority_path, authority_vfs).unwrap();
         reopened_authority
             .configure_logical_outbox(&[44; 32], 1024 * 1024, 128 * 1024)
             .unwrap();
@@ -946,15 +954,23 @@ mod tests {
                 .published_sequence,
             2
         );
-        let reopened_sink = EngineLogicalOutboxSink::open(&sink_path, 7, 11, 1024 * 1024).unwrap();
+        let reopened_sink =
+            EngineLogicalOutboxSink::open_with_vfs(sink_path, sink_vfs, 7, 11, 1024 * 1024).unwrap();
         assert_eq!(reopened_sink.status().durable_sequence, 2);
     }
 
     #[test]
     fn relay_drains_all_scopes_beyond_former_quota_and_joins_its_workers() {
-        let directory = tempfile::tempdir().unwrap();
-        let authority_path = directory.path().join("authority");
-        let sink_path = directory.path().join("sink");
+        // The drain bound specifies relay scheduling, not the host volume:
+        // 131 scopes cost 262 durable syncs, seconds of fsync on some disks.
+        let authority_vfs = Arc::new(DeterministicVfs::new(None));
+        let sink_vfs = Arc::new(DeterministicVfs::new(None));
+        let authority_path = std::path::Path::new("/authority");
+        let sink_path = std::path::Path::new("/sink");
+        for (vfs, path) in [(&authority_vfs, authority_path), (&sink_vfs, sink_path)] {
+            vfs.create_dir(path).unwrap();
+            vfs.sync_directory(std::path::Path::new("/")).unwrap();
+        }
         let scopes = (1..=131)
             .map(|owner| LogicalOutboxOwnerScope::new(7, owner).unwrap())
             .collect::<Vec<_>>();
@@ -963,14 +979,19 @@ mod tests {
             source_scopes: scopes.clone(),
             max_logical_bytes: 1,
         };
-        let mut database = AuthorityDatabase::initialize(&authority_path).unwrap();
+        let mut database =
+            AuthorityDatabase::initialize_with_vfs(authority_path, authority_vfs).unwrap();
         database.configure_logical_outbox(&[47; 32], 1, 1).unwrap();
         for scope in &scopes {
             commit_outbox_scope(&mut database, scope.tenant_id, scope.owner_user_id, 1);
         }
         let authority = Arc::new(Mutex::new(database));
-        let sink = MultiplexedEngineLogicalOutboxSink::initialize(&sink_path, sink_config.clone())
-            .unwrap();
+        let sink = MultiplexedEngineLogicalOutboxSink::initialize_with_vfs(
+            sink_path,
+            sink_vfs.clone(),
+            sink_config.clone(),
+        )
+        .unwrap();
         let worker =
             LogicalOutboxWorker::start(sink, LogicalOutboxWorkerConfig::default()).unwrap();
         let started = Instant::now();
@@ -1007,16 +1028,18 @@ mod tests {
             started.elapsed().as_micros()
         );
         drop(sink);
-        let reopened = MultiplexedEngineLogicalOutboxSink::open(&sink_path, sink_config).unwrap();
+        let reopened =
+            MultiplexedEngineLogicalOutboxSink::open_with_vfs(sink_path, sink_vfs, sink_config)
+                .unwrap();
         assert_eq!(reopened.status().active_owner_scopes, 131);
         assert_eq!(reopened.status().durable_records, 131);
     }
 
     #[test]
     fn multiplexed_engine_sink_drains_two_authorities_and_reopens_without_scanning() {
-        let directory = tempfile::tempdir().unwrap();
-        let authority_path = directory.path().join("authority");
-        let sink_path = directory.path().join("sink");
+        let sink_path = std::path::Path::new("/sink");
+        let (mut database, authority_vfs) = relay_test_authority(47);
+        let sink_vfs = relay_test_vfs(sink_path);
         let hot = LogicalOutboxOwnerScope::new(7, 11).unwrap();
         let quiet = LogicalOutboxOwnerScope::new(7, 12).unwrap();
         let sink_config = MultiplexedEngineLogicalOutboxSinkConfig {
@@ -1024,16 +1047,13 @@ mod tests {
             source_scopes: vec![hot, quiet],
             max_logical_bytes: 1024 * 1024,
         };
-        let mut database = AuthorityDatabase::initialize(&authority_path).unwrap();
-        database
-            .configure_logical_outbox(&[47; 32], 1024 * 1024, 128 * 1024)
-            .unwrap();
         commit_outbox_scope(&mut database, hot.tenant_id, hot.owner_user_id, 1);
         commit_outbox_scope(&mut database, hot.tenant_id, hot.owner_user_id, 2);
         commit_outbox_scope(&mut database, quiet.tenant_id, quiet.owner_user_id, 1);
         let authority = Arc::new(Mutex::new(database));
-        let sink = MultiplexedEngineLogicalOutboxSink::initialize(&sink_path, sink_config.clone())
-            .unwrap();
+        let sink = MultiplexedEngineLogicalOutboxSink::initialize_with_vfs(
+            sink_path, sink_vfs.clone(), sink_config.clone(),
+        ).unwrap();
         let worker =
             LogicalOutboxWorker::start(sink, LogicalOutboxWorkerConfig::default()).unwrap();
         let relay = LogicalOutboxRelay::start_scopes(
@@ -1057,7 +1077,11 @@ mod tests {
         drop(sink);
         drop(authority);
 
-        let reopened = MultiplexedEngineLogicalOutboxSink::open(&sink_path, sink_config).unwrap();
+        authority_vfs.crash().unwrap();
+        sink_vfs.crash().unwrap();
+        let reopened =
+            MultiplexedEngineLogicalOutboxSink::open_with_vfs(sink_path, sink_vfs, sink_config)
+                .unwrap();
         assert_eq!(reopened.status().active_owner_scopes, 2);
         assert_eq!(reopened.status().durable_records, 3);
     }

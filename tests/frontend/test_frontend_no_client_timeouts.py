@@ -69,6 +69,8 @@ PAPER_FEATURES = os.path.join(ROOT, 'frontend', 'src', 'features', 'paper')
 TYPED_TRANSPORT = os.path.join(ROOT, 'frontend', 'src', 'api', 'transport.ts')
 CONVERSATION_SYNC = os.path.join(
     ROOT, 'frontend', 'src', 'core', 'conversation-sync.ts')
+CONVERSATION_STREAMS = os.path.join(
+    ROOT, 'frontend', 'src', 'core', 'conversation-event-multiplexer.ts')
 RUNTIME_PRELUDE = os.path.join(
     ROOT, 'frontend', 'src', 'runtime', 'sections', '_prelude.js')
 
@@ -189,19 +191,21 @@ def _run_node(harness_src, *argv):
 @pytest.mark.unit
 class TestGenerationPathsHaveNoTimer:
     def test_branch_sse_has_no_first_byte_abort(self):
-        live = _live_native(CONVERSATION_SYNC)
-        assert '45000' not in live, (
-            'conversation-sync.ts still carries the 45s first-byte abort — that '
-            'is the TTFT kill we removed from the transport, re-implemented '
-            'in the browser')
-        assert 'sseTimeout' not in live
+        for path in (CONVERSATION_SYNC, CONVERSATION_STREAMS):
+            live = _live_native(path)
+            assert '45000' not in live, (
+                f'{os.path.basename(path)} carries the 45s first-byte abort — that '
+                'is the TTFT kill we removed from the transport, re-implemented '
+                'in the browser')
+            assert 'sseTimeout' not in live
 
     def test_branch_sse_keeps_its_poll_fallback(self):
         """Removing the timer must NOT remove the real error path: an SSE
         failure still falls back to polling."""
         live = _live_native(CONVERSATION_SYNC)
-        assert 'new EventSource' in live
+        assert 'eventSourceFactory(' in live
         assert 'this.recover(' in live
+        assert 'new EventSource' in _live_native(CONVERSATION_STREAMS)
 
     def test_image_gen_has_no_watchdog_abort(self):
         live = _live('image-gen.js')

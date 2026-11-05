@@ -305,8 +305,7 @@ fn encode(value: &Value) -> io::Result<Vec<u8>> {
     let raw = serde_json::to_vec(value)
         .map_err(|_| invalid_data("credential response cannot be encoded"))?;
     if raw.len() > MAX_CREDENTIAL_RESPONSE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "credential response exceeds 8 MiB",
         ));
     }
@@ -533,7 +532,7 @@ pub(crate) fn list(
         if page_count == 0 { break; }
         let successor = rows.last().unwrap().0.clone().exact_range()?.1;
         values.try_reserve(page_count)
-            .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory, "credential list allocation failed"))?;
+            .map_err(|_| crate::resource_exhaustion::reservation_failure("credential list allocation failed"))?;
         for (_, raw) in rows {
             let id = std::str::from_utf8(&raw)
                 .map_err(|_| invalid_data("credential owner index is malformed"))?;

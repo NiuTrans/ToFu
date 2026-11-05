@@ -1,10 +1,12 @@
-"""lib/trading_strategy_engine/risk_metrics — Advanced risk-adjusted performance metrics.
+"""Advanced risk report policy, tail statistics and higher moments.
 
-Computes professional-grade metrics: Sharpe, Sortino, Calmar, Information Ratio,
-Omega Ratio, Tail Ratio, VaR, CVaR, Ulcer Index, and more.
+Entry point: compute_advanced_metrics. Shared equity arithmetic comes from
+performance_metrics; downside and distribution policies remain in this owner.
 """
 
 import math
+
+from ..performance_metrics import adjacent_returns, maximum_drawdown, sample_return_statistics
 
 __all__ = [
     'compute_advanced_metrics',
@@ -37,12 +39,7 @@ def _compute_advanced_metrics(equity_curve):
     final = values[-1]
 
     # Daily returns
-    rets = []
-    for i in range(1, n):
-        if values[i - 1] > 0:
-            rets.append((values[i] - values[i - 1]) / values[i - 1])
-        else:
-            rets.append(0)
+    rets = adjacent_returns(values)
 
     if not rets:
         return {'error': 'No returns computed'}
@@ -53,9 +50,7 @@ def _compute_advanced_metrics(equity_curve):
     years = days / 252.0
     ann_return = (math.pow(final / initial, 1 / years) - 1) * 100 if years > 0 and final > 0 and initial > 0 else 0
 
-    mean_ret = sum(rets) / len(rets)
-    variance = sum((r - mean_ret) ** 2 for r in rets) / max(len(rets) - 1, 1)
-    daily_vol = math.sqrt(variance)
+    mean_ret, daily_vol = sample_return_statistics(rets)
     ann_vol = daily_vol * math.sqrt(252) * 100
 
     # Risk-free rate (China ~2.5%)
@@ -74,30 +69,10 @@ def _compute_advanced_metrics(equity_curve):
         sortino = sharpe * 1.5  # no downside days — very good
 
     # ── Max Drawdown ──
-    peak = values[0]
-    max_dd = 0
-    max_dd_start = max_dd_end = dates[0]
-    dd_start = dates[0]
-    current_dd_days = 0
-    max_dd_days = 0
-
-    for i in range(1, n):
-        if values[i] > peak:
-            peak = values[i]
-            dd_start = dates[i]
-            current_dd_days = 0
-        else:
-            current_dd_days += 1
-
-        dd = (peak - values[i]) / peak if peak > 0 else 0
-        if dd > max_dd:
-            max_dd = dd
-            max_dd_start = dd_start
-            max_dd_end = dates[i]
-            max_dd_days = current_dd_days
+    drawdown = maximum_drawdown(values, dates)
 
     # ── Calmar Ratio ──
-    calmar = ann_return / (max_dd * 100) if max_dd > 0 else 0
+    calmar = ann_return / (drawdown.fraction * 100) if drawdown.fraction > 0 else 0
 
     # ── Information Ratio (vs risk-free benchmark) ──
     # Would be vs market benchmark ideally, but using excess returns
@@ -147,7 +122,7 @@ def _compute_advanced_metrics(equity_curve):
                 (len(rets) * daily_vol ** 4) - 3) if daily_vol > 0 else 0
 
     # ── Recovery Factor ──
-    recovery_factor = total_return / (max_dd * 100) if max_dd > 0 else 0
+    recovery_factor = total_return / (drawdown.fraction * 100) if drawdown.fraction > 0 else 0
 
     # ── Ulcer Index (RMS of drawdown) ──
     drawdowns = []
@@ -191,9 +166,9 @@ def _compute_advanced_metrics(equity_curve):
         'tail_ratio': round(tail_ratio, 3),
 
         # Drawdown
-        'max_drawdown_pct': round(max_dd * 100, 2),
-        'max_drawdown_period': {'start': max_dd_start, 'end': max_dd_end},
-        'max_drawdown_days': max_dd_days,
+        'max_drawdown_pct': round(drawdown.fraction * 100, 2),
+        'max_drawdown_period': {'start': drawdown.peak_date, 'end': drawdown.trough_date},
+        'max_drawdown_days': drawdown.periods_to_trough,
         'longest_drawdown_days': longest_dd,
         'ulcer_index': round(ulcer, 3),
         'recovery_factor': round(recovery_factor, 3),

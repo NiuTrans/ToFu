@@ -57,8 +57,9 @@ from lib.openapi._schema import (  # noqa: E402
     media_responses,
     _tofu_config_schema,
 )
-from lib.openapi._wire import schema_definition  # noqa: E402
+from lib.openapi._wire import inline_schema_definition, schema_definition  # noqa: E402
 from lib.openapi._spec import build_spec  # noqa: E402
 from lib.openapi._docs import redoc_html, swagger_html  # noqa: E402
 
-__all__ = ['media_responses', 'api_meta', 'build_spec', 'schema_definition', 'swagger_html', 'redoc_html']
+__all__ = ['media_responses', 'api_meta', 'build_spec', 'inline_schema_definition', 'schema_definition',
+           'swagger_html', 'redoc_html']

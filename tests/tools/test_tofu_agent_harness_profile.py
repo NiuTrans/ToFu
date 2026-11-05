@@ -43,7 +43,7 @@ def test_direct_common_schemas_come_from_registry(tmp_path):
     catalog, _ = assemble_tool_list(ctx)
     wire = full_wire_tools(catalog)
     names = {tool['function']['name'] for tool in wire}
-    assert {'find_files', 'grep_search', 'read_files', 'edit_file', 'write_file',
+    assert {'find_files', 'search_files', 'read_files', 'edit_file', 'write_file',
             'run_command', 'poll',
             'kill'} <= names
     assert all(any(tool is original for original in catalog) for tool in wire)

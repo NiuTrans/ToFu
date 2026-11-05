@@ -63,9 +63,8 @@ def test_master_abort_wakes_wait_and_cancels_pending():
 def test_stop_preempts_await_fast_paths(known_ids):
     spec = SubTaskSpec(id='child', role='researcher', objective='work')
     master = MasterOrchestrator('parent', 'conv', [spec], user_id=1)
-    # Exercise both cached no-progress and unknown-ID immediate returns.
+    # Exercise both a blocking wait and the unknown-ID immediate return.
     ids = ['child'] if known_ids else ['unknown']
-    master._await_timeout_progress[('all', tuple(ids))] = frozenset()
     result = master.await_agents(
         ids=ids, mode='all', timeout_seconds=60, abort_check=lambda: True)
     assert result['cancelled'] and not result['timed_out']

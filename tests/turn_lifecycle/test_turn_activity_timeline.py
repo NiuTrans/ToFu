@@ -54,7 +54,7 @@ def test_schema_isolation_model_failure_and_fallback_keep_exact_order():
             'emittedAt': 1_020,
             'spanId': 'model:attempt-a:1',
             'model': 'kimi-k3',
-            'providerId': 'sankuai',
+            'providerId': 'example-corp',
             'keyHint': '2208********5409',
             'status': 'failed',
             'errorKind': 'BadRequestError',
@@ -84,12 +84,60 @@ def test_schema_isolation_model_failure_and_fallback_keep_exact_order():
     assert isolated['action'] == 'omitted'
     assert isolated['parentSpanId'] == 'model:attempt-a:1'
     failed = timeline['entries'][1]
-    assert failed['providerId'] == 'sankuai'
+    assert failed['providerId'] == 'example-corp'
     assert failed['keyHint'] == '2208********5409'
     switched = timeline['entries'][2]
     assert (switched['fromModel'], switched['toModel']) == (
         'kimi-k3', 'glm-5.3',
     )
+
+
+def test_failed_model_rows_name_their_envelope_cause_not_their_class():
+    """Real emitter fields fold into rows that carry the terminal-envelope
+    taxonomy; reasonCode keeps the raw class name as evidence."""
+    from lib.llm import AbortedError
+    from lib.llm.llm_errors import RateLimitError
+    from lib.tasks_pkg.manager._stream import _model_request_complete_fields
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    task = _task()
+
+    def complete(seq, status, error=None, usage=None, **attribution):
+        fields = _model_request_complete_fields(
+            task, status=status, finish_reason='', error=error,
+            usage_value=usage, span_id=f'model:attempt-a:{seq}',
+            model='kimi-k3', started_ms=0, tag=f'R{seq}', round_num=seq,
+            **attribution)
+        return {**build_event(EventType.MODEL_REQUEST_COMPLETE, **fields),
+                'seq': seq, 'emittedAt': 1_000 + seq}
+
+    timeline = None
+    for event in (
+        complete(1, 'failed', RateLimitError(
+            'HTTP 503: overloaded', is_gateway=True, status_code=503)),
+        complete(2, 'failed', RateLimitError('HTTP 429', status_code=429)),
+        complete(3, 'failed', AbortedError('fenced'),
+                 error_kind='storage_fence', error_detail='fence stopped it'),
+        complete(4, 'failed', usage={'_malformed_stream': True}),
+        complete(5, 'failed', usage={}),
+        complete(6, 'aborted', AbortedError('user stop')),
+        # A forged or newer-than-this-server kind is not a cause to render.
+        {**complete(7, 'failed', RuntimeError('HTTP 429')),
+         'envelopeKind': 'not_a_kind'},
+    ):
+        timeline = fold_activity_timeline(timeline, event, task)
+
+    rows = [(row['status'], row.get('reasonCode'), row.get('envelopeKind'))
+            for row in timeline['entries']]
+    assert rows == [
+        ('failed', 'RateLimitError', 'upstream_error'),
+        ('failed', 'RateLimitError', 'ratelimit'),
+        ('failed', 'storage_fence', 'storage_fence'),
+        ('failed', 'MalformedProviderStream', 'premature_close'),
+        ('failed', 'PrematureStreamClose', 'premature_close'),
+        ('aborted', None, None),
+        ('failed', 'RuntimeError', None),
+    ]
 
 
 def test_aborted_model_request_localizes_detail_and_drops_constant_kind():
@@ -164,7 +212,7 @@ def test_request_complete_fields_carry_abort_error_url():
     from lib.tasks_pkg.manager._stream import _model_request_complete_fields
 
     fields = _model_request_complete_fields(
-        {'provider_id': 'sankuai'},
+        {'provider_id': 'example-corp'},
         status='aborted',
         finish_reason='',
         error=AbortedError(
@@ -182,7 +230,7 @@ def test_request_complete_fields_carry_abort_error_url():
     assert fields['errorUrl'] == 'https://x/v1/chat'
     # An abort without a bound URL emits no errorUrl at all.
     no_url = _model_request_complete_fields(
-        {'provider_id': 'sankuai'},
+        {'provider_id': 'example-corp'},
         status='aborted',
         finish_reason='',
         error=AbortedError('VLM PDF transcription aborted'),
@@ -196,7 +244,7 @@ def test_request_complete_fields_carry_abort_error_url():
     assert 'errorUrl' not in no_url
 
     redacted = _model_request_complete_fields(
-        {'provider_id': 'sankuai'}, status='aborted', finish_reason='',
+        {'provider_id': 'example-corp'}, status='aborted', finish_reason='',
         error=AbortedError('synthetic abort', url=(
             'https://user:synthetic-password@x/v1/chat?token=synthetic-token')),
         usage_value={}, span_id='model:attempt-a:1', model='kimi-k3',
@@ -208,7 +256,7 @@ def test_request_complete_fields_carry_abort_error_url():
 
     # Dispatch metadata's masked key hint reaches the wire as keyHint.
     hinted = _model_request_complete_fields(
-        {'provider_id': 'sankuai'}, status='failed', finish_reason='',
+        {'provider_id': 'example-corp'}, status='failed', finish_reason='',
         error=RuntimeError('boom'),
         usage_value={'_dispatch': {'key_hint': '2208********5409'}},
         span_id='model:attempt-a:1', model='kimi-k3',
@@ -246,7 +294,7 @@ def test_request_complete_fields_honor_fence_error_overrides():
     from lib.tasks_pkg.manager._stream import _model_request_complete_fields
 
     fields = _model_request_complete_fields(
-        {'provider_id': 'sankuai',
+        {'provider_id': 'example-corp',
          '_abort_reason': 'storage_authority_integrity'},
         status='failed',
         finish_reason='',
@@ -505,6 +553,129 @@ def test_failed_compaction_receipt_remains_a_visible_warning_fact():
     assert entry['summaryKey'] == 'activity.compaction.failed'
     assert entry['detail'] == 'no safe messages to drop'
     assert entry['reductionPercent'] == 0
+
+
+def test_compaction_receipt_outlives_a_tool_loop_past_the_row_budget():
+    """The settled receipt is the transcript's only marker of an archive.
+
+    A tool loop that overflows the window reclaims display-filtered tool
+    rows; the receipt survives with its accounting even though it is older.
+    """
+    from lib.turn_activity_timeline import (
+        ACTIVITY_TIMELINE_MAX_ENTRIES,
+        fold_activity_timeline,
+    )
+
+    task = _task()
+    timeline = None
+    seq = 0
+
+    def fold(event):
+        nonlocal timeline, seq
+        seq += 1
+        timeline = fold_activity_timeline(
+            timeline, {'seq': seq, 'emittedAt': 1_000 + seq, **event}, task)
+
+    def run_tool(index):
+        call = {'toolCallId': f'call-{index}', 'toolName': 'read_files',
+                'roundNum': index}
+        fold({'type': EventType.TOOL_START, **call})
+        fold({'type': EventType.TOOL_COMPLETE, **call, 'status': 'done'})
+
+    for index in range(20):
+        run_tool(index)
+    fold({'type': EventType.PHASE, 'phase': Phase.COMPACTING})
+    fold({'type': EventType.COMPACTION, 'archiveId': 'archive-long',
+          'trigger': 'working_set', 'tokensBefore': 612_667, 'msgsBefore': 300})
+    fold({'type': EventType.COMPACTION_DONE, 'archiveId': 'archive-long',
+          'trigger': 'working_set', 'tokensBefore': 612_667,
+          'tokensAfter': 50_477, 'msgsBefore': 300, 'msgsAfter': 40,
+          'receipt': {'status': 'completed', 'trigger': 'working_set'}})
+    for index in range(20, 20 + 3 * ACTIVITY_TIMELINE_MAX_ENTRIES):
+        run_tool(index)
+
+    assert timeline['droppedCount'] > 0
+    assert len(timeline['entries']) == ACTIVITY_TIMELINE_MAX_ENTRIES
+    receipts = [entry for entry in timeline['entries']
+                if entry.get('reasonCode') == 'context_compaction']
+    assert [(entry['archiveId'], entry['status'], entry['tokensAfter'])
+            for entry in receipts] == [('archive-long', 'succeeded', 50_477)]
+    assert timeline['entries'][-1]['toolCallId'] == (
+        f'call-{19 + 3 * ACTIVITY_TIMELINE_MAX_ENTRIES}')
+
+
+def _ranked_rows(**counts):
+    """Rows oldest first, rendered facts before routine rows.
+
+    Age-only eviction would reclaim the receipts and errors first; every
+    case below proves the reverse order.
+    """
+    shapes = {
+        'receipt': {'kind': 'status', 'status': 'succeeded', 'severity': 'info',
+                    'reasonCode': 'context_compaction', 'archiveId': 'archive-a'},
+        'error': {'kind': 'error', 'status': 'failed', 'severity': 'error'},
+        'warning': {'kind': 'status', 'status': 'waiting', 'severity': 'warning',
+                    'reasonCode': 'retrying'},
+        'tool': {'kind': 'tool', 'status': 'succeeded', 'severity': 'info'},
+        'beat': {'kind': 'status', 'status': 'running', 'severity': 'info'},
+    }
+    rows = []
+    for name in ('receipt', 'error', 'warning', 'tool', 'beat'):
+        for index in range(counts.get(name, 0)):
+            rows.append({'id': f'{name}-{index}', 'spanId': f'{name}-{index}',
+                         'seq': len(rows), 'occurredAt': len(rows), 'count': 1,
+                         **shapes[name]})
+    return rows
+
+
+@pytest.mark.parametrize(('counts', 'evicted'), [
+    pytest.param({'receipt': 2, 'error': 47, 'warning': 40, 'tool': 40, 'beat': 30},
+                 {*(f'beat-{i}' for i in range(30)), 'tool-0'},
+                 id='status-beats-then-oldest-tool-row'),
+    pytest.param({'receipt': 2, 'error': 67, 'warning': 60, 'tool': 30, 'beat': 30},
+                 {*(f'beat-{i}' for i in range(30)),
+                  *(f'tool-{i}' for i in range(30)), 'warning-0'},
+                 id='display-filtered-rows-before-rendered-warnings'),
+    pytest.param({'receipt': 2, 'error': 127, 'warning': 10, 'tool': 10, 'beat': 10},
+                 {*(f'beat-{i}' for i in range(10)), *(f'tool-{i}' for i in range(10)),
+                  *(f'warning-{i}' for i in range(10)), 'error-0'},
+                 id='errors-before-compaction-receipts'),
+    pytest.param({'receipt': 130}, {'receipt-0', 'receipt-1'},
+                 id='oldest-receipts-only-when-nothing-else-remains'),
+])
+def test_row_budget_reclaims_rows_by_transcript_value(counts, evicted):
+    from lib.turn_activity_timeline import (
+        ACTIVITY_TIMELINE_MAX_ENTRIES,
+        normalize_activity_timeline,
+    )
+
+    rows = _ranked_rows(**counts)
+    timeline = normalize_activity_timeline({'entries': json.loads(json.dumps(rows))})
+
+    kept = [entry['id'] for entry in timeline['entries']]
+    assert len(kept) == ACTIVITY_TIMELINE_MAX_ENTRIES
+    assert timeline['droppedCount'] == len(evicted)
+    assert kept == [row['id'] for row in rows if row['id'] not in evicted]
+
+
+def test_byte_budget_keeps_an_oldest_compaction_receipt():
+    from lib.turn_activity_timeline import (
+        ACTIVITY_TIMELINE_MAX_ENTRIES,
+        ACTIVITY_TIMELINE_MAX_JSON_BYTES,
+        normalize_activity_timeline,
+    )
+
+    rows = _ranked_rows(receipt=1, beat=ACTIVITY_TIMELINE_MAX_ENTRIES - 1)
+    for row in rows[1:]:
+        row['detail'] = 'd' * 400
+        row['summaryArgs'] = {f'arg-{index}': 'x' * 160 for index in range(12)}
+    timeline = normalize_activity_timeline({'entries': rows})
+
+    assert timeline['droppedCount'] > 0
+    assert len(json.dumps(timeline, ensure_ascii=False, separators=(',', ':'))
+               .encode('utf-8')) <= ACTIVITY_TIMELINE_MAX_JSON_BYTES
+    assert timeline['entries'][0]['id'] == 'receipt-0'
+    assert timeline['entries'][-1]['id'] == f'beat-{ACTIVITY_TIMELINE_MAX_ENTRIES - 2}'
 
 
 def test_repeated_schema_rejection_across_dispatches_coalesces():
@@ -1171,6 +1342,129 @@ def test_separate_recovery_incidents_sum_backoff_not_wall_envelope():
     assert recovery['durationMs'] == 4_200
 
 
+@pytest.mark.parametrize('dropped_before', [0, 9, 99, 2_147_483_646, 2_147_483_647])
+def test_byte_trim_stops_at_the_first_row_count_that_fits(dropped_before):
+    """Incremental size accounting matches re-encoding after every removal."""
+    from lib.turn_activity_timeline import (
+        ACTIVITY_TIMELINE_MAX_ENTRIES,
+        ACTIVITY_TIMELINE_MAX_JSON_BYTES,
+        normalize_activity_timeline,
+    )
+
+    def encoded(document):
+        return len(json.dumps(
+            document, ensure_ascii=False, separators=(',', ':'),
+        ).encode('utf-8'))
+
+    rows = [{
+        'id': f'activity:{seq}', 'spanId': f'span:{seq}', 'seq': seq,
+        'occurredAt': 10_000 + seq,
+        'kind': 'error' if seq % 29 == 0 else 'status',
+        'status': 'failed' if seq % 29 == 0 else 'running',
+        'severity': 'error' if seq % 29 == 0 else 'info',
+        'summary': ('\u7f16' if seq % 2 else '\u00e9') * 180,
+        'detail': ('\u8f91' if seq % 3 else 'd') * 400,
+        'summaryArgs': {f'summary-{index}': 'x' * (100 + seq % 60)
+                        for index in range(12)},
+        'count': 1,
+    } for seq in range(ACTIVITY_TIMELINE_MAX_ENTRIES)]
+    timeline = normalize_activity_timeline({
+        'entries': json.loads(json.dumps(rows)),
+        **({'droppedCount': dropped_before} if dropped_before else {}),
+    })
+
+    assert timeline is not None
+    assert encoded(timeline) <= ACTIVITY_TIMELINE_MAX_JSON_BYTES
+    removed = len(rows) - len(timeline['entries'])
+    assert removed > 0
+    assert timeline['droppedCount'] == min(2_147_483_647, dropped_before + removed)
+
+    # Reference: the same removal policy, re-encoding the whole document after
+    # every pop. The production trim must stop at exactly the same row.
+    from lib.turn_activity_timeline import _eviction_index, _normalize_entry
+    reference = [_normalize_entry(json.loads(json.dumps(row))) for row in rows]
+    reference_dropped = dropped_before
+
+    def reference_document():
+        return {
+            'blockId': timeline['blockId'],
+            'version': timeline['version'],
+            'entries': reference,
+            **({'droppedCount': reference_dropped} if reference_dropped else {}),
+        }
+
+    while reference and encoded(reference_document()) > ACTIVITY_TIMELINE_MAX_JSON_BYTES:
+        reference.pop(_eviction_index(reference))
+        reference_dropped = min(2_147_483_647, reference_dropped + 1)
+    assert timeline == reference_document()
+
+
+@pytest.mark.parametrize('dropped_before', [0, 9, 99])
+@pytest.mark.parametrize('slack', [-1, 0, 1])
+def test_byte_trim_is_exact_at_the_cap_boundary(dropped_before, slack):
+    """Tune one row so the document lands exactly on the byte cap.
+
+    Off-by-a-few-bytes bookkeeping (separator, droppedCount key or digits)
+    removes one row too many or too few only at this boundary.
+    """
+    from lib.turn_activity_timeline import (
+        ACTIVITY_TIMELINE_MAX_JSON_BYTES,
+        ACTIVITY_TIMELINE_VERSION,
+        normalize_activity_timeline,
+    )
+
+    def row(seq, pad):
+        return {'id': f'activity:{seq}', 'spanId': f'span:{seq}', 'seq': seq,
+                'occurredAt': 10_000 + seq, 'kind': 'status', 'status': 'running',
+                'severity': 'info', 'summary': 's' * 180, 'detail': 'd' * pad,
+                'summaryArgs': {f'arg-{index}': 'x' * 100 for index in range(6)},
+                'count': 1}
+
+    def encoded(rows, dropped):
+        return len(json.dumps({
+            'blockId': 'activity-timeline', 'version': ACTIVITY_TIMELINE_VERSION,
+            'entries': rows, **({'droppedCount': dropped} if dropped else {}),
+        }, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+
+    # Uniform rows whose survivors (all but the oldest) sit just under the cap
+    # at full padding; then shrink the newest row's padding so that dropping
+    # exactly one row lands at cap + slack. Rows stay within entry bounds.
+    row_bytes = len(json.dumps(row(100, 400), ensure_ascii=False, separators=(',', ':')))
+    count = ACTIVITY_TIMELINE_MAX_JSON_BYTES // (row_bytes + 1) + 1
+    assert count <= 128
+    rows = [row(seq, 400) for seq in range(count)]
+    while encoded(rows[1:], dropped_before + 1) <= ACTIVITY_TIMELINE_MAX_JSON_BYTES:
+        count += 1
+        assert count <= 128
+        rows.append(row(count - 1, 400))
+    # Shed ``summaryArgs`` then detail characters from the newest rows until
+    # the post-drop document is exactly cap + slack.
+    target = ACTIVITY_TIMELINE_MAX_JSON_BYTES + slack
+    # Values stay non-empty: normalization drops empty strings, which would
+    # silently change the sizes this fixture is computing.
+    for tuned in (rows[-1], rows[-2]):
+        for key in list(tuned['summaryArgs']):
+            excess = encoded(rows[1:], dropped_before + 1) - target
+            if excess <= 0:
+                break
+            tuned['summaryArgs'][key] = 'x' * max(1, len(tuned['summaryArgs'][key]) - excess)
+        excess = encoded(rows[1:], dropped_before + 1) - target
+        if excess > 0:
+            tuned['detail'] = 'd' * max(1, len(tuned['detail']) - excess)
+    for tuned in (rows[-1], rows[-2]):
+        assert normalize_activity_timeline({'entries': [dict(tuned)]})['entries'] == [tuned]
+    assert encoded(rows[1:], dropped_before + 1) == ACTIVITY_TIMELINE_MAX_JSON_BYTES + slack
+    assert encoded(rows, dropped_before) > ACTIVITY_TIMELINE_MAX_JSON_BYTES
+
+    timeline = normalize_activity_timeline({
+        'entries': rows, **({'droppedCount': dropped_before} if dropped_before else {}),
+    })
+    removed = count - len(timeline['entries'])
+    assert removed == (1 if slack <= 0 else 2)
+    assert timeline['droppedCount'] == dropped_before + removed
+    assert encoded(timeline['entries'], timeline['droppedCount']) <= ACTIVITY_TIMELINE_MAX_JSON_BYTES
+
+
 def test_normalization_enforces_byte_budget_and_preserves_newest_error():
     from lib.turn_activity_timeline import (
         ACTIVITY_TIMELINE_MAX_JSON_BYTES,
@@ -1344,6 +1638,47 @@ def test_terminal_error_closes_open_rows_and_success_done_resolves_warnings():
     assert settled['severity'] == 'warning'
 
 
+def test_lost_tool_completion_does_not_settle_as_a_started_row():
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    task = _task()
+    timeline = None
+    for event in (
+        {
+            'type': EventType.TOOL_START,
+            'seq': 1,
+            'emittedAt': 1_000,
+            'toolCallId': 'call-1',
+            'toolName': 'run_command',
+            'roundNum': 72,
+        },
+        {
+            'type': EventType.TOOL_PROGRESS,
+            'seq': 2,
+            'emittedAt': 31_000,
+            'toolCallId': 'call-1',
+            'toolName': 'run_command',
+            'roundNum': 72,
+            'detail': 'run_command… (30s)',
+        },
+        {
+            'type': EventType.DONE,
+            'seq': 3,
+            'emittedAt': 46_000,
+            'finishReason': 'aborted',
+        },
+    ):
+        timeline = fold_activity_timeline(timeline, event, task)
+
+    settled = timeline['entries'][0]
+    assert settled['status'] == 'aborted'
+    assert settled['severity'] == 'warning'
+    assert settled['summaryKey'] == 'activity.tool.aborted'
+    assert settled['summaryArgs'] == {'tool': 'run_command'}
+    assert 'detail' not in settled
+    assert settled['durationMs'] == 45_000
+
+
 def test_durable_error_detail_preserves_original_diagnostic_evidence():
     from lib.turn_activity_timeline import fold_activity_timeline
 
@@ -1509,7 +1844,7 @@ def test_stream_boundary_marks_returned_truncated_stream_failed(monkeypatch):
              'reasoning_content': 'unfinished'},
             'stop',
             {
-                '_dispatch': {'provider_id': 'sankuai', 'model': 'kimi-k3'},
+                '_dispatch': {'provider_id': 'example-corp', 'model': 'kimi-k3'},
                 '_missing_done': True,
                 '_stream_anomaly': True,
                 '_failure_stage': 'midstream_close',

@@ -6,6 +6,7 @@ No private message/tool chunks, writes, worker, replay or budget grant is added.
 """
 from lib.identity import require_user_id
 from lib.storage.errors import StorageError
+from lib.error_envelope import BadRequest
 from .action_observations import BINDING_NAMESPACE,_record_value,_task_prefix,_digest
 from .action_pending import NAMESPACE as PENDING_NAMESPACE
 from .persistence import research_direction_hash
@@ -60,8 +61,8 @@ def discover_unfinished_actions(direction,*,lang='en',user_id):
     from lib.storage import get_storage_client
     owner=require_user_id(user_id,context='research unfinished action owner')
     if not isinstance(direction,str) or not direction.strip() or len(direction)>2000:
-        raise ValueError('direction must be non-empty and at most 2000 characters')
-    if lang not in ('en','zh'):raise ValueError('lang must be en or zh')
+        raise BadRequest('direction must be non-empty and at most 2000 characters', field='direction')
+    if lang not in ('en','zh'):raise BadRequest('lang must be en or zh', field='lang')
     direction=direction.strip();scope=research_direction_hash(direction)
     client=get_storage_client();candidates={}
     for namespace in (PENDING_NAMESPACE,BINDING_NAMESPACE):

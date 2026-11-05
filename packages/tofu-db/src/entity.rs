@@ -700,7 +700,40 @@ pub struct EntityTransaction {
     snapshot_pin: SnapshotPin,
 }
 
+const OVERLAY_ENVELOPE_RESERVE_BYTES: usize = 64 * 1024;
+
+/// Bytes one write adds to an EntityOverlay delta (`encode_overlay_delta`);
+/// `None` is a delete.
+pub(crate) fn overlay_write_bytes(key_bytes: usize, value_bytes: Option<usize>) -> usize {
+    8 + key_bytes + value_bytes.unwrap_or(4)
+}
+
 impl EntityTransaction {
+    fn has_plain_writes(&self) -> bool {
+        !self.writes.is_empty() && self.retired_ranges.is_empty() && self.mounted_ranges.is_empty()
+    }
+
+    /// The EntityOverlay delta must fit the 256 KiB family inline bound
+    /// alongside the envelope's other records. The estimate matches
+    /// encode_overlay_delta byte for byte; the reserve leaves 64 KiB for
+    /// receipt (≤7 KiB inline), outbox and stream records.
+    fn overlay_delta_fits_envelope(&self) -> bool {
+        self.overlay_delta_bytes() + OVERLAY_ENVELOPE_RESERVE_BYTES <= crate::transaction::MAX_INLINE_BYTES
+    }
+
+    fn overlay_delta_bytes(&self) -> usize {
+        4 + self.writes.iter()
+            .map(|(key, value)| overlay_write_bytes(key.len(), value.as_ref().map(Vec::len)))
+            .sum::<usize>()
+    }
+
+    /// Delta bytes this transaction can still add and commit as one
+    /// rebaseable overlay write instead of the structural tree path.
+    pub(crate) fn overlay_delta_room(&self) -> usize {
+        crate::transaction::MAX_INLINE_BYTES
+            .saturating_sub(OVERLAY_ENVELOPE_RESERVE_BYTES + self.overlay_delta_bytes())
+    }
+
     /// Account ownership without evicting values at an artificial quota.
     fn reserve_transaction_bytes(&mut self, bytes: usize) -> io::Result<()> {
         self.snapshot_pin.reserve_transaction_bytes(bytes)
@@ -1532,11 +1565,155 @@ impl Page {
     }
 }
 
+/// Persistent-pin catalog records one walk found: in one root's graph, or
+/// below one page.
+#[derive(Clone, Copy, Debug, Default)]
+struct PinCatalogTally {
+    declared_count: Option<usize>,
+    pins: usize,
+}
+
+impl PinCatalogTally {
+    fn declare(&mut self, encoded_count: &[u8]) -> io::Result<()> {
+        if self.declared_count.is_some() {
+            return Err(invalid_data(
+                "duplicate persistent entity root pin count record",
+            ));
+        }
+        self.declared_count = Some(decode_persistent_root_pin_count(encoded_count)?);
+        Ok(())
+    }
+
+    fn discover(&mut self, pins: usize) -> io::Result<()> {
+        self.pins = self
+            .pins
+            .checked_add(pins)
+            .ok_or_else(|| invalid_data("persistent entity root pin count overflow"))?;
+        if self.pins > MAX_PERSISTENT_ENTITY_ROOT_PINS {
+            return Err(invalid_data("persistent entity root pin bound exceeded"));
+        }
+        Ok(())
+    }
+
+    /// Joins the records below a page this walk did not read again.
+    fn join(&mut self, subtree: Self) -> io::Result<()> {
+        if let Some(count) = subtree.declared_count {
+            if self.declared_count.is_some() {
+                return Err(invalid_data(
+                    "duplicate persistent entity root pin count record",
+                ));
+            }
+            self.declared_count = Some(count);
+        }
+        self.discover(subtree.pins)
+    }
+
+    /// The records found since `before` was taken.
+    fn since(self, before: Self) -> Self {
+        Self {
+            declared_count: self.declared_count.filter(|_| before.declared_count.is_none()),
+            pins: self.pins - before.pins,
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.declared_count.is_none() && self.pins == 0
+    }
+
+    fn check_catalog(self) -> io::Result<()> {
+        match self.declared_count {
+            Some(declared) if declared != self.pins => Err(invalid_data(
+                "persistent entity root pin count does not match its catalog",
+            )),
+            None if self.pins > MAX_LEGACY_PERSISTENT_ENTITY_ROOT_PINS => Err(invalid_data(
+                "legacy persistent entity root pin count exceeds its bound",
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Pages one mark has walked across all of its roots; see
+/// [`visit_entity_page_graphs_once`]. A page ID fixes the page's bytes and
+/// therefore its whole subtree, so a walked page is not read again. A page
+/// walked with discovery keeps the pin-catalog tally of its subtree, so each
+/// root still checks its declared pin count against every pin record it
+/// reaches. Bounded by the distinct pages walked; a failed walk leaves it
+/// unusable.
+#[derive(Default)]
+struct EntityPageVisits {
+    /// Walked pages; `true` once walked with persistent-root discovery.
+    pages: HashMap<BlockId, bool>,
+    /// Nonzero tallies of pages walked with discovery.
+    pin_catalog_tallies: HashMap<BlockId, PinCatalogTally>,
+    /// Pages walked with discovery whose subtrees are still on the frontier:
+    /// the page, the frontier length below its children, and the walk's tally
+    /// before the page.
+    open: Vec<(BlockId, usize, PinCatalogTally)>,
+    /// Persistent pin roots and range mounts, which need no discovery, found
+    /// by discovery walks and walked after every root.
+    deferred: Vec<BlockId>,
+    skipped_pages: u64,
+}
+
+impl EntityPageVisits {
+    /// `None` when an earlier walk covers `node`, whose subtree tally then
+    /// joins `tally`; otherwise whether this is the page's first walk. A walk
+    /// without discovery never satisfies one that needs it: the page is
+    /// walked again (read, not visited) to discover the pins it records.
+    fn admit(&mut self, node: &ReachabilityNode, tally: &mut PinCatalogTally) -> io::Result<Option<bool>> {
+        match self.pages.get(&node.block_id).copied() {
+            None => Ok(Some(true)),
+            Some(discovered) if discovered || !node.discover_persistent_roots => {
+                if node.discover_persistent_roots {
+                    if let Some(subtree) = self.pin_catalog_tallies.get(&node.block_id) {
+                        tally.join(*subtree)?;
+                    }
+                }
+                self.skipped_pages += 1;
+                Ok(None)
+            }
+            Some(_) => Ok(Some(false)),
+        }
+    }
+
+    fn walked(&mut self, node: &ReachabilityNode, frontier_below: usize, before: PinCatalogTally) {
+        *self.pages.entry(node.block_id).or_insert(false) |= node.discover_persistent_roots;
+        if node.discover_persistent_roots {
+            self.open.push((node.block_id, frontier_below, before));
+        }
+    }
+
+    /// Keeps the tally of every page whose subtree has left the frontier.
+    fn close_finished(&mut self, frontier: usize, tally: PinCatalogTally) {
+        while let Some(&(page, below, before)) = self.open.last() {
+            if frontier > below {
+                break;
+            }
+            self.open.pop();
+            let subtree = tally.since(before);
+            if !subtree.is_empty() {
+                self.pin_catalog_tallies.insert(page, subtree);
+            }
+        }
+    }
+}
+
+fn reachability_root(block_id: BlockId, discover_persistent_roots: bool) -> ReachabilityNode {
+    ReachabilityNode {
+        block_id,
+        expected_level: None,
+        lower_bound: None,
+        upper_bound: None,
+        discover_persistent_roots,
+    }
+}
+
 pub(crate) fn visit_entity_page_graph_with_values<ReadBlock, VisitPage, VisitValue>(
     root: Option<BlockId>,
-    mut read_block: ReadBlock,
-    mut visit_page: VisitPage,
-    mut visit_value: VisitValue,
+    read_block: ReadBlock,
+    visit_page: VisitPage,
+    visit_value: VisitValue,
 ) -> io::Result<EntityPageReachabilityMetrics>
 where
     ReadBlock: FnMut(BlockId) -> io::Result<Vec<u8>>,
@@ -1546,21 +1723,119 @@ where
     let Some(root) = root else {
         return Ok(EntityPageReachabilityMetrics::default());
     };
-    let mut pending = vec![ReachabilityNode {
-        block_id: root,
-        expected_level: None,
-        lower_bound: None,
-        upper_bound: None,
-        discover_persistent_roots: true,
-    }];
+    walk_entity_page_graph(reachability_root(root, true), None, read_block, visit_page, visit_value)
+}
+
+/// What one [`visit_entity_page_graphs_once`] call walked.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct EntityPageGraphsWalk {
+    /// Distinct pages, each read and visited once.
+    pub walked_pages: usize,
+    /// Page references not followed because an earlier walk covered them.
+    pub skipped_pages: u64,
+}
+
+/// The graphs of every root of one mark (docs/TOFUDB_ONLINE_GC.md, "Pages
+/// shared by several roots are walked once per mark"): what
+/// [`visit_entity_page_graph_with_values`] visits for each root, with each
+/// page read and visited once, by the first walk that reaches it. Every
+/// root's graph is walked with persistent-root discovery first; the
+/// persistent pin roots and range mounts those walks reach need none and are
+/// walked afterwards, so no page needs a second read for discovery. Each root
+/// still checks its declared pin count against all of its pin records.
+/// Levels and key ranges are checked on the path that reaches a page first;
+/// offline `verify` checks every path.
+pub(crate) fn visit_entity_page_graphs_once<ReadBlock, VisitPage, VisitValue>(
+    roots: &[Option<BlockId>],
+    mut read_block: ReadBlock,
+    mut visit_page: VisitPage,
+    mut visit_value: VisitValue,
+) -> io::Result<EntityPageGraphsWalk>
+where
+    ReadBlock: FnMut(BlockId) -> io::Result<Vec<u8>>,
+    VisitPage: FnMut(BlockId, &[u8]) -> io::Result<()>,
+    VisitValue: FnMut(&EntityKey, &[u8]) -> io::Result<()>,
+{
+    let mut visits = EntityPageVisits::default();
+    for root in roots.iter().flatten() {
+        walk_entity_page_graph(
+            reachability_root(*root, true),
+            Some(&mut visits),
+            &mut read_block,
+            &mut visit_page,
+            &mut visit_value,
+        )?;
+    }
+    while let Some(block_id) = visits.deferred.pop() {
+        walk_entity_page_graph(
+            reachability_root(block_id, false),
+            Some(&mut visits),
+            &mut read_block,
+            &mut visit_page,
+            &mut visit_value,
+        )?;
+    }
+    Ok(EntityPageGraphsWalk {
+        walked_pages: visits.pages.len(),
+        skipped_pages: visits.skipped_pages,
+    })
+}
+
+fn note_reachability_page(
+    metrics: &mut EntityPageReachabilityMetrics,
+    frontier: usize,
+    page_bytes: usize,
+) -> io::Result<()> {
+    metrics.page_count = metrics
+        .page_count
+        .checked_add(1)
+        .ok_or_else(|| invalid_data("entity reachability page count overflow"))?;
+    metrics.payload_bytes = metrics
+        .payload_bytes
+        .checked_add(page_bytes as u64)
+        .ok_or_else(|| invalid_data("entity reachability byte count overflow"))?;
+    metrics.maximum_frontier = metrics.maximum_frontier.max(
+        u32::try_from(frontier)
+            .map_err(|_| invalid_data("entity reachability frontier overflow"))?,
+    );
+    Ok(())
+}
+
+fn walk_entity_page_graph<ReadBlock, VisitPage, VisitValue>(
+    start: ReachabilityNode,
+    mut visits: Option<&mut EntityPageVisits>,
+    mut read_block: ReadBlock,
+    mut visit_page: VisitPage,
+    mut visit_value: VisitValue,
+) -> io::Result<EntityPageReachabilityMetrics>
+where
+    ReadBlock: FnMut(BlockId) -> io::Result<Vec<u8>>,
+    VisitPage: FnMut(BlockId, &[u8]) -> io::Result<()>,
+    VisitValue: FnMut(&EntityKey, &[u8]) -> io::Result<()>,
+{
+    let mut pending = vec![start];
     let persistent_pin_count_key = persistent_root_pin_count_key()?;
-    let mut declared_persistent_pin_count = None;
-    let mut discovered_persistent_pin_count = 0_usize;
+    let mut tally = PinCatalogTally::default();
     let mut metrics = EntityPageReachabilityMetrics {
         maximum_frontier: 1,
         ..EntityPageReachabilityMetrics::default()
     };
-    while let Some(node) = pending.pop() {
+    loop {
+        if let Some(visits) = visits.as_deref_mut() {
+            visits.close_finished(pending.len(), tally);
+        }
+        let Some(node) = pending.pop() else {
+            break;
+        };
+        let first_walk = match visits.as_deref_mut() {
+            Some(visits) => match visits.admit(&node, &mut tally)? {
+                Some(first_walk) => first_walk,
+                None => continue,
+            },
+            None => true,
+        };
+        let frontier_below = pending.len();
+        let tally_before = tally;
         if metrics.page_count == MAX_ENTITY_REACHABILITY_PAGES as u64 {
             return Err(invalid_input("entity reachability page bound exceeded"));
         }
@@ -1576,13 +1851,10 @@ where
             }
             let directory = RootDirectory::decode(&encoded)?;
             for mount in directory.mounts.iter().rev() {
-                pending.push(ReachabilityNode {
-                    block_id: mount.root,
-                    expected_level: None,
-                    lower_bound: None,
-                    upper_bound: None,
-                    discover_persistent_roots: false,
-                });
+                match visits.as_deref_mut() {
+                    Some(visits) if node.discover_persistent_roots => visits.deferred.push(mount.root),
+                    _ => pending.push(reachability_root(mount.root, false)),
+                }
             }
             if let Some(base_root) = directory.base_root {
                 pending.push(ReachabilityNode {
@@ -1596,19 +1868,13 @@ where
             if pending.len() > MAX_ENTITY_REACHABILITY_FRONTIER {
                 return Err(invalid_input("entity reachability frontier bound exceeded"));
             }
-            visit_page(node.block_id, &encoded)?;
-            metrics.page_count = metrics
-                .page_count
-                .checked_add(1)
-                .ok_or_else(|| invalid_data("entity reachability page count overflow"))?;
-            metrics.payload_bytes = metrics
-                .payload_bytes
-                .checked_add(encoded.len() as u64)
-                .ok_or_else(|| invalid_data("entity reachability byte count overflow"))?;
-            metrics.maximum_frontier = metrics.maximum_frontier.max(
-                u32::try_from(pending.len())
-                    .map_err(|_| invalid_data("entity reachability frontier overflow"))?,
-            );
+            if first_walk {
+                visit_page(node.block_id, &encoded)?;
+            }
+            if let Some(visits) = visits.as_deref_mut() {
+                visits.walked(&node, frontier_below, tally_before);
+            }
+            note_reachability_page(&mut metrics, pending.len(), encoded.len())?;
             continue;
         }
         let page = Page::decode(&encoded)?;
@@ -1630,7 +1896,7 @@ where
                 "entity reachability level or key-range witness mismatch",
             ));
         }
-        if let Page::Leaf(entries) = &page {
+        if let (true, Page::Leaf(entries)) = (first_walk, &page) {
             for (key, entity) in entries {
                 if let Some(value) = entity.value.as_deref() {
                     visit_value(&EntityKey(key.clone()), value)?;
@@ -1661,36 +1927,21 @@ where
                         continue;
                     };
                     if key.as_slice() == persistent_pin_count_key.encoded() {
-                        if declared_persistent_pin_count.is_some() {
-                            return Err(invalid_data(
-                                "duplicate persistent entity root pin count record",
-                            ));
-                        }
-                        declared_persistent_pin_count =
-                            Some(decode_persistent_root_pin_count(encoded_value)?);
+                        tally.declare(encoded_value)?;
                         continue;
                     }
                     if !is_persistent_root_pin_key(key)? {
                         continue;
                     }
-                    discovered_persistent_pin_count = discovered_persistent_pin_count
-                        .checked_add(1)
-                        .ok_or_else(|| invalid_data("persistent entity root pin count overflow"))?;
-                    if discovered_persistent_pin_count > MAX_PERSISTENT_ENTITY_ROOT_PINS {
-                        return Err(invalid_data("persistent entity root pin bound exceeded"));
-                    }
+                    tally.discover(1)?;
                     let snapshot = decode_persistent_root_pin(encoded_value)?;
                     if snapshot.sequence >= value.version {
                         return Err(invalid_data("persistent entity root pin is not monotonic"));
                     }
-                    let pinned_root = snapshot.root;
-                    pending.push(ReachabilityNode {
-                        block_id: pinned_root,
-                        expected_level: None,
-                        lower_bound: None,
-                        upper_bound: None,
-                        discover_persistent_roots: false,
-                    });
+                    match visits.as_deref_mut() {
+                        Some(visits) => visits.deferred.push(snapshot.root),
+                        None => pending.push(reachability_root(snapshot.root, false)),
+                    }
                 }
             }
             Page::Leaf(_) => {}
@@ -1698,33 +1949,15 @@ where
         if pending.len() > MAX_ENTITY_REACHABILITY_FRONTIER {
             return Err(invalid_input("entity reachability frontier bound exceeded"));
         }
-        visit_page(node.block_id, &encoded)?;
-        metrics.page_count = metrics
-            .page_count
-            .checked_add(1)
-            .ok_or_else(|| invalid_data("entity reachability page count overflow"))?;
-        metrics.payload_bytes = metrics
-            .payload_bytes
-            .checked_add(encoded.len() as u64)
-            .ok_or_else(|| invalid_data("entity reachability byte count overflow"))?;
-        metrics.maximum_frontier = metrics.maximum_frontier.max(
-            u32::try_from(pending.len())
-                .map_err(|_| invalid_data("entity reachability frontier overflow"))?,
-        );
-    }
-    match declared_persistent_pin_count {
-        Some(declared) if declared != discovered_persistent_pin_count => {
-            return Err(invalid_data(
-                "persistent entity root pin count does not match its catalog",
-            ));
+        if first_walk {
+            visit_page(node.block_id, &encoded)?;
         }
-        None if discovered_persistent_pin_count > MAX_LEGACY_PERSISTENT_ENTITY_ROOT_PINS => {
-            return Err(invalid_data(
-                "legacy persistent entity root pin count exceeds its bound",
-            ));
+        if let Some(visits) = visits.as_deref_mut() {
+            visits.walked(&node, frontier_below, tally_before);
         }
-        _ => {}
+        note_reachability_page(&mut metrics, pending.len(), encoded.len())?;
     }
+    tally.check_catalog()?;
     Ok(metrics)
 }
 
@@ -3003,8 +3236,7 @@ impl<'a> Tree<'a> {
                 Ok(rows)
             }
             RootNode::Directory(directory) => {
-                leaves.try_reserve(1).map_err(|error|
-                    io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+                leaves.try_reserve(1).map_err(crate::resource_exhaustion::reservation_error)?;
                 leaves.push(root);
                 let mut visible = BTreeMap::new();
                 if let Some(base_root) = directory.base_root {
@@ -3126,8 +3358,7 @@ impl<'a> Tree<'a> {
         }
         match &*self.load_node(id)? {
             RootNode::Page(Page::Leaf(entries)) => {
-                leaves.try_reserve(1).map_err(|error|
-                    io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+                leaves.try_reserve(1).map_err(crate::resource_exhaustion::reservation_error)?;
                 leaves.push(id);
                 let mut tombstones_in_range = 0_u32;
                 let mut live_in_range = 0_u32;
@@ -3206,8 +3437,7 @@ impl<'a> Tree<'a> {
         }
         match &*self.load_node(id)? {
             RootNode::Page(Page::Leaf(entries)) => {
-                leaves.try_reserve(1).map_err(|error|
-                    io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+                leaves.try_reserve(1).map_err(crate::resource_exhaustion::reservation_error)?;
                 leaves.push(id);
                 let mut tombstones_in_range = 0_u32;
                 let mut live_in_range = 0_u32;
@@ -3936,6 +4166,10 @@ impl EntityDatabase {
     ) -> io::Result<Option<EntityTransaction>> {
         self.require_usable_authority()?;
         let pin_key = persistent_root_pin_key(tenant_id, owner_user_id, pin_id)?;
+        // Read replicas use their captured logical head, including its
+        // overlay. A persistent snapshot is a read capability and must not
+        // borrow the live writer or observe later pin removal/replacement.
+        let visible = self.current_snapshot();
         // Read the pin through the overlay-merged view at the current durable
         // sequence: a pin write/removal sitting in the deferred-application
         // overlay must be visible to snapshot acquisition (the
@@ -3947,9 +4181,9 @@ impl EntityDatabase {
                     .overlay
                     .read()
                     .map_err(|_| io::Error::other("entity overlay lock is poisoned"))?;
-                overlay.view(self.current_snapshot().sequence).resolve_versioned(
+                overlay.view(visible.sequence).resolve_versioned(
                     pin_key.encoded(),
-                    self.writer_engine()?.state().durable_sequence,
+                    visible.sequence,
                 )
             } else {
                 None
@@ -3971,7 +4205,7 @@ impl EntityDatabase {
         };
         let snapshot = decode_persistent_root_pin(&encoded_snapshot)?;
         if snapshot.sequence >= record.version
-            || snapshot.sequence > self.writer_engine()?.state().durable_sequence
+            || snapshot.sequence > visible.sequence
         {
             return Err(invalid_data("persistent entity root pin is not monotonic"));
         }
@@ -4161,8 +4395,7 @@ impl EntityDatabase {
                     .ok_or_else(|| invalid_data("range scan byte accounting overflow"))?;
                 transaction.reserve_transaction_bytes(bytes)?;
                 reserved_bytes = next_reserved;
-                transaction.range_witnesses.try_reserve(1).map_err(|error|
-                    io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+                transaction.range_witnesses.try_reserve(1).map_err(crate::resource_exhaustion::reservation_error)?;
                 transaction.range_witnesses.push(witness);
                 let interval_consumed = if reverse { window_start <= cursor_start }
                     else { window_end >= cursor_end };
@@ -4496,31 +4729,11 @@ impl EntityDatabase {
         if transaction.snapshot.sequence > self.writer_engine()?.state().durable_sequence {
             return Err(invalid_data("entity snapshot is from the future"));
         }
-        let plain_writes = !transaction.writes.is_empty()
-            && transaction.retired_ranges.is_empty()
-            && transaction.mounted_ranges.is_empty();
-        if self.overlay_enabled
-            && plain_writes
-        {
-            // The EntityOverlay delta must fit the 256 KiB family inline
-            // bound alongside the envelope's other records; an oversized
-            // mutation set takes the exact legacy tree path (whose
-            // spill-to-reference mechanism covers it) instead of failing
-            // closed at envelope build time. The estimate matches
-            // encode_overlay_delta byte for byte; the reserve leaves 64 KiB
-            // for receipt (≤7 KiB inline), outbox and stream records.
-            const OVERLAY_ENVELOPE_RESERVE_BYTES: usize = 64 * 1024;
-            let delta_bytes: usize = 4
-                + transaction
-                    .writes
-                    .iter()
-                    .map(|(key, value)| {
-                        8 + key.len() + value.as_ref().map_or(4, |value| value.len())
-                    })
-                    .sum::<usize>();
-            if delta_bytes + OVERLAY_ENVELOPE_RESERVE_BYTES
-                <= crate::transaction::MAX_INLINE_BYTES
-            {
+        if self.overlay_enabled && transaction.has_plain_writes() {
+            // An oversized mutation set takes the exact legacy tree path
+            // (whose spill-to-reference mechanism covers it) instead of
+            // failing closed at envelope build time.
+            if transaction.overlay_delta_fits_envelope() {
                 // Validate stale snapshots against the logical tree + overlay
                 // head. Independent prepared transactions must not force a full
                 // physical drain merely because another transaction committed.
@@ -4645,7 +4858,7 @@ impl EntityDatabase {
         keys.sort_unstable();
         keys.dedup();
         let head_versions = {
-            let _versions = crate::fsync_stats::StageTimer::diagnostic(
+            let _versions = crate::fsync_stats::StageTimer::new(
                 crate::fsync_stats::STAGE_OVERLAY_VALIDATE_HEAD_VERSIONS);
             versions_at(&overlay, head, &keys)?
         };
@@ -4658,7 +4871,7 @@ impl EntityDatabase {
         let blind_keys: Vec<_> = transaction.writes.keys()
             .filter(|key| !transaction.point_witnesses.contains_key(*key)).map(Vec::as_slice).collect();
         let snapshot_versions = {
-            let _versions = crate::fsync_stats::StageTimer::diagnostic(
+            let _versions = crate::fsync_stats::StageTimer::new(
                 crate::fsync_stats::STAGE_OVERLAY_VALIDATE_ORIGINAL_BLIND_VERSIONS);
             versions_at(&transaction.overlay_view, transaction.snapshot, &blind_keys)?
         };
@@ -4667,7 +4880,7 @@ impl EntityDatabase {
                 return Err(conflict("entity write witness changed"));
             }
         }
-        let range_validation = crate::fsync_stats::StageTimer::diagnostic(
+        let range_validation = crate::fsync_stats::StageTimer::new(
             crate::fsync_stats::STAGE_OVERLAY_VALIDATE_RANGE_WITNESSES);
         for witness in &transaction.range_witnesses {
             if overlay.changed_in_range_since(
@@ -4931,6 +5144,15 @@ impl EntityDatabase {
     /// it explicitly per authority.
     pub(crate) fn set_write_overlay_enabled(&mut self, enabled: bool) {
         self.overlay_enabled = enabled;
+    }
+
+    /// Whether `prepare_commit` can publish this write set as one overlay
+    /// delta without the structural tree path, which first drains the
+    /// authority-wide overlay. Without the overlay every commit is a tree
+    /// commit, so that path is then the ordinary one.
+    pub(crate) fn commits_without_overlay_drain(&self, transaction: &EntityTransaction) -> bool {
+        !self.overlay_enabled
+            || (transaction.has_plain_writes() && transaction.overlay_delta_fits_envelope())
     }
 
     /// Probe-derived overlay merge triggers applied by the authority at open
@@ -5349,10 +5571,12 @@ impl EntityDatabase {
         Ok(Some((chunk_entries, actual_entries)))
     }
 
-    /// Drain all pending chunks (used by budget triggers, maintenance,
-    /// backup, GC, and tests).
+    /// Drain all pending chunks for maintenance and structural publication.
+    /// The caller already holds authority until empty: a foreground latency
+    /// slice only multiplies fsyncs here. Keep the existing byte/reference
+    /// bounds and leave the online adaptive slice unchanged.
     pub fn merge_overlay_fully(&mut self) -> io::Result<()> {
-        while self.merge_overlay_chunk()? {}
+        while self.merge_overlay_chunk_with_limit(Self::MERGE_CHUNK_ENTRIES)?.is_some() {}
         Ok(())
     }
 

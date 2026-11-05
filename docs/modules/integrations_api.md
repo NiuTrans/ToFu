@@ -18,11 +18,24 @@ interfaces and explicit compatibility adapters. The API constitution is
 | Push/SSE delivery | push/event owners and [`../EVENTS.md`](../contracts/EVENTS.md) |
 | OpenAI adapter | `routes/compat_openai.py`, compat translator |
 | Anthropic adapter | `routes/compat_anthropic.py`, compat translator |
+| OpenAI wire values and chunk shape | `lib/compat/openai_projection.py` |
 | MCP integration | `lib/mcp/`, MCP routes |
 | Desktop bridge | `lib/desktop/`, desktop routes |
+| Feishu bot bridge and its sender authority | `lib/feishu/`, `lib/feishu/authority.py` |
+| External channels (大象, GitHub): ingress, subscriptions, outbox, 大象 bridge, GitHub poller | `lib/channels/`, `routes/api_v1/channels.py` — [`../CHANNELS.md`](../CHANNELS.md); tests `tests/channels/` |
 | SDKs | `clients/python/`, `clients/typescript/` |
 
 ## Dependency direction
+
+Problem: compatible chat, native chat and direct model execution maintained
+three copies of the OpenAI finish mapping and repeated chunk dictionaries.
+Decision: the pure `openai_projection.py` owner supplies closed finish values,
+direct-response usage projection and fresh chunk structures. Its callers own
+terminal verification, clocks, content selection, native events and settlement.
+The existing `lib.compat.openai.project_completion_usage` import remains an
+explicit export. Alternatives rejected: merging stream loops would conflate
+narrator filtering, native event delivery and client tool handoff; projecting
+all usage through one rule would erase native translation/billing semantics.
 
 Delivery adapters depend on structural application-service ports. They may:
 
@@ -109,6 +122,93 @@ no HTTP `request`, so reading it while mapping a 401/429 raised a second excepti
 and returned 500. Decision: retain the original status and use the WebSocket path
 for diagnostics/envelopes. Alternative rejected: removing the shared handler
 would lose consistent auth, capacity, and API v4 problem responses.
+
+## Feishu bridge authority
+
+Problem: the Feishu bot ran slash commands before mapping the sender to an
+owner, admitted everyone when `FEISHU_ALLOWED_USERS` was empty, let `/project`
+select any server directory and `/cat`/`/ls`/`/grep` read through it (arbitrary
+server file read), and with `FEISHU_DEFAULT_OWNER_USER_ID` persisted any sender
+as the owner's human input without saying who sent it. `/tool` also wrote
+`project_path`, a key task configuration never reads.
+
+Decision: `lib/feishu/authority.py` is the one boundary every event passes
+first. Admission is default deny: an explicit allowlist entry or an explicit
+`FEISHU_USER_OWNER_MAP` entry. Only an owner-map entry makes the sender the
+owner; only the owner runs commands (message and menu) and tool mode (now
+`projectPath`) and is persisted as a human Turn. `FEISHU_DEFAULT_OWNER_USER_ID`
+runs other admitted senders' chat under that owner's account as `virtual_user`
+input. `/project` selects only the owner's registered projects
+(`/api/v1/project/recent`), and access is rechecked on every use, so removing a
+project revokes it. File commands run as a restricted principal of the
+absolute-path guard whose only registered root is the selected project; the
+guard's shared `_safe_path` now realpath-checks list/grep/read targets for
+restricted principals, so absolute, `../` and symlinked paths cannot leave the
+root (this also closes list_dir/grep for remote API callers). Each exchange
+attempt's execution config records `_externalSender` (open ID and whether it
+is the owner), because the Turn `origin` vocabulary is a closed contract.
+
+Alternatives rejected: keeping allow-all for an empty list (any Feishu user of
+the tenant gets the owner's account); treating default-owner senders as the
+owner (third-party text becomes human authority, contrary to
+[`../CHANNELS.md`](../CHANNELS.md) C7); confining paths inside the bridge with
+its own resolver (a second guard that drifts from `abs_path_guard`); listing
+`FEISHU_WORKSPACE_ROOT` subdirectories (a directory is not a registration).
+TODO(enterprise): one bot app and default owner per deployment. Known limit:
+`FEISHU_WORKSPACE_ROOT` no longer affects selection. Verify
+`tests/feishu/test_feishu_authority.py` and `test_feishu_turn_persistence.py`.
+
+### Third-party senders get a plain model reply
+
+Problem: a default-owner sender's chat ran `run_task_sync` under the owner's
+account with ordinary task defaults, and the third party reads the reply. Its
+config carried no capability keys, so `memoryEnabled` (default true) and My
+Context (on when `preferencesEnabled` is absent) applied, and the default
+catalog held search/create/update/delete/merge memory, skill load/search and
+install requests, `read_files`, image/video inspection, `fetch_url`,
+`web_search`, server-side downloads, agent spawning and messaging,
+scheduler/timer creation, `poll`/`kill` of the owner's background work,
+tool-result artifacts, working facts, `todo_write` and, through Tool Search,
+`run_command`, `update_search_settings` and `ask_human`. Context added My
+Context, prefetched owner memories, the skills index (and skill bodies a
+message names), the credential-vault index (names and notes), host
+environment and swarm guidance; after the turn, My Context consolidation
+could write facts the third party stated into the owner's profile. The owner's
+MCP servers are on by default (`mcpEnabled`); conversation recall
+(`list_conversations`/`get_conversation`) turned on for any message text
+carrying the referenced-conversation wrapper (`[REFERENCED_CONVERSATION` with
+`title="`); plugins, project files, code execution and browser/desktop tools
+needed only one config key.
+
+Decision: `FeishuSender.execution_profile` is `THIRD_PARTY_TEXT` for every
+non-owner and `pipeline.run_task_pipeline` passes it to `run_task_sync`; the
+owner's chat is unchanged. The profile (`lib/tasks_pkg/execution_profile.py`)
+is attached only by `create_task(execution_profile=...)`, never read from
+request configuration. `create_task` replaces the request config with the
+profile's (model selection only; every capability off, personal capabilities
+fail closed) and marks the task; tool assembly then admits no tool (empty
+wire, gateway and executable catalogs, so dispatch refuses any call); the
+Context Composer acquires as a request without project, tools or memory and
+renders only the platform contract and the date, withholding required blocks
+too; memory prefetch never runs and the turn is never eligible for My Context
+consolidation. The last three key on the task mark, so a config key added
+later cannot widen the profile. Known limit: chronological carriers
+(`append_injection`) keep their producers, which are the loop's own recovery
+notices and the conversation's inbox deliveries. Only the owner's own actions
+in that conversation (a steer, or a background command or agent the owner
+starts there from the web UI) produce inbox deliveries.
+
+Alternatives rejected: setting `memoryEnabled`/`preferencesEnabled` false in
+the bridge config (memory tools do not follow `memoryEnabled`, My Context and
+several sources have no key, and every new capability would need a matching
+bridge key); the `toolSpecAllowlist` config key (a caller key, and registry
+assembly is not the only owner-data source); keeping `web_search`/`fetch_url`
+(server-side fetches of third-party-chosen URLs and of search result pages
+reach internal hosts and spend the owner's search quota — not clearly safe);
+a separate bare model call (bypasses routing, usage and billing, and the
+canonical turn path). Verify `tests/feishu/test_feishu_third_party_profile.py`
+(effective catalog and context with owner data planted at every source, plus
+owner controls) and `test_feishu_authority.py`.
 
 ## Invariants
 

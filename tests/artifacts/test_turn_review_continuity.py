@@ -89,8 +89,9 @@ def lineage(monkeypatch):
         'current-attempt': dict(attemptId='current-attempt', turnId='continued', conversationId='conversation',
                                 taskId='current-task', config={KEY: source}),
     }
-    def get_turn(conversation_id, turn_id, *, user_id):
+    def get_turn(conversation_id, turn_id, *, user_id, include_projection=True):
         assert conversation_id == 'conversation' and user_id == 1
+        assert include_projection is False
         if turn_id != 'original': raise LifecycleNotFound('Unavailable')
         return copy.deepcopy(origin)
     def get_attempt(attempt_id, *, user_id, include_execution_config):

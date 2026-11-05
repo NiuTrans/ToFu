@@ -1,0 +1,8 @@
+{
+  "content": "The complete answer: the retry resent the exact same request.",
+  "content_excludes": [
+    "The interrupted answer begins with half a"
+  ],
+  "tool_names": [],
+  "aborted": false
+}

@@ -13,10 +13,6 @@ import pytest
 
 from lib.project_mod.git_command_scope import git_command_scopes
 from lib.project_mod import git_guard
-from lib.project_mod.workspace_lease import (
-    WorkspaceBusyError, workspace_claims_lease, workspace_file_write_lease,
-    workspace_git_metadata_lease,
-)
 
 pytestmark = pytest.mark.unit
 
@@ -79,109 +75,6 @@ def removal_scope(parent, target, force=False):
     command = shlex.join(['git', 'worktree', 'remove',
                          *(['--force'] if force else []), str(target)])
     return git_command_scopes(command, str(parent), environment=os.environ)[0]
-
-
-def test_plain_cleanup_runs_while_main_source_is_being_edited(linked_checkout):
-    parent, target, git = linked_checkout
-    scope = removal_scope(parent, target)
-    assert scope.presence_roots() == (str(target),)
-    assert set(scope.writer_claims()) == {('metadata', str(parent)), ('tree', str(target))}
-    with held_by_other_thread(workspace_file_write_lease, parent / 'source'):
-        with workspace_claims_lease(scope.writer_claims()):
-            git('worktree', 'remove', str(target))
-    assert not target.exists()
-    assert (parent / 'source').read_text() == 'retained\n'
-
-
-@pytest.mark.parametrize('held_scope', ['target-file', 'common-metadata'])
-def test_cleanup_keeps_actual_target_and_shared_metadata_exclusion(linked_checkout, held_scope):
-    parent, target, git = linked_checkout
-    factory, path = ((workspace_file_write_lease, target / 'source')
-                     if held_scope == 'target-file' else (workspace_git_metadata_lease, parent))
-    with held_by_other_thread(factory, path):
-        with pytest.raises(WorkspaceBusyError):
-            with workspace_claims_lease(removal_scope(parent, target).writer_claims()):
-                git('worktree', 'remove', str(target))
-    assert target.is_dir()
-    assert (target / 'source').read_text() == 'retained\n'
-
-
-@pytest.mark.parametrize('configuration_owner', ['invoker', 'target'])
-@pytest.mark.parametrize('key,value', [
-    ('core.fsmonitor', '/untrusted/monitor'),
-    ('core.hooksPath', '/untrusted/hooks'),
-    ('include.path', '/unresolved/config'),
-    ('core.worktree', '/redirected/tree'),
-])
-def test_worktree_specific_helpers_and_redirects_retain_conservative_scope(
-        linked_checkout, configuration_owner, key, value):
-    parent, target, git = linked_checkout
-    git('config', '--worktree', key, value,
-        cwd=parent if configuration_owner == 'invoker' else target)
-    scope = removal_scope(parent, target)
-    assert set(scope.presence_roots()) == {str(parent), str(target)}
-    assert ('tree', str(parent)) in scope.writer_claims()
-
-
-def test_target_status_callback_cannot_write_through_a_main_file_lease(
-        linked_checkout, tmp_path):
-    parent, target, git = linked_checkout
-    marker = parent / 'source'
-    monitor = tmp_path / 'status-monitor'
-    monitor.write_text('#!/bin/sh\nprintf called > ' + shlex.quote(str(marker))
-                       + "\nprintf 'test-token\\0'\n")
-    monitor.chmod(0o700)
-    git('config', '--worktree', 'core.fsmonitor', str(monitor), cwd=target)
-    scope = removal_scope(parent, target)
-    with held_by_other_thread(workspace_file_write_lease, marker):
-        with pytest.raises(WorkspaceBusyError):
-            with workspace_claims_lease(scope.writer_claims()):
-                git('worktree', 'remove', str(target))
-    assert marker.read_text() == 'retained\n'
-    assert target.is_dir()
-    with workspace_claims_lease(scope.writer_claims()):
-        git('worktree', 'remove', str(target))
-    assert marker.read_text() == 'called'  # Native target status invoked the callback.
-
-
-def test_target_alias_keeps_physical_tree_identity(linked_checkout, tmp_path):
-    parent, target, _ = linked_checkout
-    alias = tmp_path / 'alias'
-    alias.symlink_to(target, target_is_directory=True)
-    scope = removal_scope(parent, alias)
-    assert scope.presence_roots() == (str(target),)
-    assert ('tree', str(target)) in scope.writer_claims()
-
-
-@pytest.mark.parametrize('existing_directory', [False, True])
-def test_move_uses_actual_destination_without_borrowing_parent_activity(
-        linked_checkout, existing_directory):
-    parent, target, git = linked_checkout
-    destination = parent / 'moved'
-    if existing_directory:
-        destination.mkdir()
-    actual = destination / target.name if existing_directory else destination
-    command = shlex.join(['git', 'worktree', 'move', str(target), str(destination)])
-    scope = git_command_scopes(command, str(parent), environment=os.environ)[0]
-    assert set(scope.presence_roots()) == {str(target), str(actual)}
-    assert set(scope.writer_claims()) == {
-        ('metadata', str(parent)), ('tree', str(target)), ('tree', str(actual))}
-    with held_by_other_thread(workspace_file_write_lease, parent / 'source'):
-        with workspace_claims_lease(scope.writer_claims()):
-            git('worktree', 'move', str(target), str(destination))
-    assert not target.exists()
-    assert (actual / 'source').read_text() == 'retained\n'
-
-
-def test_dirty_target_remains_protected_by_git_and_force_needs_review(linked_checkout):
-    parent, target, git = linked_checkout
-    (target / 'untracked').write_text('must retain\n')
-    with workspace_claims_lease(removal_scope(parent, target).writer_claims()):
-        outcome = git('worktree', 'remove', str(target), check=False)
-    assert outcome.returncode != 0
-    assert (target / 'untracked').read_text() == 'must retain\n'
-    assert not git_guard.automatic_receipt_eligible(
-        shlex.join(['git', 'worktree', 'remove', '--force', str(target)]))
 
 
 @pytest.mark.parametrize('operation', ['remove', 'move'])

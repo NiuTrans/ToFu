@@ -100,41 +100,17 @@ def inspect_image(
 
 def _ocr_image(raw: bytes, mime_type: str) -> str:
     """Best-effort local OCR. Missing Tesseract is a normal empty result."""
+    from .ocr import recognize_image
+
     try:
-        try:
-            import pymupdf
-        except ImportError:
-            import fitz as pymupdf
-        from lib.pdf_parser._common import PYMUPDF_LOCK
-        filetype = _MIME_SUFFIX[mime_type].lstrip('.').replace('jpg', 'jpeg')
-        with PYMUPDF_LOCK:
-            image_doc = pymupdf.open(stream=raw, filetype=filetype)
-            try:
-                pdf_bytes = image_doc.convert_to_pdf()
-            finally:
-                image_doc.close()
-            pdf = pymupdf.open(stream=pdf_bytes, filetype='pdf')
-            try:
-                page = pdf[0]
-                for language in ('chi_sim+eng', 'eng'):
-                    try:
-                        text_page = page.get_textpage_ocr(
-                            language=language, dpi=150, full=True)
-                        text = page.get_text('text', textpage=text_page).strip()
-                        if text:
-                            return text[:20_000]
-                    except Exception as exc:
-                        logger.debug(
-                            '[Knowledge] image OCR (%s) unavailable: %s',
-                            language, exc)
-            finally:
-                pdf.close()
+        return recognize_image(raw, mime_type)
     except Exception as exc:
-        logger.debug('[Knowledge] image OCR setup unavailable: %s', exc)
-    return ''
+        logger.debug('[Knowledge] image OCR unavailable: %s', exc)
+        return ''
 
 
-def standalone_image(raw: bytes, filename: str) -> dict:
+def standalone_image(raw: bytes, filename: str, *, ocr: bool = True) -> dict:
+    """Validate one image; ``ocr=False`` leaves its OCR text to a later job."""
     budget = resolve_knowledge_visual_budget()
     metadata = inspect_image(raw, _budget=budget)
     return {
@@ -145,7 +121,7 @@ def standalone_image(raw: bytes, filename: str) -> dict:
         'pages': [],
         'bbox': [],
         'caption': os.path.basename(filename or 'image'),
-        'ocr_text': _ocr_image(raw, metadata['mime_type']),
+        'ocr_text': _ocr_image(raw, metadata['mime_type']) if ocr else '',
         'description': '',
         'source': 'standalone',
     }

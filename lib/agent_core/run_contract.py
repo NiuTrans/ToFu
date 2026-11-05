@@ -58,7 +58,7 @@ TOOLS_ALL = {
 AGENT_EVIDENCE_VERSION = 'tofu.agent-runtime-evidence/v1'
 
 _PUBLIC_DISPATCH_EVIDENCE_FIELDS = frozenset({
-    'model', 'provider_id', 'protocol', 'responses_profile', 'latency_ms',
+    'model', 'logical_model', 'provider_id', 'protocol', 'responses_profile', 'latency_ms',
     'ttft_ms', 'stream_started_at_unix_ns', 'first_content_at_unix_ns',
     'stream_completed_at_unix_ns', 'attempt', '429_retries',
     'ttft_measurement',

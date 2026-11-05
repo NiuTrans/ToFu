@@ -14,6 +14,8 @@ export interface ChoiceInteraction {
   descriptions?: string[];
   state: 'pending' | 'answered' | 'stale';
   response?: string;
+  /** Owner-provided status line: a pending note is information, not an unconfirmed answer. */
+  note?: string;
 }
 export interface ChoicePorts {
 
@@ -92,8 +94,8 @@ export function renderChoices(block: ChoiceBlock, ports: ChoicePorts | undefined
     else if (!value.options.includes(selected)) selected = '';
     inputs.forEach(input => { input.checked = input.value === selected; });
     status.textContent = value.state === 'answered'
-      ? `${text('rich.answerSaved', 'Answer saved')}: ${value.response}`
-      : value.state === 'stale' ? text('rich.answerStale', 'This question is no longer answerable. Reload to check its current state.') : '';
+      ? `${value.note ?? text('rich.answerSaved', 'Answer saved')}: ${value.response}`
+      : value.state === 'stale' ? text('rich.answerStale', 'This question is no longer answerable. Reload to check its current state.') : value.note ?? '';
   };
   const run = async (kind: 'load' | 'submit') => {
     if (disposed || flight || !ports || (kind === 'submit' && (interaction?.state !== 'pending' || !selected))) return;
@@ -106,7 +108,7 @@ export function renderChoices(block: ChoiceBlock, ports: ChoicePorts | undefined
         : await ports.submit(block.interactionId, selected, command!.id, controller.signal);
       if (disposed || controller.signal.aborted) return;
       apply(value);
-      if (kind === 'submit' && value.state !== 'answered') {
+      if (kind === 'submit' && value.state !== 'answered' && !value.note) {
         status.textContent = text('rich.answerUnconfirmed', 'Answer not confirmed. Reload before retrying.');
         interaction = { ...value, state: 'stale' };
       }

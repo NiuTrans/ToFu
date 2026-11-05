@@ -763,7 +763,7 @@ fn read_frame_after_length_prefix<G>(
     } else {
         let total = length + 4;
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(total).map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory, "storage.v2 frame allocation failed"))?;
+        bytes.try_reserve_exact(total).map_err(|_| crate::resource_exhaustion::reservation_failure("storage.v2 frame allocation failed"))?;
         let read = (&mut *reader).take(total as u64).read_to_end(&mut bytes)?;
         if read < length { return Err(invalid("truncated storage.v2 frame")); }
         if read < total { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer")); }

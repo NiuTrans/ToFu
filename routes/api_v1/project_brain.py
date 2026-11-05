@@ -67,8 +67,10 @@ def project_coordination_read():
 def project_coordination_conversations():
     from quart import request
     from lib.conversations.coordinator_conversations import conversation_page
+    from lib.project_dispatch.history import PROCESS_RECIPIENT_ORIGINS
     try:
-        return api_ok(conversation_page(_owner(), _path(), request.args.get('cursor')))
+        return api_ok(conversation_page(_owner(), _path(), request.args.get('cursor'),
+                                        recipient_origins=PROCESS_RECIPIENT_ORIGINS))
     except Exception as exc:
         return _safe_route_error_response(exc)
 
@@ -86,7 +88,7 @@ def project_coordinator_report_read():
 
 @api_v1_project_brain_bp.route('/api/v1/project/coordination/budget', methods=['GET'])
 @require_scope('conversations')
-@api_meta(summary='Read Coordinator request consumption and future request allowances', tags=['project'], scope='conversations')
+@api_meta(summary='Read combined Coordinator and Worker usage for the current request (no spending limit)', tags=['project'], scope='conversations')
 def project_coordinator_budget_read():
     try:
         from lib.conversations.coordinator_budget import read_state
@@ -95,15 +97,13 @@ def project_coordinator_budget_read():
         return _safe_route_error_response(exc)
 
 
-@api_v1_project_brain_bp.route('/api/v1/project/coordination/budget', methods=['POST'])
+@api_v1_project_brain_bp.route('/api/v1/project/coordination/progress', methods=['GET'])
 @require_scope('conversations')
-@api_meta(summary='Set finite allowances for future human Coordinator requests', tags=['project'], scope='conversations',
-          request_body=dispatch_request_body('coordinatorBudgetUpdate'))
-def project_coordinator_budget_update():
+@api_meta(summary="Read the Coordinator's task board for the current binding", tags=['project'], scope='conversations')
+def project_coordinator_progress_read():
     try:
-        from lib.project_dispatch.contract import parse
-        from lib.conversations.coordinator_budget import update_settings
-        return api_ok(update_settings(_owner(), parse('coordinatorBudgetUpdate')))
+        from lib.conversations.coordinator_progress import CoordinatorTaskProgress
+        return api_ok(CoordinatorTaskProgress(_owner(), _path()).read())
     except Exception as exc:
         return _safe_route_error_response(exc)
 
@@ -179,9 +179,10 @@ def project_message_receipts():
 
 def _dispatch_service(project_path):
     from lib.project_dispatch.repository import ProjectDispatchRepository
-    from lib.project_dispatch.service import ProjectDispatchService
+    from lib.project_dispatch.service import PROCESS_HISTORY_PREVIEWS, ProjectDispatchService
     principal = request_principal()
-    return ProjectDispatchService(ProjectDispatchRepository(principal.require_owner(), project_path)), principal
+    return ProjectDispatchService(ProjectDispatchRepository(principal.require_owner(), project_path),
+                                  history_previews=PROCESS_HISTORY_PREVIEWS), principal
 
 
 @api_v1_project_brain_bp.route('/api/v1/project/coordination/assignments', methods=['POST'])
@@ -204,9 +205,32 @@ def project_assignment_create():
 @require_scope('chat')
 @api_meta(summary='Read bounded assignment facts or reconcile an exact command without execution',
           tags=['project'], scope='chat', parameters=dispatch_query_parameters())
-def project_assignment_list():
+async def project_assignment_list():
+    import asyncio
+    from threading import Event
+    from lib.project_dispatch.service import HistoryBuildCancelled
+    disconnected = Event()
+    # A client disconnect cancels only this coroutine, never the build thread.
+    # The event stops the build before its next row, and the thread is joined
+    # before the request context is released.
+    build = asyncio.create_task(asyncio.to_thread(_assignment_history_response, disconnected.is_set))
+    try:
+        return await asyncio.shield(build)
+    except asyncio.CancelledError:
+        disconnected.set()
+        try:
+            await asyncio.shield(build)
+        except HistoryBuildCancelled:
+            # The build saw the disconnect before its next row; the worker maps
+            # every other failure to a response, so nothing else is swallowed.
+            pass
+        raise
+
+
+def _assignment_history_response(cancelled):
     from quart import request
     from lib.project_dispatch.repository import _validate_schema
+    from lib.project_dispatch.service import HistoryBuildCancelled
     try:
         query = {'path': _path()}
         for name in ('commandId', 'assignmentId', 'cursor'):
@@ -215,7 +239,9 @@ def project_assignment_list():
         _validate_schema(query, 'listQuery')
         service, principal = _dispatch_service(query['path'])
         return api_ok(service.history_page(principal=principal, command_id=query.get('commandId'),
-            assignment_id=query.get('assignmentId'), cursor=query.get('cursor')))
+            assignment_id=query.get('assignmentId'), cursor=query.get('cursor'), cancelled=cancelled))
+    except HistoryBuildCancelled:
+        raise
     except Exception as exc:
         return _safe_route_error_response(exc)
 

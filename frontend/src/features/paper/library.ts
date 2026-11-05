@@ -1,3 +1,5 @@
+import { destroyPodcastRuntime } from './podcast-runtime';
+import { destroyVideoRuntime } from './video-runtime';
 import { featureRegistry } from '../../feature-registry';
 import { escapeHtml as escape } from '../../html-safety';
 
@@ -100,8 +102,6 @@ type PaperLibraryWindow = Window & {
   _showPaperLanding?: () => void;
   _updatePaperTitles?: () => void;
   _loadPaperPdf?: (url: string) => Promise<unknown>;
-  _destroyPodcastRuntime?: () => void;
-  _destroyVideoRuntime?: () => void;
   _destroyBabelRuntime?: () => void;
   _cancelPaperDeepenJobs?: () => void;
   _cancelPaperNotes?: () => void;
@@ -566,8 +566,8 @@ export function setActivePaperId(id?: string | null): void {
   paperSelectionRevision += 1;
   const shared = state();
   if (String(shared._activePaperId || '') !== value) {
-    shared._destroyPodcastRuntime?.();
-    shared._destroyVideoRuntime?.();
+    destroyPodcastRuntime();
+    destroyVideoRuntime();
     shared._destroyBabelRuntime?.();
     shared._cancelPaperDeepenJobs?.();
     shared._cancelPaperNotes?.();

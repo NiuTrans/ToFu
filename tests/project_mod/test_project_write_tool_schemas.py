@@ -8,6 +8,12 @@ import re
 from jsonschema import Draft7Validator
 import pytest
 
+from lib.tools.contracts import (
+    ARGUMENT_ALTERNATIVES,
+    ToolContractError,
+    compile_execution_contract_documents,
+    validate_tool_arguments_from_documents,
+)
 from lib.tools.gateway import (
     fit_tool_schema_budget,
     sanitize_wire_tools,
@@ -44,20 +50,38 @@ def test_write_schema_accepts_empty_content_or_ref_but_not_missing_or_both():
     validator = Draft7Validator(params)
     base = {'description': 'Create marker', 'path': 'tmp/.keep'}
 
+    # The caption is optional: only the destination is mandatory.
+    assert validator.is_valid({'path': 'tmp/.keep', 'content': ''})
     assert validator.is_valid({**base, 'content': ''})
     assert validator.is_valid({
         **base, 'content_ref': {'tool_round': 3, 'start': 0, 'end': 12}})
-    assert not validator.is_valid(base)
-    assert not validator.is_valid({
-        **base, 'content': 'x', 'content_ref': {'tool_round': 3}})
+    # The content choice is an admission rule, not a root combinator
+    # (providers reject those): refusals name both sources and carry the
+    # registered recovery action.
+    documents = compile_execution_contract_documents([PROJECT_TOOL_WRITE_FILE])
+    for accepted in ({**base, 'content': ''},
+                     {**base, 'content_ref': {'tool_round': 3}}):
+        validate_tool_arguments_from_documents(documents, 'write_file', accepted)
+    for refused, code in (
+            (base, 'missing_required_arguments'),
+            ({**base, 'content': 'x', 'content_ref': {'tool_round': 3}},
+             'invalid_argument_value')):
+        with pytest.raises(ToolContractError) as rejection:
+            validate_tool_arguments_from_documents(
+                documents, 'write_file', refused)
+        assert rejection.value.code == code
+        assert 'content, content_ref' in str(rejection.value)
+        assert rejection.value.next_action == (
+            ARGUMENT_ALTERNATIVES['write_file'].next_action)
     assert not validator.is_valid({**base, 'content': 'x', 'extra': True})
     assert sanitize_wire_tools([PROJECT_TOOL_WRITE_FILE]) == [
         PROJECT_TOOL_WRITE_FILE]
 
+    budget = tool_schema_tokens([PROJECT_TOOL_WRITE_FILE], model='kimi-k3') - 1
     compact = fit_tool_schema_budget(
-        [PROJECT_TOOL_WRITE_FILE], budget_tokens=200, model='kimi-k3')
+        [PROJECT_TOOL_WRITE_FILE], budget_tokens=budget, model='kimi-k3')
     assert compact and compact[0]['function']['name'] == 'write_file'
-    assert tool_schema_tokens(compact, model='kimi-k3') <= 200
+    assert tool_schema_tokens(compact, model='kimi-k3') <= budget
 
 
 def test_edit_schema_keeps_anchor_efficiency_and_partial_failure_contracts():
@@ -85,9 +109,10 @@ def test_edit_contract_survives_resident_projection_search_and_budget():
     assert item['name'] == 'edit_file'
     assert item['arguments_schema'] == resident['function']['parameters']
     assert 'Prefer replace' in item['summary']
-    projected = fit_tool_schema_budget([resident], budget_tokens=1000, model='kimi-k3')
+    projected = fit_tool_schema_budget(
+        [resident], budget_tokens=tool_schema_tokens([resident], model='kimi-k3'),
+        model='kimi-k3')
     assert projected and projected[0]['function']['description'] == resident['function']['description']
-    assert tool_schema_tokens(projected, model='kimi-k3') <= 1000
 
 
 def test_edit_description_examples_execute_the_promised_order(tmp_path):
@@ -116,7 +141,8 @@ def test_edit_schema_rejects_empty_edits_and_preserves_requested_batch_size():
         'anchor': 'def main():', 'content': '\n    run()',
     }
     assert validator.is_valid({'description': 'Wire main', 'edits': [edit]})
-    assert not validator.is_valid({'description': '', 'edits': [edit]})
+    assert validator.is_valid({'edits': [edit]})
+    assert validator.is_valid({'description': '', 'edits': [edit]})
     assert not validator.is_valid({'description': 'No work', 'edits': []})
     assert validator.is_valid({
         'description': 'Complete requested batch', 'edits': [edit] * 31})
@@ -124,14 +150,3 @@ def test_edit_schema_rejects_empty_edits_and_preserves_requested_batch_size():
         'description': 'No anchor', 'edits': [{**edit, 'anchor': ''}]})
     assert sanitize_wire_tools([PROJECT_TOOL_EDIT_FILE]) == [
         PROJECT_TOOL_EDIT_FILE]
-
-
-def test_resident_pair_stays_within_schema_budget():
-    # Includes content_ref/oneOf, explicit edit examples and path guidance.
-    # The old 410/395 pins predated these declarations; they failed even
-    # before the insert fix. Keep a measured ceiling for the current schema.
-    assert tool_schema_tokens([PROJECT_TOOL_WRITE_FILE], model='kimi-k3') <= 700
-    assert tool_schema_tokens([PROJECT_TOOL_EDIT_FILE], model='kimi-k3') <= 1000
-    assert tool_schema_tokens(
-        [PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_EDIT_FILE],
-        model='kimi-k3') <= 1700

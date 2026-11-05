@@ -119,3 +119,14 @@ def test_full_profile_editing_advice_tracks_authorized_current_tools(tool_names)
         assert ('write_file(append=true)' in prompt) is False
         assert ('To create files or append at end-of-file use write_file' in prompt) == (
             'write_file' in tool_names)
+
+
+@pytest.mark.parametrize('tool_names', [None, {'edit_file'},
+                                       {'run_command', 'edit_file'}])
+def test_full_profile_defers_edit_content_semantics_to_the_tool_contract(tool_names):
+    prompt = build_static_prompt(
+        cwd='/workspace', is_git=True, model='kimi-k3', profile='full',
+        tool_names=tool_names, include_date=False, include_environment=False,
+    )
+    assert 'follow its operation/content contract and examples' in prompt
+    assert 'To add content in the middle of a file use' not in prompt

@@ -33,7 +33,7 @@ def acknowledge_presented_results(task: dict) -> bool:
         return False  # No current identity witness: retain for reconciliation.
     ids = list(dict.fromkeys(str(item['agent_id']) for item in pending if item.get('agent_id')))
     if ids and not (task.get('_transientRuntime') or task.get('_invocationStorageFree')):
-        if persistence.mark_delivered(key, ids) is False:
+        if session is None or not persistence.mark_delivered(key, ids, task_id=session.task_id):
             return False
     if session is not None:
         session.mark_results_delivered(ids)
@@ -42,7 +42,7 @@ def acknowledge_presented_results(task: dict) -> bool:
 
 
 def restore_unconsumed_results(task: dict) -> None:
-    pending = task.pop('_swarm_inject_pending', None) or []
+    pending = task.get('_swarm_inject_pending') or []
     if not pending:
         return
     from lib import agent_inbox
@@ -50,16 +50,27 @@ def restore_unconsumed_results(task: dict) -> None:
     key = swarm_key_for(task)
     from lib.swarm.integration import get_active_session
     session = get_active_session(key)
-    if session is not None and session.user_id == task.get('_userId'):
+    if session is not None and session.user_id != task.get('_userId'):
+        raise ValueError('result restoration belongs to another owner')
+    if session is not None:
         session.restore_unconsumed_results([item['agent_id'] for item in pending
             if item.get('agent_id') and (not item.get('swarm_run_id')
             or item['swarm_run_id'] == session.task_id)])
-    for item in pending:
-        agent_inbox.enqueue(key, item.get('value') or '', mode='swarm-update',
-                            priority=item.get('priority') or 'later',
-                            agent_id=item.get('agent_id') or '',
-                            extra={'status': item.get('status') or '',
-                                   'swarm_run_id': item.get('swarm_run_id') or ''})
+    restored = 0
+    try:
+        for item in tuple(pending):
+            agent_inbox.enqueue(key, item.get('value') or '', mode='swarm-update',
+                                priority=item.get('priority') or 'later',
+                                agent_id=item.get('agent_id') or '',
+                                extra={'status': item.get('status') or '',
+                                       'swarm_run_id': item.get('swarm_run_id') or ''})
+            restored += 1
+    finally:
+        # Retire only the restored prefix, once: large batches stay linear.
+        # Stop tombstones and duplicate hints need no resurrection.
+        del pending[:restored]
+        if task.get('_swarm_inject_pending') is pending and not pending:
+            task.pop('_swarm_inject_pending', None)
 
 
 def stage_tool_results(task: dict, session, payloads: list[dict]) -> None:
@@ -75,7 +86,8 @@ def stage_tool_results(task: dict, session, payloads: list[dict]) -> None:
             continue
         known.add(identity)
         value = format_swarm_update(
-            agent_id=row['agent_id'], role=row.get('role') or 'general',
+            agent_id=row['agent_id'], swarm_run_id=session.task_id,
+            role=row.get('role') or 'general',
             status=row.get('status') or 'completed', elapsed_seconds=row.get('elapsed') or 0,
             tokens=row.get('tokens') or 0, result=row.get('result') or row.get('final_answer') or '',
             output_file=row.get('output_file') or '', error=row.get('error') or '')

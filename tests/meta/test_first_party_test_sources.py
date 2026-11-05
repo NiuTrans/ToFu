@@ -18,6 +18,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _MEMBERS = (
+    ('tofu_sdk', ('clients', 'python')),
     ('tofu_search', ('packages', 'tofu-search')),
     ('tofu_trading', ('plugins', 'tofu-trading')),
     ('tofu_environments', ('packages', 'tofu-environments')),
@@ -34,7 +35,7 @@ import sys
 
 checkout, private = map(Path, sys.argv[1:3])
 preload = sys.argv[3]
-names = ('tofu_search', 'tofu_trading', 'tofu_environments')
+names = ('tofu_sdk', 'tofu_search', 'tofu_trading', 'tofu_environments')
 sys.path.insert(0, str(checkout))
 
 class PoisonedEditableFinder(MetaPathFinder):

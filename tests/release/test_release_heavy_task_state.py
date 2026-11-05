@@ -105,6 +105,23 @@ def test_image_reuse_joins_terminal_heavy_release(status):
         assert _release_heavy_task_state(task) == 0
 
 
+@pytest.mark.parametrize('status', ['done', 'error', 'aborted', 'running'])
+def test_request_text_count_memo_joins_terminal_heavy_release(status):
+    from lib.tasks_pkg.compaction._tokens import _task_text_count_memo
+    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
+    task = {'id': 'memo-release', 'status': status}
+    memo = _task_text_count_memo(task)
+    assert memo is not None and task['_requestTextCountMemo'] is memo
+    _release_heavy_task_state(task)
+    if status == 'running':
+        assert task['_requestTextCountMemo'] is memo
+    else:
+        assert task['_requestTextCountMemo'] is None
+        # A late count after terminal release must not resurrect the memo.
+        assert _task_text_count_memo(task) is None
+        assert task['_requestTextCountMemo'] is None
+
+
 def test_lightweight_fields_are_kept():
     from lib.tasks_pkg.manager._persist import _release_heavy_task_state
     task = _big_task('done')

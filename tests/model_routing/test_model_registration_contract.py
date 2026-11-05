@@ -192,8 +192,8 @@ def test_glm53_uses_the_complete_registration_shape():
 
     for path in (
         ROOT / 'static' / 'provider_templates' / 'glm.json',
-        # The meituan template retired into its release-tier bundle.
-        ROOT / 'bundles' / 'meituan' / 'provider_templates' / 'meituan.json',
+        # The yourprovider template retired into its release-tier bundle.
+        ROOT / 'bundles' / 'yourprovider' / 'provider_templates' / 'yourprovider.json',
     ):
         template = json.loads(path.read_text(encoding='utf-8'))
         filename = path.name

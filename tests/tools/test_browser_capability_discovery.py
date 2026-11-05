@@ -170,3 +170,32 @@ def test_programmatic_search_has_same_browser_availability(monkeypatch):
         'browser_extension_disconnected')
     assert result['items'] == []
     assert not task['programRuns'][0]['childCalls']
+
+
+def test_enabled_browser_family_stays_deferred_instead_of_pinned(monkeypatch):
+    """The always-on browser must not ride every request.
+
+    With no composer toggle there is no human choice to pin: the family is
+    exposed with its searchable policy, so Tool Search keeps it deferred.
+    """
+    import lib.browser.availability as availability
+    from lib.tools.registry import ToolContext, all_specs, assemble_tool_list
+
+    monkeypatch.setattr(availability, 'browser_extension_availability',
+                        lambda owner, **kw: {'available': True})
+    ctx = ToolContext(
+        cfg={'memoryEnabled': True, 'mcpEnabled': False},
+        enabled_plugins=frozenset(), task_id='browser-default',
+        project_path='', project_enabled=False, search_mode='multi',
+        search_enabled=True, fetch_enabled=True, code_exec_enabled=False,
+        browser_enabled=True, desktop_enabled=False, image_gen_enabled=False,
+        human_guidance_enabled=False, scheduler_enabled=False,
+        messages=[{'role': 'user', 'content': 'hello'}], owner_user_id=7)
+    tools, _ = assemble_tool_list(ctx)
+    family = {spec.key: spec for spec in all_specs()}['browser'].provides
+    exposed = {tool['function']['name'] for tool in tools} & family
+
+    assert exposed == family
+    assert {ctx.discovery_policy_by_name[name] for name in exposed} == {
+        'searchable'}
+    assert not exposed & ctx.frontend_selected_tool_names

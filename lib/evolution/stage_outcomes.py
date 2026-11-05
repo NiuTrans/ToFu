@@ -397,10 +397,10 @@ def page(run_id, task_id, *, user_id, offset=0, source_kind='deliverable', limit
     if value is None:
         raise EvolutionStateError('unknown outcome for this owned run')
     if source_kind not in ('deliverable', 'tool_evidence', 'artifact_evidence', 'background_evidence'):
-        raise ValueError('unknown outcome source kind')
+        raise EvolutionContractError('unknown outcome source kind')
     descriptor = source_view(value, source_kind)
     if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= descriptor['content_chars']:
-        raise ValueError('outcome offset is outside the source')
+        raise EvolutionContractError('outcome offset is outside the source')
     end = min(descriptor['content_chars'], offset + limit)
     content = []
     for ordinal in range(offset // PART_CHARS, (end + PART_CHARS - 1) // PART_CHARS):

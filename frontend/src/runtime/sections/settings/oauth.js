@@ -4,9 +4,9 @@
 
    OAuth flows: status/login/logout/manual-callback for Claude/Codex providers.
 
-   This file is concatenated by Vite's module graph — symbols share
-   the same window scope as every other frontend/src/runtime/*.js file. No
-   exports / imports needed.
+   Retained subscription markup and authorization policy. Presentation reads
+   and timers delegate to the typed OAuth panel lifetime imported by the
+   settings-presenters manifest. Delete these bridges as the presenter migrates.
    ═══════════════════════════════════════════════════════════════════ */
 
 // ══════════════════════════════════════════════════════
@@ -44,15 +44,18 @@ function _oauthRelayOrigins(provider, port) {
   return ['http://127.0.0.1:' + p, 'http://localhost:' + p];
 }
 
-function _oauthRecordPendingFlow(provider, port, state) {
+function _oauthRecordPendingFlow(provider, port, state, view) {
   _oauthPendingFlows[provider] = {
     state: state || '',
+    view: view || captureOAuthPanel(),
     origins: _oauthRelayOrigins(provider, port),
   };
 }
 
-function _oauthClearPendingFlow(provider) {
+function _oauthClearPendingFlow(provider, expected) {
+  if (arguments.length > 1 && _oauthPendingFlows[provider] !== expected) return;
   delete _oauthPendingFlows[provider];
+  delete _oauthExchangeParams[provider];
 }
 
 // origin === null marks the BroadcastChannel path: it is same-origin by
@@ -115,8 +118,8 @@ var _oauthExchangeParams = {};
 // token JSON on success, or rejects (so the caller falls back to the
 // server-side exchange). Anthropic/OpenAI token endpoints are CORS-open for
 // the public OAuth client, but if not, the fetch rejects and we fall back.
-function _browserExchange(provider, code, state) {
-  var ex = _oauthExchangeParams[provider];
+function _browserExchange(provider, code, state, exchange) {
+  var ex = arguments.length > 3 ? exchange : _oauthExchangeParams[provider];
   if (!ex || !ex.token_url || !ex.code_verifier) return Promise.reject(new Error('no-exchange-params'));
 
   var headers, bodyData;
@@ -213,11 +216,16 @@ function _completeLogin(provider, code, state, opts) {
   // manual: the user pasted the code/URL by hand — the only path allowed to
   // arrive without the flow's state (raw code paste has no state channel).
   var manual = !!(opts && opts.manual);
+  var flow = _oauthPendingFlows[provider];
+  var view = manual ? captureOAuthPanel() : (flow && flow.view) || captureOAuthPanel();
+  if (!view || (manual && !view.isCurrent())) return;
+  var exchange = _oauthExchangeParams[provider];
+  view.invalidateStatus();
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
-  _updateOAuthCard(provider, { status: 'exchanging' });
+  if (view.isCurrent()) _updateOAuthCard(provider, { status: 'exchanging' });
 
   function _onSuccess(data) {
-    _oauthClearPendingFlow(provider);
+    _oauthClearPendingFlow(provider, flow);
     // Exchange/store responses historically returned `{ok, email}` without
     // the status projection fields consumed by _updateOAuthCard. Passing that
     // object through made a successful login repaint as "not logged in".
@@ -226,29 +234,33 @@ function _completeLogin(provider, code, state, opts) {
     var success = Object.assign({}, data || {}, {
       status: 'success', authenticated: true,
     });
+    _autoConfigureOAuthProvider(provider, success, view);
+    if (!view.isCurrent()) return;
+    view.invalidateStatus();
     _updateOAuthCard(provider, success);
-    _autoConfigureOAuthProvider(provider, success);
     var manualDiv = document.getElementById('oauth' + capProvider + 'Manual');
     if (manualDiv) manualDiv.style.display = 'none';
     var manualInput = document.getElementById('oauth' + capProvider + 'ManualUrl');
     if (manualInput) manualInput.value = '';
   }
   function _onError(msg) {
-    _oauthClearPendingFlow(provider);
+    _oauthClearPendingFlow(provider, flow);
+    if (!view.isCurrent()) return;
     _updateOAuthCard(provider, { status: 'error' });
     showAlert(t('settings.oauthAuthorizationFailed', { msg: msg }));
   }
 
   function _recoveryFailed(reason) {
-    _oauthClearPendingFlow(provider);
+    _oauthClearPendingFlow(provider, flow);
     console.error('[OAuth] Automatic recovery exhausted for %s: %s', provider, reason || 'unknown');
+    if (!view.isCurrent()) return;
     _updateOAuthCard(provider, { status: 'error' });
     showAlert(t('settings.oauthAutomaticRecoveryFailed'));
   }
 
   function _tryBrowser(reason) {
     console.warn('[OAuth] Server exchange unavailable (%s) — trying browser exchange', reason);
-    _browserExchange(provider, code, state)
+    _browserExchange(provider, code, state, exchange)
       .then(function(tokenJson) {
         console.log('[OAuth] Browser-side exchange succeeded for', provider);
         return _storeBrowserToken(provider, tokenJson).then(function(data) {
@@ -289,33 +301,21 @@ function _handleOAuthCode(provider, code, state) {
 }
 
 function _loadOAuthStatus(fromRepoll) {
-  // Typed owner; remove this bridge when the subscription presenter migrates.
+  var view = captureOAuthPanel();
+  if (!view) return Promise.resolve();
+  // The typed owner retires presentation while accepted login writes settle.
   renderCodexSharedLogin(undefined, function(result) {
-    _updateOAuthCard('codex', result);
-    _autoConfigureOAuthProvider('codex', result);
+    if (view.isCurrent()) _updateOAuthCard('codex', result);
+  }, function(result) {
+    _autoConfigureOAuthProvider('codex', result, view);
   });
-  if (!fromRepoll) {
-    _oauthStatusRepollAttempts = 0;
-  }
-  Api.oauth.status()
-    .then(function(data) {
-      if (!data) return;
+  return view.loadStatus({
+    read: function(options) { return Api.oauth.status(options); },
+    publish: function(data) {
       _updateOAuthCard('claude', data.claude);
-      _updateOAuthCard('codex', data.codex);
-      _catpawLoadStatus();
-      // Egress and earned-reset reads both warm asynchronously. One bounded
-      // status re-poll chain observes either without duplicating timers.
-      var probing = [data.claude, data.codex].some(function(s) {
-        return s && s.egress && s.egress.state === 'unknown';
-      });
-      var resetRefreshing = !!(data.codex && data.codex.reset_offer &&
-        data.codex.reset_offer.refreshing);
-      if (resetRefreshing) _scheduleOAuthStatusRepoll();
-      if (!probing && !resetRefreshing) _oauthStatusRepollAttempts = 0;
-    })
-    .catch(function(e) {
-      console.warn('[OAuth] Failed to load status:', e);
-    });
+      if (view.isCurrent()) _updateOAuthCard('codex', data.codex);
+    },
+  }, !!fromRepoll);
 }
 
 function _oauthQuotaPct(value) {
@@ -340,9 +340,7 @@ function _oauthQuotaResetLabel(timestamp) {
   var when = new Date(seconds * 1000);
   if (!Number.isFinite(when.getTime())) return '';
   try {
-    var locale = (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh')
-      ? 'zh-CN' : 'en-US';
-    return new Intl.DateTimeFormat(locale, {
+    return new Intl.DateTimeFormat(document.documentElement.lang || undefined, {
       month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
     }).format(when);
   } catch (_err) {
@@ -411,9 +409,7 @@ function _oauthResetExpiryLabel(timestamp) {
   var seconds = Number(timestamp || 0);
   if (!Number.isFinite(seconds) || seconds <= 0) return '';
   try {
-    var locale = (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh')
-      ? 'zh-CN' : 'en';
-    return new Date(seconds * 1000).toLocaleString(locale, {
+    return new Date(seconds * 1000).toLocaleString(document.documentElement.lang || undefined, {
       dateStyle: 'medium', timeStyle: 'short',
     });
   } catch (_err) {
@@ -469,24 +465,11 @@ function _renderOAuthResetOffer(provider, offer, authenticated) {
 // The first status read therefore may be `unknown+refreshing`. Re-poll only
 // while Settings is open, with one timer and a hard attempt cap; ordinary
 // steady-state reads pay no polling cost.
-var _oauthStatusRepollTimer = null;
-var _oauthStatusRepollAttempts = 0;
-var _OAUTH_STATUS_REPOLL_MS = 2000;
-var _OAUTH_STATUS_REPOLL_MAX = 8;  // usage + optional details are each <= 5s
-
+// Narrow bridges; remove with the retained OAuth presenter. One typed owner
+// coalesces status/device reads and owns the existing bounded repoll policy.
 function _scheduleOAuthStatusRepoll() {
-  if (_oauthStatusRepollTimer) return;
-  if (_oauthStatusRepollAttempts >= _OAUTH_STATUS_REPOLL_MAX) return;
-  _oauthStatusRepollAttempts++;
-  _oauthStatusRepollTimer = setTimeout(function() {
-    _oauthStatusRepollTimer = null;
-    var modal = document.getElementById('settingsModal');
-    if (!modal || !modal.classList.contains('open')) {
-      _oauthStatusRepollAttempts = 0;
-      return;
-    }
-    _loadOAuthStatus(true);
-  }, _OAUTH_STATUS_REPOLL_MS);
+  var view = captureOAuthPanel();
+  if (view) view.scheduleRepoll();
 }
 
 // ── Desktop-egress status line + pin selector (S4) ──
@@ -516,8 +499,10 @@ function _renderEgressLine(provider, egress) {
       ((routeId === 'env' || routeId.indexOf('pool:') === 0) ? 'proxy' : 'direct');
     if (routeMode === 'proxy' || routeMode === 'env') {
       key = 'settings.egressViaProxy';
-      vars.route = egress.preferred_server_route_label || routeId ||
-        t('settings.egressConfiguredProxy');
+      // The server labels the environment route in English; name it in the
+      // UI language instead of echoing that wire label.
+      vars.route = routeId === 'env' ? t('settings.egressEnvProxy')
+        : egress.preferred_server_route_label || routeId || t('settings.egressConfiguredProxy');
     } else {
       key = 'settings.egressDirect';
     }
@@ -565,6 +550,7 @@ function _updateOAuthCard(provider, status) {
       (status.status === 'started' || status.status === 'waiting_callback');
     if (devWaiting && status.device) {
       _showDevicePanel(status.device.user_code, status.device.verification_url);
+      _startDeviceStatusPoll(provider);
     } else if (status.authenticated || !devWaiting) {
       _hideDevicePanel();
       _stopDeviceStatusPoll();
@@ -647,6 +633,9 @@ function _updateOAuthCard(provider, status) {
 }
 
 function _oauthCancelAndRetry(provider) {
+  var view = captureOAuthPanel();
+  if (!view) return;
+  view.invalidateStatus();
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
   _oauthClearPendingFlow(provider);
   // Call logout to reset the server-side flow state
@@ -715,6 +704,10 @@ function _oauthUseConsoleFallback(provider) {
 }
 
 function _oauthLogin(provider, preferConsole) {
+  var view = captureOAuthPanel();
+  if (!view) return;
+  var flow = _oauthPendingFlows[provider];
+  view.invalidateStatus();
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
   var loginBtn = document.getElementById('oauth' + capProvider + 'LoginBtn');
   if (loginBtn && loginBtn.disabled) return;
@@ -742,19 +735,19 @@ function _oauthLogin(provider, preferConsole) {
       return r.json();
     })
     .then(function(data) {
+      if (data.status === 'success') {
+        _oauthClearPendingFlow(provider, flow);
+        var reused = Object.assign({}, data, { authenticated: true });
+        _autoConfigureOAuthProvider(provider, reused, view);
+        if (view.isCurrent()) { view.invalidateStatus(); _updateOAuthCard(provider, reused); }
+        return;
+      }
+      if (!view.isCurrent()) return;
       if (data.error) {
         showAlert(t('settings.oauthLoginFailed', {
           error: errorEnvelopeMessage(data.error) || String(data.error),
         }));
         if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? t('settings.oauthLoginChatGPT') : t('settings.oauthLoginClaude'); }
-        return;
-      }
-
-      if (data.status === 'success') {
-        _oauthClearPendingFlow(provider);
-        var reused = Object.assign({}, data, { authenticated: true });
-        _updateOAuthCard(provider, reused);
-        _autoConfigureOAuthProvider(provider, reused);
         return;
       }
 
@@ -767,7 +760,7 @@ function _oauthLogin(provider, preferConsole) {
       // back: only our relay origin echoing this flow's state gets through.
       _oauthRecordPendingFlow(
         provider, data.callback_port,
-        (data.exchange && data.exchange.state) || '');
+        (data.exchange && data.exchange.state) || '', view);
 
       // Step 2: Open the auth URL in a popup window
       // For Claude: redirects to console.anthropic.com which shows code#state
@@ -811,17 +804,17 @@ function _oauthLogin(provider, preferConsole) {
 
       // ── Detect popup closed → auto-reset ONLY if manual box not used ──
       if (popup) {
-        var popupCheckInterval = setInterval(function() {
+        var popupCheckInterval = view.scope.interval(function() {
           /* Self-terminate once the login resolves (success / error / cancel):
            *   the old code only stopped on popup.closed, leaking a 1s interval
            *   for every Connect click that never closed its popup (). */
           var badgeNow = document.getElementById('oauth' + capProvider + 'Status');
           if (badgeNow && !badgeNow.classList.contains('pending')) {
-            clearInterval(popupCheckInterval);
+            view.scope.cancelInterval(popupCheckInterval);
             return;
           }
           if (!popup || popup.closed) {
-            clearInterval(popupCheckInterval);
+            view.scope.cancelInterval(popupCheckInterval);
             // Don't reset if manual paste box is visible (user may be pasting code)
             var manualInput = document.getElementById('oauth' + capProvider + 'ManualUrl');
             if (manualInput && manualInput.value.trim()) return;  // user is typing
@@ -838,6 +831,7 @@ function _oauthLogin(provider, preferConsole) {
                 loginBtn2.disabled = false;
                 loginBtn2.textContent = t('settings.oauthReopenPopup');
                 loginBtn2.onclick = function() {
+                  if (!view.isCurrent()) return;
                   // Re-open popup with same auth URL, don't create new flow
                   var w2 = 600, h2 = 700;
                   var left2 = (screen.width - w2) / 2, top2 = (screen.height - h2) / 2;
@@ -853,6 +847,7 @@ function _oauthLogin(provider, preferConsole) {
     })
     .catch(function(e) {
       console.error('[OAuth] Login error:', e);
+      if (!view.isCurrent()) return;
       showAlert(t('settings.oauthLoginReqFailed', { error: e.message }));
       if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? t('settings.oauthLoginChatGPT') : t('settings.oauthLoginClaude'); }
     });
@@ -864,10 +859,11 @@ function _oauthLogin(provider, preferConsole) {
 // redirect: the server mints a user code, the user enters it at the
 // verification URL in ANY browser (phone included), and the server's poll
 // thread completes the exchange — we just watch the status projection.
-var _oauthDevicePollTimer = null;
-
 function _oauthDeviceLogin(provider) {
   if (provider !== 'codex') return;
+  var view = captureOAuthPanel();
+  if (!view) return;
+  view.invalidateStatus();
   var deviceBtn = document.getElementById('oauthCodexDeviceBtn');
   if (deviceBtn && deviceBtn.disabled) return;
   if (deviceBtn) { deviceBtn.disabled = true; deviceBtn.textContent = t('settings.oauthPreparing'); }
@@ -902,18 +898,18 @@ function _oauthDeviceLogin(provider) {
       return r.json();
     })
     .then(function(data) {
+      if (data && data.status === 'success') {
+        var reused = Object.assign({}, data, { authenticated: true });
+        _autoConfigureOAuthProvider(provider, reused, view);
+        if (view.isCurrent()) { view.invalidateStatus(); _hideDevicePanel(); _updateOAuthCard(provider, reused); }
+        return;
+      }
+      if (!view.isCurrent()) return;
       if (deviceBtn) { deviceBtn.disabled = false; deviceBtn.textContent = t('settings.oauthDeviceLogin'); }
       if (!data || data.error) {
         showAlert(t('settings.oauthLoginFailed', {
           error: (data && errorEnvelopeMessage(data.error)) || 'unknown',
         }));
-        return;
-      }
-      if (data.status === 'success') {
-        _hideDevicePanel();
-        var reused = Object.assign({}, data, { authenticated: true });
-        _updateOAuthCard(provider, reused);
-        _autoConfigureOAuthProvider(provider, reused);
         return;
       }
       _showDevicePanel(data.user_code, data.verification_url);
@@ -925,6 +921,7 @@ function _oauthDeviceLogin(provider) {
     })
     .catch(function(e) {
       console.error('[OAuth] Device login error:', e);
+      if (!view.isCurrent()) return;
       if (deviceBtn) { deviceBtn.disabled = false; deviceBtn.textContent = t('settings.oauthDeviceLogin'); }
       if (e && (e._httpStatus === 503 || e._statusCode === 0)) {
         // Deviceauth must be minted by the server. When every server/agent
@@ -932,8 +929,8 @@ function _oauthDeviceLogin(provider) {
         // of ending on a raw HTTP 400/503. The remote callback-copy box makes
         // the fixed localhost redirect usable without any local listener.
         Promise.resolve(showAlert(t('settings.oauthDeviceFallback'))).then(
-          function() { _oauthLogin(provider); },
-          function() { _oauthLogin(provider); });
+          function() { if (view.isCurrent()) _oauthLogin(provider); },
+          function() { if (view.isCurrent()) _oauthLogin(provider); });
         return;
       }
       showAlert(t('settings.oauthLoginReqFailed', { error: e.message }));
@@ -960,11 +957,14 @@ function _hideDevicePanel() {
 }
 
 function _oauthCopyDeviceCode(button) {
+  var view = captureOAuthPanel();
+  if (!view) return;
   var codeEl = document.getElementById('oauthCodexDeviceCode');
   if (!codeEl || !codeEl.textContent) return;
   function _copied() {
+    if (!view.isCurrent()) return;
     button.textContent = t('settings.oauthCopied');
-    setTimeout(function() { button.textContent = t('settings.oauthCopyCode'); }, 1500);
+    view.scope.timeout(function() { button.textContent = t('settings.oauthCopyCode'); }, 1500);
   }
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(codeEl.textContent).then(_copied, function() {});
@@ -979,34 +979,26 @@ function _oauthCopyDeviceCode(button) {
 }
 
 function _startDeviceStatusPoll(provider) {
-  _stopDeviceStatusPoll();
-  _oauthDevicePollTimer = setInterval(function() {
-    Api.oauth.status()
-      .then(function(data) {
-        if (!data) return;
-        var s = data[provider];
-        _updateOAuthCard(provider, s);
-        var terminal = !s || s.authenticated ||
-          ['error', 'timeout', 'not_started'].indexOf(s.status) >= 0 ||
-          !s.device;
-        if (terminal) {
-          _stopDeviceStatusPoll();
-          if (s && s.authenticated) _autoConfigureOAuthProvider(provider, s);
-        }
-      })
-      .catch(function() {});
-  }, 3000);
+  var view = captureOAuthPanel();
+  if (!view) return;
+  view.startDevicePoll(provider, function() { _loadOAuthStatus(true); }, function(status) {
+    _autoConfigureOAuthProvider(provider, status, view);
+  });
 }
 
 function _stopDeviceStatusPoll() {
-  if (_oauthDevicePollTimer) {
-    clearInterval(_oauthDevicePollTimer);
-    _oauthDevicePollTimer = null;
-  }
+  var view = captureOAuthPanel();
+  if (view) view.stopDevicePoll();
 }
 
 async function _oauthLogout(provider) {
+  var view = captureOAuthPanel();
+  if (!view) return;
+  var flow = _oauthPendingFlows[provider];
   if (!await showConfirm(t('settings.oauthLogoutConfirm', { provider: (provider === 'codex' ? 'ChatGPT' : 'Claude') }))) return;
+
+  if (!view.isCurrent()) return;
+  view.invalidateStatus();
 
   // Try POST first; if proxy returns 405, fall back to GET with query params
   function _doLogoutRequest(useGet) {
@@ -1016,36 +1008,42 @@ async function _oauthLogout(provider) {
     }
     return Api.oauth.logoutPost(provider);
   }
-  _doLogoutRequest(false)
+  return _doLogoutRequest(false)
     .then(function(r) {
       if (r.status === 404 || r.status === 405) return _doLogoutRequest(true);
       return r;
     })
     .then(function(r) { return r.json(); })
     .then(function() {
-      _oauthClearPendingFlow(provider);
-      _updateOAuthCard(provider, { status: 'not_started', authenticated: false });
+      _oauthClearPendingFlow(provider, flow);
+      if (view.isCurrent()) {
+        view.invalidateStatus();
+        _updateOAuthCard(provider, { status: 'not_started', authenticated: false });
+      }
       if (typeof _refreshSubscriptionModelCatalog === 'function') {
-        return _refreshSubscriptionModelCatalog();
+        return _refreshSubscriptionModelCatalog(view.session);
       }
       return null;
     })
     .catch(function(e) {
+      if (!view.isCurrent()) return;
       showAlert(t('settings.oauthLogoutFailed', { error: e.message }));
     });
 }
 
 var _oauthResetConsumeInFlight = false;
 function _oauthConsumeReset() {
-  if (_oauthResetConsumeInFlight) return;
+  var view = captureOAuthPanel();
+  if (!view || _oauthResetConsumeInFlight) return;
+  _oauthResetConsumeInFlight = true;
   var confirmed = typeof showConfirm === 'function'
     ? showConfirm(t('settings.oauthResetRedeemConfirm'), {
         okText: t('settings.oauthResetRedeemButton'),
       })
     : Promise.resolve(true);
-  confirmed.then(function(ok) {
-    if (!ok) return;
-    _oauthResetConsumeInFlight = true;
+  return confirmed.then(function(ok) {
+    if (!ok || !view.isCurrent()) return;
+    view.invalidateStatus();
     return Api.oauth.resetOfferConsume()
       .then(function(resp) {
         if (resp && typeof resp.json === 'function') {
@@ -1054,6 +1052,7 @@ function _oauthConsumeReset() {
         return resp;
       })
       .then(function(body) {
+        if (!view.isCurrent()) return;
         if (body && body.ok) {
           showAlert(t('settings.oauthResetRedeemSuccess'));
           return;
@@ -1070,22 +1069,25 @@ function _oauthConsumeReset() {
       })
       .catch(function(e) {
         console.warn('[OAuth] reset consume failed:', e);
-        showAlert(t('settings.oauthResetRedeemFailed'));
+        if (view.isCurrent()) showAlert(t('settings.oauthResetRedeemFailed'));
       })
       .then(function() {
-        _oauthResetConsumeInFlight = false;
-        _loadOAuthStatus();
+        if (view.isCurrent()) { view.invalidateStatus(); _loadOAuthStatus(); }
       });
-  });
+  }).catch(function(error) {
+    console.warn('[OAuth] reset confirmation failed:', error);
+  }).finally(function() { _oauthResetConsumeInFlight = false; });
 }
 function _oauthCopyAuthLink(button, provider) {
+  var view = captureOAuthPanel();
+  if (!view) return;
   const capProvider = provider === 'codex' ? 'Codex' : 'Claude';
   const input = document.getElementById('oauth' + capProvider + 'AuthUrl');
   if (!input) return;
   input.select();
   document.execCommand('copy');
   button.textContent = t('settings.oauthCopied');
-  setTimeout(function() {
+  view.scope.timeout(function() {
     button.textContent = t('settings.oauthCopyLink');
   }, 1500);
 }
@@ -1124,22 +1126,24 @@ function _oauthManualSubmit(provider) {
   _completeLogin(provider, code, state, { manual: true });
 }
 
-function _autoConfigureOAuthProvider(provider, status) {
+function _autoConfigureOAuthProvider(provider, status, view) {
+  view = view || captureOAuthPanel();
+  if (!view) return;
   var name = provider === 'codex' ? 'ChatGPT Plus' : 'Claude Pro';
   var el = document.getElementById('settingsStatusHint');
-  if (el) {
+  if (view.isCurrent() && el) {
     el.textContent = t('settings.oauthAutoConfigured', { name: name });
     el.style.color = '#28a745';
   }
   // The backend auto-provisions a managed provider on login; refresh the
   // providers list so the new models appear without a manual reload.
   if (typeof _refreshSubscriptionModelCatalog === 'function') {
-    _refreshSubscriptionModelCatalog().then(function(cfg) {
-      if (!cfg) return;
+    _refreshSubscriptionModelCatalog(view.session).then(function(cfg) {
+      if (!cfg || !view.isCurrent()) return;
       _loadOAuthStatus();
     }).catch(function(e) {
       console.warn('[OAuth] subscription catalogue refresh failed:', e);
-      showAlert(t('settings.oauthCatalogRepairFailed'));
+      if (view.isCurrent()) showAlert(t('settings.oauthCatalogRepairFailed'));
     });
   }
 }
@@ -1150,169 +1154,7 @@ function _autoConfigureOAuthProvider(provider, status) {
 // secret-free availability verdict and offers a one-click import; the token
 // itself never crosses the API. Roster/base_url come from the catpaw template.
 
-function _catpawRender(status) {
-  var badge = document.getElementById('oauthCatpawStatus');
-  var importBtn = document.getElementById('oauthCatpawImportBtn');
-  var disconnectBtn = document.getElementById('oauthCatpawDisconnectBtn');
-  var hint = document.getElementById('oauthCatpawHint');
-  if (!badge) return;
-  badge.title = '';
-  var connected = !!(status && status.connected);
-  var available = !!(status && status.available);
-  if (connected) {
-    _catpawAutoTried = false;  // ready for a future disconnect→reconnect cycle
-    badge.textContent = t('settings.oauthModelsReady', { n: status.model_count || 0 });
-    badge.className = 'oauth-status-badge authenticated';
-    if (importBtn) importBtn.style.display = 'none';
-    if (disconnectBtn) disconnectBtn.style.display = '';
-    if (hint) hint.style.display = 'none';
-  } else if (available) {
-    badge.textContent = t('settings.oauthCatpawReady');
-    badge.className = 'oauth-status-badge pending';
-    if (importBtn) { importBtn.style.display = ''; importBtn.disabled = false; importBtn.textContent = t('settings.oauthCatpawImport'); }
-    if (disconnectBtn) disconnectBtn.style.display = 'none';
-    if (hint) hint.style.display = 'none';
-  } else {
-    // No credential: button now triggers the guided CLI login (not disabled).
-    badge.textContent = t('settings.oauthCatpawUnavailable');
-    badge.className = 'oauth-status-badge';
-    if (importBtn) { importBtn.style.display = ''; importBtn.disabled = false; importBtn.textContent = t('settings.oauthCatpawLogin'); }
-    if (disconnectBtn) disconnectBtn.style.display = 'none';
-    if (hint) hint.style.display = '';
-  }
-}
-
-// Auto-import in flight / done flags so the poll + initial load don't double-fire.
-var _catpawAutoTried = false;
-var _catpawPollTimer = null;
-
-function _catpawLoadStatus() {
-  if (!document.getElementById('oauthCatpawCard')) return;
-  Api.oauth.catpawImportStatus()
-    .then(function(data) {
-      data = data || { available: false };
-      // Fully automatic path: credential on disk, not yet connected → import
-      // without any click. Explicitly authorized by the user.
-      if (data.available && !data.connected && !_catpawAutoTried) {
-        _catpawAutoTried = true;
-        _catpawDoImport(true);
-        return;
-      }
-      if (data.connected) _catpawStopPoll();
-      _catpawRender(data);
-    })
-    .catch(function() { _catpawRender({ available: false }); });
-}
-
-// silent=true suppresses failure alerts (auto path falls back to manual button).
-function _catpawDoImport(silent) {
-  var importBtn = document.getElementById('oauthCatpawImportBtn');
-  if (importBtn) { importBtn.disabled = true; importBtn.textContent = t('settings.oauthPreparing'); }
-  return Api.oauth.catpawImportApply()
-    .then(function(r) { return r && typeof r.json === 'function' ? r.json() : r; })
-    .then(function(data) {
-      if (importBtn) { importBtn.disabled = false; importBtn.textContent = t('settings.oauthCatpawImport'); }
-      if (!data || data.error || data.ok === false) {
-        if (!silent) showAlert(t('settings.oauthCatpawImportFailed'));
-        _catpawLoadStatus();
-        return;
-      }
-      _catpawRender(data);
-      _loadOAuthStatus();
-    })
-    .catch(function() {
-      if (importBtn) { importBtn.disabled = false; importBtn.textContent = t('settings.oauthCatpawImport'); }
-      if (!silent) showAlert(t('settings.oauthCatpawImportFailed'));
-      _catpawLoadStatus();
-    });
-}
-
-function _catpawStopPoll() {
-  if (_catpawPollTimer) { clearInterval(_catpawPollTimer); _catpawPollTimer = null; }
-}
-
-// Poll while a CLI login is in progress; auto-import the instant the
-// credential lands. Bounded so we never poll forever.
-function _catpawStartPoll() {
-  _catpawStopPoll();
-  var attempts = 0;
-  _catpawPollTimer = setInterval(function() {
-    attempts += 1;
-    if (attempts > 60 || !document.getElementById('oauthCatpawCard')) { _catpawStopPoll(); return; }
-    Api.oauth.catpawImportStatus()
-      .then(function(data) {
-        data = data || {};
-        if (data.available && !data.connected) {
-          _catpawStopPoll();
-          _catpawAutoTried = true;
-          _catpawDoImport(true);
-        } else if (data.connected) {
-          _catpawStopPoll();
-          _catpawRender(data);
-        }
-      })
-      .catch(function() {});
-  }, 3000);
-}
-
-// One click when no credential: kick the CLI login, open its SSO link, poll.
-function _catpawLogin() {
-  var btn = document.getElementById('oauthCatpawImportBtn');
-  if (btn) { btn.disabled = true; btn.textContent = t('settings.oauthPreparing'); }
-  Api.oauth.catpawImportLogin()
-    .then(function(data) {
-      data = data || {};
-      if (data.login_url) {
-        try { window.open(data.login_url, '_blank', 'noopener'); } catch (e) {}
-        _catpawStartPoll();
-        var hint = document.getElementById('oauthCatpawHint');
-        if (hint) { hint.textContent = t('settings.oauthCatpawLoginWaiting'); hint.style.display = ''; }
-      } else {
-        // CLI missing or link not captured → show manual instructions.
-        _catpawRender({ available: false, installed: !!data.installed });
-      }
-      if (btn) { btn.disabled = false; btn.textContent = t('settings.oauthCatpawImport'); }
-    })
-    .catch(function() {
-      if (btn) { btn.disabled = false; btn.textContent = t('settings.oauthCatpawImport'); }
-      _catpawRender({ available: false });
-    });
-}
-
-function _catpawImport() {
-  // Manual click: if a credential is already on disk, import; otherwise treat
-  // the click as "get me logged in" and run the CLI login flow.
-  Api.oauth.catpawImportStatus()
-    .then(function(s) {
-      if (s && s.available) { _catpawDoImport(false); }
-      else { _catpawLogin(); }
-    })
-    .catch(function() { _catpawLogin(); });
-}
-
-async function _catpawDisconnect() {
-  if (!await showConfirm(t('settings.oauthCatpawDisconnectConfirm'))) return;
-  // The relay provider is a normal model-routing aggregate; deleting it is
-  // the disconnect. Find it by template brand and reuse the CAS delete.
-  Api.modelRouting.get()
-    .then(function(data) {
-      var doc = data && data.model_routing;
-      var revision = data && data.revision;
-      var row = ((doc && doc.providers) || []).find(function(p) {
-        return p && p.brand === 'catpaw';
-      });
-      if (!row) { _catpawLoadStatus(); return null; }
-      return Api.modelRouting.deleteProvider(row.provider_id, revision)
-        .then(function() {
-          if (typeof _loadModelRoutingAuthority === 'function') {
-            return _loadModelRoutingAuthority();
-          }
-          return null;
-        })
-        .then(function() { _catpawLoadStatus(); });
-    })
-    .catch(function(e) {
-      showAlert(t('settings.oauthLogoutFailed', { error: (e && e.message) || 'unknown' }));
-      _catpawLoadStatus();
-    });
-}
+// Action bridges remain until the subscription presenter migrates. Catpaw
+// status, connection intent and teardown are owned by the typed Settings module.
+function _catpawImport() { return catpawSettings.connect(); }
+function _catpawDisconnect() { return catpawSettings.disconnect(); }

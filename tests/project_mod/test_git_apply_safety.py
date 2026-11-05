@@ -11,7 +11,6 @@ import subprocess
 import pytest
 
 from lib.project_mod.command_analysis import _git_guard_classify
-from lib.project_mod.run_command import command_write_lease_claims
 
 pytestmark = pytest.mark.unit
 
@@ -101,11 +100,8 @@ def test_cached_apply_preserves_worktree_and_normal_commit_appends_history(repo)
     'git apply --index patch.diff', 'git commit -m append',
     'git apply patch.diff && git add one.txt && git commit -m append',
 ])
-def test_ordinary_write_classification_still_requires_checkout_lease(repo, command):
-    root, _git = repo
+def test_ordinary_writes_are_safe_write_never_readonly(command):
     assert _git_guard_classify(command) == 'safe_write'
-    kind = 'metadata' if command == 'git commit -m append' else 'root'
-    assert (kind, str(root)) in command_write_lease_claims(str(root), command)
 
 
 @pytest.mark.parametrize('command', [

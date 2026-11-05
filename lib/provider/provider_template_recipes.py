@@ -324,7 +324,9 @@ def compile_provider_template_bundle(
             f'unknown provider template {key!r}')
 
     recipes = copy.deepcopy(template['offering_recipes'])
-    from lib.model_catalog._creator_identity import strip_routing_decoration
+    from lib.model_catalog._creator_identity import creator_family, strip_routing_decoration
+    from lib.model_routing.model_defaults import index_spelling_identities, unique_spelling_row
+    spelling = index_spelling_identities(directory_by_ref.values())
     for recipe in recipes:
         # Public catalog estimates are Model metadata, not provider limits.
         if (template.get('category') == 'relay' and
@@ -336,6 +338,12 @@ def compile_provider_template_bundle(
         logical_id = strip_routing_decoration(recipe['model_id'])
         matches = [row for (creator, mid), row in directory_by_ref.items()
                    if mid == logical_id]
+        if not matches:
+            # Relay spellings (claude-opus-5.5) of one developer entry
+            # (claude-opus-5-5) share its facts; ambiguity matches nothing.
+            twin = unique_spelling_row(
+                spelling, creator_family(recipe['model_id']), logical_id)
+            matches = [] if twin is None else [twin]
         if len(matches) == 1:
             recipe.setdefault('capabilities', copy.deepcopy(matches[0]['capabilities']))
             if not recipe.get('context_window'):
@@ -402,11 +410,18 @@ def compile_provider_template_bundle(
         deployment.pop('enabled', None)
         deployment['probe_status'] = 'unprobed'
     if provider_prices:
-        # Migration emits one offering per recipe in order; collisions are
-        # blocking issues above. Never fuzzy-match a price to a similar ID.
-        for recipe, offering in zip(legacy['models'], document['offerings'], strict=True):
+        # Normalization reorders Offerings, so bind each price through the
+        # recipe's own wire ids (migration's request_ids-else-model+aliases
+        # rule); one wire id is one Deployment. Never fuzzy-match an ID.
+        offerings = {row['offering_id']: row for row in document['offerings']}
+        offering_by_wire = {row['wire_model_id']: offerings[row['offering_id']]
+                            for row in document['deployments']}
+        for recipe in legacy['models']:
             price = provider_prices.get(recipe['model_id'])
-            if price is not None:
+            wires = recipe.get('request_ids') or [recipe['model_id'], *recipe.get('aliases', [])]
+            offering = next((offering_by_wire[wire] for wire in wires
+                             if wire in offering_by_wire), None)
+            if price is not None and offering is not None:
                 offering['actual_pricing'] = copy.deepcopy(price)
 
     credentials = copy.deepcopy(document['credentials'])

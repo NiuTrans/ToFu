@@ -19,6 +19,7 @@ Shape notes:
 from __future__ import annotations
 
 from lib.llm.responses_outbound._message_phase import capture_phase_messages
+from lib.llm.responses_replay import capture_replay_order
 
 from lib.llm.responses_outbound._sse import (
     _CAPTURE_ITEM_TYPES,
@@ -73,6 +74,12 @@ def responses_response_to_openai(data: object,
                    else 'response failed')
         code = (raw_code if isinstance(raw_code, str) and raw_code
                 else 'response_failed')
+        if code == 'invalid_encrypted_content':
+            from lib.llm.llm_errors import InvalidEncryptedContentError
+            failure = InvalidEncryptedContentError(param=err.get('param'))
+            logger.warning('[Responses] non-stream response failed: %s', failure.code)
+            return {'error': {'code': failure.code, 'param': failure.param,
+                              'message': str(failure), 'type': 'invalid_request_error'}}
         logger.warning('[Responses] non-stream response failed: %s: %s',
                        code, message[:200])
         return {'error': {**err, 'message': f'{code}: {message}',
@@ -238,6 +245,9 @@ def responses_response_to_openai(data: object,
         message['_responses_items'] = response_items
     if tool_calls:
         message['tool_calls'] = tool_calls
+    if response_items:
+        message['_responses_items'] = capture_replay_order(
+            output, message, response_items, tool_name_reverse=tool_name_reverse)
 
     usage = _usage_to_openai(data.get('usage') or {})
     if _program_needs_followup(output):

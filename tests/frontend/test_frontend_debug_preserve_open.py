@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 
 import pytest
@@ -43,12 +42,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 JS_DIR = runtime_sections_dir()
 _DEBUG_SRC = os.path.join(JS_DIR, 'core', 'debug_panel.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -207,8 +200,6 @@ def _run(js_path: str) -> str:
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_expanded_blocks_survive_full_rerender():
     output = _run(_DEBUG_SRC)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -217,8 +208,6 @@ def test_expanded_blocks_survive_full_rerender():
     print(output)
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NEUTER_without_reapply_the_block_collapses():
     """Patch a COPY of debug_panel.js so the full-render restore loop is a
     no-op (the pre-fix behavior). The expanded block MUST then collapse across
@@ -255,8 +244,6 @@ def test_NEUTER_without_reapply_the_block_collapses():
         assert f.read() == src, 'shipped debug_panel.js must be byte-identical'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NEUTER_positional_restore_reopens_wrong_block_on_drift():
     """Reviewer's option-2 disproof: patch a COPY so identity capture/restore
     degrades to POSITIONAL (data-idx) — the pre-review implementation. The
