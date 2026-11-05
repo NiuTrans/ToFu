@@ -1871,6 +1871,32 @@ def _is_frame_overflow_error(exc: 'StorageError') -> bool:
             and 'frame exceeds the size limit' in str(exc).lower())
 
 
+# packages/tofu-db/src/turn.rs::validate_settleable_turn_size refuses a
+# non-terminal event whose reconstructed Turn would consume the reserve that
+# keeps the Turn's terminal settlement admissible. Domain bounds travel as
+# their literal (src/resource_exhaustion.rs); the SQL authority has no such
+# reserve and never sends it.
+_SETTLEABLE_BUDGET_REFUSAL = 'Turn reconstructed state exceeds its settleable snapshot budget'
+
+
+def _is_settleable_budget_refusal(exc: 'StorageError') -> bool:
+    return (exc.code == 'database_resource_exhausted'
+            and exc.message == _SETTLEABLE_BUDGET_REFUSAL)
+
+
+def _refused_frame_is_loggable(exc: 'StorageError', raw_event: Mapping[str, Any],
+                               task_event: Mapping[str, Any] | None) -> bool:
+    """A settleable-budget refusal of a carried frame that queues in a FIFO.
+
+    Barrier frames (terminal, interaction, receipt, effect) keep their own
+    transaction and fail to their producer; they never wedge a FIFO head.
+    """
+    if not _is_settleable_budget_refusal(exc) or task_event is None:
+        return False
+    from lib.tasks_pkg.event_delivery import is_barrier_event
+    return not is_barrier_event(raw_event)
+
+
 def _signal_frame_overflow_abort(task: dict[str, Any], attempt_id: str,
                                  event_kind: str) -> None:
     """Plant the cooperative abort triple when even a text-only frame is
@@ -1929,6 +1955,59 @@ def _signal_authority_integrity_abort(task: dict[str, Any], attempt_id: str,
     except Exception:
         logger.debug('[TurnLifecycle] authority-integrity abort signal failed '
                      '(non-fatal)', exc_info=True)
+
+
+def _log_refused_frame_and_stop(task: dict[str, Any], attempt_id: str, user_id: Any,
+                                event_kind: str, task_event: Mapping[str, Any],
+                                worker_publication: Mapping[str, Any]):
+    """Keep a Turn closable after the authority refuses to grow it further.
+
+    The native authority refuses a non-terminal frame whose reconstructed Turn
+    would consume the reserve it keeps for the terminal settlement. Resending
+    the frame is refused again, and a failed FIFO head would keep the terminal
+    event behind it forever. The frame's exact rows, including progress rows
+    batched before it, become durable in the event log only, fenced to the
+    live attempt like a coalesced frame. The task stops under the existing
+    ``storage_frame_overflow`` fence, so its terminal event (within the
+    reserve) settles the Turn as failed/internal_fence_abort.
+
+    Returns ``'logged'``, or False when the append proved the attempt stale.
+    """
+    from lib.tasks_pkg.event_log import EventAttemptStaleError, append_persistent_event
+    rows = [*(task_event.get('preceding_events') or ()), task_event]
+    logger.warning(
+        '[TurnLifecycle] Turn reached its settleable ceiling task=%s attempt=%s '
+        'event=%s; keeping %d row(s) in the attempt event log and stopping the task',
+        str(task.get('id') or '?')[:8], str(attempt_id)[:8], event_kind, len(rows))
+    if not task.get('aborted'):
+        _signal_frame_overflow_abort(task, attempt_id, event_kind)
+        if not task.get('error'):
+            # Stamped before the producer unwinds: a cancelled frame carries
+            # the stop to the fatal path, which keeps an existing envelope.
+            from lib.error_envelope import make_envelope
+            task['error'] = make_envelope(
+                'storage_fence',
+                detail=('The storage authority refused to grow this turn into the space '
+                        'it reserves for settling it; the refused events were kept in the '
+                        'event log and the in-flight request was stopped (internal fence: '
+                        'storage_frame_overflow).'),
+                model=str(task.get('model') or (task.get('config') or {}).get('model') or ''),
+                context='turn-event-record', source='turn-lifecycle',
+                raw=_SETTLEABLE_BUDGET_REFUSAL)
+    require_live = [attempt_id]
+    if task.get('_flowRootAttemptId'):
+        require_live.append(task['_flowRootAttemptId'])
+    claim = ({'worker_claim': worker_publication['worker_claim'], 'user_id': user_id}
+             if 'worker_claim' in worker_publication else {})
+    try:
+        for row in rows:
+            append_persistent_event(row['task_id'], row['sequence'], row['event'],
+                                    require_attempts_live=require_live, **claim)
+    except EventAttemptStaleError:
+        _signal_stale_attempt_abort(task, attempt_id, 'event-log-append-rejected')
+        return False
+    return 'logged'
+
 
 def _drain_queue_after_settlement(task: dict[str, Any], conversation_id: str,
                                   status: str) -> None:
@@ -2101,6 +2180,11 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
     ``require_attempts_live`` — the attempt ids the caller's standalone
     append must have the storage authority verify inside the append
     transaction (2026-09-18 stream-churn fix; see the coalesced branch).
+
+    Returns ``'logged'`` when the authority refused to grow a near-limit Turn
+    by a carried non-barrier frame: its exact rows are already durable in the
+    attempt-fenced event log only, and the task is stopping under the
+    ``storage_frame_overflow`` fence (``_log_refused_frame_and_stop``).
 
     Commit wakeups of these writes publish after the projection lock is
     released, in commit order (``_task_projection_critical_section``).
@@ -2491,6 +2575,9 @@ def _record_task_event_locked(
                 task, attempt_id, event_kind,
                 detail=str(exc)[:300])
             raise
+        if _refused_frame_is_loggable(exc, raw_event, task_event):
+            return _log_refused_frame_and_stop(
+                task, attempt_id, user_id, event_kind, task_event, worker_publication)
         # A payload-cap rejection is deterministic. Retrying the same full
         # projection on every subsequent progress frame once turned one
         # 10.3M-character command log into hundreds of multi-MiB serializations
@@ -2503,8 +2590,12 @@ def _record_task_event_locked(
         # Terminal events are not exempt: a turn whose text alone no longer
         # fits one frame still has to settle, and the slim path is the only
         # writable shape left (task mtdx825fjmhmx5 burned 2.5h emitting
-        # rejected full-projection terminal frames).
-        if (not _is_frame_overflow_error(exc)
+        # rejected full-projection terminal frames). A terminal frame refused
+        # at the settleable ceiling settles the same way: the refused
+        # structural growth of earlier frames is in the event log, and
+        # maintenance must not resend a full terminal that cannot fit.
+        if (not (_is_frame_overflow_error(exc)
+                 or (terminal and _is_settleable_budget_refusal(exc)))
                 or task_event is None or slim or background_receipt or effect_intent):
             raise
         retry_count = int(task.get('_turnProjectionOversizeCount') or 0) + 1
@@ -2543,6 +2634,9 @@ def _record_task_event_locked(
             # its next gate instead of repeating this failure for hours.
             if _is_frame_overflow_error(retry_exc):
                 _signal_frame_overflow_abort(task, attempt_id, event_kind)
+            elif _refused_frame_is_loggable(retry_exc, raw_event, task_event):
+                return _log_refused_frame_and_stop(
+                    task, attempt_id, user_id, event_kind, task_event, worker_publication)
             elif retry_exc.code == 'database_integrity':
                 _signal_authority_integrity_abort(
                     task, attempt_id, event_kind,
@@ -2738,6 +2832,8 @@ def record_task_events(task: dict[str, Any],
 
     Returns one outcome per entry, as ``record_task_event`` would:
     ``'carried'`` once its row committed inside the Turn transaction,
+    ``'logged'`` once a Turn at its settleable ceiling kept the rows in the
+    attempt-fenced event log only,
     ``False`` when the authority rejected the attempt (nothing of the entry was
     written; a stale attempt also plants the cooperative abort).
 
@@ -2749,7 +2845,8 @@ def record_task_events(task: dict[str, Any],
     whole batch, falls back to the per-event path, whose single-event rules
     isolate a refused frame. A batch the native authority cannot commit as one
     ordinary commit (``database_resource_exhausted``) bisects only that chunk,
-    retaining each unwritten sibling's own size. After an
+    retaining each unwritten sibling's own size; a refused chunk of one entry
+    takes the per-event path. After an
     unknown outcome the next call reads the exact rows before resending: all
     present and identical means committed, none means resend, some fails
     closed with ``database_conflict``.
@@ -2830,7 +2927,7 @@ def _record_task_events_locked(task: dict[str, Any], entries: list[TaskEventBatc
 
 def _record_task_events_per_event(task: dict[str, Any], entries: list[TaskEventBatchEntry],
                                   *, live_flow: bool) -> bool:
-    """The single-event path, in FIFO order, each row carried in its record."""
+    """The single-event path, in FIFO order, each entry with its single-event outcome."""
     for entry in entries:
         outcome = _record_task_event_locked(
             task, entry.raw_event, entry.task_event,
@@ -2939,8 +3036,12 @@ def _record_task_event_chunk(task: dict[str, Any], pending: list[TaskEventBatchE
             task[_TURN_EVENT_BATCH_UNKNOWN_KEY] = _unknown_batch_outcome(
                 attempt_id, state, chunk, revision, progress, structural)
             raise
-        if exc.code == 'database_resource_exhausted' and len(chunk) > 1:
-            return False, True, len(chunk)
+        if exc.code == 'database_resource_exhausted':
+            if len(chunk) > 1:
+                return False, True, len(chunk)
+            # A lone refused entry follows the single-event rules: a Turn at
+            # its settleable ceiling keeps the rows in the attempt event log.
+            return _record_task_events_per_event(task, entries, live_flow=live_flow), True, None
         if _authority_lacks_turn_event_batch(exc):
             return _record_task_events_per_event(task, entries, live_flow=live_flow), False, None
         if exc.code == 'turn_projection_stale':
