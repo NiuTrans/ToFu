@@ -135,6 +135,37 @@ must remain visible alongside hot performance. SQLite can implement the same
 evidence-driven algorithm; this diagnostic establishes native work reduction,
 not a capability SQLite cannot express.
 
+### Recovery size evidence for large histories
+
+Problem: the fast path reserved a second copy of the whole projection to
+cover restart settlement. Once a valid history exceeded that conservative
+estimate, even empty child-status patches materialized the checkpoint again.
+Decision: witness version 2 records the actual encoded restart settlement
+size from the existing recovery owner. Metadata-only patches reuse it;
+changes to content, thinking or tool rounds invalidate it. Materialization
+verifies the count, and the ordinary snapshot/terminal reserve still applies.
+Version 1 remains readable with a conservative fallback; older readers treat
+version 2 as an optimization miss. No snapshot ceiling, checkpoint cadence,
+durability barrier or recovery option changes. Alternatives rejected: raising
+the snapshot limit moves the cliff; skipping recovery admission could admit a
+live Turn that cannot settle. Tests use a 40 MiB history and compare ordinary
+execution, restart readback, invalidation and malformed evidence.
+
+The 2026-11-05 paired regression runs the ordinary materialized owner and the
+production witness owner from the same debug test binary, with identical
+40 MiB projections and three subsequent empty metadata patches. On local
+temporary storage, the measured per-event medians were 1,937.207 ms and
+17.326 ms. A separate run with both disposable databases under this host's
+FUSE mount measured 1,954.594 ms and 3.031 ms. Each run checks exact command
+results, full Turn readback, invalidation and reopen. These small debug-build
+samples establish elimination of repeated materialization, not a production
+latency SLO, filesystem ranking or whole-conversation speedup. First mint and
+checkpoint rollovers still materialize; content/thinking/tool updates retain
+the ordinary path. Run
+`cargo test --manifest-path packages/tofu-db/Cargo.toml --lib execution_frame_large_history_reuses_recovery_proof_for_small_events -- --nocapture`;
+set `TMPDIR` to an isolated directory on the filesystem being measured.
+Metadata retention is measured in [storage operations](STORAGE_OPERATIONS.md#large-history-event-persistence).
+
 ### Final production-owner timing
 
 The final combined source is `36b11621e0d9e9a86aa3c774838f3f187d7d456d`
@@ -254,8 +285,8 @@ for its size. SQL has no such representation and commits the whole run.
 each durable wire once in FIFO order and chains K patches from the cached
 committed revision r to r+K. Oversized inline diagnostics are shed per entry as
 on the single path. It checks every per-entry result and remembers projection
-state once per transaction. A refused composite commit records its first half
-alone; later chunks of the call start at the size that committed. After an
+state once per transaction. A refused composite commit bisects only that
+interval in FIFO order; each unwritten sibling keeps its independent size. After an
 unknown outcome the next call reads the exact rows before resending: all
 present and identical means committed, none means resend on the same base,
 some fails closed with `database_conflict`. A stale attempt revokes the whole

@@ -134,11 +134,10 @@ def test_a_queued_structural_backlog_commits_in_one_transaction_per_budget_chunk
             assert sizes == ([63] if chunk is None else [16, 16, 16, 15])
         else:
             # Native TofuDB refuses a composite commit that no longer fits one
-            # ordinary commit; its first half commits alone and later chunks
-            # start at the admitted size.
+            # ordinary commit. Only that interval splits: independently sized
+            # siblings still preserve the exact FIFO rows checked above.
             assert {code for _, code in authority.refused} <= {'database_resource_exhausted'}
-            assert sizes[0] <= (chunk or 63)
-        assert len(sizes) == -(-63 // sizes[0])
+            assert all(0 < size <= (chunk or 63) for size in sizes)
         [cost] = costs
         assert cost.persist_calls == 2
         assert [row['sequence'] for row in _rows(storage, task)] == list(range(64))

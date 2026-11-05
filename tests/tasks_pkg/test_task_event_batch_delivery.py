@@ -1,8 +1,9 @@
 """A queued run of structural events persists through one storage call.
 
 When a pump takes a lane whose head has not started, it claims the head and
-every following unstarted item of the same batch scope, never waiting for
-later arrivals, and freezes them. Their entries persist through the head's
+following unstarted items of the same batch scope within the existing RPC
+row bound, never waiting for later arrivals, and freezes them. Their entries
+persist through the head's
 ``persist_batch`` in one call; every frame publishes in FIFO order after that
 call returns, and failure or a lost acknowledgement retries exactly the frozen
 run. Items without a batch port end runs, and a run of one persists through
@@ -120,6 +121,46 @@ def test_a_backlog_behind_a_blocked_head_persists_as_one_run_published_after_com
     # Two storage calls: the head alone, then the whole run once.
     [cost] = costs
     assert cost.persist_calls == 2
+
+
+@pytest.mark.parametrize('merge_progress', [False, True])
+def test_committed_rpc_prefix_is_published_while_a_later_batch_is_blocked(
+        coordinator, merge_progress):
+    from lib.storage.storage_event_policy import resolve_storage_event_budget
+    limit = resolve_storage_event_budget().batch_max_events
+    lane = DeliveryLane({'id': 'visible-prefix'})
+    storage = Storage()
+    entered, release = threading.Event(), threading.Event()
+
+    def block(entries):
+        entered.set()
+        assert release.wait(3)
+
+    storage.batch_hooks = [lambda entries: None, block]
+    head = _blocked_head(coordinator, lane, storage)
+    identity = object()
+    try:
+        for sequence in range(1, limit + 3):
+            progress = {}
+            if merge_progress and 1 < sequence <= limit:
+                publish = storage.publish(sequence)
+                progress = dict(
+                    projection_identity=identity,
+                    progress_frame=ProgressFrame(sequence, {'type': 'delta'}, publish),
+                    persist_progress=lambda frames: storage.committed.update(
+                        frame.sequence for frame in frames),
+                    progress_wire_bytes=1, progress_payload_bytes=1)
+            _submit(coordinator, lane, storage, sequence, **progress)
+        head.set()
+        assert entered.wait(2), 'the whole backlog was retained as one publication batch'
+        assert storage.published == list(range(limit + 1))
+        assert lane.completed == limit + 1
+        assert storage.violations == []
+    finally:
+        head.set()
+        release.set()
+    coordinator.flush(lane)
+    assert storage.published == list(range(limit + 3))
 
 
 @pytest.mark.parametrize('lost_ack', [False, True])

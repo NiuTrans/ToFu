@@ -2738,8 +2738,8 @@ def record_task_events(task: dict[str, Any],
     the command (``unknown_operation``), or a deterministic refusal of the
     whole batch, falls back to the per-event path, whose single-event rules
     isolate a refused frame. A batch the native authority cannot commit as one
-    ordinary commit (``database_resource_exhausted``) records its first half
-    alone, and later transactions of the call start at that size. After an
+    ordinary commit (``database_resource_exhausted``) bisects only that chunk,
+    retaining each unwritten sibling's own size. After an
     unknown outcome the next call reads the exact rows before resending: all
     present and identical means committed, none means resend, some fails
     closed with ``database_conflict``.
@@ -2794,15 +2794,23 @@ def _record_task_events_locked(task: dict[str, Any], entries: list[TaskEventBatc
     from lib.storage import storage_event_policy
     budget = storage_event_policy.resolve_storage_event_budget()
     batch_supported = True
-    # Entries one ordinary commit carried after the authority split a chunk.
-    limit = None
-    while True:
-        pending = [entry for entry in entries if entry.outcome is None]
+    # Split only the refused interval. A large first event may need a commit
+    # of its own; that is no evidence that the small suffix must also do so.
+    # The stack holds references to existing entries, never new event copies.
+    intervals = [entries]
+    while intervals:
+        pending = [entry for entry in intervals[-1] if entry.outcome is None]
         if not pending:
-            break
+            intervals.pop()
+            continue
         if batch_supported:
-            committed, batch_supported, limit = _record_task_event_chunk(
-                task, pending, attempt_id, budget, live_flow=live_flow, limit=limit)
+            committed, batch_supported, refused_size = _record_task_event_chunk(
+                task, pending, attempt_id, budget, live_flow=live_flow)
+            if refused_size is not None:
+                half = refused_size // 2
+                intervals[-1:] = [part for part in (
+                    pending[refused_size:], pending[half:refused_size], pending[:half]) if part]
+                continue
         else:
             committed = _record_task_events_per_event(task, pending, live_flow=live_flow)
         if not committed:
@@ -2835,15 +2843,13 @@ def _authority_lacks_turn_event_batch(exc: StorageError) -> bool:
 
 def _record_task_event_chunk(task: dict[str, Any], pending: list[TaskEventBatchEntry],
                              attempt_id: str, budget: Any, *, live_flow: bool,
-                             allow_rebase: bool = True,
-                             limit: int | None = None) -> tuple[bool, bool, int | None]:
+                             allow_rebase: bool = True) -> tuple[bool, bool, int | None]:
     """Commit the longest pending prefix within one RPC budget.
 
-    Returns ``(committed, batch_supported, limit)``; ``committed`` is False
-    when the authority rejected the attempt. ``limit`` caps the entries of
-    later chunks once the native authority refused a larger one with
-    ``database_resource_exhausted``: those records no longer fit one
-    ordinary commit, so the first half is recorded alone.
+    Returns ``(committed, batch_supported, refused_size)``. A non-None
+    ``refused_size`` identifies the exact unwritten prefix to bisect after
+    ``database_resource_exhausted``; it is never a cap on later transactions.
+    Otherwise ``committed`` is False when the authority rejected the attempt.
     """
     from lib.storage.generated_task_event_delivery_contract import (
         STRUCTURAL_BATCH_COMMAND,
@@ -2863,14 +2869,14 @@ def _record_task_event_chunk(task: dict[str, Any], pending: list[TaskEventBatchE
                 segments_stable=marker['segmentsStable'])
             _finish_task_event_chunk(task, attempt_id, unknown, marker['progress'],
                                      marker['structural'])
-            return True, True, limit
+            return True, True, None
         task.pop(_TURN_EVENT_BATCH_UNKNOWN_KEY, None)
     state = _task_projection_state(task, attempt_id, user_id)
     if state is None:
         attempt = get_attempt(attempt_id, user_id=user_id)
         if attempt['status'] not in LIVE_ATTEMPT_STATUSES:
             _signal_stale_attempt_abort(task, attempt_id, 'attempt-not-live')
-            return False, True, limit
+            return False, True, None
         turn = get_turn(attempt['conversationId'], attempt['turnId'], user_id=user_id)
         # Remember the committed base before sending: a retry after an
         # unknown outcome rebuilds the same CAS chain, which a committed run
@@ -2890,8 +2896,6 @@ def _record_task_event_chunk(task: dict[str, Any], pending: list[TaskEventBatchE
     chunk: list[_PreparedBatchEntry] = []
     rows = wire_bytes = 0
     for entry in pending:
-        if limit is not None and len(chunk) >= limit:
-            break
         prepared = _prepare_task_event_batch_entry(
             task, entry, attempt_id=attempt_id, user_id=user_id, actor=state['actor'],
             previous=previous, segments_stable=segments_stable,
@@ -2926,26 +2930,23 @@ def _record_task_event_chunk(task: dict[str, Any], pending: list[TaskEventBatchE
                 attempt_id, state, chunk, revision, progress, structural)
             raise
         if exc.code == 'database_resource_exhausted' and len(chunk) > 1:
-            return _record_task_event_chunk(task, pending, attempt_id, budget,
-                                            live_flow=live_flow, allow_rebase=allow_rebase,
-                                            limit=len(chunk) // 2)
+            return False, True, len(chunk)
         if _authority_lacks_turn_event_batch(exc):
-            return _record_task_events_per_event(task, entries, live_flow=live_flow), False, limit
+            return _record_task_events_per_event(task, entries, live_flow=live_flow), False, None
         if exc.code == 'turn_projection_stale':
             task.pop(_TURN_PROJECTION_STATE_KEY, None)
             if _task_event_rows_durable(task['id'], entries):
                 # An earlier unknown outcome committed exactly these rows; the
                 # next frame rereads the revision instead of applying them again.
                 _finish_task_event_chunk(task, attempt_id, entries, progress, structural)
-                return True, True, limit
+                return True, True, None
             task['_turnProjectionRebasePending'] = attempt_id
             if not allow_rebase:
                 raise ProjectionRebaseRequired(
                     exc.code, exc.message, retryable=True,
                     operation_id=exc.operation_id) from exc
             return _record_task_event_chunk(task, pending, attempt_id, budget,
-                                            live_flow=live_flow, allow_rebase=False,
-                                            limit=limit)
+                                            live_flow=live_flow, allow_rebase=False)
         if exc.code == 'database_integrity':
             _signal_authority_integrity_abort(
                 task, attempt_id, 'turn_event_batch', detail=str(exc)[:300])
@@ -2956,7 +2957,7 @@ def _record_task_event_chunk(task: dict[str, Any], pending: list[TaskEventBatchE
                 'events=%d reason=%s; recording them one by one',
                 str(task.get('id') or '?')[:8], str(attempt_id)[:8], len(chunk),
                 _storage_rejection_reason(exc))
-            return _record_task_events_per_event(task, entries, live_flow=live_flow), True, limit
+            return _record_task_events_per_event(task, entries, live_flow=live_flow), True, None
         raise
     except BaseException:
         task[_TURN_EVENT_BATCH_UNKNOWN_KEY] = _unknown_batch_outcome(
@@ -2975,7 +2976,7 @@ def _record_task_event_chunk(task: dict[str, Any], pending: list[TaskEventBatchE
         if (latest_attempt is None
                 or latest_attempt.get('status') not in LIVE_ATTEMPT_STATUSES):
             _signal_stale_attempt_abort(task, attempt_id, 'event-record-rejected')
-        return False, True, limit
+        return False, True, None
     for offset, (prepared, item) in enumerate(zip(chunk, result)):
         count = item.get('task_event_count')
         if (item.get('applied') is not True or item.get('task_event') is None
@@ -2991,7 +2992,7 @@ def _record_task_event_chunk(task: dict[str, Any], pending: list[TaskEventBatchE
         projection_revision=revision + len(chunk),
         segments_stable=not chunk[-1].slim)
     _finish_task_event_chunk(task, attempt_id, entries, progress, structural)
-    return True, True, limit
+    return True, True, None
 
 
 def _prepare_task_event_batch_entry(
