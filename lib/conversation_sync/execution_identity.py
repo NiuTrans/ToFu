@@ -14,11 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from lib.identity import PrincipalContext, require_user_id
+from lib.storage.generated_worker_job_contract import WORKER_EXECUTION_CONFIG_KEY
 
 _CONTRACT = json.loads((Path(__file__).resolve().parents[2] / 'contracts' /
                         'conversation_execution_identity_v1.json').read_text())
 EXECUTION_IDENTITY_CONFIG_KEY = _CONTRACT['configKey']
-RESERVED_EXECUTION_FIELDS = frozenset(_CONTRACT['reservedConfigFields'])
+RESERVED_EXECUTION_FIELDS = frozenset(_CONTRACT['reservedConfigFields']) | {WORKER_EXECUTION_CONFIG_KEY}
 REVIEW_SOURCE_CONFIG_KEY = _CONTRACT['reviewSource']['configKey']
 REVIEW_SOURCE_SCHEMA = _CONTRACT['reviewSource']['schema']
 _ENVELOPE_FIELDS = frozenset(_CONTRACT['fields'])

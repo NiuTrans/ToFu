@@ -13279,7 +13279,7 @@ pub(crate) fn attempt_start(
     database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
     attempt_id: &str, task_id: &str, now_ms: u64,
 ) -> io::Result<Vec<u8>> {
-    attempt_start_with_automation(database, transaction, attempt_id, task_id, now_ms, None, None)
+    attempt_start_with_automation(database, transaction, attempt_id, task_id, now_ms, None, None, None)
 }
 
 pub(crate) fn attempt_start_with_automation(
@@ -13290,6 +13290,7 @@ pub(crate) fn attempt_start_with_automation(
     now_ms: u64,
     automation_context: Option<&crate::automation_events::TaskStartedContext>,
     worker_claim: Option<&crate::worker_job::PublicationClaim>,
+    worker_process: Option<&Value>,
 ) -> io::Result<Vec<u8>> {
     let Some(loaded) = load_attempt_for_update(database, transaction, attempt_id)? else {
         return encode_response(&Value::Null);
@@ -13314,7 +13315,15 @@ pub(crate) fn attempt_start_with_automation(
         .ok_or_else(|| invalid_data("attempt status is malformed"))?;
     crate::worker_job::require_conversation_publication_claim(
         database, transaction, attempt_id, task_id, worker_claim, false, false)?;
+    use crate::generated_tofudb_ir::WORKER_EXECUTION_CONFIG_KEY;
+    let witness = worker_process.map(|process|
+        crate::worker_job::execution_witness(process, worker_claim)).transpose()?;
     if status == "running" {
+        if witness.as_ref().is_some_and(|witness|
+                loaded.document.get("_config").and_then(|value| value.get(WORKER_EXECUTION_CONFIG_KEY)) != Some(witness)) {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists,
+                "worker entry identity cannot change after entry"));
+        }
         return encode_response(&public_attempt(&loaded.document)?);
     }
     if status != "pending" || turn.document.get("status").and_then(Value::as_str) != Some("pending")
@@ -13322,6 +13331,11 @@ pub(crate) fn attempt_start_with_automation(
         return encode_response(&Value::Null);
     }
     let mut attempt = loaded.document.clone();
+    if let Some(witness) = witness {
+        let config = attempt.get_mut("_config").and_then(Value::as_object_mut)
+            .ok_or_else(|| invalid_data("attempt execution configuration is malformed"))?;
+        config.insert(WORKER_EXECUTION_CONFIG_KEY.to_owned(), witness);
+    }
     attempt.insert("status".to_owned(), Value::String("running".to_owned()));
     if attempt.get("startedAt").is_none_or(Value::is_null) {
         attempt.insert("startedAt".to_owned(), Value::from(now_ms));

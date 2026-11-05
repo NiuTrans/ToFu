@@ -58,6 +58,11 @@ def test_claim_rebuilds_and_joins_common_chat_before_returning_outcome(claimed, 
         assert task['id'] == context.claim.task_id
         assert task['_conversationWorkerContext'] is context
         assert task['config']['model'] == 'controlled'
+        from lib.process_owner import process_owner
+        from lib.storage.generated_worker_job_contract import WORKER_EXECUTION_CONFIG_KEY
+        accepted = turns.get_attempt(pair['attempt']['attemptId'], user_id=owner,
+                                     include_execution_config=True)
+        assert accepted['config'][WORKER_EXECUTION_CONFIG_KEY]['process'] == process_owner()
         assert turns.get_attempt(pair['attempt']['attemptId'], user_id=owner)['status'] == 'running'
         entered.append(task['id'])
         task['content'] = 'completed by the shared executor'
@@ -89,6 +94,22 @@ def test_entered_attempt_is_never_replayed_from_lease_ownership_alone(claimed, m
     monkeypatch.setattr('lib.conversation_sync.task_start.start_conversation_attempt_executor',
                         lambda *a, **kw: pytest.fail('entered effects were replayed'))
     with pytest.raises(WorkerDomainSettlementUnknown, match='recovery'):
+        execute_claimed_attempt(context, context.claim.payload)
+
+
+def test_old_storage_peer_cannot_silently_omit_process_entry(claimed, monkeypatch):
+    from lib import turn_lifecycle as turns
+    from lib.conversation_sync.worker_execution import execute_claimed_attempt
+    from lib.durable_worker import WorkerProtocolError
+    context, _pair, _factory, _owner = claimed
+    original = turns.mark_task_started
+    def old_peer(*args, **kwargs):
+        kwargs.pop('worker_process', None)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(turns, 'mark_task_started', old_peer)
+    monkeypatch.setattr('lib.conversation_sync.task_start.start_conversation_attempt_executor',
+                        lambda *a, **kw: pytest.fail('unacknowledged process entered preparation'))
+    with pytest.raises(WorkerProtocolError, match='process entry'):
         execute_claimed_attempt(context, context.claim.payload)
 
 

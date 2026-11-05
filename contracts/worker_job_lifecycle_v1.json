@@ -104,6 +104,16 @@
     "legacyRecovery": "turn.recover and task_results.recover_running never settle these bindings. API process absence and lease expiry grant no physical-exit, effect or accounting evidence.",
     "derivedIndexes": "Legacy restart indexes contain only legacy recovery candidates. Old worker-owned index entries are verified against their canonical owner and retired without modifying durable execution facts."
   },
+  "conversationExecutionWitness": {
+    "format": "tofu.conversation-worker-execution/v1",
+    "configKey": "_conversationWorkerExecution",
+    "processField": "worker_process",
+    "processFields": ["host", "boot", "pid_namespace", "pid", "started"],
+    "entry": "turn.attempt.start may carry the actual invocation process identity. Store its exact process and original worker claim in private accepted configuration in the same transaction as first startedAt. Identical retries revalidate authority; changed witnesses and late introduction after entry refuse.",
+    "visibility": "Private owner-only execution reads; never public Attempt or client-controlled accepted configuration.",
+    "absence": "Missing or unavailable process evidence grants no physical-exit proof and never permits replay. It does not prevent initial execution.",
+    "retention": "One fixed-shape entry witness per durable Attempt in its existing lifetime; no heartbeat history, second registry or process journal."
+  },
   "leaseAuthority": {
     "clock": "backend-owned UTC-offset high-water plus monotonic elapsed time",
     "lifetime": "native/SQLite: existing shared store epoch; PostgreSQL: random named server-shared clock epoch scoped by database OID; never a Sidecar-local UUID",

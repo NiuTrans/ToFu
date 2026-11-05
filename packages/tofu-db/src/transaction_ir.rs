@@ -911,6 +911,7 @@ pub enum TransactionIrStep {
         task_id: String,
         automation_context: Option<crate::automation_events::TaskStartedContext>,
         worker_claim: Option<crate::worker_job::PublicationClaim>,
+        worker_process: Option<Value>,
         committed_at_ms: u64,
         slot: usize,
     },
@@ -4745,10 +4746,17 @@ impl TransactionIr {
                     task_id,
                     automation_context,
                     worker_claim,
+                    worker_process,
                     committed_at_ms,
                     slot,
                 } => {
                     if let Some(context) = automation_context { context.validate()?; }
+                    if let Some(process) = worker_process {
+                        let witness = crate::worker_job::execution_witness(process, worker_claim.as_ref())?;
+                        literal_bytes = literal_bytes.checked_add(serde_json::to_vec(&witness)
+                            .map_err(|_| invalid_input("worker execution witness cannot be encoded"))?.len())
+                            .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
+                    }
                     if let Some(claim) = worker_claim {
                         claim.validate()?;
                         literal_bytes = literal_bytes.checked_add(claim.worker_id.len())
@@ -7586,6 +7594,7 @@ fn prepare_transaction_ir_mode(
                 task_id,
                 automation_context,
                 worker_claim,
+                worker_process,
                 committed_at_ms,
                 slot,
             } => {
@@ -7597,6 +7606,7 @@ fn prepare_transaction_ir_mode(
                     *committed_at_ms,
                     automation_context.as_ref(),
                     worker_claim.as_ref(),
+                    worker_process.as_ref(),
                 )?));
             }
             TransactionIrStep::TurnEventsList {

@@ -2135,6 +2135,7 @@ fn compile_turn(
                 automation_context,
                 worker_claim: crate::worker_job::PublicationClaim::parse(payload.get("worker_claim"))
                     .map_err(|_| SemanticExecutionError::InvalidPayload)?,
+                worker_process: payload.get("worker_process").cloned(),
                 committed_at_ms: now_unix_ms,
                 slot: 0,
             }],

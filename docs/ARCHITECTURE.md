@@ -257,7 +257,11 @@ The delivery dependencies and completion evidence are:
    before either Python or native transport may send. Rejected authority never
    selects credential rotation or model fallback; already-dispatched usage
    still settles through its original account. Root task birth also preserves
-   the principal's tenant for nested requirement/ownership checks. Qualify
+   the principal's tenant for nested requirement/ownership checks. Actual worker
+   entry now atomically freezes its process incarnation and original claim in
+   private Attempt configuration. Client configuration cannot supply this
+   witness; running attempts cannot replace or backfill it. A missing witness
+   grants no death proof or replay. Qualify
    provider calls, tools, terminal accounting, never-entered cancellation and
    unknown acknowledgements with crash injection before registering the kind.
    An uncertain external effect

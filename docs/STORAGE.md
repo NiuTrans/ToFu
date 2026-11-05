@@ -1052,6 +1052,24 @@ and an explicit `PrincipalContext`, never projections or request-local provider
 handles. Lost acknowledgements resolve the same job; legacy `@dispatching` or
 another executor binding fails closed instead of creating a second authority.
 
+Actual worker entry can additionally carry `worker_process` from the common
+process-owner capture. The first `turn.attempt.start` atomically stores the
+original claim/process witness under `_conversationWorkerExecution` in private
+Attempt configuration. Identical retries revalidate the claim; changed or late
+witnesses refuse. Public acceptance discards a supplied witness, and public
+Attempt reads omit it. Missing process evidence grants no death proof. This is
+one fixed-shape witness over the Attempt's existing retention, with no heartbeat
+history: a representative entry measured 310 JSON bytes before storage encoding.
+
+Registered child births resolve the same root claim in storage, including nested
+births, Flow completion, checkpoint and replay batches with omitted proofs.
+Generic task record writes/deletes cannot bypass that boundary. A child tool
+entry selects one exact occurrence and requires its echoed guarded admission;
+retries revalidate Stop even when the previous receipt already committed.
+The shared model account revalidates the root entry after domain observers and
+before transport dispatch. Already dispatched usage still settles through its
+original accounting owner; no per-model ledger or new retention stream is added.
+
 Durably bound Attempts require `worker_claim` at `turn.attempt.start`,
 `turn.event.record` (including every batch entry), `turn.visible.sync`,
 `task_results.checkpoint` and standalone task `event.append{,_batch}`, as defined by
