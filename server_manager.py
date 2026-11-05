@@ -1510,18 +1510,23 @@ class LifecycleManager:
     def _storage_lease_blocks_worker(self, lease: dict[str, Any]) -> bool:
         return bool(lease.get('held') and not self._native_storage.owns_lease(lease))
 
-    def _recover_native_storage_service(self) -> None:
-        """Recover a departed manager's host without changing a live app's engine."""
+    def _recover_native_storage_service(self, worker_pid: int) -> bool:
+        """Recover a departed manager's host without changing a live app's engine.
+
+        False means the host cannot return at the generation the live worker
+        attached through. That worker must drain; its planned replacement
+        starts the current generation before it spawns.
+        """
         from serverctl_pkg.native_storage_service import host_matches, process_matches, write_record
         record = self._native_storage.record()
         if not record or host_matches(record):
-            return
+            return True
         if record.get('state') == 'failed':
             raise RuntimeError(record.get('error') or 'native storage failed; explicit restart required')
         if self._active_storage_lease().get('held'):
             # The previous host's native child may still be finishing EOF
             # shutdown. Never launch a second host into its authority lease.
-            return
+            return True
         if (record.get('managerPid') == os.getpid()
                 and process_matches(record['managerPid'], record.get('managerStartTime'))):
             # Engine exits belong to StorageRuntime's crash budget. A host
@@ -1532,9 +1537,17 @@ class LifecycleManager:
             raise RuntimeError(record['error'])
         environment = self._worker_environment(self._state.get('serverEnv') or {}, self.port)
         plan = self._native_storage.prepare(environment)
-        if not plan or record.get('plan') != plan:
+        if plan and record.get('plan') == plan:
+            self._native_storage.ensure(plan, environment)
+            return True
+        # Drain only a worker bound to this host's departed manager and its
+        # private channel; anything else keeps the explicit-restart boundary.
+        if (record.get('host') != _hostname()
+                or process_matches(record.get('managerPid'), record.get('managerStartTime'))
+                or proc_env_value(worker_pid, 'TOFU_STORAGE_CONNECTION_FILE')
+                != record.get('connectionFile')):
             raise RuntimeError('native storage configuration changed; drain/restart the worker to replace it')
-        self._native_storage.ensure(plan, environment)
+        return False
 
     def _recover_execution_service(self) -> bool:
         """Recover the same execution generation without retiring the live API."""
@@ -3288,10 +3301,20 @@ class LifecycleManager:
                 return
             if status.get('running'):
                 try:
-                    self._recover_native_storage_service()
+                    storage_recoverable = self._recover_native_storage_service(int(status['pid']))
                 except Exception as exc:
                     self._set_observed('degraded', f'native storage recovery failed: {exc}')
                     self._save()
+                    return
+                if not storage_recoverable:
+                    # Manager death drained the host; a live worker never
+                    # adopts another storage generation. A planned restart
+                    # replaces the host with the current one, then the worker.
+                    logger.warning(
+                        'native storage host of a departed manager cannot return at '
+                        'worker pid=%s generation; draining the worker to start the '
+                        'current storage generation', status.get('pid'))
+                    self.stop(source='native-storage-recovery', keep_desired_running=True)
                     return
                 self._remember_worker(status)
                 execution_ready = self._recover_execution_service()
