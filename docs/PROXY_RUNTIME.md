@@ -231,7 +231,10 @@ logical socket immediately, rejects its correlated RPCs and schedules the
 existing reconnect without awaiting transport close. A delayed or throwing
 `close()` cannot strand work, and late old-socket callbacks cannot settle a new
 socket's requests. Temporary server close code 1011 reconnects; intentional 1000
-and policy refusal 1008 remain terminal. An explicit connect consumes a pending
+and policy refusal 1008 do not schedule a retry. Visible activation, `online`,
+and `pageshow` provide fresh connection demand after a clean close or a delayed
+retry; repeated signals join the same connecting socket. A passive wake never
+bypasses a 1008 policy refusal. An explicit connect consumes a pending
 retry so that an older timer cannot reconnect after a policy refusal. Every
 inbound frame is transport proof of life, including an unmatched pong; only a
 matched pong supplies RTT. A retired socket never supplies either. Alternatives
@@ -239,6 +242,20 @@ rejected: awaiting TCP teardown retains the original disconnect deadlock;
 raising watchdog timeouts hides it; accepting old socket callbacks corrupts
 request ownership. `test_push_recovery_lifecycle.py` and the existing half-open,
 latency and generation suites specify these boundaries.
+`test_visual_foreground_recovery.py` closes a native Chromium WebSocket with
+code 1000 and requires a page activation to restore the badge without reload.
+
+**Foreground recovery dependencies.** After current-owner resolution, the
+active conversation's cursor wake and catalog refresh start independently.
+The catalog/boot lease coalesces catalog work only: a held list request cannot
+block another visibility/network wake of the selected conversation. Stream
+backoff and snapshot single-flight remain owned by the coordinator. Failures
+in either branch are reported independently; only the catalog branch releases
+its lease. Problem: a catalog timeout held a usable conversation connection
+behind the full list read. Rejected: shortening the catalog deadline or forcing
+another snapshot delays recovery or duplicates authority work.
+`test_frontend_resume_revalidate.py` holds the catalog response pending while
+requiring both the initial and subsequent foreground wakes to proceed.
 
 ## Request parsing work
 

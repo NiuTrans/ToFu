@@ -122,7 +122,8 @@ def _resume_model_switch_from(
     """
     if not new_model:
         return ""
-    turn = get_turn(conversation_id, turn_id, user_id=user_id) or {}
+    turn = get_turn(conversation_id, turn_id, user_id=user_id,
+                    include_projection=False) or {}
     parent_id = str(turn.get("parentTurnId") or "")
     if not parent_id:
         return ""

@@ -22,6 +22,7 @@ from lib.conversations.project_identity import normalize_project_path
 from lib.identity import PrincipalContext, require_user_id
 from lib.log import get_logger
 from lib.agent_core.storage_errors import StorageError
+from lib.utils import sha256_holding_gil
 
 CONTRACT = json.loads((Path(__file__).resolve().parents[2] /
                        'contracts/project_dispatch_v1.schema.json').read_text())
@@ -70,6 +71,33 @@ def _validate_schema(value, definition):
         json.dumps(value, allow_nan=False).encode('utf-8')
     except (ValueError, TypeError, UnicodeError) as exc:
         raise ProjectDispatchError('Dispatch must be finite UTF-8 JSON') from exc
+
+
+# Schema validity is a pure function of (definition, exact JSON value). Each
+# stored row identity keeps the canonical digest of the content last proven
+# valid under one definition: an unchanged row skips the jsonschema walk, any
+# other content is validated in full, and only a completed validation records
+# its digest, so a race can repeat a validation but never skip a changed row.
+_VALID_STORED_ROW_DIGESTS = {}
+
+
+def _validate_stored_row(row, definition, identity):
+    try:
+        canonical = json.dumps(row, ensure_ascii=False, sort_keys=True,
+                               separators=(',', ':'), allow_nan=False)
+        digest = sha256_holding_gil(canonical.encode('utf-8')).digest()
+        # Tuples and non-string keys encode like lists and string keys but
+        # validate differently; only a value equal to its decoded JSON is keyed.
+        exact = isinstance(identity, str) and json.loads(canonical) == row
+    except (TypeError, ValueError, RecursionError):
+        exact = False
+    if not exact:
+        _validate_schema(row, definition)
+        return
+    key = (definition, identity)
+    if _VALID_STORED_ROW_DIGESTS.get(key) != digest:
+        _validate_schema(row, definition)
+        _VALID_STORED_ROW_DIGESTS[key] = digest
 
 
 def batch_requests(request):
@@ -242,12 +270,14 @@ class ProjectDispatchRepository:
 
         # The separate scope-change contract owns this same-record extension.
         if not segmented:
-            _validate_schema({k: v for k, v in value.items() if k != 'scopeChanges'}, 'record')
+            _validate_stored_row({k: v for k, v in value.items() if k != 'scopeChanges'}, 'record', self.key)
         else:
-            for field, definition in (('assignments', 'assignment'), ('requestBudgets', 'coordinatorRequestBudget'),
-                                      ('coordinatorSettlements', 'coordinatorSettlement')):
+            for field, definition, identity in (
+                    ('assignments', 'assignment', 'id'),
+                    ('requestBudgets', 'coordinatorRequestBudget', 'id'),
+                    ('coordinatorSettlements', 'coordinatorSettlement', 'sourceAttemptId')):
                 for row in value.get(field, []):
-                    _validate_schema(row, definition)
+                    _validate_stored_row(row, definition, row.get(identity) if isinstance(row, dict) else None)
         if 'scopeChanges' in value:
             from .scope_changes import check_extension
             check_extension(self, value)
@@ -1102,7 +1132,8 @@ class ProjectDispatchRepository:
             attempt = get_attempt(execution['attemptId'], user_id=self.owner)
         else:
             attempt = self.attempt_get(execution['attemptId'], user_id=self.owner)
-        turn = self.turn_get(row['request']['recipientId'], execution['turnId'], user_id=self.owner)
+        turn = self.turn_get(row['request']['recipientId'], execution['turnId'], user_id=self.owner,
+                             include_projection=False)
         if (not isinstance(attempt, Mapping) or not isinstance(turn, Mapping)
                 or attempt.get('attemptId') != execution['attemptId']
                 or attempt.get('turnId') != execution['turnId']

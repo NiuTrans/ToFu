@@ -24,6 +24,7 @@ def test_explicit_differential_candidate_failure_is_not_a_skip(monkeypatch):
     monkeypatch.setenv('TOFUDB_DIFFERENTIAL_BIN', '/nonexistent/explicit-candidate')
     monkeypatch.setattr(binary_support, '_RESOLVED', None)
     monkeypatch.setattr(binary_support, '_RESOLUTION_ATTEMPTED', False)
+    monkeypatch.setattr(binary_support, '_FAILURE', None)
     _fail_without_skip(suite._resolve_tofudb_binary, 'TOFUDB_DIFFERENTIAL_BIN')
 
 
@@ -47,6 +48,7 @@ def test_failed_source_build_cannot_fall_back_to_stale_binary(tmp_path, monkeypa
     # are actually consulted.
     monkeypatch.setattr(binary_support, '_RESOLVED', None)
     monkeypatch.setattr(binary_support, '_RESOLUTION_ATTEMPTED', False)
+    monkeypatch.setattr(binary_support, '_FAILURE', None)
     _fail_without_skip(suite._resolve_tofudb_binary, 'build failed.*synthetic compile failure')
 
 
@@ -72,6 +74,7 @@ def test_attempted_source_build_must_produce_verified_candidate(tmp_path, monkey
     monkeypatch.setattr(binary_support, '_CARGO_BUILD_TIMEOUT_SECONDS', 0.5)
     monkeypatch.setattr(binary_support, '_RESOLVED', None)
     monkeypatch.setattr(binary_support, '_RESOLUTION_ATTEMPTED', False)
+    monkeypatch.setattr(binary_support, '_FAILURE', None)
     _fail_without_skip(suite._resolve_tofudb_binary,
                        'timed out' if result == 'timeout' else 'no executable candidate')
 

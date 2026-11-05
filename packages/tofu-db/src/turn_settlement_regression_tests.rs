@@ -142,11 +142,11 @@ fn large_projection_small_patch_and_terminal_settlement_remain_writable() {
         );
         let terminal = execute(&mut db, &terminal_request, 1_600).unwrap();
         assert_eq!(terminal["applied"], true);
-        // An already-terminal attempt rejects duplicate event publication;
-        // no revision bump or second settlement may occur after a lost ACK.
+        // A lost terminal ACK replays its original receipt without another
+        // event publication, revision bump or settlement.
         assert_eq!(
             execute(&mut db, &terminal_request, 1_700).unwrap(),
-            json!({"applied": false})
+            terminal
         );
         // Settlement retires the head, retains all text, and survives reopen.
         drop(db);
@@ -376,7 +376,7 @@ fn compact_head_ceiling_rejects_atomically_and_retains_settleable_state() {
             }),
             Some("ceiling-terminal"),
         );
-        if recover {
+        let expected_retry = if recover {
             let result = execute(
                 &mut db,
                 &request(
@@ -389,9 +389,12 @@ fn compact_head_ceiling_rejects_atomically_and_retains_settleable_state() {
             )
             .unwrap();
             assert_eq!(result["recovered"], 1);
+            json!({"applied": false})
         } else {
-            assert_eq!(execute(&mut db, &terminal, 1_800).unwrap()["applied"], true);
-        }
+            let result = execute(&mut db, &terminal, 1_800).unwrap();
+            assert_eq!(result["applied"], true);
+            result
+        };
         drop(db);
         let mut db = AuthorityDatabase::open(directory.path()).unwrap();
         let settled = execute(&mut db, &get, 1_900).unwrap();
@@ -406,7 +409,7 @@ fn compact_head_ceiling_rejects_atomically_and_retains_settleable_state() {
         );
         assert_eq!(
             execute(&mut db, &terminal, 2_000).unwrap(),
-            json!({"applied": false})
+            expected_retry
         );
     }
 }
@@ -491,7 +494,7 @@ fn continued_tool_round_patch_repairs_replays_and_settles() {
     }), Some("continued-terminal"));
     let result = execute(&mut db, &terminal, 1_500).unwrap();
     assert_eq!(result["applied"], true);
-    assert_eq!(execute(&mut db, &terminal, 1_600).unwrap(), json!({"applied":false}));
+    assert_eq!(execute(&mut db, &terminal, 1_600).unwrap(), result);
     let replay = execute(&mut db, &request("turn.events.list",11,json!({
         "attempt_id":attempt_id, "user_id":11, "projection_mode":"patch"
     }),None),1_610).unwrap();

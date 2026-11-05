@@ -6085,6 +6085,11 @@ fn prepare_transaction_ir_mode(
         .filter(|step| matches!(step, TransactionIrStep::TurnEventRecord { .. }))
         .nth(1).is_some();
     let mut turn_event_applied = None;
+    let mut adjacent_turn_projection = None;
+    // Carried payload after the previous step when it was an applied batched
+    // Turn event record, and the most one such record added by itself.
+    let mut carried_after_turn_event = None;
+    let mut largest_turn_event_carried = 0_usize;
     let _steps_timer = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_IR_STEPS);
     let steps = match execution {
         IrStepExecution::Sequential => ir.steps.as_slice(),
@@ -6099,6 +6104,10 @@ fn prepare_transaction_ir_mode(
         }
     };
     for step in steps {
+        if !matches!(step, TransactionIrStep::TurnEventRecord { .. }) {
+            adjacent_turn_projection = None;
+        }
+        let carried_after_previous_step = carried_after_turn_event.take();
         match step {
             TransactionIrStep::Queue { request, slot } => {
                 slots[*slot as usize] =
@@ -7495,7 +7504,17 @@ fn prepare_transaction_ir_mode(
                 )?));
             }
             TransactionIrStep::TurnEventRecord { request, slot } => {
-                let response = crate::turn::event_record(database, &mut transaction, request)?;
+                let carried_before = match carried_after_previous_step {
+                    Some(bytes) => bytes,
+                    None if batched_turn_events => database.carried_payload_bytes(&transaction)?,
+                    None => 0,
+                };
+                let response = if batched_turn_events {
+                    crate::turn::event_record_adjacent(database, &mut transaction, request,
+                        &mut adjacent_turn_projection)?
+                } else {
+                    crate::turn::event_record(database, &mut transaction, request)?
+                };
                 if batched_turn_events {
                     let applied = serde_json::from_slice::<serde_json::Value>(&response)
                         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData,
@@ -7508,10 +7527,20 @@ fn prepare_transaction_ir_mode(
                     // Composed records must not turn into a commit that drains
                     // every conversation's overlay or synchronizes each loose
                     // block under the authority; the producer splits instead.
-                    if applied && !database.commits_as_one_ordinary_delta(&transaction)? {
-                        return Err(crate::resource_exhaustion::domain_bound(
-                            "Turn event batch exceeds one ordinary commit; record fewer entries per batch",
-                        ));
+                    // One record is never refused for its own size, so the
+                    // largest record's carried payload is set aside: splitting
+                    // it off would only repeat its work while the rest fits.
+                    if applied {
+                        let carried = database.carried_payload_bytes(&transaction)?;
+                        largest_turn_event_carried = largest_turn_event_carried
+                            .max(carried.saturating_sub(carried_before));
+                        if !database.commits_as_one_ordinary_delta(
+                            &transaction, carried.saturating_sub(largest_turn_event_carried)) {
+                            return Err(crate::resource_exhaustion::domain_bound(
+                                "Turn event batch exceeds one ordinary commit; record fewer entries per batch",
+                            ));
+                        }
+                        carried_after_turn_event = Some(carried);
                     }
                 }
                 slots[*slot as usize] = Some(Some(response));
@@ -8746,6 +8775,7 @@ fn prepare_transaction_ir_mode(
             }
         }
     }
+    drop(adjacent_turn_projection);
     drop(_steps_timer);
     let mut response = result_bytes(&ir.result, &mut slots)?;
     // This completion witness alone grants no cache eligibility. The semantic

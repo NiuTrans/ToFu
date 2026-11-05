@@ -478,6 +478,38 @@ struct LoadedTurnForAttempt {
     verified_stable_segments: Option<execution_frame::VerifiedStableSegments>,
 }
 
+/// The preceding ordinary event's owned reconstruction, valid only between
+/// adjacent event steps in one IR transaction. The IR owner drops it at every
+/// other step and before commit preparation. Scope and the complete physical
+/// header must still match a fresh transactional read before it can be moved.
+pub(crate) struct AdjacentEventProjection {
+    key: EntityKey,
+    header: Map<String, Value>,
+    projection: Map<String, Value>,
+}
+
+fn materialize_event_projection(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    loaded: &mut LoadedTurnForAttempt,
+    preceding: &mut Option<AdjacentEventProjection>,
+) -> io::Result<()> {
+    if let Some(head) = &loaded.projection_head {
+        if let Some(previous) = preceding.take()
+            .filter(|previous| previous.key == loaded.key && previous.header == loaded.document)
+        {
+            loaded.document.insert("projection".into(), Value::Object(previous.projection));
+            // Normalization still proves segment semantics for this request;
+            // no persisted witness is inferred from the owned buffer.
+            loaded.verified_stable_segments = None;
+        } else {
+            loaded.verified_stable_segments = materialize_projection_head(
+                database, transaction, &mut loaded.document, head)?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProjectionHeadDescriptor {
     head_id: String,
@@ -13588,6 +13620,17 @@ fn load_event_record_state(
     request: &EventRecordRequest,
     materialize_projection: bool,
 ) -> io::Result<Option<(LoadedAttemptForUpdate, LoadedTurnForAttempt)>> {
+    load_event_record_state_with_projection(
+        database, transaction, request, materialize_projection, &mut None)
+}
+
+fn load_event_record_state_with_projection(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &EventRecordRequest,
+    materialize_projection: bool,
+    preceding: &mut Option<AdjacentEventProjection>,
+) -> io::Result<Option<(LoadedAttemptForUpdate, LoadedTurnForAttempt)>> {
     let Some(loaded_attempt) = load_attempt_for_update(database, transaction, &request.attempt_id)?
     else {
         return Ok(None);
@@ -13645,10 +13688,7 @@ fn load_event_record_state(
             return Ok(None);
         }
     }
-    let load_turn = if materialize_projection {
-        load_current_turn_for_attempt
-    } else { load_current_turn_header_for_attempt };
-    let Some(loaded_turn) = load_turn(
+    let Some(mut loaded_turn) = load_current_turn_header_for_attempt(
         database,
         transaction,
         &request.attempt_id,
@@ -13658,6 +13698,9 @@ fn load_event_record_state(
     else {
         return Ok(None);
     };
+    if materialize_projection {
+        materialize_event_projection(database, transaction, &mut loaded_turn, preceding)?;
+    }
     let stored_task_id = loaded_attempt
         .document
         .get("taskId")
@@ -13685,6 +13728,15 @@ pub(crate) fn event_record(
     event_record_mode(database, transaction, request, true)
 }
 
+pub(crate) fn event_record_adjacent(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &EventRecordRequest,
+    preceding: &mut Option<AdjacentEventProjection>,
+) -> io::Result<Vec<u8>> {
+    event_record_with_projection(database, transaction, request, true, Some(preceding))
+}
+
 #[cfg(test)]
 fn event_record_unframed(database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
     request: &EventRecordRequest) -> io::Result<Vec<u8>>
@@ -13695,6 +13747,16 @@ fn event_record_unframed(database: &AuthorityDatabase, transaction: &mut Authori
 fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
     request: &EventRecordRequest, allow_frame_witness: bool) -> io::Result<Vec<u8>>
 {
+    event_record_with_projection(database, transaction, request, allow_frame_witness, None)
+}
+
+fn event_record_with_projection(database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    request: &EventRecordRequest, allow_frame_witness: bool,
+    mut adjacent: Option<&mut Option<AdjacentEventProjection>>) -> io::Result<Vec<u8>>
+{
+    // An error, refusal, fast-path event or different Turn consumes the old
+    // buffer. Only a fully published materialized event can supply the next.
+    let mut preceding = adjacent.as_mut().and_then(|slot| slot.take());
     if request.slim && request.projection_patch.is_some() {
         return Err(invalid_input("Slim Turn events cannot carry a projection patch"));
     }
@@ -13702,8 +13764,9 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
     let frame_candidate = allow_frame_witness && text_append.is_none()
         && execution_frame::classify_patch(request);
     let _load_stage = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_TURN_EVENT_LOAD);
-    let Some((loaded_attempt, mut loaded_turn)) = load_event_record_state(
+    let Some((loaded_attempt, mut loaded_turn)) = load_event_record_state_with_projection(
         database, transaction, request, text_append.is_none() && !frame_candidate,
+        &mut preceding,
     )? else {
         return encode_response(&json!({"applied": false}));
     };
@@ -13714,7 +13777,6 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
     let starts_attempt = !request.terminal && attempt_status == "pending";
 
     let turn = &loaded_turn.document;
-    let mut verified_stable_segments = loaded_turn.verified_stable_segments.clone();
     let turn_id = turn
         .get("turnId")
         .and_then(Value::as_str)
@@ -13752,12 +13814,11 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
     // The fast append helpers have finished borrowing the original loaded
     // document. Transfer its private reconstruction buffer instead of copying
     // the complete history into another Turn before applying one event.
-    let mut turn = std::mem::take(&mut loaded_turn.document);
     if (text_append.is_some() || frame_candidate) && text_update.is_none() && frame_update.is_none() {
-        if let Some(head) = &loaded_turn.projection_head {
-            verified_stable_segments = materialize_projection_head(database, transaction, &mut turn, head)?;
-        }
+        materialize_event_projection(database, transaction, &mut loaded_turn, &mut preceding)?;
     }
+    let mut verified_stable_segments = loaded_turn.verified_stable_segments.take();
+    let mut turn = std::mem::take(&mut loaded_turn.document);
     let previous_projection = match turn.remove("projection") {
         Some(Value::Object(projection)) => projection,
         _ => Map::new(),
@@ -14049,11 +14110,19 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
         text_update.as_ref().map(|update| update.projection_bytes),
         projection_bytes,
     )?;
-    publish_event_record(database, transaction, request, EventPublication {
+    let response = publish_event_record(database, transaction, request, EventPublication {
         conversation_id: &loaded_attempt.conversation_id, turn: &turn,
         attempt: &attempt, projection: &next_projection, projection_bytes,
         replay_patch, starts_attempt,
-    })
+    })?;
+    if next_projection_head.is_some() && text_update.is_none() && frame_update.is_none() {
+        if let Some(slot) = adjacent {
+            *slot = Some(AdjacentEventProjection {
+                key: loaded_turn.key, header: turn, projection: next_projection,
+            });
+        }
+    }
+    Ok(response)
 }
 
 // One physical checkpoint/patch-chain policy for ordinary events and frames.

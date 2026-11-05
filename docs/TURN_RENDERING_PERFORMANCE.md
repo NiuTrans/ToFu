@@ -1,5 +1,34 @@
 # Turn rendering performance
 
+## Activity occurrence lookup
+
+Problem: chronological activity windows resolved every timeline entry twice
+by scanning all content blocks. Long tool histories repeated producer and
+occurrence checks during each cold selection, blocking browser input.
+
+Decision: `presentation/activity-anchor.ts` builds invocation-local indexes
+by source block ID, tool ordinal and legacy tool-call ID, narrows candidates
+by the strongest available selector, and retains the same producer, combined
+selector and ambiguity checks. The forward and backward window passes reuse
+each resolved occurrence. Indexes are discarded before diagnostic insertion;
+they cannot retain stale offsets or cross a projection revision.
+
+On one frozen 2,168-tool-round, 103-activity Turn, five ABBA comparisons of
+the complete cold block selector produced identical serialized output and
+median 148.16 ms before / 88.46 ms after (ranges 142.97–179.45 / 83.60–97.82 ms).
+The same frozen-input ABBA run in Chromium measured 131.30 / 70.60 ms
+(ranges 119.00–144.50 / 65.80–89.60 ms), a 46% reduction.
+The executable work guard uses 512 blocks and 512 entries: the former path
+read block sources 1,048,576 times; the indexed path needs 1,536. Existing
+ambiguity, trimmed history, producer scope and compaction-placement cases
+remain in `activity-anchor.test.ts`.
+
+Alternatives rejected: caching windows across mutable block arrays risks
+stale occurrence offsets; limiting retained activities or tool rounds loses
+history; yielding between repeated scans retains the redundant work.
+
+## Incremental Turn projection
+
 Problem: stream events previously copied entity indexes, reselected the whole
 conversation and rebuilt a shell fingerprint covering every loaded Turn. Even
 a small DOM update repeated work proportional to historical conversation size.

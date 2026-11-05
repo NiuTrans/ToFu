@@ -195,17 +195,21 @@ function _activeConversationWake() {
 function _revalidateOnResume(trigger) {
 
   _modelPickerStartup.recover();
-  if (!_acquireBootLoad()) return false;
+  const refreshCatalog = _acquireBootLoad();
   const identityRefresh = typeof initCurrentUserId === 'function'
     ? initCurrentUserId() : Promise.resolve(null);
-  void Promise.resolve(identityRefresh)
-    .then(() => loadConversationCatalog())
-    .then(() => _activeConversationWake())
-    .catch((error) =>
-      debugLog(`[conversation-sync] ${trigger} recovery failed: ${error?.message || error}`,
-               'warn'))
-    .finally(_releaseBootLoad);
-  return true;
+  const identityReady = Promise.resolve(identityRefresh);
+  const failed = (error) => debugLog(
+    `[conversation-sync] ${trigger} recovery failed: ${error?.message || error}`, 'warn');
+  // Current conversation recovery owns no catalog dependency. A slow list or
+  // a boot load already in flight must not hold its replay cursor asleep.
+  // The coordinator coalesces snapshots and preserves stream retry backoff.
+  void identityReady.then(() => _activeConversationWake()).catch(failed);
+  if (refreshCatalog) {
+    void identityReady.then(() => loadConversationCatalog())
+      .catch(failed).finally(_releaseBootLoad);
+  }
+  return refreshCatalog;
 }
 runtimeScope._revalidateOnResume = _revalidateOnResume;
 

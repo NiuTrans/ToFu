@@ -61,6 +61,15 @@ descendants on interruption. Verify `test_tofudb_source_build_retirement.py`.
 
 ## Test layers
 
+Conversation navigation browser checks follow the current reader controls:
+settled tool panels open at the newest calls and page backward through their
+in-card earlier boundary. Command output uses the focusable output chip; its
+native disclosure summary is retained for semantics and is not the keyboard
+entry point. The harness asserts focus before activation so a hidden target
+cannot leave Enter on the previously focused panel toggle and collapse it.
+`test_visual_conversation_navigation_performance.py` keeps the single-read,
+late-response, exact-output and cancellation assertions through these controls.
+
 Turn delivery tests import their shared fixture functions explicitly from
 `tests/turn_lifecycle/test_task_event_delivery.py`. A collectable test module
 cannot also supply them reliably through `pytest_plugins`: collecting that
@@ -972,6 +981,27 @@ an intentional saturation test, or a timing contract that cannot safely
 overlap the parallel unit lane. Each new use carries an inline resource reason.
 `test-unit` runs those cases in a separate no-xdist phase; isolation work
 should remove the marker rather than broaden the exception.
+
+### Source-built test engines
+
+**Problem:** the differential and context-read suites cargo-build the tofu-db
+engine on first use (`tests/support/tofudb_binary.py`). A cold build outlasts
+pytest-timeout's 300 s per-test hang guard, so the first dependent test and
+every test queued behind the build lock errored (14 TofuDB context-read cases
+in one run); the interrupted resolution then made later callers in the process
+silently skip, and a real compile failure was rebuilt and re-reported by each
+dependent test. **Decision:** `ensure_engine_binary` runs the build with the
+caller's ITIMER_REAL deadline paused and re-arms the remaining time whatever
+the outcome; the build keeps its own `_CARGO_BUILD_TIMEOUT_SECONDS` deadline.
+A failed build is remembered for the process and raised to every later caller;
+an interrupted build is retried. Tests that reset the resolver state also
+reset `_FAILURE`. **Alternatives rejected:** a larger per-test timeout for
+engine tests (a tuning knob that still loses to a slower host or a cold
+cache); building at collection end (blocks every xdist worker, including those
+that never run an engine test); declaring an engine marker on each dynamic
+user (`getfixturevalue`, helper calls), which every new caller must remember.
+With `--timeout-method=thread` the deadline cannot be paused and the old
+behaviour remains. Specification: `tests/meta/test_tofudb_engine_preparation.py`.
 
 ### Per-test and collection overhead
 

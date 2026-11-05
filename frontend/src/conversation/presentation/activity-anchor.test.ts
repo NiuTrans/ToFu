@@ -3,6 +3,7 @@ import type { TurnActivityEntry, TurnActivityTimeline } from '../../api/conversa
 import type { ConversationBlockViewModel } from './conversation-view-model';
 import {
   activityAnchorIndex, activityAnchorWindows, activityEntryAttemptId,
+  resolveActivityOccurrence,
 } from './activity-anchor';
 
 function entry(extra: Partial<TurnActivityEntry> = {}): TurnActivityEntry {
@@ -27,6 +28,48 @@ function prose(blockId: string, taskId = 'task-a', attemptId = 'attempt-a'): Con
 function timeline(entries: TurnActivityEntry[]): TurnActivityTimeline {
   return { blockId: 'activity-timeline', version: 1, entries };
 }
+
+it('builds long-timeline windows without rescanning every content block per entry', () => {
+  let sourceReads = 0;
+  const blocks = Array.from({ length: 512 }, (_, index) => {
+    const block = tool(index);
+    return new Proxy(block, { get(target, key, receiver) {
+      if (key === 'source') sourceReads += 1;
+      return Reflect.get(target, key, receiver);
+    } });
+  });
+  const entries = blocks.map((_, index) => entry({ id: `event-${index}`,
+    taskId: 'task-a', anchorToolRoundNum: index }));
+  const windows = activityAnchorWindows(timeline(entries), blocks);
+  expect(windows.get('event-256')).toEqual({ after: entries[255], before: entries[257] });
+  expect(sourceReads).toBeLessThanOrEqual(8 * (blocks.length + entries.length));
+});
+
+it('preserves window boundaries for ambiguous, missing and combined occurrence selectors', () => {
+  const blocks = [tool(1), tool(1, 'child', 'child-attempt'), tool(2),
+    prose('answer'), prose('answer')];
+  const entries = [
+    entry({ id: 'unscoped', anchorToolRoundNum: 1 }),
+    entry({ id: 'first', taskId: 'task-a', anchorToolRoundNum: 1 }),
+    entry({ id: 'child', taskId: 'child', anchorToolRoundNum: 1 }),
+    entry({ id: 'missing', anchorBlockId: 'trimmed', toolCallId: 'reused' }),
+    entry({ id: 'combined', anchorBlockId: 'tool:task-a:2', anchorToolRoundNum: 1 }),
+    entry({ id: 'invalid', anchorToolRoundNum: 0.5 }),
+    entry({ id: 'second', anchorBlockId: 'tool:task-a:2', anchorToolRoundNum: 2 }),
+    entry({ id: 'ambiguous', anchorBlockId: 'answer' }),
+  ];
+  const windows = activityAnchorWindows(timeline(entries), blocks);
+  for (let index = 0; index < entries.length; index += 1) {
+    const prior = entries.slice(0, index).map(value => ({ value,
+      occurrence: resolveActivityOccurrence(blocks, value) })).filter(value => value.occurrence != null);
+    const later = entries.slice(index + 1).map(value => ({ value,
+      occurrence: resolveActivityOccurrence(blocks, value) })).filter(value => value.occurrence != null);
+    expect(windows.get(entries[index].id)).toEqual({
+      ...(prior.length ? { after: prior.at(-1)!.value } : {}),
+      ...(later.length ? { before: later[0].value } : {}),
+    });
+  }
+});
 
 describe('producer occurrence anchors', () => {
   it('uses the exact occurrence despite recycled provider IDs and a stale VM pairing', () => {

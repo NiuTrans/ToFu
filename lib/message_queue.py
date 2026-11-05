@@ -948,7 +948,8 @@ def dispatch_completed_background_batch(conv_id: str, *, user_id: int) -> str | 
                 if assignment['execution'] is not None:
                     from lib.conversation_sync.runtime import conversation_turn_commands
                     latest = trusted.repository.turn_get(
-                        conv_id, assignment['execution']['turnId'], user_id=user_id)
+                        conv_id, assignment['execution']['turnId'], user_id=user_id,
+                        include_projection=False)
                     outcome = conversation_turn_commands.resume_turn(
                         conv_id, assignment['execution']['turnId'], user_id, {
                             'commandId': 'project-dispatch-background:' + queue_id,

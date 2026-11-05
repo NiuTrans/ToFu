@@ -102,7 +102,11 @@ runtimeScope.ConversationTurnStore = {
 """ + owner + r"""
 return (async () => {
   const first = _revalidateOnResume('online');
+  await new Promise((resolve) => setImmediate(resolve));
+  const wakeBeforeCatalog = calls.wake;
   const duplicate = _revalidateOnResume('visibilitychange');
+  await new Promise((resolve) => setImmediate(resolve));
+  const wakeWithCatalogHeld = calls.wake;
   releaseList();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
@@ -121,7 +125,7 @@ return (async () => {
     conversationId:'conv-a', cursorHint:'cursor-9', userId:7,
   });
   return {
-    first, duplicate, hidden, staleLeaseRecovered,
+    first, duplicate, hidden, staleLeaseRecovered, wakeBeforeCatalog, wakeWithCatalogHeld,
     calls,
     leaseReleased:runtimeScope._bootLoadInFlight === 0,
     listeners:Object.keys(listeners).sort(),
@@ -134,11 +138,13 @@ return (async () => {
         "duplicate": False,
         "hidden": False,
         "staleLeaseRecovered": True,
+        "wakeBeforeCatalog": 1,
+        "wakeWithCatalogHeld": 2,
         "calls": {
-            "identity": 2,
+            "identity": 3,
             "modelRecovery": 3,
             "list": 2,
-            "wake": 2,
+            "wake": 3,
             "invalidate": [["conv-a", "cursor-9"]],
         },
         "leaseReleased": True,

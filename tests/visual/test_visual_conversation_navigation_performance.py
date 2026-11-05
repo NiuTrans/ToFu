@@ -114,14 +114,14 @@ def test_sidebar_single_read_viewport_budget_and_late_snapshot(browser, live_ser
         _dismiss_onboarding_modals(page)
         expect(page.locator('#chatInner .conversation-round-toolbar:visible')).to_have_count(0)
         _open_tool_panel(page)
-        # An oversized panel opens at its first call; the in-card row that
-        # counts the hidden later calls pages through them.
+        # An oversized panel opens at its newest calls; the in-card row that
+        # counts the hidden earlier calls pages back through them.
         expect(page.locator('#chatInner .conversation-tool-panel')).to_be_visible()
         before = page.locator('#chatInner [data-block-kind="tool"]').first.get_attribute('data-block-id')
-        later = page.locator('#chatInner [data-region-boundary="process:later"] button')
-        expect(later).to_be_visible()
-        later.focus()
-        later.press('Enter')
+        earlier = page.locator('#chatInner [data-region-boundary="process:earlier"] button')
+        expect(earlier).to_be_visible()
+        earlier.focus()
+        earlier.press('Enter')
         page.wait_for_function("""before => document.querySelector('#chatInner [data-block-kind="tool"]')
           ?.dataset.blockId !== before""", arg=before)
         assert page.locator('#chatInner [data-block-id]').count() <= 200
@@ -336,8 +336,10 @@ def test_successful_command_output_is_lazy_exact_and_keyboard_inspectable(browse
         viewer = page.locator('#chatInner details[data-tool-result-authority="deferred"]')
         expect(viewer).to_have_count(1)
         assert not requests
-        viewer.locator('summary').focus()
-        viewer.locator('summary').press('Enter')
+        output_control = page.locator('#chatInner .ptool-cmd-ok .ptool-cmd-fold-output')
+        output_control.focus()
+        expect(output_control).to_be_focused()
+        output_control.press('Enter')
         hydrated = page.locator('#chatInner details[data-tool-result-authority="toolContent"]')
         expect(hydrated).to_contain_text('Exact structured ending', timeout=10000)
         assert hydrated.evaluate('(details) => details.open')
@@ -346,8 +348,8 @@ def test_successful_command_output_is_lazy_exact_and_keyboard_inspectable(browse
         expect(hydrated.locator('pre')).to_be_visible()
         assert hydrated.locator('pre').evaluate('(node) => getComputedStyle(node).display') == 'block'
         assert page.evaluate('window.commandOutputExecuted === undefined')
-        hydrated.locator('summary').click()
-        hydrated.locator('summary').click()
+        output_control.click()
+        output_control.click()
         page.wait_for_timeout(100)
         assert len(requests) == 1, requests
         assert page.locator('#chatInner .ptool-cmd-block.ptool-cmd-err').count() == 1

@@ -1,5 +1,20 @@
 # Storage operations and verification
 
+## Terminal event receipts
+
+The `turn.event.record` terminal branch stores its original success response in
+the existing owner-scoped command receipt transaction. Ordinary streaming and
+batch events do not gain receipts. The native lost-ACK/reopen fixture measures
+a **191-byte response and 268-byte receipt entity value** for one completion
+with one carried `done` event; entity keys, indexes, WAL framing and ordinary
+Turn/event state are additional. Payload identities change receipt size, so
+this is a fixture measurement, not a universal per-turn bound. Receipt
+retention and cleanup use the existing owner; there is no new retention knob.
+Run `turn_terminal_retry_replays_the_committed_result_after_lost_ack_and_reopen`
+with `--nocapture` to retain its size evidence. Same-command retries add no
+WAL bytes or duplicate events. Decision and alternatives:
+[storage idempotency](STORAGE.md#commands-queries-and-idempotency).
+
 ## Large-history event persistence
 
 The projection witness's version 2 recovery-size evidence adds one optional
@@ -1029,11 +1044,14 @@ operation in one session and publishes each entry's sync change in order; a
 failure discards that attempt's reconstructible projection-cache baseline.
 Native TofuDB additionally refuses (`database_resource_exhausted`, nothing
 written) a multi-entry batch once its entity delta leaves the overlay envelope
-or its new blobs and rows exceed the WAL-carried ceiling minus the composition
-headroom (`AuthorityDatabase::commits_as_one_ordinary_delta`). Such a commit
-would otherwise drain the authority-wide overlay and synchronize every new
-loose block under the authority. The producer splits the refused batch; a
-single entry is never refused for its size. Rationale and measurements:
+or its new blobs and rows, less the carried payload of its single largest
+entry, exceed the WAL-carried ceiling minus the composition headroom
+(`AuthorityDatabase::carried_payload_bytes` and
+`AuthorityDatabase::commits_as_one_ordinary_delta`). Such a commit would
+otherwise drain the authority-wide overlay and synchronize every new loose
+block under the authority. The producer splits the refused batch; a single
+entry is never refused for its size, and one such entry commits together with
+followers that still fit one ordinary commit. Rationale and measurements:
 [`TOFUDB_EXECUTION_FRAMES.md`](TOFUDB_EXECUTION_FRAMES.md#batched-structural-events-2026-11-01).
 
 Full-fold application commands use that same versioned projection-patch

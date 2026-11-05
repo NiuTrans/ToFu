@@ -112,6 +112,7 @@ def test_pytest_explicit_candidate_serves_differential_fixtures_without_building
     monkeypatch.setenv('TOFUDB_DIFFERENTIAL_BIN', env.get('TOFUDB_DIFFERENTIAL_BIN', ''))
     monkeypatch.setattr(binary_support, '_RESOLVED', None)
     monkeypatch.setattr(binary_support, '_RESOLUTION_ATTEMPTED', False)
+    monkeypatch.setattr(binary_support, '_FAILURE', None)
     monkeypatch.setattr(binary_support, '_cargo_build', lambda *args: pytest.fail(
         'an explicit test engine must not start an in-tree cargo build'))
     assert binary_support.ensure_engine_binary(tmp_path) == candidate
