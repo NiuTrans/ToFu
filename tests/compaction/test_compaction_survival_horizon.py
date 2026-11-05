@@ -99,7 +99,7 @@ def test_longer_observed_compaction_window_invalidates_stale_economic_veto(
         return {
             'convId': 'survival-veto',
             '_userId': 1,
-            'config': {'model': 'kimi-k3'},
+            'config': {'model': 'kimi-k3', 'compaction': {'workingSetTokens': 128_000}},
             '_compactionCadenceLastRound': 2,
             '_autoCompactRetryAfterTokens': 250_000,
             '_autoCompactRetryWitness': {

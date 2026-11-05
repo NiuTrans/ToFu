@@ -411,7 +411,7 @@ def test_auto_economic_decline_hysteresis_waits_for_prompt_growth(monkeypatch):
     msg_tokens = tokens._estimate_total_tokens(messages)
     task = {
         'convId': 'hysteresis',
-        'config': {'model': 'kimi-k3'},
+        'config': {'model': 'kimi-k3', 'compaction': {'workingSetTokens': 128_000}},
         '_autoCompactRetryAfterTokens': msg_tokens + 8_192,
     }
     monkeypatch.setattr(
@@ -438,7 +438,7 @@ def test_hysteresis_reuses_authoritative_preflight_measurement(monkeypatch):
     messages = [_sys(), _user('unchanged hot tail')]
     task = {
         'convId': 'hysteresis-measured',
-        'config': {'model': 'kimi-k3'},
+        'config': {'model': 'kimi-k3', 'compaction': {'workingSetTokens': 128_000}},
         '_autoCompactRetryAfterTokens': 50_000,
     }
 
@@ -523,7 +523,7 @@ def test_cache_negative_retry_floor_yields_when_cache_witness_cools(
     task = {
         'convId': 'cache-cooled',
         '_userId': 1,
-        'config': {'model': 'kimi-k3'},
+        'config': {'model': 'kimi-k3', 'compaction': {'workingSetTokens': 128_000}},
         '_autoCompactRetryAfterTokens': 250_000,
         '_autoCompactRetryWitness': {
             'reason': 'cache_negative',
@@ -563,7 +563,7 @@ def test_cache_negative_retry_floor_holds_while_cache_witness_is_warm(
     task = {
         'convId': 'cache-still-warm',
         '_userId': 1,
-        'config': {'model': 'kimi-k3'},
+        'config': {'model': 'kimi-k3', 'compaction': {'workingSetTokens': 128_000}},
         '_autoCompactRetryAfterTokens': 250_000,
         '_autoCompactRetryWitness': {
             'reason': 'cache_negative',
@@ -931,9 +931,9 @@ def priced_summary_route(monkeypatch):
 
 
 def _observed_cache_task(conv_id, model='kimi-k3'):
-    """Current task/route cache evidence, not historical lastTurnCacheRead."""
+    """Explicit economic policy with current task/route cache evidence."""
     return {'convId': conv_id, 'id': 't', 'provider_id': 'economics-test',
-            'config': {'model': model},
+            'config': {'model': model, 'compaction': {'workingSetTokens': 128_000}},
             '_compactionCacheObservation': {
                 'taskId': 't', 'model': model, 'providerId': 'economics-test',
                 'cacheReadTokens': 100000}}

@@ -8,28 +8,15 @@ import threading
 import pytest
 
 import lib.tasks_pkg.orchestrator._root_agent_loop as root_loop
+from lib.tasks_pkg.orchestrator._round_state import RoundState
 pytestmark = pytest.mark.unit
 
 
 def _state():
-    return SimpleNamespace(
+    return RoundState(
         model='kimi-k3',
         preset='default',
         thinking_enabled=False,
-        exit_reason='running',
-        abort_phase=None,
-        consecutive_tool_timeouts=0,
-        assistant_msg=None,
-        last_finish_reason=None,
-        last_usage=None,
-        last_stream_result=None,
-        accumulated_usage={},
-        api_rounds=[],
-        tool_call_happened=False,
-        tool_round_num=0,
-
-        model_round_start=0,
-        last_checkpoint_ts=0.0,
     )
 
 
@@ -148,6 +135,7 @@ def _install_script(monkeypatch, state, script, events, *, abort_on_round=None):
     def llm_call(task, current_state, *args, round_num, **kwargs):
         message, finish, usage = next(turns)
         current_state.assistant_msg = message
+        current_state.original_assistant_content = message.get('content') or ''
         current_state.last_finish_reason = finish
         current_state.last_usage = usage
         current_state.api_rounds.append({'roundNum': round_num})

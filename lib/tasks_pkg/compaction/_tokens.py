@@ -41,7 +41,6 @@ _WORKING_SET_AUDITED: set[int] = set()
 _TASK_TOOL_SCHEMA = object()
 _SETTLED_MESSAGE_ESTIMATE_KEY = ('compaction.message-estimate',)
 
-_PRICING_TIER_WORKING_SET_MARGIN = 0.90
 _COMPACTION_CADENCE_MAX_GAPS = 8
 _COMPACTION_CADENCE_MAX_PAYBACK_ROUNDS = 6.0
 
@@ -780,9 +779,9 @@ def _working_set_token_limit(task: dict | None = None) -> int:
 
     A per-request ``config.compaction.workingSetTokens`` override wins over
     ``TOFU_WORKING_CONTEXT_TOKENS``.  Zero disables the economic ceiling.
-    Without an explicit override, a provider/model rate card with a proven
-    price increase selects 90% of the last cheaper tier. Flat/unknown pricing
-    retains the conservative 128K default. Positive values are clamped so a
+    Without an explicit override, only the route's context-window safety
+    threshold can trigger automatic compaction. Pricing does not implicitly
+    authorize an earlier lossy rewrite. Positive values are clamped so a
     typo cannot cause constant tiny-context compactions or remove all bounds.
     """
     import os
@@ -792,22 +791,7 @@ def _working_set_token_limit(task: dict | None = None) -> int:
     if raw is None and 'TOFU_WORKING_CONTEXT_TOKENS' in os.environ:
         raw = os.environ.get('TOFU_WORKING_CONTEXT_TOKENS')
     if raw is None:
-        value = _DEFAULT_WORKING_SET_TOKENS
-        try:
-            from lib.pricing import first_pricing_increase_boundary
-            cfg = (task or {}).get('config', {}) or {}
-            model = str(cfg.get('model') or (task or {}).get('model') or '')
-            provider_id = str((task or {}).get('provider_id') or '')
-            boundary = first_pricing_increase_boundary(
-                model, provider_id or None) if model else None
-            if boundary:
-                value = int(
-                    int(boundary['maxPromptTokens'])
-                    * _PRICING_TIER_WORKING_SET_MARGIN)
-        except Exception as exc:
-            logger.debug('[Compact] pricing-tier working-set lookup failed: %s',
-                         exc)
-        return max(32_000, min(2_000_000, value))
+        return _DEFAULT_WORKING_SET_TOKENS
     try:
         value = int(raw)
     except (TypeError, ValueError) as e:

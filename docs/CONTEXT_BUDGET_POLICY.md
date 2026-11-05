@@ -1,5 +1,32 @@
 # Coordinated route budgets and prefix rewrites
 
+## Automatic compaction preserves execution continuity
+
+**Problem (2026-11-05).** An implicit 128K working set, or 90% of a pricing
+tier, triggered lossy rewrites far below the route's physical window. A bounded
+sample of conversation `mw1qxog7wlwbz5` contained 20 `working_set` archives over
+165 minutes; receipt prompts were about 126–150K tokens on a 1M route whose
+window-safety trigger was 777,600. This establishes premature economic pressure,
+not that every rewrite lost facts or caused every long-running task.
+
+**Decision.** Automatic compaction defaults to the existing route-window safety
+trigger with output and compaction reserves. The default economic working set
+is zero, and pricing tiers do not silently select one. Explicit positive
+`compaction.workingSetTokens` / `TOFU_WORKING_CONTEXT_TOKENS` values retain the
+existing economic candidate and ROI policy; request config wins. Invalid values
+fall back to window safety. Manual compaction, mandatory admission, reactive
+recovery, source preservation and complete-summary requirements are unchanged.
+No task-age, token-spend or total-round limit is introduced.
+
+**Alternatives rejected.** Raising the arbitrary default only moves the same
+unproven quality/cost tradeoff. ROI alone predicts spending, not task completion
+or evidence retention. Waiting for literal window exhaustion would omit the
+space required for output and safe recovery. This policy can retain larger
+prompts and cost more per request; end-to-end quality/cost gains require a live
+comparison, not extrapolation from token savings. Gate regressions keep a
+150K/1M prompt intact by default, allow an explicit 128K target, and still trigger
+under 900K/1M pressure.
+
 ## Native route scope
 
 Native application admission binds the compiled route's declared window, actual
