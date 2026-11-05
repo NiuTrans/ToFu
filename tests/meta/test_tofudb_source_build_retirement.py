@@ -18,6 +18,20 @@ from tests.support import tofudb_binary as binary_support
 pytestmark = pytest.mark.unit
 
 
+def test_compiler_failure_keeps_primary_error_when_warnings_fill_the_tail(tmp_path, monkeypatch):
+    import subprocess
+    diagnostic = 'error[E0425]: cannot find worker control type\n --> src/worker_control.rs:9:4\n'
+    stderr = 'warning: before\n' * 300 + diagnostic + 'warning: after\n' * 300
+
+    def failed(*args, **kwargs):
+        raise subprocess.CalledProcessError(101, ['cargo', 'build'], stderr=stderr)
+
+    monkeypatch.setattr(binary_support, '_run_build', failed)
+    with pytest.raises(RuntimeError) as error:
+        binary_support._cargo_build(tmp_path, tmp_path / 'cargo')
+    assert diagnostic.strip() in str(error.value)
+
+
 class _Interrupted(BaseException):
     """Stands in for the Failed outcome pytest-timeout raises from SIGALRM."""
 

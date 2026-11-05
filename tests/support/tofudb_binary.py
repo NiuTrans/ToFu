@@ -117,7 +117,13 @@ def _cargo_build(project_root: Path, cargo: Path) -> Path:
                 cwd=manifest.parent, env=env, timeout=_CARGO_BUILD_TIMEOUT_SECONDS,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            detail = str(getattr(exc, 'stderr', '') or exc)[-2000:]
+            import re
+            diagnostic = str(getattr(exc, 'stderr', '') or exc)
+            primary = re.search(r'^error(?:\[[^]\n]+\])?:', diagnostic, re.MULTILINE)
+            # Keep the existing diagnostic budget around the actionable error;
+            # warning-heavy tails must not hide the source location to repair.
+            detail = (diagnostic[primary.start():primary.start() + 2000]
+                      if primary else diagnostic[-2000:])
             raise RuntimeError(
                 f'tofu-db source build failed; refusing a stale binary '
                 f'fallback: {detail}') from exc

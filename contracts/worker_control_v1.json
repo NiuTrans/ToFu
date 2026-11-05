@@ -1,0 +1,16 @@
+{
+  "format": "tofu.worker-control/v1",
+  "operation": "worker_control.watch",
+  "request": {"cursor": "null or the previous response cursor"},
+  "cursor": {"epoch": "authority process UUID", "queue": "u64 generation", "cancel": "u64 generation"},
+  "response": {"format": "tofu.worker-control/v1", "cursor": "current cursor", "cancelTasks": "task IDs observed during this wait, or null when a gap requires rechecking all active claims"},
+  "semantics": {
+    "authority": "Authenticated transport control; hints confer no execution, ownership or cancellation authority.",
+    "commit": "Queue index and cancellation mutations publish after commit, before delivery acknowledgement; rollback may cause a harmless invalidation but never an execution.",
+    "subscribe": "Read an initial cursor before the first queue probe. Compare the next cursor before waiting, so a commit between probe and wait cannot be lost.",
+    "idle": "A wait consumes no semantic transaction, command receipt or queue query. Its existing request deadline bounds the connection; an unchanged response does not trigger a probe.",
+    "reconnect": "A new authority epoch or lost response invalidates the queue and active claim observations.",
+    "retention": "Only generations and currently waiting connections are retained. No notification log or durable user data is created.",
+    "shutdown": "Authority shutdown wakes every waiting connection before joining transport workers."
+  }
+}

@@ -26,6 +26,11 @@ const GLOBAL_BLOB_OWNER_USER_ID: u64 = TENANT_GLOBAL_OWNER_ID;
 const SUMMARY_MAGIC: &[u8; 8] = b"WJQSUM01";
 const PRIORITY_COUNT: usize = MAX_WORKER_JOB_PRIORITY + 1;
 
+/// These task identities retain domain recovery ownership after lease loss.
+pub(crate) fn owns_conversation_task(task_id: &str) -> bool {
+    task_id.starts_with("conversation-attempt:")
+}
+
 fn invalid_input(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
@@ -410,6 +415,7 @@ fn put_queued_index(
     transaction: &mut AuthorityTransaction,
     job: &Job,
 ) -> io::Result<()> {
+    transaction.note_worker_queue_change();
     database.entity_put(
         transaction,
         queued_key(transaction, job)?,
@@ -891,6 +897,16 @@ impl PublicationClaim {
 
 /// Read the bound job inside the publishing transaction so its version joins
 /// OCC validation. A heartbeat/claim read in another transaction is not a fence.
+pub(crate) fn starts_tool_effect(event_type: &str, payload: &[u8]) -> io::Result<bool> {
+    if event_type != "tool_effect" { return Ok(false); }
+    let event: Value = serde_json::from_slice(payload)
+        .map_err(|_| invalid_input("tool effect event is not JSON"))?;
+    let effect = &event["executionEffect"];
+    Ok(effect.get("state").and_then(Value::as_str) == Some("entered")
+        && effect.get("reconciliation").is_none_or(Value::is_null))
+}
+
+/// Cancellation drainage never admits a new tool effect, even in a terminal frame.
 pub(crate) fn require_conversation_publication_claim(
     database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
     attempt_id: &str, task_id: &str, proof: Option<&PublicationClaim>, terminal: bool,
@@ -1144,6 +1160,8 @@ pub(crate) fn request_cancel(
     job.cancel_requested_at_ms = now_ms;
     job.cancel_reason = reason.to_owned();
     job.updated_at_ms = now_ms;
+    transaction.note_worker_queue_change();
+    transaction.note_worker_cancellation(task_id);
     put_job(database, transaction, &job)?;
     if suspended || domain_cancel {
         put_queued_index(database, transaction, &job)?;

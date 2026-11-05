@@ -50,6 +50,24 @@ pending evidence, missing-local-task Stop, pre-execution cancellation, unknown
 preparation outcomes and terminal durability debt. It measures correctness and
 joined lifetime, not production provider throughput or automatic crash recovery.
 
+Legacy restart indexes no longer retain claimed conversation tasks or Flow
+phases. `test_worker_recovery_ownership.py` measures unchanged snapshots and
+checkpoints across both recovery commands, plus an empty legacy-recovery probe
+when only worker-owned state remains. It separately proves ordinary orphan
+recovery still runs on all three authorities. This removes reconstructible
+index entries; no execution record, effect receipt or account is reclaimed.
+
+Worker wake retention is independent of job history: two generation counters,
+one authority epoch and the task IDs accumulated by currently waiting clients.
+`test_worker_control.py` checks missed-subscription delivery and shutdown;
+`test_worker_service_remote.py` waits from an empty queue, admits a real job,
+observes remote Stop and verifies durable cancellation plus zero retained active
+monitors on SQLite, PostgreSQL and TofuDB. There is no notification table, command
+receipt or durable replay stream. `test_worker_commit_wake.py` injects real SQLite
+COMMIT acknowledgement loss and verifies one effect and a visible generation
+change, while a failed statement publishes no uncommitted hints. These are
+correctness and logical-retention measurements, not a throughput claim.
+
 ## Payment quote retention
 
 Stripe prepares one durable payment quote before provider IO and later binds its

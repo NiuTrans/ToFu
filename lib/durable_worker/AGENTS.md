@@ -1,0 +1,20 @@
+# Durable execution ownership
+
+This package owns typed kind admission, synchronous claimed execution, lease
+supervision and the demand service. Domain handlers retain invocation, effect,
+accounting and Turn settlement; this package never replays an unknown effect.
+
+- `__init__.py` retains the public runner/context/registration imports.
+- `service.py` composes claim horizons, the shared demand executor, typed
+  registrations and one injected wake source. An idle worker count is reuse
+  policy, never an admission ceiling.
+- `lib/storage/worker_wake.py` owns the remote hint transport. A hint only
+  requests a new authority proof; it cannot cancel or authorize an effect.
+- State and transport semantics live in
+  `contracts/worker_job_lifecycle_v1.json`, `contracts/worker_control_v1.json`
+  and `docs/STORAGE.md`. Existing domain runtime policy owns timing contracts.
+
+Verify `tests/storage/test_durable_worker_foundation.py`, worker lease and
+suspension suites, `test_worker_service_remote.py`, and the automation runtime
+tests. Claim kinds only after their domain's crash, effect and settlement
+specifications prove every registration property.

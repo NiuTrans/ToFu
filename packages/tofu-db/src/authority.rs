@@ -144,9 +144,16 @@ pub struct AuthorityTransaction {
     content_free_diagnostic_outbox_exemption: bool,
     internal_maintenance: bool,
     search_invalidated: bool,
+    worker_queue_changed: bool,
+    worker_cancelled_tasks: BTreeSet<String>,
 }
 
 impl AuthorityTransaction {
+    pub(crate) fn note_worker_queue_change(&mut self) { self.worker_queue_changed = true; }
+    pub(crate) fn note_worker_cancellation(&mut self, task_id: &str) {
+        self.worker_cancelled_tasks.insert(task_id.to_owned());
+    }
+
     pub(crate) fn note_search_invalidation(&mut self) {
         self.search_invalidated = true;
     }
@@ -246,6 +253,7 @@ pub struct AuthorityDatabase {
     canonical_json_cache: Arc<crate::canonical_json_bytes::cache::CanonicalProofCache>,
     event_read_epoch: Uuid,
     worker_lease_clock: Arc<crate::worker_lease_clock::WorkerLeaseClock>,
+    pub(crate) worker_control: Arc<crate::worker_control::WorkerControl>,
     preparation: Option<Arc<preparation::PreparedBlobStore>>,
     entities: EntityDatabase,
     foreground_admissions: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -307,6 +315,7 @@ impl AuthorityDatabase {
             entities,
             event_read_epoch: Uuid::new_v4(),
             worker_lease_clock: Arc::new(crate::worker_lease_clock::WorkerLeaseClock::new()?),
+            worker_control: crate::worker_control::WorkerControl::new(),
             foreground_admissions: Default::default(),
             canonical_json_cache: Default::default(),
             decoded_chunk_cache: Default::default(),
@@ -327,6 +336,7 @@ impl AuthorityDatabase {
             entities,
             event_read_epoch: Uuid::new_v4(),
             worker_lease_clock: Arc::new(crate::worker_lease_clock::WorkerLeaseClock::new()?),
+            worker_control: crate::worker_control::WorkerControl::new(),
             foreground_admissions: Default::default(),
             canonical_json_cache: Default::default(),
             decoded_chunk_cache: Default::default(),
@@ -355,6 +365,7 @@ impl AuthorityDatabase {
             entities,
             event_read_epoch: Uuid::new_v4(),
             worker_lease_clock: Arc::new(crate::worker_lease_clock::WorkerLeaseClock::new()?),
+            worker_control: crate::worker_control::WorkerControl::new(),
             foreground_admissions: Default::default(),
             canonical_json_cache: Default::default(),
             decoded_chunk_cache: Default::default(),
@@ -380,6 +391,7 @@ impl AuthorityDatabase {
             entities,
             event_read_epoch: Uuid::new_v4(),
             worker_lease_clock: Arc::new(crate::worker_lease_clock::WorkerLeaseClock::new()?),
+            worker_control: crate::worker_control::WorkerControl::new(),
             foreground_admissions: Default::default(),
             canonical_json_cache: Default::default(),
             decoded_chunk_cache: Default::default(),
@@ -400,6 +412,7 @@ impl AuthorityDatabase {
             entities,
             event_read_epoch: Uuid::new_v4(),
             worker_lease_clock: Arc::new(crate::worker_lease_clock::WorkerLeaseClock::new()?),
+            worker_control: crate::worker_control::WorkerControl::new(),
             foreground_admissions: Default::default(),
             canonical_json_cache: Default::default(),
             decoded_chunk_cache: Default::default(),
@@ -427,6 +440,7 @@ impl AuthorityDatabase {
             entities,
             event_read_epoch: Uuid::new_v4(),
             worker_lease_clock: Arc::new(crate::worker_lease_clock::WorkerLeaseClock::new()?),
+            worker_control: crate::worker_control::WorkerControl::new(),
             foreground_admissions: Default::default(),
             canonical_json_cache: Default::default(),
             decoded_chunk_cache: Default::default(),
@@ -484,6 +498,7 @@ impl AuthorityDatabase {
             entities: self.entities.build_read_replica()?,
             event_read_epoch: self.event_read_epoch,
             worker_lease_clock: Arc::clone(&self.worker_lease_clock),
+            worker_control: Arc::clone(&self.worker_control),
             foreground_admissions: std::sync::Arc::clone(&self.foreground_admissions),
             canonical_json_cache: Arc::clone(&self.canonical_json_cache),
             decoded_chunk_cache: Arc::clone(&self.decoded_chunk_cache),
@@ -1525,6 +1540,8 @@ impl AuthorityDatabase {
             content_free_diagnostic_outbox_exemption: false,
             internal_maintenance: false,
             search_invalidated: false,
+            worker_queue_changed: false,
+            worker_cancelled_tasks: BTreeSet::new(),
         })
     }
 
@@ -1615,6 +1632,8 @@ impl AuthorityDatabase {
             content_free_diagnostic_outbox_exemption: false,
             internal_maintenance: false,
             search_invalidated: false,
+            worker_queue_changed: false,
+            worker_cancelled_tasks: BTreeSet::new(),
         }))
     }
 
@@ -2803,6 +2822,8 @@ impl AuthorityDatabase {
             content_free_diagnostic_outbox_exemption,
             internal_maintenance,
             search_invalidated,
+            worker_queue_changed,
+            worker_cancelled_tasks,
             ..
         } = transaction;
         if authority_uuid != self.entities.authority_uuid() {
@@ -2941,6 +2962,7 @@ impl AuthorityDatabase {
             .iter()
             .map(|prepared| prepared.committed_result(committed.sequence))
             .collect();
+        self.worker_control.publish(worker_queue_changed, &worker_cancelled_tasks);
         if search_invalidated {
             self.note_search_invalidation_commit(tenant_id, owner_user_id);
         }

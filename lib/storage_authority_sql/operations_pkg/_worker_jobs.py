@@ -97,6 +97,20 @@ def _live_claim(row, worker_id, fence, epoch, now):
             and int(row['lease_deadline_ms']) > now)
 
 
+def _starts_tool_effect(event: Any) -> bool:
+    """Initial effect ACK is admission; later reconciliation is draining evidence.
+
+    The common tool owner emits this exact write-ahead event before invoking a
+    handler. Reconciliation references only attach to an already entered effect.
+    Ordinary progress never pays a history read or acquires effect authority.
+    """
+    if not isinstance(event, Mapping) or event.get('type') != 'tool_effect':
+        return False
+    effect = event.get('executionEffect')
+    return (isinstance(effect, Mapping) and effect.get('state') == 'entered'
+            and effect.get('reconciliation') is None)
+
+
 def _require_conversation_publication_claim(
     session: Session, *, attempt_id: str, task_id: str, user_id: int,
     proof: Any, terminal: bool = False, drain_entered: bool = False,
@@ -255,6 +269,7 @@ def _worker_job_enqueue_owned(session: Session, payload: Mapping[str, Any]) -> A
             now_ms, now_ms,
         ),
     )
+    session.worker_hints.queue_changed = True
     created = _job_row(session, task_id)
     if created is None:  # pragma: no cover - transaction invariant
         raise StorageError('database_internal', 'Worker job insert was not visible')
@@ -467,6 +482,7 @@ def _worker_job_defer(session: Session, payload: Mapping[str, Any]) -> Any:
     )
     if not count:
         return {"ok": False, "error": "stale_fence"}
+    session.worker_hints.queue_changed = True
     return {
         "ok": True,
         "replayed": False,
@@ -484,6 +500,7 @@ def _worker_job_wake_owned(session: Session, task_id: str, owner: int, tenant: s
     sequence = int(row['wake_sequence']) + 1
     if sequence > _MAX_CLOCK_MS:
         raise StorageError('database_integrity', 'Worker wake sequence overflows')
+    session.worker_hints.queue_changed = True
     wake_at = _lease_authority(session).utc_now_ms
     session.execute('UPDATE storage_worker_jobs SET wake_sequence=?, '
                     'available_at_ms=?, updated_at_ms=? WHERE task_id=?',
@@ -600,6 +617,8 @@ def _worker_job_request_cancel(
             user_id,
         ),
     )
+    session.worker_hints.queue_changed = True
+    session.worker_hints.cancelled_tasks.add(task_id)
     updated = _job_row(session, task_id)
     return {"accepted": True, "alreadyRequested": False, "job": _job_document(updated)}
 

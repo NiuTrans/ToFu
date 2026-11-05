@@ -192,6 +192,7 @@ pub mod native_checkpoint_store;
 #[cfg(feature = "native-runtime-checkpoints")]
 mod checkpoint_runtime;
 mod daemon_checkpoint;
+mod worker_control;
 
 mod query_result_cache;
 #[cfg(test)]

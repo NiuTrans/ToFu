@@ -365,6 +365,7 @@ impl EmbeddedRuntime {
             authority_watch,
             dispatch_bindings: crate::server::StorageV2Bindings {
                 checkpoint_control: None,
+                worker_control: None,
                 authority_admission: Arc::default(),
                 published_queries: Some(published_queries),
                 authority_gc_budget: AuthorityGarbageCollectionBudget::from_resource_budget(config.resource_budget),

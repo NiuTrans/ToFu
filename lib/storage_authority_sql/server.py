@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from lib.storage.generated_worker_control import WATCH_OPERATION
+
 import ctypes
 import hashlib
 import hmac
@@ -197,6 +199,7 @@ class _StorageTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             cooldown_s=idle_trim_cooldown_s,
         )
         self.backend = backend
+        self.worker_control = backend.worker_control
         self.token = token
         self.read_only_preview = bool(read_only_preview)
         self.logical_outbox = logical_outbox
@@ -204,9 +207,16 @@ class _StorageTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.native_checkpoint = NativeCheckpointService(backend,
             getattr(getattr(backend, 'config', None), 'native_checkpoint', None),
             logical_outbox=logical_outbox, read_only=self.read_only_preview)
+        self._worker_control_bound = False
         super().__init__(address, handler, bind_and_activate=True)
+        self._worker_control_bound = True
 
     def server_close(self):
+        # TCPServer closes partial construction on bind failure. It never
+        # acquired this backend lifetime and must not retire its existing watch.
+        if self._worker_control_bound:
+            self.worker_control.close()
+            self._worker_control_bound = False
         try:
             super().server_close()
         finally:
@@ -470,7 +480,11 @@ class _StorageHandler(socketserver.BaseRequestHandler):
                 1000,
             )
 
-        if operation.startswith('native_checkpoint.'):
+        if operation == WATCH_OPERATION:
+            if kind != 'query' or request.get('command_id') is not None:
+                raise StorageError('database_protocol_error', 'Worker watch requires a query without a receipt')
+            result = self.server.worker_control.watch(request.get('payload'), deadline_at)
+        elif operation.startswith('native_checkpoint.'):
             if request.get('command_id') is not None:
                 raise StorageError('database_protocol_error', 'Native checkpoint controls cannot use command receipts')
             result = self.server.native_checkpoint.dispatch(kind, operation, request.get('payload'), deadline_at)
