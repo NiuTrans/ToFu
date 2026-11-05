@@ -91,6 +91,9 @@ class ExecutionBudget:
                   or (root.get('config') or {}).get('_unknownUsagePolicy'))
         self._unknown_usage_policy = policy if policy in ('continue', 'fence') else 'fence'
         self._model_attempt_observer = root.get('_executionModelAttemptObserver')
+        self._model_dispatch_authority = root.get('_executionModelDispatchAuthority')
+        if self._model_dispatch_authority is not None and not callable(self._model_dispatch_authority):
+            raise TypeError('model dispatch authority must be callable')
         self._child_observer = root.get('_executionChildObserver')
         self._child_ordinal = 0
         self._child_records = {}
@@ -1021,6 +1024,9 @@ class ExecutionBudget:
                 return
             if not row['dispatched'] and callable(self._model_attempt_observer):
                 self._observe_model_attempt(ordinal,row,'dispatch_intent',0,False)
+                self._validate_model_dispatch(row)
+            if self._model_dispatch_authority is not None:
+                self._model_dispatch_authority(row['task'])
                 self._validate_model_dispatch(row)
             row['dispatched'] = True
             self._publish_account_frontier('model_dispatched')

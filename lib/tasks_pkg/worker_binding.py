@@ -40,7 +40,9 @@ def bind_conversation_worker(task, context):
         attempt_id=task.get('_attemptId'), turn_id=task.get('_turnId'), principal=principal)
     if task.get('id') != identity:
         raise ValueError('conversation worker task identity differs from claim')
-    if '_conversationWorkerContext' in task or '_invocationAbortCheck' in task:
+    if any(key in task for key in (
+            '_conversationWorkerContext', '_invocationAbortCheck',
+            '_executionModelDispatchAuthority', '_executionBudget')):
         raise ValueError('conversation worker cannot replace existing invocation control')
     from lib.tasks_pkg.invocation_cancellation import ChildCancellationScope
 
@@ -59,6 +61,51 @@ def bind_conversation_worker(task, context):
 
     task['_conversationWorkerContext'] = context
     task['_invocationAbortCheck'] = ChildCancellationScope(aborted)
+    task['_executionModelDispatchAuthority'] = lambda actor: admit_model_dispatch(actor, context)
+
+
+def admit_model_dispatch(task, context):
+    """Revalidate the committed root entry at the final shared model boundary.
+
+    The entered Attempt is the durable possibility-of-effects witness. Each
+    request borrows its current claim, including descendants, after all domain
+    account observers. This admits no replay and owns no usage or cost ledger.
+    """
+    from lib.durable_worker import WorkerCancellationRequested, WorkerLeaseLost
+    from lib.llm.llm_errors import AbortedError, ModelAdmissionRefused
+    from lib.storage.errors import StorageError
+    from lib.tasks_pkg.persistence_wait import wait_for_persistence
+    from lib.turn_lifecycle import mark_task_started
+    if (task.get('_conversationWorkerContext') is not context
+            or task.get('_userId') != context.principal.require_owner(context='model execution authority')
+            or task.get('convId') != context.claim.payload['conversationId']):
+        raise ModelAdmissionRefused('Model execution authority differs from its invocation')
+    try:
+        context.checkpoint()
+        def admit():
+            return mark_task_started(context.claim.payload['attemptId'], context.claim.task_id,
+                user_id=task['_userId'], worker_claim=context.publication_claim())
+        try:
+            result = wait_for_persistence(task, admit, label='worker model admission', effect_free=True)
+        except StorageError as error:
+            if error.code == 'database_conflict':
+                # Read the existing authoritative verdict only to distinguish
+                # human Stop from lost execution ownership; this grants nothing.
+                from lib.durable_worker import StorageWorkerJobStore
+                import time
+                context.observe_claim_state(StorageWorkerJobStore().claim_state(
+                    context.claim, now_ms=time.time_ns() // 1_000_000))
+                context.checkpoint()
+            raise
+        if (not isinstance(result, dict) or result.get('status') != 'running'
+                or result.get('taskId') != context.claim.task_id
+                or result.get('attemptId') != context.claim.payload['attemptId']):
+            raise ModelAdmissionRefused('Model execution entry was not acknowledged')
+        context.checkpoint()
+    except WorkerCancellationRequested as error:
+        raise AbortedError(str(error)) from error
+    except (WorkerLeaseLost, StorageError) as error:
+        raise ModelAdmissionRefused('Model execution authority ended') from error
 
 
 def inherit_conversation_worker(parent, child):
