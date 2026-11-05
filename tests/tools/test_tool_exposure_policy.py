@@ -37,6 +37,7 @@ EAGER = frozenset({
     'inspect_tool_effect', 'read_tool_artifact', 'search_tool_artifact',
     'spawn_agents', 'get_agent_result', 'evolution_source',
     'await_project_workers', 'cancel_project_work', 'create_conversation',
+    'control_conversation', 'get_conversation_status',
     'delegate_project_work', 'dispatch_project_assignment',
     'finish_project_request', 'get_project_assignment', 'get_project_workers',
     'report_to_user', 'request_user_decision', 'review_project_work', 'update_task_progress',
