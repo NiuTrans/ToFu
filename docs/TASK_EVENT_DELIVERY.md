@@ -332,6 +332,13 @@ Raw reports and artifact manifests for both the accepted and rejected arms are
 retained under `/tmp/tofu-storage-terminal-results-20261105/`; the frozen
 control/candidate directories use `/tmp/tofu-storage-terminal-{control,reuse}-20261105/`.
 
+The integrated source-matched artifact `135bd105ed16…` repeated all 25 histories
+and 625 events after the shared worker/recovery changes: cohort completion
+24.422 seconds, terminal median 1.039 seconds, terminal P95 4.578 seconds.
+Complete work matched both controls above; ordered publication, SIGKILL/reopen
+and offline integrity passed again. This single integration run is separate
+from the two same-base attribution pairs, not another independent paired trial.
+
 Merged-source verification passed 35 native event/batch/worker-fence/fault tests,
 one isolated checkpoint-work counter test, 17 native application delivery tests
 with no skips, and 48 Python harness/resource/SQL checks. The broad native run
