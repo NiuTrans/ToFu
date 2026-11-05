@@ -77,6 +77,28 @@ def test_unreadable_package_cannot_disappear_from_prepared_identity(tmp_path, mo
         prepare_plan(project, {}, python='/env/python')
 
 
+def test_installs_into_the_interpreter_environment_change_generation_but_bytecode_does_not(tmp_path):
+    import subprocess
+    import sys
+    from serverctl_pkg.execution_plan import prepare_plan
+    project = tmp_path / 'project'
+    project.mkdir()
+    _source(project)
+    environment = tmp_path / 'environment'
+    subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(environment)],
+                   check=True, capture_output=True, timeout=300)
+    python = str(environment / 'bin' / 'python')
+    purelib = Path(subprocess.run(
+        [python, '-I', '-c', 'import sysconfig; print(sysconfig.get_path("purelib"))'],
+        check=True, capture_output=True, text=True, timeout=120).stdout.strip())
+    plan = prepare_plan(project, {}, python=python)
+    (purelib / '__pycache__').mkdir()
+    (purelib / '__pycache__' / 'provider.cpython-312.pyc').write_bytes(b'bytecode')
+    assert plan == prepare_plan(project, {}, python=python)
+    (purelib / 'provider-0.1.1.dist-info').mkdir()
+    assert plan != prepare_plan(project, {}, python=python)
+
+
 @pytest.mark.parametrize('package', ['tofu_db', 'tofu_workers', 'scripts', 'new_runtime_owner'])
 def test_every_importable_runtime_package_changes_generation(tmp_path, package):
     from serverctl_pkg.execution_plan import prepare_plan

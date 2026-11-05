@@ -294,8 +294,8 @@ The delivery dependencies and completion evidence are:
    shutdown, preserving physical joins and the existing pinned-import source
    owner. Real processes prove manager exec retention, owner-death wake and no
    clean-stop receipt before worker exit. Generation preparation hashes the
-   existing Python source boundary and launch policy; frontend artifacts do not
-   replace execution. The selected SQL Sidecar now shares the resident storage
+   existing Python source boundary, the interpreter's install fingerprint and
+   launch policy; frontend artifacts do not replace execution. The selected SQL Sidecar now shares the resident storage
    lifetime through its existing v1 handoff. Inbound bot connections belong to
    task workers, so API composition does not duplicate them. Manager execution
    composition now prepares and supervises the execution host, preserving it
