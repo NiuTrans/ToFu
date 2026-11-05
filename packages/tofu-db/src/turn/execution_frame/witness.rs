@@ -25,6 +25,8 @@ pub(in crate::turn) struct ProjectionWitness {
     actor: String,
     status: String,
     guidance_repair_free: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_bytes: Option<usize>,
 }
 
 /// Transaction-local no-op proof, minted only by the shared normalizer on
@@ -157,7 +159,7 @@ impl ProjectionWitness {
             fields.insert(key.clone(), field);
         }
         let mut witness = Self {
-            version: 1,
+            version: 2,
             revision,
             bytes: 0,
             fields,
@@ -165,6 +167,7 @@ impl ProjectionWitness {
             actor: actor.to_owned(),
             status: status.to_owned(),
             guidance_repair_free: false,
+            recovery_bytes: Some(size(&restart_settlement(projection))?),
         };
         witness.bytes = witness.measured_bytes()?;
         if !witness.bounded()? {
@@ -194,6 +197,8 @@ impl ProjectionWitness {
     fn bounded(&self) -> io::Result<bool> {
         Ok(
             self.bytes <= crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES
+                && self.recovery_bytes.is_none_or(|bytes|
+                    bytes > 0 && bytes <= crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES)
                 && size(self)? <= MAX_TURN_PROJECTION_PATCH_BYTES
                 && self.fields.keys().next().is_none_or(|key| {
                     !matches!(
@@ -206,12 +211,13 @@ impl ProjectionWitness {
 
     pub(in crate::turn) fn decode(raw: &Value, revision: u64) -> io::Result<Option<Self>> {
         // Unknown evidence versions remain a reconstructible optimization miss.
-        if raw.get("version").and_then(Value::as_u64) != Some(1) {
+        if !matches!(raw.get("version").and_then(Value::as_u64), Some(1 | 2)) {
             return Ok(None);
         }
         let witness: Self = serde_json::from_value(raw.clone())
             .map_err(|_| invalid_data("Turn frame evidence is malformed"))?;
         if witness.revision != revision
+            || (witness.version == 1 && witness.recovery_bytes.is_some())
             || !witness.bounded()?
             || witness.measured_bytes()? != witness.bytes
             || witness.fields.values().any(|field| {
@@ -234,6 +240,10 @@ impl ProjectionWitness {
     ) -> io::Result<Option<VerifiedStableSegments>> {
         if projection.len() != self.fields.len() {
             return Err(invalid_data("Turn frame fields differ"));
+        }
+        if self.recovery_bytes.is_some_and(|bytes|
+            size(&restart_settlement(projection)).ok() != Some(bytes)) {
+            return Err(invalid_data("Turn frame recovery bytes differ"));
         }
         for (key, value) in projection {
             if FieldWitness::from_value(value)?.as_ref() != self.fields.get(key) {
@@ -291,6 +301,7 @@ pub(in crate::turn) fn classify_patch(request: &EventRecordRequest) -> bool {
 pub(in crate::turn) struct WitnessUpdate {
     pub head: ProjectionHeadDescriptor,
     pub projection_bytes: usize,
+    pub recovery_bytes: Option<usize>,
 }
 
 pub(in crate::turn) fn append_from_witness(
@@ -351,6 +362,12 @@ pub(in crate::turn) fn append_from_witness(
         if normalization_dependency(key) {
             witness.stable_segments = false;
         }
+        // These are exactly restart_settlement's projection inputs. The
+        // current classifier excludes toolRounds; retain the dependency here
+        // so extending it cannot accidentally reuse a stale recovery proof.
+        if matches!(key, "content" | "thinking" | "toolRounds") {
+            witness.recovery_bytes = None;
+        }
         match operation["op"].as_str().unwrap() {
             "set" => {
                 let Some(field) =
@@ -385,9 +402,9 @@ pub(in crate::turn) fn append_from_witness(
     if !witness.bounded()? {
         return Ok(None);
     }
-    // Prove that the ordinary size validator cannot enter its materialized
-    // recovery inspection. The compact Turn envelope may itself be large;
-    // no fixed envelope estimate is sufficient.
+    // Supply the ordinary validator's exact recovery count near its ceiling.
+    // Legacy or invalidated evidence still materializes there. The compact
+    // Turn envelope may itself be large; measure it instead of estimating.
     let mut envelope = loaded.document.clone();
     envelope.remove("projection");
     envelope.remove("_projectionHead");
@@ -396,14 +413,15 @@ pub(in crate::turn) fn append_from_witness(
     envelope.insert("settlement".into(), json!(request.settlement));
     envelope.insert("updatedAt".into(), json!(request.now_ms));
     let reserve = MAX_LEGACY_DOCUMENT_BYTES + MAX_TIMING_TRACE_PERSISTED_BYTES + 1024;
-    if witness
-        .bytes
-        .saturating_mul(2)
-        .saturating_add(reserve)
-        .saturating_add(size(&envelope)?)
-        .saturating_add(b",\"projection\":".len())
-        > crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES
-    {
+    let materialized = witness.bytes.saturating_add(size(&envelope)?)
+        .saturating_add(b",\"projection\":".len());
+    let limit = crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES;
+    if materialized.saturating_add(witness.bytes).saturating_add(reserve) > limit
+        && witness.recovery_bytes.is_none() {
+        return Ok(None);
+    }
+    let reserve = reserve.max(witness.recovery_bytes.unwrap_or(0).saturating_add(1024));
+    if materialized.saturating_add(reserve) > limit {
         return Ok(None);
     }
     let next_count = head.patch_count + 1;
@@ -419,6 +437,7 @@ pub(in crate::turn) fn append_from_witness(
     next.patch_count = next_count;
     next.patch_bytes = next_bytes;
     let projection_bytes = witness.bytes;
+    let recovery_bytes = witness.recovery_bytes;
     next.frame_witness = Some(witness);
     store_projection_head_patch(
         database,
@@ -432,5 +451,6 @@ pub(in crate::turn) fn append_from_witness(
     Ok(Some(WitnessUpdate {
         head: next,
         projection_bytes,
+        recovery_bytes,
     }))
 }

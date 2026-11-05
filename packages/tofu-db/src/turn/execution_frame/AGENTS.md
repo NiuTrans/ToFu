@@ -17,6 +17,9 @@ producer batch, process cache or passive replay protocol.
 - Missing/future evidence and unsupported transitions use materialization;
   known malformed evidence retains integrity errors. Text-tail and lifecycle
   writers must drop or replace facts when their state changes.
+- Version 2 measures restart-settlement bytes with the shared recovery owner.
+  Its content/thinking/toolRounds inputs invalidate reuse; materialization
+  verifies the count. Version 1 retains conservative size admission.
 - The containing `execution_frame.rs::record` and its multi-step IR port remain
   `cfg(test)` experiments. Do not infer producer batching from those tests.
 - Runtime contracts: `src/turn_execution_frame_runtime_tests.rs`; real producer
