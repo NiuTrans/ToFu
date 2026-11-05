@@ -583,6 +583,8 @@ def test_real_supervisor_reexec_loads_new_generation_with_same_pid(tmp_path):
     project.mkdir()
     (project / 'data').mkdir()
     (project / 'logs').mkdir()
+    # Deliberately only the declared closure: it is the generation identity,
+    # so a module the manager loads outside it would survive an update stale.
     for name in supervisor_protocol.SUPERVISOR_SOURCE_FILES:
         (project / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(os.path.join(root, name), project / name)
@@ -595,7 +597,8 @@ def test_real_supervisor_reexec_loads_new_generation_with_same_pid(tmp_path):
         bind_ephemeral_loopback(probe)
         port = int(probe.getsockname()[1])
     env = {
-        **os.environ,
+        **{key: value for key, value in os.environ.items()
+           if key != 'PYTHONPATH'},
         'TOFU_SUPERVISOR_HOST': '127.0.0.1',
         'TOFU_SUPERVISOR_PORT': str(port),
         'TOFU_SUPERVISOR_PROJECTS': str(project),
@@ -603,8 +606,10 @@ def test_real_supervisor_reexec_loads_new_generation_with_same_pid(tmp_path):
     }
     startup_log = project / 'logs' / 'supervisor-startup.log'
     startup_output = startup_log.open('wb')
+    # -S: an editable install's finder would otherwise satisfy a missing
+    # module from the checkout the environment was installed from.
     process = subprocess.Popen(
-        [sys.executable, 'supervisor.py'],
+        [sys.executable, '-S', 'supervisor.py'],
         cwd=project,
         env=env,
         stdin=subprocess.DEVNULL,
