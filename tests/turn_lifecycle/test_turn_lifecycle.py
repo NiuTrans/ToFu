@@ -1658,6 +1658,24 @@ def test_resume_with_switched_model_stamps_durable_config_marker(chat_sidecar):
     assert starts[0]['model'] == 'kimi-k3'
 
 
+def test_resume_model_switch_reads_the_submitted_turn_as_metadata(chat_sidecar, monkeypatch):
+    from lib.conversation_sync import command_service
+
+    conversation_id = _new_conversation_id('switch-metadata')
+    settled = _settled_abort(conversation_id)
+    reads, read_turn = [], command_service.get_turn
+
+    def recorded(conversation, turn_id, **kwargs):
+        reads.append((turn_id, kwargs.get('include_projection', True)))
+        return read_turn(conversation, turn_id, **kwargs)
+    monkeypatch.setattr(command_service, 'get_turn', recorded)
+
+    assert command_service._resume_model_switch_from(
+        conversation_id, settled['turnId'], 1, 'kimi-k3') == 'gpt-4o'
+    # Only the parent's contextSnapshot needs a projection body.
+    assert reads == [(settled['turnId'], False), (settled['parentTurnId'], True)]
+
+
 def test_resume_with_unchanged_model_stamps_no_marker(chat_sidecar):
     conversation_id = _new_conversation_id('switch-same')
     settled = _settled_abort(conversation_id)

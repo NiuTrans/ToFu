@@ -17,7 +17,11 @@ adds a worker, or writes SQL.
 binding_repository, clock, attempt_get, workspace_get)` accepts self-contained test ports. Defaults use the
 selected portable storage client, owner-scoped conversation repository,
 `get_turn(conversation, turn, user_id=owner, include_projection=...)` and
-coordination repository. Prerequisite evidence reads Turn metadata only.
+coordination repository. Prerequisite evidence, the delegation source and the
+publication result read Turn metadata only; the human source keeps its body read.
+`_check_record` skips a stored row's schema walk only for the exact canonical
+digest last validated under that definition and row identity; it caches no row or
+authority, and caller-supplied input is always walked.
 `clock` and budget deadlines are Unix seconds; grant `createdAt` uses that clock.
 
 Authorization replay preserves evidence, never renews a revoked/expired grant.
