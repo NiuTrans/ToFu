@@ -367,6 +367,15 @@ def test_optional_sibling_never_waives_mandatory_import(tmp_path, optional_impor
     'benchmarks/search_html_reference.py',
     'benchmarks/search_relevance.py',
     'benchmarks/tofudb_context_progression.py',
+    'benchmarks/model_dispatch_barrier.py',
+    'benchmarks/model_request_cpu.py',
+    'benchmarks/round_prep_body.py',
+    'benchmarks/round_token_count_cpu.py',
+    'benchmarks/route_group_retirement.py',
+    'benchmarks/storage_history_cohort.py',
+    'benchmarks/task_event_delivery_contention.py',
+    'benchmarks/turn_event_batch.py',
+    'scripts/analyze_agent_load.py',
 ))
 @pytest.mark.parametrize('mode', ('internal', 'opensource'))
 def test_portable_diagnostic_test_dependencies_follow_retained_source_policy(
@@ -394,6 +403,67 @@ def test_portable_diagnostic_test_dependencies_follow_retained_source_policy(
     _verify_exported_test_surface(target, source)
     assert (target / helper).read_text() == 'VALUE = 1\n'
     assert not (target / 'export_pkg').exists()
+
+
+_PATH_LOADING_TEST = (
+    'import importlib.util\n'
+    'from pathlib import Path\n'
+    'import pytest\n\n'
+    'ROOT = Path(__file__).resolve().parents[1]\n'
+    'HERE = Path(__file__).resolve().parent\n\n'
+    '@pytest.fixture\n'
+    'def helper():\n'
+    "    spec = importlib.util.spec_from_file_location('helper', ROOT / 'benchmarks' / 'helper.py')\n"
+    '    module = importlib.util.module_from_spec(spec)\n'
+    '    spec.loader.exec_module(module)\n'
+    '    return module\n'
+)
+
+
+def _make_path_loading_src(root):
+    _make_src(root)
+    (root / 'benchmarks').mkdir()
+    (root / 'benchmarks' / 'helper.py').write_text('VALUE = 1\n', encoding='utf-8')
+
+
+def test_path_loaded_first_party_helper_missing_from_export_is_blocked(tmp_path):
+    from export import ExportTestSurfaceError, _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_path_loading_src(src)
+    dest = tmp_path / 'dest'
+    _make_dest(dest, {'test_measure.py': _PATH_LOADING_TEST})
+
+    with pytest.raises(ExportTestSurfaceError,
+                       match=r'test_measure\.py -> benchmarks/helper\.py'):
+        _verify_exported_test_surface(dest, src)
+
+    (dest / 'benchmarks').mkdir()
+    (dest / 'benchmarks' / 'helper.py').write_text('VALUE = 1\n', encoding='utf-8')
+    _verify_exported_test_surface(dest, src)
+
+
+@pytest.mark.parametrize('load', (
+    # Module-relative and dynamic paths are not repository-root files.
+    "importlib.util.spec_from_file_location('local', HERE / 'helper.py')\n",
+    "importlib.util.spec_from_file_location('dyn', ROOT / 'benchmarks' / NAME)\n",
+    # A module-level importorskip of an unshipped root skips the whole module.
+    "pytest.importorskip('tofu_db')\n"
+    "importlib.util.spec_from_file_location('helper', ROOT / 'benchmarks' / 'helper.py')\n",
+))
+def test_path_loads_that_cannot_name_a_dropped_repository_file_pass(tmp_path, load):
+    from export import _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_path_loading_src(src)
+    dest = tmp_path / 'dest'
+    source = ('import importlib.util\nfrom pathlib import Path\nimport pytest\n'
+              "ROOT = Path(__file__).resolve().parents[1]\n"
+              "HERE = Path(__file__).resolve().parent\nNAME = 'helper.py'\n" + load)
+    _make_dest(dest, {'test_local.py': source})
+    _verify_exported_test_surface(dest, src)
 
 
 def test_public_installer_contract_does_not_require_private_export_toolchain(tmp_path):
