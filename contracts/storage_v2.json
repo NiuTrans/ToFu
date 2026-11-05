@@ -384,6 +384,7 @@
   },
   "applicationSemantics": {
     "ownerOmittedOperations": [
+      "worker_job.active.list",
       "system.schema_version",
       "worker_job.defer"
     ],

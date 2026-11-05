@@ -830,11 +830,11 @@ def list_running_tasks(
 ) -> list[dict]:
     """Return one entry per CONVERSATION with genuinely-live running work.
 
-    Used by the self-update restart guard to refuse a process re-exec that
-    would kill sibling conversations' in-flight work. A restart is an
-    unconditional ``os.execv`` of the whole server, so EVERY running task
-    dies with it — this lets the caller detect that and require an explicit
-    override.
+    The restart guard and sidebar share this owner. Durable roots are read from
+    the queue/lease indexes even when this API owns no carrier. Queued, running
+    and suspended roots stay active until their authority settles; API-local
+    heartbeat age cannot declare a remote worker dead. Local legacy work keeps
+    the following filters. Store errors propagate instead of proving idle.
 
     Three filters make the count reflect reality rather than registry cruft, so
     the guard never blocks a restart for work that is not actually running:
@@ -874,8 +874,8 @@ def list_running_tasks(
 
     Returns:
         A list of ``{'taskId', 'convId', 'elapsed'}`` dicts, one per distinct
-        live conversation (representative = the earliest-created live task of
-        that conv). Best-effort snapshot taken through ``TaskRuntime``.
+        live conversation and owner (representative = the earliest-created task
+        of that conversation), combining authority and local ``TaskRuntime``.
     """
     from lib.tasks_pkg.liveness import is_wedged, stall_threshold_seconds
     max_silent = stall_threshold_seconds()
@@ -883,7 +883,19 @@ def list_running_tasks(
     now = time.time()
     # Keyed by dedup identity so one conversation counts once. Keep the
     # earliest-created live task as the representative (stable, oldest work).
-    by_key: dict[str, tuple[float, dict]] = {}
+    from lib.durable_worker.activity import list_active_conversation_tasks
+    by_key: dict[tuple, tuple[float, dict]] = {}
+    for row in list_active_conversation_tasks(user_id=user_id):
+        conv = row['conversationId']
+        if exclude_conv_id and conv == exclude_conv_id:
+            continue
+        created = row['createdAtMs'] / 1000
+        key = (row['userId'], conv if conv else ('\x00task:' + row['taskId']))
+        prior = by_key.get(key)
+        if prior is None or created < prior[0]:
+            by_key[key] = (created, {
+                'taskId': row['taskId'], 'convId': conv, 'elapsed': round(now - created, 1),
+            })
     for t in chat_task_runtime.snapshot():
         tid = str(t.get('id') or '')
         if t.get('status') not in ('pending', 'running') or t.get('aborted'):
@@ -909,7 +921,7 @@ def list_running_tasks(
             continue
             # Dedup key: real conversations collapse by convId; convId-less
             # tasks each stay distinct (keyed on their unique task id).
-        key = conv if conv else ('\x00task:' + tid)
+        key = (task_user_id(t), conv if conv else ('\x00task:' + tid))
         entry = {
             'taskId': tid,
             'convId': conv,

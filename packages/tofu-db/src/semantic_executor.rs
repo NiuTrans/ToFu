@@ -8591,6 +8591,19 @@ fn compile_worker_job(
         Ok(user_id)
     };
     let (steps, result) = match admitted.operation.name {
+        "worker_job.active.list" => {
+            let owner = match payload.get("user_id") {
+                Some(Value::Null) => None,
+                Some(_) => Some(positive_identity(&payload, "user_id")?),
+                None => return Err(SemanticExecutionError::InvalidPayload),
+            };
+            (
+                vec![TransactionIrStep::WorkerJobActiveList {
+                    task_kinds: worker_job_claim_kinds(&payload)?, user_id: owner, slot: 0,
+                }],
+                TransactionIrResult::SlotOrLiteral { slot: 0, missing: b"[]".to_vec() },
+            )
+        }
         "worker_job.get" => (
             vec![TransactionIrStep::WorkerJobGet {
                 task_id: task_id()?,

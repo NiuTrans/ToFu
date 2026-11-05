@@ -157,6 +157,9 @@ The bounded recovery record replaces one current value, not a history of tasks.
 Verify `test_execution_composition.py` and `test_execution_application.py`;
 the latter boots the common application against a real SQL authority while the
 HTTP port is occupied, joins execution, and proves storage remains alive.
+Restart activity protection now reads durable root jobs as well as local
+carriers. Storage errors do not certify idle or consume an ordinary restart
+approval; explicit force retains the existing approval boundary.
 
 The resident protocol also passes an inherited manager-control pipe. Only the
 manager owns its writer; its descriptor remains inheritable across manager exec

@@ -723,6 +723,11 @@ pub enum TransactionIrStep {
         task_kinds: Vec<String>,
         slot: usize,
     },
+    WorkerJobActiveList {
+        task_kinds: Vec<String>,
+        user_id: Option<u64>,
+        slot: usize,
+    },
     WorkerJobDefer {
         task_id: String,
         worker_id: String,
@@ -3807,7 +3812,11 @@ impl TransactionIr {
                             invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
-                TransactionIrStep::WorkerJobClaimHorizon { task_kinds, slot } => {
+                TransactionIrStep::WorkerJobActiveList { user_id: Some(0), .. } => {
+                    return Err(invalid_input("invalid worker activity owner"));
+                }
+                TransactionIrStep::WorkerJobClaimHorizon { task_kinds, slot }
+                | TransactionIrStep::WorkerJobActiveList { task_kinds, slot, .. } => {
                     validate_worker_job_slot(&mut initialized_slots, *slot)?;
                     let unique: std::collections::BTreeSet<_> = task_kinds.iter().collect();
                     if task_kinds.is_empty()
@@ -6006,6 +6015,7 @@ fn prepare_transaction_ir_mode(
                 | TransactionIrStep::WorkerJobGet { .. }
                 | TransactionIrStep::WorkerJobClaimNext { .. }
                 | TransactionIrStep::WorkerJobClaimHorizon { .. }
+                | TransactionIrStep::WorkerJobActiveList { .. }
                 | TransactionIrStep::WorkerJobDefer { .. }
                 | TransactionIrStep::WorkerJobHeartbeat { .. }
                 | TransactionIrStep::WorkerJobClaimState { .. }
@@ -7125,6 +7135,11 @@ fn prepare_transaction_ir_mode(
                     database,
                     &mut transaction,
                     task_kinds,
+                )?));
+            }
+            TransactionIrStep::WorkerJobActiveList { task_kinds, user_id, slot } => {
+                slots[*slot as usize] = Some(Some(crate::worker_job::active_list(
+                    database, &mut transaction, task_kinds, *user_id,
                 )?));
             }
             TransactionIrStep::WorkerJobDefer {

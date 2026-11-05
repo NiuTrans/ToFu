@@ -204,6 +204,27 @@ def _worker_job_get(
     return None if row is None else _job_document(row)
 
 
+def _worker_job_active_list(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Project complete active work from the queue/lease indexes, never history."""
+    if 'user_id' not in payload:
+        raise StorageError('database_protocol_error', 'Worker activity requires an explicit owner scope')
+    owner = None if payload['user_id'] is None else _job_owner(payload)
+    _, kinds = _claim_kind_filter(payload)
+    placeholders = ', '.join('?' for _ in kinds)
+    owner_clause = ' AND user_id=?' if owner is not None else ''
+    parameters = (*kinds, *((owner,) if owner is not None else ()))
+    rows = session.fetch_all(
+        'SELECT task_id,user_id,task_kind,status,created_at_ms,payload_json '
+        'FROM storage_worker_jobs WHERE status IN (\'queued\',\'running\',\'suspended\') '
+        f'AND task_kind IN ({placeholders}){owner_clause} '
+        'ORDER BY created_at_ms,task_id', parameters)
+    return [{
+        'taskId': row['task_id'], 'userId': row['user_id'], 'taskKind': row['task_kind'],
+        'conversationId': _load(row['payload_json']).get('conversationId', ''),
+        'status': row['status'], 'createdAtMs': row['created_at_ms'],
+    } for row in rows]
+
+
 def _worker_job_enqueue(session: Session, payload: Mapping[str, Any]) -> Any:
     """Generic producers cannot bypass automation's atomic job owners."""
     from lib.automations.contract import RESERVED_WORKER_TASK_KINDS
@@ -675,6 +696,7 @@ def _worker_job_complete(session: Session, payload: Mapping[str, Any]) -> Any:
 __all__ = [
     "_MAX_JOB_PAYLOAD_BYTES",
     "_WORKER_JOB_COLUMNS",
+    "_worker_job_active_list",
     "_worker_job_claim_horizon",
     "_worker_job_claim_next",
     "_worker_job_claim_state",

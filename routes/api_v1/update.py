@@ -445,6 +445,10 @@ def update_restart():
         running = list_running_tasks(exclude_conv_id=own_conv)
     except Exception as e:
         logger.warning('[Update] Could not check running tasks before restart: %s', e)
+        if not force:
+            return api_error(
+                'Active execution could not be verified; retry when storage is available.',
+                status=503)
 
     if not approval_id:
         return _approval_required(
