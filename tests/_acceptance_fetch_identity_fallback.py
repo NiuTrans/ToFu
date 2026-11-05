@@ -103,7 +103,7 @@ def main():
         core._is_bot_protection = lambda html: False
         core._is_bot_extracted_text = lambda text: False
         core._extract_html_text = lambda html, limit, url=None, scope=None: None
-        core._looks_like_spa_shell = lambda html, result: True
+        core._looks_like_spa_shell = lambda html, result, **_kwargs: True
         core._try_playwright_fallback = lambda url, max_chars, timeout: None
         register_browser_provider(_ProbeBrowser())
 

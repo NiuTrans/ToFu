@@ -2,7 +2,7 @@
 
 Orchestrates the full fetch pipeline:
   cache → authenticated (cookie) fetch → HTTP request → SSL retry →
-  Playwright fallback → host-browser fallback.
+  declared text alternate → Playwright fallback → host-browser fallback.
 
 Config comes from :mod:`tofu_search.config`; the auth-source and browser
 fallbacks are optional and routed through :mod:`tofu_search.providers`
@@ -18,6 +18,10 @@ import requests
 
 from tofu_search._worker_executor import DemandThreadPoolExecutor as ThreadPoolExecutor
 from tofu_search.config import get_config
+from tofu_search.fetch.declared_alternates import (
+    declared_text_alternate,
+    is_text_alternate_type,
+)
 from tofu_search.fetch.html_extract import extract_html_publish_date
 from tofu_search.fetch.html_extract import extract_html_text as _extract_html_text
 from tofu_search.fetch.html_rendering import empty_application_main
@@ -93,6 +97,28 @@ def _mk_deadline_playwright(budget_blown):
     return _wrapped
 
 
+def _read_declared_alternate(alternate_url, timeout, transport):
+    """GET one declared alternate through the anonymous gate and HTTP budget.
+
+    Only a text answer is accepted and it is never searched for alternates, so
+    one alternate cannot lead to another. The declaring page owns circuit state.
+    """
+    if not _should_fetch(alternate_url):
+        return None
+    try:
+        resp, raw = _do_request(alternate_url, timeout, **transport)
+    except Exception as e:
+        logger.debug('[Fetch] Declared alternate unavailable (%s) — %s',
+                     type(e).__name__, alternate_url[:80])
+        return None
+    if not is_text_alternate_type(resp.headers.get('Content-Type')):
+        return None
+    text = _decode_bytes(raw, resp.encoding).strip()
+    if len(text) <= 50 or _is_bot_extracted_text(text):
+        return None
+    return text
+
+
 def fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
                        deadline_secs=None, diag=None, *, query=None):
     """Read a source, optionally selecting exact passages for a question.
@@ -142,6 +168,8 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
     ``reason`` (a stable machine token) and ``detail`` (a human sentence).
     HTTP failures also carry ``http_status`` and an optional bounded raw
     ``retry_after`` header. These are response facts, not replay permission.
+    Text read from a same-origin alternate that the received document declares
+    sets ``strategy='declared_alternate'`` and ``alternate_url`` instead.
     Passing nothing preserves the historical signature exactly.
     """
     cfg = get_config()
@@ -154,7 +182,8 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
 def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
     """Run one raw page pipeline inside its caller-owned elapsed allowance."""
     if diag is not None:
-        for key in ('reason', 'detail', 'truncated', 'http_status', 'retry_after'):
+        for key in ('reason', 'detail', 'truncated', 'http_status', 'retry_after',
+                    'strategy', 'alternate_url'):
             diag.pop(key, None)
 
     def _diag(reason, detail):
@@ -380,9 +409,10 @@ def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
     is_pdf = False
     html_for_spa_check = None
     html_scope = {}
+    transport = {'verify': True}
 
     try:
-        resp, raw = _do_request(url, timeout, verify=True)
+        resp, raw = _do_request(url, timeout, **transport)
     except _HttpError as e:
         # 401/403/404/410/413 = URL-specific (auth/permission/missing/oversize),
         # not a domain fault → don't trip the circuit breaker.
@@ -409,8 +439,9 @@ def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
         is_legacy_renegotiation = 'UNSAFE_LEGACY_RENEGOTIATION' in str(e)
         if is_legacy_renegotiation and _HAS_LEGACY_SSL:
             logger.warning('SSL legacy renegotiation error, retrying with legacy adapter — %s', domain, exc_info=True)
+            transport = {'legacy_ssl': True}
             try:
-                resp, raw = _do_request(url, timeout, legacy_ssl=True)
+                resp, raw = _do_request(url, timeout, **transport)
             except _HttpError as e2:
                 if e2.status_code not in (401, 403, 404, 406, 410, 413):
                     _circuit.record_failure(url)
@@ -427,8 +458,9 @@ def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
         else:
             logger.warning('SSL failed, retrying WITHOUT certificate verification (insecure) — %s: %s',
                            domain, e, exc_info=True)
+            transport = {'verify': False}
             try:
-                resp, raw = _do_request(url, timeout, verify=False)
+                resp, raw = _do_request(url, timeout, **transport)
             except _HttpError as e2:
                 if e2.status_code not in (401, 403, 404, 406, 410, 413):
                     _circuit.record_failure(url)
@@ -487,6 +519,31 @@ def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
     # ── Connection succeeded → clear the domain's failure count ──
     _circuit.record_success(url)
 
+    def _declared_alternate(html):
+        """Deliver a text alternate that an unreadable received document declares."""
+        if not html:
+            return None
+        # Seam substitutes for _do_request may omit the final response URL.
+        document_url = getattr(resp, 'url', None) or url
+        alternate_url = declared_text_alternate(document_url, resp.headers, html)
+        if not alternate_url or _page_budget_exhausted():
+            return None
+        text = _read_declared_alternate(alternate_url, timeout, transport)
+        if not text:
+            return None
+        logger.info('[Fetch] Declared alternate OK — %s (%d chars)', url[:80], len(text))
+        if diag is not None:
+            diag.pop('truncated', None)
+            diag['strategy'] = 'declared_alternate'
+            diag['alternate_url'] = alternate_url
+        if len(text) > extraction_limit:
+            text = text[:extraction_limit] + '\n[…truncated]'
+            if diag is not None: diag['truncated'] = True
+        if max_chars: _fetch_cache.put(url, text)
+        if max_chars and len(text) > max_chars:
+            return text[:max_chars] + '\n[…truncated]'
+        return text
+
     try:
         ct = resp.headers.get('Content-Type', '').lower()
         is_pdf = ('application/pdf' in ct or url.lower().rstrip('/').endswith('.pdf')
@@ -518,6 +575,9 @@ def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
             html = _decode_bytes(raw, resp.encoding)
             if _is_bot_protection(html):
                 logger.debug('[Fetch] Bot protection detected, trying Playwright — %s', url[:80])
+                alternate_text = _declared_alternate(html)
+                if alternate_text:
+                    return alternate_text
                 pw_text = _try_playwright_fallback(url, max_chars, timeout)
                 if pw_text:
                     return pw_text
@@ -541,6 +601,9 @@ def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
     if result and _is_bot_extracted_text(result):
         logger.debug('[Fetch] Bot protection in extracted text (%d chars), '
                      'trying Playwright — %s', len(result), url[:80])
+        alternate_text = _declared_alternate(html_for_spa_check)
+        if alternate_text:
+            return alternate_text
         pw_result = _try_playwright_fallback(url, max_chars, timeout)
         if pw_result:
             return pw_result
@@ -559,6 +622,9 @@ def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
             signals=html_scope.get('rendering'))):
         logger.debug('SPA shell detected (HTML=%sB, text=%d), trying Playwright — %s',
                      f'{len(html_for_spa_check):,}', len(result) if result else 0, url[:80])
+        alternate_text = _declared_alternate(html_for_spa_check)
+        if alternate_text:
+            return alternate_text
         pw_result = _try_playwright_fallback(url, max_chars, timeout)
         if pw_result:
             return pw_result
@@ -586,6 +652,9 @@ def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
             return result[:max_chars] + '\n[…truncated]'
         return result
     logger.debug('Empty result (len=%d) — %s', len(result) if result else 0, url[:80])
+    alternate_text = _declared_alternate(html_for_spa_check)
+    if alternate_text:
+        return alternate_text
     return _diag('empty_extract',
                  'Fetched the page, but text extraction produced %d chars (below the '
                  '50-char floor) — likely a redirect stub or a near-empty page.'

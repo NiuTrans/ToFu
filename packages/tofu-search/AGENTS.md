@@ -74,6 +74,9 @@ visibility boundary; verify `tests/test_html_streaming.py` and its runtime fixtu
 owns bounded browser readiness/projection through the same extractor. Verify
 `test_html_rendering_admission.py`, `test_rendered_page_source.py`, then opt-in
 `TOFU_SEARCH_TEST_BROWSER=1 pytest .../test_rendered_dom_browser.py` with Playwright.
+`fetch/declared_alternates.py` selects a same-origin text alternate that an
+unreadable received document declares; `fetch/core.py` admits that one request
+before rendering. Verify `test_declared_alternates.py`.
 `search/proxy_mode.py::fetch_attempt_plan` owns the HTTP/browser route identity;
 `fetch/browser_proxy.py` projects the selected anonymous route into a context.
 `fetch/document_response.py` scopes main-document status observations for reads.
