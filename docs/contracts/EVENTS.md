@@ -691,8 +691,11 @@ model retries the round. Settlement semantics live in
   catalogued for perceivability, their private event *types* stay
   unregistered per the §1 scope ruling — except the registered stage
   grammar in the §1 carve-out). Then emit it via `emit_phase`.
-* Frontend-local phase states the client derives itself (e.g.
-  `thinking_active`) are NOT pushes — they are deliberately unregistered.
+* Frontend-local phase states the client derives itself (`thinking_active`,
+  `responding`) are NOT pushes — they are deliberately unregistered. The
+  client derives them from which projection accumulator (`thinking` /
+  `content`) the phase-clearing frame's patch appended to
+  (`docs/RENDER_CONTRACT.md`).
 
 For model streaming, the three progress phases have non-overlapping meaning:
 

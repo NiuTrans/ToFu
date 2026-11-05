@@ -1151,19 +1151,30 @@ timeline row.
 
 A running Turn with no live phase does not prove worker startup or transport
 recovery: older snapshots omit phases and semantic deltas clear them. The row
-first reports the Turn's own projected activity (`projectLiveActivity` in
+first reports the Turn's own activity (`projectLiveActivity` in
 `presentation/view-model/live-turns.ts`). Calls that the projection marks
 active read “Running {tool}: {intent}” (or the active tool list) with an
 elapsed clock from the earliest backend `tStart`; this also decorates a
 `tool_exec` frame, which is sent once per batch and goes stale as parallel calls
-finish. Unsettled reasoning reads as the client-derived `thinking_active`.
-Only without such evidence does the fallback say “Waiting for an execution
-status update…”; it never claims a resynchronization and never uses
+finish. Otherwise the frame that cleared the phase names the stream: the
+reducer records, beside `livePhase`, which projection accumulator that frame's
+patch appended to (`TurnState.liveContentGrowth`: `thinking` → `reasoning`,
+`content` → `answer`, neither → `none`; a coalesced frame growing both is
+`answer`, the newer output of one response). Segment-text mirror flushes are
+not growth. The row then reads the client-derived `thinking_active`
+(“Thinking…”) or `responding` (“Generating response…”). A phase installed by a
+snapshot carries no frame evidence; only then does unsettled reasoning in the
+projection stand in for it. Goal rows keep their joined context and take only
+the frame evidence, which also names a Goal root's current worker phase. Only
+without such evidence does the fallback say “Waiting for an execution status
+update…”; it never claims a resynchronization and never uses
 `workerStarting`, which requires an explicit worker-entry phase. Every other
 reported phase is shown as sent. The row is omitted only when it would restate
-the streaming block directly above it: an answer tail under the bare fallback,
-or reasoning that is the reply's last part. Pending task binding still
-distinguishes scheduler preparation from executor queue residence.
+the streaming block directly above it: `responding` under its answer tail,
+`thinking_active` when the reasoning is the reply's last part, or (snapshot
+phase only) the bare fallback under an unsettled answer tail. Pending task
+binding still distinguishes scheduler preparation from executor queue
+residence.
 
 **Problem (owner report 2026-11-03):** a 435-round slides reply showed only
 “Waiting for an execution status update…” under its failed work-unit card and
@@ -1181,13 +1192,33 @@ client stopwatch restarts on every reload, unlike the backend `tStart`.
 Specs: `presentation/view-model/live-turns.test.ts` and
 `ui/renderers/text-blocks.test.ts`.
 
+**Problem (owner report 2026-11-05):** while reasoning streamed, the row read
+“Waiting for an execution status update…”. Streaming was inferred from block
+position (unsettled reasoning had to be the reply's last content block), but a
+round's live `thinking:terminal` accumulator precedes its `text:terminal`
+accumulator, so narration, one coalesced frame growing both channels, or a
+system note after the reasoning closed it and dropped the row to the fallback;
+an answer streaming in the `terminal`-stamped accumulator also kept the
+fallback under it. **Decision:** derive streaming activity from the frame that
+cleared the phase, recorded by the reducer; projection position remains only
+for snapshot phases. Replaying a 16,498-frame live capture through the reducer
+and view model shows every reasoning frame as `thinking_active`; the fallback
+remains only between `compaction_done` (which folds the compacting phase) and
+the next round phase. **Alternatives rejected:** a backend phase per channel
+switch registers client-derived states as wire phases and adds a write per
+switch to restate what the frame already proves; treating any visible
+reasoning or prose as live would label post-compaction and post-request gaps
+as streaming. Specs: `core/turn-state.test.ts`,
+`presentation/view-model/live-turns.test.ts`, `goal-progress.test.ts`.
+
 `llm_thinking` denotes an opened model-generation round, not evidence of
 reasoning-channel output. Its live row preserves localized `detailKey` and
 `detailArgs` (generating a reply or analyzing tool results), then raw detail or
 label; a bare phase falls back to localized “Generating response…”. It never
 gets a thinking character counter or thinking-specific styling. The distinct
 `thinking_active` content-stream status uses the same “Thinking…” wording as
-an active reasoning disclosure.
+an active reasoning disclosure; `responding` (main replies and the Autopilot
+virtual user alike) uses “Generating response…”.
 
 When an authored Flow role tier resolves to a model other than the one selected
 for the conversation, every producer phase carries the structured

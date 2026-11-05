@@ -18,7 +18,7 @@ describe('shared live phase presentation', () => {
     expect(presentLivePhaseLabel(value, text)).toBe('localized:stream.phase.storageWedged');
   });
   it.each([
-    { phase: 'waiting_model' }, { phase: 'llm_thinking' }, { phase: 'thinking_active' },
+    { phase: 'waiting_model' }, { phase: 'llm_thinking' }, { phase: 'thinking_active' }, { phase: 'responding' },
     { phase: 'retrying' }, { phase: 'tool_exec', tools: ['read_file', 'inspect_runtime'] },
     { phase: 'worker_starting', detailKey: 'stream.phase.workerStarting' },
     { phase: 'retrying', detailKey: 'stream.phase.retryRateLimited', detailArgs: { model: 'm' } },
@@ -27,6 +27,12 @@ describe('shared live phase presentation', () => {
   ])('uses identical normal and Goal root copy for $phase', raw => {
     const value = liveAttemptPresentation(raw, 'running');
     expect(presentLivePhaseLabel(liveStatusPhase(root(value)), text)).toBe(presentLivePhaseLabel(value, text));
+  });
+  it('names client-derived content streams with their own localized copy', () => {
+    expect(presentLivePhaseLabel(liveAttemptPresentation({ phase: 'thinking_active' }, 'running'), text))
+      .toBe('localized:stream.thinking.active');
+    expect(presentLivePhaseLabel(liveAttemptPresentation({ phase: 'responding' }, 'running'), text))
+      .toBe('localized:stream.phase.generatingResponse');
   });
   it('keeps tool identity and routing evidence in Goal root context', () => {
     const current = liveAttemptPresentation({ phase: 'tool_exec', tools: ['canonical_tool'], modelRoute: {

@@ -11,6 +11,7 @@ import {
   type TurnRecord,
 } from '../../../api/conversation-sync.generated';
 import {
+  type LiveContentGrowth,
   type TurnState,
 } from '../../domain/turn-store';
 import {
@@ -77,8 +78,11 @@ export function selectGoalProgress(
         || transientTurnPresentation(root)) continue;
     const rootAttempt = root.currentAttemptId ? state.attemptsById[root.currentAttemptId] : undefined;
     if (rootAttempt?.taskId === attempt.taskId && !rootAttempt.queueBinding) {
+      const streamed = streamedContentPhase(state.liveContentGrowth);
       result.set(root.turnId, { ...context, rootSummary: true,
-        currentPhase: state.livePhase ? liveAttemptPresentation(state.livePhase as object, worker.status) : undefined,
+        currentPhase: state.livePhase
+          ? liveAttemptPresentation(state.livePhase as object, worker.status)
+          : streamed ? liveAttemptPresentation({ phase: streamed }, worker.status) : undefined,
       });
       break;
     }
@@ -197,22 +201,45 @@ function toolStartedAt(block: ToolActionBlock): number | undefined {
   return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
+/** Client-derived phase for the content channel the phase-clearing frame grew. */
+function streamedContentPhase(
+  growth: LiveContentGrowth | undefined,
+): 'thinking_active' | 'responding' | undefined {
+  return growth === 'reasoning' ? 'thinking_active'
+    : growth === 'answer' ? 'responding' : undefined;
+}
+
+function showStreamedPhase(
+  liveStatus: TransientTurnPresentation, phase: 'thinking_active' | 'responding',
+): void {
+  liveStatus.phase = phase;
+  delete liveStatus.detailKey;
+}
+
 /**
- * Fill the live row from the running Turn's own projection where its phase
+ * Fill the live row from the running Turn's own evidence where its phase
  * frame says less. Semantic deltas clear the phase and one `tool_exec` frame
  * covers a whole batch, while a grouped reply renders reasoning above its tool
  * panel and receipts below its prose, so this row is often the only live
- * surface in view (rationale: docs/RENDER_CONTRACT.md). Calls this projection
- * marks active name the work and carry the earliest backend start for elapsed
- * time; unsettled reasoning reads as the client-derived `thinking_active`.
- * Every other reported phase stays as sent.
+ * surface in view (rationale: docs/RENDER_CONTRACT.md). In order: calls this
+ * projection marks active name the work and carry the earliest backend start
+ * for elapsed time; then the content channel the phase-clearing frame grew
+ * reads as the client-derived `thinking_active` or `responding`. Only a phase
+ * set by a snapshot, which carries no frame evidence, falls back to unsettled
+ * reasoning in the projection. Every other reported phase stays as sent. Goal
+ * rows keep their joined context and take only the frame evidence.
  */
 export function projectLiveActivity(
   liveStatus: TransientTurnPresentation,
   blocks: ReadonlyArray<ConversationBlockViewModel>,
+  contentGrowth?: LiveContentGrowth,
 ): void {
-  if (liveStatus.goalProgress) return;
   const bare = isBareWaiting(liveStatus);
+  const streamed = bare ? streamedContentPhase(contentGrowth) : undefined;
+  if (liveStatus.goalProgress) {
+    if (streamed) showStreamedPhase(liveStatus, streamed);
+    return;
+  }
   if (bare || liveStatus.phase === 'tool_exec') {
     const active = blocks.filter((block): block is ToolActionBlock => (
       (block.kind === 'tool' || block.kind === 'program')
@@ -231,21 +258,24 @@ export function projectLiveActivity(
       return;
     }
   }
-  if (bare && blocks.some(block => block.kind === 'thinking' && !block.terminal)) {
-    liveStatus.phase = 'thinking_active';
-    delete liveStatus.detailKey;
+  if (streamed) showStreamedPhase(liveStatus, streamed);
+  else if (bare && contentGrowth === undefined
+      && blocks.some(block => block.kind === 'thinking' && !block.terminal)) {
+    showStreamedPhase(liveStatus, 'thinking_active');
   }
 }
 
 /**
  * True when the row would only restate a streaming block rendered directly
- * above it: a bare "waiting" placeholder under a still-streaming answer tail,
- * or projected reasoning status when the reasoning disclosure is the reply's
- * last part (no call or prose renders between them).
+ * above it: reasoning status when the reasoning disclosure is the reply's last
+ * part (no call or prose renders between them), a streaming answer whose prose
+ * is the tail, or, for a snapshot phase without frame evidence, a bare
+ * "waiting" placeholder under an unsettled answer tail.
  */
 export function waitingPlaceholderRedundant(
   liveStatus: TransientTurnPresentation,
   blocks: ReadonlyArray<ConversationBlockViewModel>,
+  contentGrowth?: LiveContentGrowth,
 ): boolean {
   if (liveStatus.goalProgress) return false;
   const tail = blocks[blocks.length - 1];
@@ -254,7 +284,8 @@ export function waitingPlaceholderRedundant(
     return tail.kind === 'thinking' && !blocks.some(block => (
       block.kind === 'tool' || block.kind === 'program' || block.kind === 'text'));
   }
-  if (!isBareWaiting(liveStatus)) return false;
+  if (liveStatus.phase === 'responding') return tail.kind === 'text';
+  if (contentGrowth !== undefined || !isBareWaiting(liveStatus)) return false;
   if (tail.kind !== 'thinking' && tail.kind !== 'text') return false;
   return !tail.terminal;
 }
