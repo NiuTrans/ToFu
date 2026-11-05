@@ -196,6 +196,7 @@ def test_plugin_blueprint_cannot_shadow_one_already_mounted(monkeypatch):
 
 
 def test_background_service_start_is_per_app_idempotent(monkeypatch):
+    import threading
     from types import SimpleNamespace
 
     import lib.oauth.codex_catalog as codex_catalog
@@ -204,12 +205,18 @@ def test_background_service_start_is_per_app_idempotent(monkeypatch):
     import routes
     import lib.app.plugin_registry as plugin_registry
     import runtime_guards
+    import lib.channels.dx.supervisor as channel_supervisor
 
     calls = []
+    monkeypatch.setattr(channel_supervisor, '_ADAPTERS', {})
+    monkeypatch.setattr(channel_supervisor, '_WORKERS', set())
+    monkeypatch.setattr(channel_supervisor, '_STOPPING', threading.Event())
+    channel_supervisor._STOPPING.set()
     monkeypatch.setattr(
         runtime_guards, 'load_deployment_configuration',
         lambda: SimpleNamespace(mode='personal'))
     def start_scheduler_worker(*, principal):
+        assert not channel_supervisor._STOPPING.is_set()
         assert principal.kind == 'system'
         assert principal.owner_user_id == 1
         assert principal.scopes == frozenset({'scheduler:run'})

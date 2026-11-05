@@ -305,6 +305,7 @@ def start_registered_background_services(app, *, process_role='all'):
     # ── Start the sole durable scheduler (including daily-report backfill) ──
     if process_role_has(process_role, CAPABILITY_SCHEDULED_JOBS):
         try:
+            from lib.channels.dx.supervisor import start_channel_bridges
             from lib.scheduler.manager import start_scheduler_worker
             from lib.identity import PERSONAL_USER_ID, PrincipalContext
             from runtime_guards import load_deployment_configuration
@@ -319,6 +320,7 @@ def start_registered_background_services(app, *, process_role='all'):
                 ),
                 scopes={'scheduler:run'},
             )
+            start_channel_bridges()
             start_scheduler_worker(principal=scheduler_principal)
             started += 1
         except Exception as e:

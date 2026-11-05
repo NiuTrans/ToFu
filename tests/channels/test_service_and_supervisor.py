@@ -390,6 +390,9 @@ def supervisor(monkeypatch):
     FakeAdapter.instances = []
     monkeypatch.setattr(module, '_ADAPTERS', {})
     monkeypatch.setattr(module, '_CONFIRMING', set())
+    monkeypatch.setattr(module, '_WORKERS', set())
+    monkeypatch.setattr(module, '_STOPPING', threading.Event())
+    monkeypatch.setattr(module, '_HOSTING', threading.Event())
     return module
 
 
