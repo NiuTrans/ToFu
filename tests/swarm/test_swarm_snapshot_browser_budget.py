@@ -272,7 +272,9 @@ def test_terminal_reference_view_bounds_swarm_without_touching_recovery_fields()
     assert interrupted["segments"][0]["roundRef"] == "spawn-a"
     assert "input" not in interrupted["segments"][0]
     interrupted_round = interrupted["toolRounds"][0]
-    assert interrupted_round["_responsesItems"] is private_replay
+    # Terminal views omit server-only replay; Continue reads it from storage.
+    assert "_responsesItems" not in interrupted_round
+    assert projection["toolRounds"][0]["_responsesItems"] is private_replay
     assert "_partialOutput" not in interrupted_round
     assert "_partialOutputTotalChars" not in interrupted_round
     assert interrupted_round["_swarmSnapshot"] is not snapshot
