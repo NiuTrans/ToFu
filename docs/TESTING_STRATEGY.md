@@ -61,6 +61,15 @@ descendants on interruption. Verify `test_tofudb_source_build_retirement.py`.
 
 ## Test layers
 
+Conversation navigation browser checks follow the current reader controls:
+settled tool panels open at the newest calls and page backward through their
+in-card earlier boundary. Command output uses the focusable output chip; its
+native disclosure summary is retained for semantics and is not the keyboard
+entry point. The harness asserts focus before activation so a hidden target
+cannot leave Enter on the previously focused panel toggle and collapse it.
+`test_visual_conversation_navigation_performance.py` keeps the single-read,
+late-response, exact-output and cancellation assertions through these controls.
+
 Turn delivery tests import their shared fixture functions explicitly from
 `tests/turn_lifecycle/test_task_event_delivery.py`. A collectable test module
 cannot also supply them reliably through `pytest_plugins`: collecting that
