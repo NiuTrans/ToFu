@@ -15,6 +15,93 @@ pytest_plugins = ('tests.support.semantic_authorities',)
 pytestmark = pytest.mark.api
 
 
+def test_standalone_replay_requires_claim_without_live_attempt_hint(execution):
+    job = claim(execution)
+    start(execution, worker_claim=proof(job))
+    row = {'task_id': job['taskId'], 'sequence': 1,
+           'event': {'type': 'delta', 'text': 'private until committed'}}
+    for extra in ({}, {'worker_claim': {'worker_id': 'old', 'fencing_token': 1}}):
+        result = command(execution, 'event.append', **row, **extra)
+        assert result['inserted'] is False
+        assert result['rejected'] == 'worker_claim_stale'
+    assert command(execution, 'event.append', **row,
+                   worker_claim=proof(job))['inserted'] is True
+    # A stale duplicate cannot borrow the successful writer's acknowledgement.
+    assert command(execution, 'event.append', **row)['rejected'] == 'worker_claim_stale'
+
+
+def test_replay_batch_preserves_independent_siblings_and_cancel_cleanup(execution):
+    job = claim(execution)
+    start(execution, worker_claim=proof(job))
+    rows = [
+        {'task_id': job['taskId'], 'sequence': 1, 'event': {'type': 'delta', 'text': 'refused'}},
+        {'task_id': 'ordinary-stream', 'sequence': 1, 'event': {'type': 'delta', 'text': 'legacy'}},
+        {'task_id': job['taskId'], 'user_id': execution[1], 'sequence': 2,
+         'event': {'type': 'delta', 'text': 'owned'},
+         'worker_claim': proof(job)},
+    ]
+    result = command(execution, 'event.append_batch', events=rows)
+    assert result['rejected'] == 1
+    assert result['inserted'] == 2
+    command(execution, 'worker_job.request_cancel', task_id=job['taskId'],
+            now_ms=wall_ms(), reason='Stop')
+    for sequence, kind, inserted in ((3, 'delta', True), (4, 'aborted', True)):
+        result = command(execution, 'event.append', task_id=job['taskId'],
+                         sequence=sequence, event={'type': kind}, worker_claim=proof(job))
+        assert result['inserted'] is inserted
+
+
+def test_flow_phases_borrow_root_claim_and_settle_with_it(execution):
+    from lib.orchestration.visible_identity import visible_phase_identity
+    _factory, owner, pair, job = execution
+    owned = claim(execution)
+    start(execution, worker_claim=proof(owned))
+    attempt = pair['attempt']['attemptId']
+    root = pair['turn']['turnId']
+    payload = {'conversation_id': pair['turn']['conversationId'], 'attempt_id': attempt,
+               'root_turn_id': root, 'messages': [{'role': 'assistant', 'content': 'phase'}],
+               'start_index': 1, 'live': True}
+    refused_without_writes(execution, lambda: command(execution, 'turn.visible.sync', **payload))
+    assert command(execution, 'turn.visible.sync', **payload, worker_claim=proof(owned))
+    _child_turn, child_attempt = visible_phase_identity(root, attempt, 1)
+    child = event_payload(execution, flow_root_attempt_id=attempt)
+    child['attempt_id'] = child_attempt
+    with pytest.raises(StorageError):
+        command(execution, 'turn.event.record', **{k: v for k, v in child.items() if k != 'user_id'})
+    child['worker_claim'] = proof(owned)
+    assert command(execution, 'turn.event.record',
+                   **{k: v for k, v in child.items() if k != 'user_id'})['applied']
+    assert publish(execution, terminal=True, worker_claim=proof(owned))['applied']
+
+
+def test_task_result_checkpoint_revalidates_worker_before_replay(execution):
+    _factory, owner, pair, job = execution
+    owned = claim(execution)
+    start(execution, worker_claim=proof(owned))
+    value = {'task_id': job['taskId'], 'user_id': owner,
+             'conv_id': pair['turn']['conversationId'], 'status': 'running',
+             'content': 'checkpoint', 'thinking': ''}
+    payload = {'key': job['taskId'], 'value': value, 'expected_version': 0}
+    with pytest.raises(StorageError):
+        command(execution, 'task_results.checkpoint', **payload)
+    assert command(execution, 'task_results.checkpoint', **payload,
+                   worker_claim=proof(owned))['version'] > 0
+    with pytest.raises(StorageError):
+        command(execution, 'task_results.checkpoint', **payload)
+
+
+def test_queued_conversation_stop_remains_claimable_until_domain_settlement(execution):
+    _factory, _owner, _pair, job = execution
+    result = command(execution, 'worker_job.request_cancel', task_id=job['taskId'],
+                     now_ms=wall_ms(), reason='user_stop')
+    assert result['job']['status'] == 'queued'
+    assert result['job']['terminalAtMs'] == 0
+    owned = claim(execution)
+    assert owned['cancelSequence'] == 1
+    refused_without_writes(execution, lambda: start(execution, worker_claim=proof(owned)))
+    assert publish(execution, terminal=True, worker_claim=proof(owned))['applied']
+
+
 @pytest.fixture
 def execution(semantic_authority, monkeypatch):
     from lib import turn_lifecycle as turns
@@ -123,7 +210,7 @@ def test_malformed_claim_is_refused_without_mutation(execution):
         assert snapshot(execution) == before
 
 
-def test_cancellation_allows_only_current_claim_terminal_cleanup(execution):
+def test_unentered_cancellation_allows_only_current_claim_terminal_cleanup(execution):
     job = claim(execution)
     command(execution, 'worker_job.request_cancel', task_id=job['taskId'], now_ms=wall_ms(), reason='stop')
     refused_without_writes(execution, lambda: start(execution, worker_claim=proof(job)))

@@ -254,6 +254,8 @@ class StorageEventBatcher:
         sequence: int,
         event: Any,
         require_attempts_live: list[str] | None = None,
+        worker_claim: dict | None = None,
+        user_id: int | None = None,
     ) -> _PendingEvent:
         payload = {
             'task_id': task_id,
@@ -265,6 +267,10 @@ class StorageEventBatcher:
             # inside the append transaction (lib/tasks_pkg/event_log.py owns
             # shape validation and the rejection mapping).
             payload['require_attempts_live'] = list(require_attempts_live)
+        if worker_claim is not None:
+            payload['worker_claim'] = dict(worker_claim)
+        if user_id is not None:
+            payload['user_id'] = user_id
         try:
             encoded_payload = canonical_json(payload)
             wire_bytes = len(encoded_payload)
@@ -388,6 +394,8 @@ class StorageEventBatcher:
         timeout: float = 2.0,
         wait: bool = True,
         require_attempts_live: list[str] | None = None,
+        worker_claim: dict | None = None,
+        user_id: int | None = None,
     ) -> dict[str, Any]:
         """Accept one event; with ``wait``, return its batch outcome.
 
@@ -398,7 +406,7 @@ class StorageEventBatcher:
         row twice on a congested authority.
         """
         pending = self._build_pending_event(
-            task_id, sequence, event, require_attempts_live)
+            task_id, sequence, event, require_attempts_live, worker_claim, user_id)
         queue_depth, queued_bytes = self._enqueue(pending)
         with self._metrics_lock:
             self._metrics['submitted'] += 1

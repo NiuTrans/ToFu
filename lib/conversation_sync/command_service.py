@@ -244,6 +244,60 @@ def _capture_task_principal_tenant(config,user_id,principal):
     return capture_execution_identity(config, user_id, principal)
 
 
+def restore_accepted_attempt_config(turn, attempt, *, user_id):
+    """Rebuild the common executor input from accepted authority, including resumes.
+
+    Request replay and leased workers share this owner. The supplied references
+    locate the accepted config; request configuration never substitutes for it.
+    """
+    operation = attempt['operation']
+    # Only the durable accepted attempt can supply its tenant at physical
+    # dispatch, including request replay, queued activation and recovery.
+    accepted_config=get_attempt(attempt['attemptId'],user_id=user_id,
+        include_execution_config=True).get('config')
+    if not isinstance(accepted_config,Mapping):
+        raise ValueError('Accepted attempt config must be an object')
+    config=dict(accepted_config)
+
+    # Dispatch consumes this private watermark through abort_after_ts;
+    # the authoritative reread must not expose it as executor config.
+    config.pop(ATTEMPT_DISPATCH_REQUEST_STARTED_AT_MS_CONFIG_KEY, None)
+    config['_turnPrincipalTenantId']=accepted_config.get('_turnPrincipalTenantId','')
+    config.update({
+        "_turnId": turn["turnId"],
+        "_attemptId": attempt["attemptId"],
+        "_turnOperation": operation,
+        "_turnActor": turn["actor"],
+        "_turnKind": turn["kind"],
+        # Authenticated ownership is injected by the application service,
+        # never accepted from the user-provided config object. Detached
+        # workers carry it after request context has disappeared.
+        "_turnOwnerUserId": user_id,
+        "excludeLast": True,
+    })
+    # Every conversation turn — ordinary chat, Goal Mode, Flow and their
+    # resumes alike — keeps going when a provider receipt is missing:
+    # the account records the paid lower bound, keeps the receipt
+    # incomplete, and only an explicit finite cap stops spend.
+    config["_unknownUsagePolicy"] = "continue"
+    projection = turn.get("projection") or {}
+    config.update(_resume_executor_config(
+        operation, projection, config.get("_humanGuidanceAnswer")))
+    if operation in ('continue', 'checkpoint_resume', 'answer_guidance'):
+        from lib.tasks_pkg.compaction._resume_projection import resume_background_digest, resume_execution_digest
+        from copy import deepcopy
+        background_receipts = deepcopy(projection.get('_bgCommandInjects') or [])
+        config['_resumeExecutionDigest'] = resume_execution_digest(
+            projection.get('content'), projection.get('thinking'))
+        config['_resumeBackgroundReceipts'] = background_receipts
+        config['_resumeBackgroundDigest'] = resume_background_digest(background_receipts)
+    if (operation in _RESUME_FILE_CARRY_OPERATIONS
+            and "checkpointModifiedFileList" not in config):
+        config.update(_journal_resume_file_fields(turn, config))
+    restore_execution_identity(config)
+    return config
+
+
 class ConversationTurnCommandService:
     """Apply command DTOs with explicit owner identity and injected gateways."""
 
@@ -1408,7 +1462,6 @@ class ConversationTurnCommandService:
         attempt = result["attempt"]
         if not claim_attempt_start(attempt["attemptId"], user_id=user_id):
             return
-        operation = attempt["operation"]
         config=dict(request_config)  # Diagnostic model only until the owned read succeeds.
         bound_task_id: str | None = None
 
@@ -1434,50 +1487,7 @@ class ConversationTurnCommandService:
             bound_task_id = normalized_task_id
 
         try:
-            # Only the durable accepted attempt can supply its tenant at physical
-            # dispatch, including request replay, queued activation and recovery.
-            accepted_config=get_attempt(attempt['attemptId'],user_id=user_id,
-                include_execution_config=True).get('config')
-            if not isinstance(accepted_config,Mapping):
-                raise ValueError('Accepted attempt config must be an object')
-            config=dict(accepted_config)
-
-            # Dispatch consumes this private watermark through abort_after_ts;
-            # the authoritative reread must not expose it as executor config.
-            config.pop(ATTEMPT_DISPATCH_REQUEST_STARTED_AT_MS_CONFIG_KEY, None)
-            config['_turnPrincipalTenantId']=accepted_config.get('_turnPrincipalTenantId','')
-            config.update({
-                "_turnId": turn["turnId"],
-                "_attemptId": attempt["attemptId"],
-                "_turnOperation": operation,
-                "_turnActor": turn["actor"],
-                "_turnKind": turn["kind"],
-                # Authenticated ownership is injected by the application service,
-                # never accepted from the user-provided config object. Detached
-                # workers carry it after request context has disappeared.
-                "_turnOwnerUserId": user_id,
-                "excludeLast": True,
-            })
-            # Every conversation turn — ordinary chat, Goal Mode, Flow and their
-            # resumes alike — keeps going when a provider receipt is missing:
-            # the account records the paid lower bound, keeps the receipt
-            # incomplete, and only an explicit finite cap stops spend.
-            config["_unknownUsagePolicy"] = "continue"
-            projection = turn.get("projection") or {}
-            config.update(_resume_executor_config(
-                operation, projection, config.get("_humanGuidanceAnswer")))
-            if operation in ('continue', 'checkpoint_resume', 'answer_guidance'):
-                from lib.tasks_pkg.compaction._resume_projection import resume_background_digest, resume_execution_digest
-                from copy import deepcopy
-                background_receipts = deepcopy(projection.get('_bgCommandInjects') or [])
-                config['_resumeExecutionDigest'] = resume_execution_digest(
-                    projection.get('content'), projection.get('thinking'))
-                config['_resumeBackgroundReceipts'] = background_receipts
-                config['_resumeBackgroundDigest'] = resume_background_digest(background_receipts)
-            if (operation in _RESUME_FILE_CARRY_OPERATIONS
-                    and "checkpointModifiedFileList" not in config):
-                config.update(_journal_resume_file_fields(turn, config))
-            restore_execution_identity(config)
+            config = restore_accepted_attempt_config(turn, attempt, user_id=user_id)
             task_id, error_response = self._start_task(
                 turn["conversationId"],
                 config,

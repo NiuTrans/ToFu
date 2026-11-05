@@ -6,6 +6,14 @@ This package owns server-side v3 conversation command/query services and
 generated contract bindings. Read `contracts/conversation_sync_v3.yaml` and
 `docs/contracts/CONVERSATION_SYNC_V3.md`.
 
+`worker_execution.py` rebuilds claimed attempts through the common task start
+path and joins execution before reporting settlement. Entered effects require
+recovery evidence; the adapter grants no automatic replay or production kind
+registration. Verify `tests/conversation/test_durable_attempt_execution.py` and
+the cross-authority worker publication contract in `docs/STORAGE.md`.
+`worker_control.py` carries the first acknowledged cancellation cause and
+provenance between Stop and the shared invocation cancellation owner.
+
 ## Editing rules
 
 - The v3 snapshot, turn, attempt, change, and replay model is the only live

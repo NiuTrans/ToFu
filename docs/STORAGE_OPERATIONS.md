@@ -13,6 +13,24 @@ throughput. PostgreSQL row-lock and native OCC tests cover the publication/claim
 race. Production chat worker admission remains unqualified; see
 [durable worker semantics](STORAGE.md) and [architecture](ARCHITECTURE.md).
 
+The same fixture now covers standalone replay rows, mixed-stream batches,
+Flow phases and task-result checkpoints. Proofs remain request-only; the
+existing task IDs, Turn rows and worker jobs are the retained authorities.
+Queued Stop changes retention eligibility: its one existing conversation job
+remains nonterminal until the domain cancellation receipt commits, instead of
+starting terminal retention while its Turn is still pending. The executable
+measurement asserts that this job remains claimable with `terminalAtMs=0`, then
+settles without executing model/tools; it adds no cancellation queue or ledger.
+Do not purge these pending jobs as transport debris. Unconfirmed domain recovery
+must remain visible rather than being converted into successful completion.
+
+`tests/conversation/test_durable_attempt_execution.py` drives real storage,
+ordinary task registration, the physical worker envelope, event delivery and
+terminal persistence with a controlled provider outcome. It tests Stop with
+pending evidence, missing-local-task Stop, pre-execution cancellation, unknown
+preparation outcomes and terminal durability debt. It measures correctness and
+joined lifetime, not production provider throughput or automatic crash recovery.
+
 ## Payment quote retention
 
 Stripe prepares one durable payment quote before provider IO and later binds its

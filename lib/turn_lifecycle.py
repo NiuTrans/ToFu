@@ -2235,6 +2235,8 @@ def _record_task_event_locked(
         source['_activityLastLlmRound'] = task.get('_activityLastLlmRound', 0)
     now = _now_ms()
     event_kind = str(raw_event.get('type') or 'projection')
+    from lib.tasks_pkg.worker_binding import publication_arguments
+    worker_publication = publication_arguments(task, terminal=event_kind in _TERMINAL_EVENTS)
     if (coalesce and task_event_projection_is_progress(raw_event)
             and task.get('_turnProjectionRebasePending') != attempt_id
             and not (task_event or {}).get('preceding_events')
@@ -2256,6 +2258,7 @@ def _record_task_event_locked(
             if task.get('_flowRootAttemptId'):
                 require_live.append(task['_flowRootAttemptId'])
             fence_out['require_attempts_live'] = require_live
+            fence_out.update(worker_publication)
         return 'coalesced'
     state = _task_projection_state(task, attempt_id, user_id)
     if state is not None:
@@ -2372,6 +2375,7 @@ def _record_task_event_locked(
         'terminal': terminal, 'status': status, 'settlement': settlement,
         'error': error, 'event_type': event_type,
         'event_payload': event_payload, 'now': now,
+        **worker_publication,
     }
     if terminal:
         candidate = None
@@ -3027,6 +3031,8 @@ def _prepare_task_event_batch_entry(
         **_frame_projection_patch(baseline, projection, slim=slim,
                                   base_revision=revision),
     }
+    from lib.tasks_pkg.worker_binding import publication_arguments
+    payload.update(publication_arguments(task))
     if task.get('_flowRootAttemptId'):
         payload['flow_root_attempt_id'] = task['_flowRootAttemptId']
     payload['task_event'] = entry.task_event
@@ -3125,8 +3131,10 @@ def sync_visible_run_turns(task: dict[str, Any], messages: list[dict[str, Any]],
     from lib.tasks_pkg.manager._registry import task_user_id
     user_id = task_user_id(task)
     offset = max(0, min(int(task.get('_flowSyncedCount') or 0), len(messages) - 1))
+    from lib.tasks_pkg.worker_binding import publication_arguments
     visible_result = _turn_client(write=True).command(
         'turn.visible.sync', {
+            **publication_arguments(task, terminal=True),
             'conversation_id': conversation_id, 'attempt_id': attempt_id,
             'root_turn_id': root_turn_id, 'messages': messages[offset:],
             'start_index': offset,
@@ -3722,11 +3730,27 @@ def abort_attempt(attempt_id: str, *, user_id: Any, withdraw_dispatch: bool = Tr
         }
     from lib.tasks_pkg.manager.cancellation import cancel_task
 
+    durable_worker = task_id == f'conversation-attempt:{attempt_id}'
+    if durable_worker:
+        from lib.conversation_sync.worker_control import encode_cancellation, decode_cancellation
+        cancelled = _turn_client(write=True).command('worker_job.request_cancel', {
+            'task_id': task_id, 'user_id': user_id, 'now_ms': _now_ms(),
+            'reason': encode_cancellation(abort_reason, abort_detail),
+        }, f'turn-worker-cancel:{attempt_id}:{uuid.uuid4().hex}')
+        if not isinstance(cancelled, Mapping) or not cancelled.get('accepted'):
+            latest = get_attempt(attempt_id, user_id=user_id)
+            if isinstance(latest, Mapping) and latest.get('status') not in LIVE_ATTEMPT_STATUSES:
+                withdrawal = (_withdraw_conversation_dispatch(row['conversationId'], user_id)
+                              if withdraw_dispatch else {})
+                return {'attemptId': attempt_id, 'status': latest['status'],
+                        'alreadyTerminal': True, **withdrawal}
+            raise LifecycleConflict('Conversation worker cancellation was not acknowledged')
+        abort_reason, abort_detail = decode_cancellation(cancelled['job']['cancelReason'])
     receipt = (cancel_task(task_id, user_id=user_id, source='turn_attempt_abort',
                            reason=abort_reason or None,
                            reason_detail=abort_detail or None)
                if task_id else {'found': False})
-    if not receipt['found']:
+    if not receipt['found'] and not durable_worker:
         # Registry miss (or no task bound yet): plant the durable abort
         # tombstone so a live-but-evicted worker's abort_check consumes it
         # at its next poll, then settle the attempt row.

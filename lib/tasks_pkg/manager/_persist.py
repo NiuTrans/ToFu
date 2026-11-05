@@ -641,6 +641,9 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
                 'guard_contract': TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
                 'require_parent': parent_required,
             }
+            from lib.tasks_pkg.worker_binding import publication_arguments
+            checkpoint_payload.update(publication_arguments(
+                task, terminal=status in TASK_REPLAY_TERMINAL_STATUSES))
             if cache_settings_requested:
                 checkpoint_payload['cache_settings_contract'] = (
                     TASK_RESULT_CACHE_SETTINGS_CONTRACT)
