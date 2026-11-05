@@ -36,7 +36,8 @@ All eleven scheduler task/poll operations and all twelve timer operations are
 covered, as are all sixteen queue operations.
 The Project Brain foundation covers ``get``, four work transitions, and
 ``narrative.add`` with the projection and immutable stream compared together.
-The eight ``worker_job.*`` operations are also covered end to end, plus
+Every ``worker_job.*`` operation, including the owner-filtered
+``worker_job.active.list`` projection, is also covered end to end, plus
 all seven ``task_results.*`` operations, ``compaction_archive.*`` (6),
 ``desktop.egress_agent.*`` (3),
 all four ``tool_result_artifact.*`` operations,
@@ -47,9 +48,10 @@ seven executable ``billing.wallet.*``/``billing.ledger.*`` operations and all
 and ``billing.reserve.stale``. All nineteen ``orchestration.*`` and
 ``goal.run.*`` operations are covered, including definition CAS, event
 projection, terminal fencing, Goal supersession, and cross-owner startup
-retirement. All sixteen ``integration.*`` operations cover durable workspace
+retirement. All ``integration.*`` operations cover durable workspace
 registration, checkpoint queue transitions, global worker claiming/CAS,
-metadata, project status, and events. All four ``project.dispatch.*``
+metadata, delivery pages and their receipt-action filter, project status,
+and events. All four ``project.dispatch.*``
 operations cover atomic head/child CAS commits, command replay, point reads,
 prefix/cursor/reverse paging, owned project listing, byte bounds, and owner
 isolation.
@@ -5974,6 +5976,11 @@ def _worker_job_scripts() -> dict[str, list[Step]]:
             'replay_cursor': 7, 'observed_cancel_sequence': observed,
         }, command=True)
 
+    def active(ns: str, kinds: list[str], owner: Any = user) -> Step:
+        return Step('worker_job.active.list', {
+            'user_id': owner, 'task_kinds': [f'{ns}_{kind}' for kind in kinds],
+        })
+
     return {
         'worker job durable suspension cancellation and resume': build(lambda ns: [
             enqueue(ns, 'j1', 'ka', 'k1'),
@@ -6182,6 +6189,51 @@ def _worker_job_scripts() -> dict[str, list[Step]]:
                 'terminal_status': 'failed',
                 'error': {'blob': 'x' * (64 * 1024)},
             }, command=True),
+        ]),
+        'worker job active list projects queued running and suspended work': build(lambda ns: [
+            active(ns, ['ka']),
+            enqueue(ns, 'j1', 'ka', 'k1', priority=5,
+                    payload={'conversationId': 'conversation-1'}),
+            enqueue(ns, 'j2', 'ka', 'k2'),
+            # An earlier creation clock orders first; a tie orders by task id.
+            enqueue(ns, 'j3', 'kb', 'k3', now_ms=now0 - 1, available_at_ms=now0 - 1,
+                    payload={'conversationId': 'conversation-3'}),
+            enqueue(ns, 'j4', 'kc', 'k4'),
+            # Delayed work is still active; a non-string conversationId projects ''.
+            enqueue(ns, 'j5', 'ka', 'k5', available_at_ms=now0 + 60_000,
+                    payload={'conversationId': 5}),
+            enqueue(ns, 'j6', 'kb', 'k6'),
+            claim(ns, 'w1', ['kb'], now0),               # j3 runs
+            claim(ns, 'w2', ['ka'], now0),               # j1 (priority 5)
+            suspend(ns, 'w2', 1, now0, now0 + 60_000),
+            Step('worker_job.request_cancel', {
+                'task_id': f'{ns}_j2', 'user_id': user, 'now_ms': now0,
+                'reason': 'not-needed',
+            }, command=True),
+            claim(ns, 'w3', ['kb'], now0),               # j6
+            Step('worker_job.complete', {
+                'task_id': f'{ns}_j6', 'worker_id': f'{ns}_w3',
+                'fencing_token': 1, 'now_ms': now0 + 1_000,
+                'terminal_status': 'succeeded',
+            }, command=True),
+            # Duplicate kinds are one filter; terminal history never appears.
+            active(ns, ['ka', 'kb', 'ka']),
+            # Explicit null is the trusted system scope across owners.
+            active(ns, ['kc'], owner=None),
+            active(ns, ['ka', 'kb', 'kc'], owner=user + 1),
+            active(ns, ['kd']),
+        ]),
+        'worker job active list requires an explicit owner scope and kinds': build(lambda ns: [
+            enqueue(ns, 'j1', 'ka', 'k1'),
+            active(ns, ['ka']),
+            Step('worker_job.active.list', {'task_kinds': [f'{ns}_ka']}),
+            active(ns, [], owner=None),
+        ]),
+        'worker job active list rejects invalid owner and kind values': build(lambda ns: [
+            active(ns, ['ka'], owner=0),
+            Step('worker_job.active.list', {
+                'user_id': user, 'task_kinds': [f'{ns}_ka', 7],
+            }),
         ]),
     }
 
@@ -8239,7 +8291,86 @@ def _integration_scripts() -> dict[str, list[Step]]:
                 'after_id': row(1), 'limit': 128,
             }, ignore_fields=ignore_ids | frozenset({'nextAfterId'})),
         ],
+        'integration workspace delivery action page selects receipts that ask for action':
+            _integration_delivery_action_script(owner),
     }
+
+
+def _integration_delivery_action_script(owner: dict[str, Any]) -> list[Step]:
+    """Receipt predicates, retained recovery and keyset pages over cold rows.
+
+    Every case row is followed by an acknowledged one so small pages cross
+    several SQL ID windows and native locator pages. Row IDs and cursors are
+    authority-assigned: pages chain each authority's own ``nextAfterId``.
+    """
+    isolated = {'executionMode': 'isolated-task'}
+    delivered = {'state': 'delivered', 'taskOutcome': 'completed',
+                 'publicationMode': 'working_tree'}
+    acknowledged = {**isolated, 'deliveryCheckpoint': {'status': 'disabled'},
+                    'sourceRetirement': 'reclaimed', 'delivery': delivered}
+    cases = [  # task, managed, origin (a str is stored verbatim)
+        ('no-origin', True, None),
+        ('working', False, {'delivery': {'state': 'working'}}),
+        ('pending', False, {'delivery': {'state': 'pending'}}),
+        ('blocked', False, {'delivery': {'state': 'blocked'}}),
+        ('preserved', True, {'delivery': {'state': 'preserved'}}),
+        ('inputs-changed', False, {'delivery': {
+            'state': 'failed', 'retry': {'condition': 'validation_inputs_changed'}}}),
+        ('failed', False, {'delivery': {
+            'state': 'failed', 'retry': {'condition': 'conflict_inputs_changed'}}}),
+        ('checkpoint-ack-missing', False, {**isolated, 'delivery': delivered}),
+        ('source-ack-missing', True, {**isolated, 'deliveryCheckpoint': None,
+                                      'delivery': {'state': 'delivered'}}),
+        # A present null checkpoint acknowledges it; unmanaged has no source.
+        ('null-checkpoint-unmanaged', False, {
+            **isolated, 'deliveryCheckpoint': None, 'delivery': delivered}),
+        ('retained', True, {**acknowledged, 'sourceRetirement': 'retained'}),
+        ('explicit-candidate', True, {'delivery': {'state': 'delivered'}}),
+        ('scalar-receipt', False, {'delivery': 'working'}),
+        ('malformed-origin', False, 'not json'),
+    ]
+    page_fields = frozenset({'id', 'nextAfterId'})
+
+    def register(task: str, managed: bool, origin: Any) -> Step:
+        payload = {
+            **owner, 'task_id': task, 'title': task,
+            'workspace_path': f'/workspace/action-{task}', 'managed': managed,
+            'base_sha': 'a' * 40, 'now': 1.0,
+        }
+        if origin is not None:
+            payload['origin_json'] = (
+                origin if isinstance(origin, str) else json.dumps(origin))
+        return Step('integration.workspace.register', payload, command=True)
+
+    def page(payload: dict[str, Any]) -> Step:
+        return Step('integration.workspace.delivery_action_page', payload,
+                    ignore_fields=page_fields)
+
+    def set_meta(task: str, delivery: dict[str, Any]) -> Step:
+        return Step('integration.workspace.set_meta', {
+            **owner, 'task_id': task,
+            'patch_json': json.dumps({'delivery': delivery}), 'now': 2.0,
+        }, command=True)
+
+    script = []
+    for task, managed, origin in cases:
+        script.append(register(task, managed, origin))
+        script.append(register(f'cold-{task}', managed, acknowledged))
+    first = len(script) + 2
+    return script + [
+        page({'after_id': 0, 'limit': 128}),
+        page({'after_id': 0, 'limit': 128, 'retained': True}),
+        page({'after_id': 0, 'limit': 2}),
+        page({'after_id': _Ref(first, ('nextAfterId',)), 'limit': 2}),
+        page({'after_id': _Ref(first + 1, ('nextAfterId',)), 'limit': 128}),
+        # Bounds clamp like delivery_page; only boolean true asks for retained.
+        page({'after_id': 0, 'limit': 0}),
+        page({}),
+        page({'after_id': 0, 'limit': 500, 'retained': 1}),
+        set_meta('preserved', {'state': 'pending'}),
+        set_meta('working', {'state': 'delivered'}),
+        page({'after_id': 0, 'limit': 128}),
+    ]
 
 
 def _knowledge_scripts() -> dict[str, list[Step]]:
@@ -8970,6 +9101,35 @@ def test_worker_owned_clock_expiry_and_takeover_match_both_authorities(legacy_dr
     assert all(job['status'] == 'succeeded' and job['leaseDeadlineMs'] == 0 for job in terminal)
 
 
+def test_worker_active_list_filters_owners_identically(legacy_driver, integration_owner_daemon):
+    """Owner filters apply before projection; the null system scope spans owners."""
+    kind = 'activity-' + uuid.uuid4().hex
+    owners = (_OWNER_ID, _OWNER_ID + 1)
+    observed = []
+    for native in (False, True):
+        owner_context = (integration_owner_daemon if native
+                         else lambda _owner: nullcontext(legacy_driver))
+        for owner in owners:
+            with owner_context(owner) as driver:
+                enqueued = driver.execute('worker_job.enqueue', {
+                    'task_id': f'{kind}-{owner}', 'user_id': owner, 'task_kind': kind,
+                    'idempotency_key': f'{kind}-{owner}', 'now_ms': owner,
+                    'payload': {'conversationId': f'conversation-{owner}'},
+                }, _cid())
+                assert enqueued.ok, enqueued
+        with owner_context(_OWNER_ID) as driver:
+            views = []
+            for scope in (*owners, None):
+                listed = driver.execute('worker_job.active.list',
+                                        {'user_id': scope, 'task_kinds': [kind]}, None)
+                assert listed.ok, listed
+                views.append(listed.value)
+        assert [row['userId'] for row in views[2]] == list(owners)
+        assert views[:2] == [[row] for row in views[2]]
+        observed.append(views)
+    assert observed[0] == observed[1]
+
+
 def _format_divergence(
     name: str, index: int, step: Step, legacy: Outcome, tofu: Outcome,
 ) -> str:
@@ -9024,6 +9184,25 @@ def _assert_management_outcomes(name, outcomes):
         assert values[7].value['totalRounds'] == 0
         assert ((values[8].ok and values[8].value is None)
                 or values[8].error_code == 'authority_scope_mismatch')
+    elif name == 'integration workspace delivery action page selects receipts that ask for action':
+        assert all(value.ok for value in values)
+        pages = [outcome.value for step, outcome in outcomes
+                 if step.operation == 'integration.workspace.delivery_action_page']
+        tasks = [[row['task_id'] for row in page['rows']] for page in pages]
+        acting = ['working', 'pending', 'blocked', 'inputs-changed',
+                  'checkpoint-ack-missing', 'source-ack-missing']
+        assert tasks[:2] == [acting, [*acting, 'retained']]
+        assert tasks[2:6] == [acting[:2], acting[2:4], acting[4:], acting[:1]]
+        assert [page['hasMore'] for page in pages[2:6]] == [True, True, False, True]
+        assert tasks[6:] == [acting, acting, ['pending', 'blocked', 'preserved', *acting[3:]]]
+    elif name == 'worker job active list projects queued running and suspended work':
+        assert all(value.ok for value in values)
+        listed = [[(row['taskId'].rsplit('_', 1)[1], row['status'], row['conversationId'])
+                   for row in outcome.value]
+                  for step, outcome in outcomes if step.operation == 'worker_job.active.list']
+        assert listed == [[], [('j3', 'running', 'conversation-3'),
+                               ('j1', 'suspended', 'conversation-1'), ('j5', 'queued', '')],
+                          [('j4', 'queued', '')], [], []]
     elif name == 'scheduler task CRUD ordering and enabled projection':
         lookup = [outcome for step, outcome in outcomes if step.operation == 'scheduler.task.execution_lookup']
         settled = [outcome for step, outcome in outcomes if step.operation == 'scheduler.task.settle_execution']
