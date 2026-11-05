@@ -514,6 +514,36 @@ def _waiting_phase_fields(status, status_kind, *, label, secs, idle_secs):
             {'model': label, 'elapsed': secs})
 
 
+class _TransportWaitBeats:
+    """Publish one stream's transport-wait phases through its phase budget."""
+
+    def __init__(self, task, retry_phase_budget):
+        self._task, self._budget = task, retry_phase_budget
+        self._announced_tool_call = None
+
+    def emit(self, status, status_kind, phase_fields, *, model):
+        phase, detail_key, detail, args = phase_fields
+        tool_call_id = str(getattr(status, 'tool_call_id', '') or '')
+        tool_call = ((tool_call_id, getattr(status, 'tool_call_count', 0))
+                     if status_kind == 'preparing_tool_call' else None)
+        if tool_call is not None and tool_call != self._announced_tool_call:
+            # A newly opened call is a state change bounded by the model's own
+            # output, not a repeated wait beat, so sampling never drops it.
+            self._announced_tool_call = tool_call
+        elif not self._budget.should_emit(
+                ('transport_wait', status_kind,
+                 str(getattr(status, 'cooldown_cause', '') or ''))):
+            return
+        append_event(self._task, build_phase(
+            phase,
+            detail=detail,
+            detailKey=detail_key,
+            detailArgs=args,
+            model=model,
+            **({'toolCallId': tool_call_id} if tool_call and tool_call_id else {}),
+        ))
+
+
 def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
                         *, pool_wide=False,
                         pool_prefer_model=None,
@@ -867,7 +897,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             provider_id=provider_id,
         )
 
-    _announced_tool_call = None
+    _wait_beats = _TransportWaitBeats(task, _retry_phase_budget)
 
     def _on_waiting(*, status=None, elapsed=None, slot=None):
         """Heartbeat from the current attempt's typed progress snapshot.
@@ -892,7 +922,6 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
            are legitimately waiting. A truly dead worker emits no beats at
         all, so the reaper keeps its real job.
         """
-        nonlocal _announced_tool_call
         task['_dispatch_heartbeat'] = time.time()
         _request_elapsed = getattr(status, 'request_elapsed_s', elapsed or 0)
         _semantic_idle = getattr(status, 'semantic_idle_s', elapsed or 0)
@@ -906,27 +935,9 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
                 _started = bool(task['content'] != _round_base_content
                                 or task['thinking'] != _round_base_thinking)
             _status_kind = 'stream_stalled' if _started else 'waiting_event'
-        _phase, _detail_key, _detail, _args = _waiting_phase_fields(
-            status, _status_kind, label=_label, secs=_secs, idle_secs=_idle_secs)
-        _tool_call_id = str(getattr(status, 'tool_call_id', '') or '')
-        _tool_call = ((_tool_call_id, getattr(status, 'tool_call_count', 0))
-                      if _status_kind == 'preparing_tool_call' else None)
-        if _tool_call is not None and _tool_call != _announced_tool_call:
-            # A newly opened call is a state change bounded by the model's own
-            # output, not a repeated wait beat, so sampling never drops it.
-            _announced_tool_call = _tool_call
-        elif not _retry_phase_budget.should_emit(
-                ('transport_wait', _status_kind,
-                 str(getattr(status, 'cooldown_cause', '') or ''))):
-            return
-        append_event(task, build_phase(
-            _phase,
-            detail=_detail,
-            detailKey=_detail_key,
-            detailArgs=_args,
-            model=_attempt_model or model,
-            **({'toolCallId': _tool_call_id} if _tool_call and _tool_call_id else {}),
-        ))
+        _wait_beats.emit(status, _status_kind, _waiting_phase_fields(
+            status, _status_kind, label=_label, secs=_secs, idle_secs=_idle_secs),
+            model=_attempt_model or model)
 
     # ── Consume unusable-stream force-rotate signal ──
     # If the previous round returned an empty/truncated stream,

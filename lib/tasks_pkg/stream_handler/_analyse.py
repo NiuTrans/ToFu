@@ -277,6 +277,38 @@ def _handle_intent_stall_nudge(task, assistant_msg, messages, result, *,
     return None
 
 
+def _analyse_tool_call_round(assistant_msg, last_finish_reason, task, tid, model,
+                             round_num, premature_retry_count, messages, result, usage):
+    """Decide a round that returned tool calls.
+
+    An output-token limit continues the same reasoning, an incomplete tool
+    stream is recovered before dispatch, and validated calls proceed.
+    """
+    if (last_finish_reason in ('length', 'max_tokens')
+            and not task.get('aborted') and not task.get('error')):
+        from lib.tasks_pkg.stream_handler._terminal_recovery import (
+            _continue_from_output_limit,
+        )
+        return _continue_from_output_limit(
+            assistant_msg, task, round_num=round_num, model=model,
+            result=result, usage=usage, messages=messages)
+
+    tool_stream_recovery = recover_incomplete_tool_stream(
+        task=task, result=result, assistant_msg=assistant_msg, usage=usage,
+        round_num=round_num, phase_retry_count=premature_retry_count,
+        tid=tid, model=model)
+    if tool_stream_recovery is not None:
+        return tool_stream_recovery
+
+    # A validated tool call is deliverable progress. A later no-actionable
+    # incident is isolated and may use the remaining phase-wide recovery budget.
+    retry_budget._clear_no_actionable_retry_streak(task)
+    task.pop('_output_limit_recovery_count', None)
+
+    # assistant_msg has tool_calls → proceed to tool execution (or check budget)
+    return result
+
+
 def analyse_stream_result(
     assistant_msg, last_finish_reason, task, tid, model,
     round_num, _premature_retry_count, messages, usage=None,
@@ -512,26 +544,6 @@ def analyse_stream_result(
         )
         return result
 
-    if (last_finish_reason in ('length', 'max_tokens')
-            and not task.get('aborted') and not task.get('error')):
-        from lib.tasks_pkg.stream_handler._terminal_recovery import (
-            _continue_from_output_limit,
-        )
-        return _continue_from_output_limit(
-            assistant_msg, task, round_num=round_num, model=model,
-            result=result, usage=usage, messages=messages)
-
-    tool_stream_recovery = recover_incomplete_tool_stream(
-        task=task, result=result, assistant_msg=assistant_msg, usage=usage,
-        round_num=round_num, phase_retry_count=_premature_retry_count,
-        tid=tid, model=model)
-    if tool_stream_recovery is not None:
-        return tool_stream_recovery
-
-    # A validated tool call is deliverable progress. A later no-actionable
-    # incident is isolated and may use the remaining phase-wide recovery budget.
-    retry_budget._clear_no_actionable_retry_streak(task)
-    task.pop('_output_limit_recovery_count', None)
-
-    # assistant_msg has tool_calls → proceed to tool execution (or check budget)
-    return result
+    return _analyse_tool_call_round(
+        assistant_msg, last_finish_reason, task, tid, model, round_num,
+        _premature_retry_count, messages, result, usage)

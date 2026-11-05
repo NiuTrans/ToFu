@@ -7,14 +7,14 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-def _source(project):
-    (project / 'lib').mkdir()
-    (project / 'lib/__init__.py').write_text('')
-    (project / 'lib/task.py').write_text('VALUE = 1\n')
-    (project / 'server.py').write_text('APPLICATION = 1\n')
-    (project / 'frontend').mkdir()
-    (project / 'frontend/view.ts').write_text('view')
-    return project
+def _source(tmp_path):
+    (tmp_path / 'lib').mkdir()
+    (tmp_path / 'lib/__init__.py').write_text('')
+    (tmp_path / 'lib/task.py').write_text('VALUE = 1\n')
+    (tmp_path / 'server.py').write_text('APPLICATION = 1\n')
+    (tmp_path / 'frontend').mkdir()
+    (tmp_path / 'frontend/view.ts').write_text('view')
+    return tmp_path
 
 
 def test_generation_covers_source_configuration_and_interpreter_without_secrets(tmp_path):
@@ -39,10 +39,9 @@ def test_new_and_deleted_lazy_modules_change_generation_but_runtime_data_does_no
     (project / 'lib/runtime_data').mkdir()
     (project / 'lib/runtime_data/task.py').write_text('user data')
     assert plan == prepare_plan(project, {}, python='/env/python')
-    module = project / 'lib/lazy.py'
-    module.write_text('LAZY = True\n')
+    (project / 'lib/lazy.py').write_text('LAZY = True\n')
     assert plan != prepare_plan(project, {}, python='/env/python')
-    module.unlink()
+    (project / 'lib/lazy.py').unlink()
     assert plan == prepare_plan(project, {}, python='/env/python')
 
 

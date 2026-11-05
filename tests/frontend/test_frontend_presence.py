@@ -10,6 +10,7 @@ import subprocess
 
 import pytest
 
+from tests._jsdom import require_node_modules
 from tests._runtime_sections import ROOT, runtime_section_path
 
 pytestmark = pytest.mark.unit
@@ -63,6 +64,7 @@ dom.window.close();
 
 
 def _run(tmp_path, presence_src: str | None = None) -> str:
+    require_node_modules('jsdom')
     proc = subprocess.run(
         ['node', '-e', _HARNESS,
          presence_src or runtime_section_path('presence.js'), str(ROOT)],

@@ -7,6 +7,8 @@ import subprocess
 
 import pytest
 
+from tests._jsdom import require_node_modules
+
 pytestmark = pytest.mark.unit
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..'))
 SOURCE = os.path.join(
@@ -110,6 +112,7 @@ console.log(out.join('\n'));
 
 
 def test_native_push_transport_contract(tmp_path):
+    require_node_modules('vite')
     assert not os.path.exists(CLASSIC_SOURCE)
     built = tmp_path / 'push-transport.js'
     compiled = subprocess.run(
