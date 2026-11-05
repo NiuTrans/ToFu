@@ -118,10 +118,6 @@ def run_llm_call_with_fallback(
             on_tool_call_ready=stream_acc.on_tool_call_ready,
         )
         rs.assistant_msg = llm_result['assistant_msg']
-        # The provider's control declaration is distinct from public content.
-        # Terminal synthesis must see the original marker after public reset.
-        rs.original_assistant_content = str(rs.assistant_msg.get('content') or '')
-        rs.terminal_assistant_content = None
         rs.last_finish_reason = llm_result['finish_reason']
         rs.last_usage = llm_result['usage'] or rs.last_usage
 

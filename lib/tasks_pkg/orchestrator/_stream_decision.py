@@ -15,6 +15,9 @@ The helper applies the decision's state mutations in place:
 * ``rs.abort_phase`` — stamped when an abort phase was detected.
 * ``rs.exit_reason`` — stamped only on the 'break' action
   (``loop_exit_reason``).
+* ``rs.last_stream_result`` — rebound only on the 'break' action when the
+  analyser consumed a control declaration from the shared public message, so
+  terminal provider evidence keeps the content the provider returned.
 
 and returns ``(action, new_premature_retry_count)`` where action is
 one of:
@@ -31,8 +34,10 @@ the stream analyser uses it to enforce its failure-specific retry budget.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
+from lib.llm.stream_result import ProviderStreamResult
 from lib.log import get_logger
 from lib.tasks_pkg.stream_handler.api import RecoveryAction, analyse_stream_result
 
@@ -56,7 +61,7 @@ def apply_stream_decision(
         Live task dict (read by the analyser).
     rs : RoundState
         Loop-state carrier (mutated: ``last_finish_reason``,
-        ``abort_phase``, ``exit_reason``).
+        ``abort_phase``, ``exit_reason``, ``last_stream_result``).
     round_num : int
         Current round index (0-based).
     tid : str
@@ -72,6 +77,9 @@ def apply_stream_decision(
         ``(action, new_premature_retry_count)`` — action is 'break',
         'continue', 'program_continue', or 'proceed'.
     """
+    # The provider result shares its message with the public assistant_msg;
+    # the analyser may consume a control declaration from that message.
+    provider_content = rs.assistant_msg.get('content')
     # Post-stream analysis: premature close, abort, normal exit
     stream_decision = analyse_stream_result(
         rs.assistant_msg, rs.last_finish_reason, task, tid, rs.model,
@@ -80,8 +88,12 @@ def apply_stream_decision(
         stream_result=rs.last_stream_result,
     )
     new_count = stream_decision.premature_retry_count
-    if stream_decision.action is RecoveryAction.BREAK:
-        rs.terminal_assistant_content = rs.original_assistant_content
+    stream_result = rs.last_stream_result
+    if (stream_decision.action is RecoveryAction.BREAK
+            and isinstance(stream_result, ProviderStreamResult)
+            and stream_result.message.get('content') != provider_content):
+        rs.last_stream_result = replace(stream_result, message={
+            **stream_result.message, 'content': provider_content})
     rs.last_finish_reason = stream_decision.last_finish_reason
     if stream_decision.abort_detected_phase:
         rs.abort_phase = stream_decision.abort_detected_phase
