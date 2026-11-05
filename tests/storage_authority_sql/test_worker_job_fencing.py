@@ -16,6 +16,9 @@ from lib.storage.errors import StorageError
 
 pytest_plugins = ('tests._chat_sidecar',)
 pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
+# An ordinary kind: queued conversation-attempt cancellation instead stays
+# claimable until its domain handler settles the Turn (docs/STORAGE.md).
+_KIND = 'fencing-test'
 
 
 def _client(*, write=False):
@@ -31,7 +34,7 @@ def _command(operation, payload, prefix):
 
 def _enqueue(
     task_id, *, user_id=41, key=None, payload=None, now_ms=1_000,
-    task_kind='conversation-attempt',
+    task_kind=_KIND,
 ):
     return _command('worker_job.enqueue', {
         'task_id': task_id,
@@ -49,7 +52,7 @@ def _claim(worker_id, *, now_ms, task_kinds=None):
         'worker_id': worker_id,
         'now_ms': now_ms,
         'lease_ms': 10_000,
-        'task_kinds': task_kinds or ['conversation-attempt'],
+        'task_kinds': task_kinds or [_KIND],
     }
     return _command('worker_job.claim_next', request, f'claim:{worker_id}')
 
@@ -90,7 +93,7 @@ def test_claim_requires_explicit_supported_kinds():
     assert _claim(
         'replica-a/supported-only',
         now_ms=1_002,
-        task_kinds=['conversation-attempt'],
+        task_kinds=[_KIND],
     ) is None
     _command('worker_job.request_cancel', {
         'task_id': 'job-unsupported-kind',
