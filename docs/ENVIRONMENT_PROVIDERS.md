@@ -47,6 +47,12 @@ python -m pip install ./packages/tofu-environments ./packages/tofu-mtsso-auth \
   './bundles/yourprovider/environment-provider[official-auth]'
 ```
 
+These are snapshot installs. When the application runs from this checkout,
+reinstall them after updating it: providers lazily import application modules
+(`lib.*`), so a copy older than the checkout can fail at first use, for example
+a compute wait whose status read stalls with `ModuleNotFoundError`. Installs
+change the execution generation, so the next restart replaces the execution host.
+
 The trusted deployment factory returns `mcp_adapter.MCPBinding(actor,
 environment_service=..., job_service=..., authorize=..., close=...)`. Actor,
 project, repository and provider resolvers come from the deployment's identity,

@@ -126,8 +126,9 @@ write, detach, kill the owned SQL child and reconnect while the same storage hos
 retains the authority and rotates its transport token.
 
 Headless execution uses the same resident owner and the common application
-BootRunner/shutdown. Its generation covers Python application sources and launch
-policy; it excludes frontend artifacts and reveals no secret values. Preparation
+BootRunner/shutdown. Its generation covers Python application sources, the
+planned interpreter's installed packages and launch policy; it excludes frontend
+artifacts and reveals no secret values. Preparation
 and application construction reject source changes. Lazy imports reuse
 `PinnedImportSource`, retaining its documented limits for late package imports
 and non-Python assets rather than copying a second application tree. Generation
@@ -138,6 +139,21 @@ temporary preparation files are removed, and no source archive or history
 journal is retained. A preparation measured 7,614 importable Python files in
 7.842 seconds and a 336-byte compact plan. This is an inventory measurement,
 not a throughput claim.
+
+Problem: installed packages are executable source too, but the generation hashed
+only checkout sources. Reinstalling a stale provider package (or upgrading any
+dependency without a source change) therefore left the old host, with the old
+modules already imported, serving across restarts. Decision: the plan also
+records the runtime replica's environment fingerprint of the planned interpreter
+(`describe_environment` plus `fingerprint` in `serverctl_pkg/runtime_replica.py`),
+so installs, upgrades and removals replace the host at the next restart while
+bytecode writes do not; a layout that cannot be described records none.
+Alternatives rejected: hashing every installed file reads the whole environment
+(10 GB here) per preparation; a second distribution-metadata scan would duplicate
+the replica's install detector; requiring a full stop after installs keeps the
+stale host as the default outcome. Measured on this FUSE host: 0.15 s to describe
+the interpreter plus 0.46 s to fingerprint it per preparation.
+Verify `tests/server/test_execution_plan.py`.
 
 The personal Linux manager now composes the selected storage, a headless execution
 host and an API host. An automatic native transport resolves to the shared daemon;

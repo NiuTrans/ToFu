@@ -1,8 +1,9 @@
 """Execution generation identity; no application boot or durable-state access.
 
 The headless host uses the existing pinned-import source discovery owner. Python
-source and effective launch policy determine replacement; frontend artifacts do
-not. Digests disclose no launch secrets. A plan is admission evidence, not a
+source, the interpreter environment's installs (the runtime replica's environment
+fingerprint) and effective launch policy determine replacement; frontend artifacts
+do not. Digests disclose no launch secrets. A plan is admission evidence, not a
 copied source tree or an atomic snapshot of non-Python application resources.
 """
 from __future__ import annotations
@@ -14,6 +15,7 @@ import sys
 
 def prepare_plan(project: Path, environment: dict[str, str], *, python: str = sys.executable) -> dict:
     from lib.runtime.pinned_import_source import _importable_sources
+    from serverctl_pkg.runtime_replica import describe_environment, fingerprint
 
     project = project.resolve()
     roots = [project]
@@ -37,6 +39,9 @@ def prepare_plan(project: Path, environment: dict[str, str], *, python: str = sy
         identity.update(len(content).to_bytes(8, 'little'))
         identity.update(content)
     configuration = json.dumps(environment, sort_keys=True, separators=(',', ':')).encode()
+    # Installed packages are executable source too; None when the layout cannot be described.
+    installed = describe_environment(python)
     return {'format': 'tofu.execution-plan/v1', 'python': python,
             'sourceSha256': identity.hexdigest(), 'sourceFiles': len(sources),
+            'environmentFingerprint': None if installed is None else fingerprint(installed),
             'configurationSha256': hashlib.sha256(configuration).hexdigest()}
