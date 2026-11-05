@@ -8,7 +8,9 @@ from tests.project_mod.test_coordinator_request_budget import bind, spend, usage
 from tests.storage.test_coordinator_segmented_allowance import segmented_runtime
 
 pytest_plugins = ('tests.support.semantic_authorities',)
-pytestmark = pytest.mark.api
+# The native authority admits only its own owner; this runtime's dispatch scope is owner 7.
+pytestmark = [pytest.mark.api,
+              pytest.mark.parametrize('semantic_authority', ['sqlite', 'postgres'], indirect=True)]
 __all__ = ('base_runtime', 'context', 'runtime', 'segmented_runtime')
 
 
