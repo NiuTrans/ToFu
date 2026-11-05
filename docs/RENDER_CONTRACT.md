@@ -1184,7 +1184,25 @@ the streaming block directly above it: `responding` under its answer tail,
 `thinking_active` when the reasoning is the reply's last part, or (snapshot
 phase only) the bare fallback under an unsettled answer tail. Pending task
 binding still distinguishes scheduler preparation from executor queue
-residence.
+residence. An `executor_queued` phase is shown as sent while it is the latest
+frame: the queue frame is the attempt's first recorded event, which already
+marks the attempt running with `startedAt`, so a running Turn proves no worker
+entry; the worker's first phase replaces it, and a storage wedge that
+withholds later frames has its own `storage_wedged` override.
+
+Backend phases keep the row current where no content frame can. A tool call
+has no visible frame while its arguments stream, so the provider stream
+announces each call the moment it opens: `llm_thinking` with
+`stream.phase.preparingToolCall` (“Preparing a tool call ({elapsed}s):
+{tool}”) and the call's `toolCallId`; that call's `tool_start` retires the
+phase and the row names the announced call. A compaction runs inside another
+activity, so its `compaction_done` resumes the phase it interrupted (for
+example “Analyzing results and planning next step…”) instead of leaving no
+phase until the next one arrives. Wait labels whose `detailArgs.elapsed`
+counts up between sampled frames (`waitingForResponse`, `waitingQuotaReset`,
+`preparingToolCall`) tick locally once per second; the renderer locates the
+counter by composing the label with a marker in place of `elapsed`, so locales
+that place `{model}` or `{tool}` first never tick a digit inside that name.
 
 **Problem (owner report 2026-11-03):** a 435-round slides reply showed only
 “Waiting for an execution status update…” under its failed work-unit card and
@@ -1212,14 +1230,33 @@ an answer streaming in the `terminal`-stamped accumulator also kept the
 fallback under it. **Decision:** derive streaming activity from the frame that
 cleared the phase, recorded by the reducer; projection position remains only
 for snapshot phases. Replaying a 16,498-frame live capture through the reducer
-and view model shows every reasoning frame as `thinking_active`; the fallback
-remains only between `compaction_done` (which folds the compacting phase) and
-the next round phase. **Alternatives rejected:** a backend phase per channel
+and view model shows every reasoning frame as `thinking_active`. **Alternatives rejected:** a backend phase per channel
 switch registers client-derived states as wire phases and adds a write per
 switch to restate what the frame already proves; treating any visible
 reasoning or prose as live would label post-compaction and post-request gaps
 as streaming. Specs: `core/turn-state.test.ts`,
 `presentation/view-model/live-turns.test.ts`, `goal-progress.test.ts`.
+
+**Problem (2026-11-05 follow-up):** the same capture still showed the fallback
+in 26 gaps of 0.2–0.9 s after each compaction, because `compaction_done`
+folded the compacting phase to none; the row read “Thinking…” while the model
+wrote a long tool call's arguments, since the backend reported
+`preparing_tool_call` only for a response with no reasoning or text and only
+on the 20 s heartbeat; the queue frame of every queued task read as stale; and
+the wait-label tick rewrote a digit inside the model name in ja/ko/de/fr/ru.
+**Decision:** the manager resumes the interrupted phase on `compaction_done`;
+the provider stream classifies by its latest output channel and announces
+each opened tool call at once through the existing wait-status port
+(announcements bypass the per-round wait sampler, repeated beats keep it);
+the queue phase is trusted while it is the latest frame; the tick anchors on
+the template, not on digits. **Alternatives rejected:** a frontend grace timer
+before showing the fallback is a tuning knob that still guesses; a periodic
+backend heartbeat while arguments stream adds writes that restate one
+transition; matching the preparing phase's `tool_start` by tool name would
+clear the next call's phase when the previous call completes as it opens.
+Specs: `tests/tasks_pkg/test_phase_terminal_clear.py`,
+`tests/llm/test_stream_interruption_visibility.py`,
+`presentation/live-phase.test.ts`, `ui/renderers/text-blocks.test.ts`.
 
 `llm_thinking` denotes an opened model-generation round, not evidence of
 reasoning-channel output. Its live row preserves localized `detailKey` and

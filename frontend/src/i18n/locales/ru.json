@@ -4997,6 +4997,7 @@
   "stream.phase.modelRouted": "Маршрутизация модели: {from} → {to} ({role}, уровень {tier})",
   "stream.phase.partialStreamRetry": "⚠️ Поток данных прервался после {chars} симв.; частичный ответ отброшен, тот же запрос отправляется повторно ({attempt}/{max})…",
   "stream.phase.planning": "Планирование задачи…",
+  "stream.phase.preparingToolCall": "Подготовка вызова инструмента ({elapsed} с): {tool}",
   "stream.phase.reactiveCompact": "⚡ Промпт слишком длинный — контекст сжат автоматически (реактивное сжатие {attempt}/{max})…",
   "stream.phase.refusalFallback": "⚠️ Модель {model} отказалась отвечать — повтор с моделью {fallback}…",
   "stream.phase.refusalSwitchback": "🔁 Выполнен возврат к {model} для одной пробной итерации — при повторном отказе до конца хода будет использоваться {fallback}",

@@ -4997,6 +4997,7 @@
   "stream.phase.modelRouted": "モデルルーティング：{from} → {to}（{role}、{tier}）",
   "stream.phase.partialStreamRetry": "⚠️ {chars}文字の生成後にアップストリームのストリームが途切れました。途中までの応答を破棄し、同じリクエストを再送信しています（{attempt}/{max}）…",
   "stream.phase.planning": "タスクを計画しています…",
+  "stream.phase.preparingToolCall": "ツール呼び出しを準備しています（{elapsed}秒）：{tool}",
   "stream.phase.reactiveCompact": "⚡ プロンプトが長すぎるため自動圧縮しました（リアクティブ圧縮{attempt}/{max}）…",
   "stream.phase.refusalFallback": "⚠️ {model}が応答を拒否しました — {fallback}で再試行しています…",
   "stream.phase.refusalSwitchback": "🔁 1ラウンド試行するため{model}に戻しました — 再び拒否された場合、このターンの残りは{fallback}を使用します",

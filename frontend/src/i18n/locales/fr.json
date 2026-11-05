@@ -4997,6 +4997,7 @@
   "stream.phase.modelRouted": "Routage du modèle : {from} → {to} ({role}, {tier})",
   "stream.phase.partialStreamRetry": "⚠️ Le flux amont s’est interrompu (caractères générés : {chars}) ; la réponse partielle est abandonnée et la même requête est renvoyée ({attempt}/{max})…",
   "stream.phase.planning": "Planification de la tâche…",
+  "stream.phase.preparingToolCall": "Préparation d’un appel d’outil ({elapsed} s) : {tool}",
   "stream.phase.reactiveCompact": "⚡ Invite trop longue — compactage automatique (compactage réactif {attempt}/{max})…",
   "stream.phase.refusalFallback": "⚠️ {model} a refusé de répondre — nouvelle tentative avec {fallback}…",
   "stream.phase.refusalSwitchback": "🔁 Retour à {model} pour une itération de test — {fallback} sera conservé pour le reste du tour en cas de nouveau refus",

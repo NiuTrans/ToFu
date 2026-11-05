@@ -19,6 +19,7 @@ describe('shared live phase presentation', () => {
   });
   it.each([
     { phase: 'waiting_model' }, { phase: 'llm_thinking' }, { phase: 'thinking_active' }, { phase: 'responding' },
+    { phase: 'llm_thinking', detailKey: 'stream.phase.preparingToolCall', detailArgs: { tool: 'write_file', elapsed: 3 } },
     { phase: 'retrying' }, { phase: 'tool_exec', tools: ['read_file', 'inspect_runtime'] },
     { phase: 'worker_starting', detailKey: 'stream.phase.workerStarting' },
     { phase: 'retrying', detailKey: 'stream.phase.retryRateLimited', detailArgs: { model: 'm' } },
@@ -48,9 +49,11 @@ describe('shared live phase presentation', () => {
     expect(liveStatusPhase(value)).toBe(value);
     expect(presentLivePhaseLabel(liveStatusPhase(value), text)).toBe('localized:stream.phase.storageWedged');
   });
-  it('keeps executor preparing/queued distinct and rejects stale queue status after entry', () => {
+  it('keeps executor preparing/queued distinct and shows the queue on the attempt it starts', () => {
     expect(liveAttemptPresentation({}, 'pending').phase).toBe('executor_preparing');
     expect(liveAttemptPresentation({ phase: 'executor_queued' }, 'pending').phase).toBe('executor_queued');
-    expect(liveAttemptPresentation({ phase: 'executor_queued' }, 'running').phase).toBe('waiting');
+    // The queue frame is the attempt's first recorded event, which marks it running.
+    expect(liveAttemptPresentation({ phase: 'executor_queued' }, 'running').phase).toBe('executor_queued');
+    expect(liveAttemptPresentation({}, 'running').phase).toBe('waiting');
   });
 });

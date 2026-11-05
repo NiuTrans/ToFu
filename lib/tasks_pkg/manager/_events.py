@@ -567,6 +567,9 @@ def _append_event_ordered(task, event, *, lane=None):
     #   'delta'/terminal frame must persist the CLEARED phase (None) so the
     #   frontend folds the stage text exactly when v1 would (pt: v2 lane had
     #   no stream phase text at all — the projection never carried it).
+    # True when this frame installs a new phase snapshot; the persist/enqueue
+    # closures below stamp it with this frame's authoritative sequence.
+    _installs_phase_snapshot = False
     if event.get('type') == 'phase':
         p = {
             'phase': event['phase'],
@@ -593,13 +596,27 @@ def _append_event_ordered(task, event, *, lane=None):
         if event.get('toolContextTools'):
             p['toolContextTools'] = event['toolContextTools']
         if event.get('tools'): p['tools'] = event['tools']
+        # The tool call a preparing phase announces; its tool_start folds it.
+        if event.get('toolCallId'): p['toolCallId'] = event['toolCallId']
         # The PHASE wire event now carries the unified canonical `roundNum`
         # (Phase 3 §5); the poll-fallback phase dict keeps its local `round`
         # key (what the frontend phase render reads as buf.phase.round).
         if event.get('roundNum'): p['round'] = event['roundNum']
+        current = task.get('phase')
+        if p['phase'] == 'compacting':
+            # Compaction runs inside another activity (preparing a round, a
+            # reactive retry, the compact tool). Keep that activity so the
+            # compaction's own terminal resumes it instead of blanking the row.
+            if not (isinstance(current, dict)
+                    and current.get('phase') == 'compacting'):
+                task['_phaseInterruptedByCompaction'] = current
+        else:
+            task.pop('_phaseInterruptedByCompaction', None)
         task['phase'] = p
+        _installs_phase_snapshot = True
     elif event.get('type') == 'delta':
         task['phase'] = None  # Clear phase when LLM starts producing tokens
+        task.pop('_phaseInterruptedByCompaction', None)
     elif event.get('type') in TASK_REPLAY_TERMINAL_EVENT_TYPES:
         # Terminal events retire the phase snapshot. Previously ONLY deltas
         #   cleared it, so a task that ended while its last phase was still up
@@ -609,13 +626,31 @@ def _append_event_ordered(task, event, *, lane=None):
         #   (measured 2026-08-01: 20:10's compacting phase still on a bubble
         #   at 22:22, ). A finished task has no current phase.
         task['phase'] = None
+        task.pop('_phaseInterruptedByCompaction', None)
     elif (event.get('type') == 'compaction_done'
           and isinstance(task.get('phase'), dict)
           and task['phase'].get('phase') == 'compacting'):
-        # The compacting phase's OWN terminal: fold it the moment the
+        # The compacting phase's OWN terminal: retire it the moment the
         # compaction lands rather than leaving it up until the next round's
-        # phase event (or forever, if the task dies in between). Only fold a
-        # phase that IS compacting — never clobber an unrelated live phase.
+        # phase event (or forever, if the task dies in between), and resume
+        # the activity it interrupted. Clearing to None instead blanked the
+        # status row until that activity's next phase arrived. Only a phase
+        # that IS compacting is retired — never an unrelated live phase.
+        interrupted = task.pop('_phaseInterruptedByCompaction', None)
+        if isinstance(interrupted, dict):
+            resumed = {key: value for key, value in interrupted.items()
+                       if key != 'seq'}
+            resumed['emittedAt'] = _trace_observed_at
+            task['phase'] = resumed
+            _installs_phase_snapshot = True
+        else:
+            task['phase'] = None
+    elif (event.get('type') == 'tool_start'
+          and isinstance(task.get('phase'), dict)
+          and task['phase'].get('toolCallId')
+          and task['phase']['toolCallId'] == event.get('toolCallId')):
+        # The announced call's arguments are complete and its own tool row now
+        # names the work: the preparing phase's terminal.
         task['phase'] = None
 
     if _wire is not None:
@@ -677,7 +712,7 @@ def _append_event_ordered(task, event, *, lane=None):
             check_publication()
             if task.get('_invocationPublicationClosed'):
                 raise RuntimeError('Child invocation publication revoked')
-            if (lane is None and event.get('type') == 'phase'
+            if (lane is None and _installs_phase_snapshot
                     and isinstance(task.get('phase'), dict)):
                 # Phase heartbeats repaint by the authoritative event sequence;
                 # ``attempt`` remains reserved for actual retries.
@@ -807,7 +842,7 @@ def _append_event_ordered(task, event, *, lane=None):
         def _enqueue_before_push(sequence):
             from lib.tasks_pkg.event_delivery import coordinator
             try:
-                if event.get('type') == 'phase' and isinstance(task.get('phase'), dict):
+                if _installs_phase_snapshot and isinstance(task.get('phase'), dict):
                     task['phase']['seq'] = sequence
                     if projection_source is not None and isinstance(projection_source.get('phase'), dict):
                         projection_source['phase']['seq'] = sequence

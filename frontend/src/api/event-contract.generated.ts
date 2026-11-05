@@ -92,6 +92,8 @@ export interface PhaseEvent {
   toolContext?: string;
   /** (optional) the structured raw tool names behind `toolContext` — compose the suffix in the UI language from THESE when present */
   toolContextTools?: unknown[];
+  /** (optional, llm_thinking preparing-tool-call phase) provider id of the call being written; that call's tool_start retires the phase */
+  toolCallId?: string;
   /** (optional) retry/nudge counter */
   attempt?: number;
   /** (optional) retry/nudge budget */

@@ -4997,6 +4997,7 @@
   "stream.phase.modelRouted": "Modellrouting: {from} → {to} ({role}, {tier})",
   "stream.phase.partialStreamRetry": "⚠️ Upstream-Stream nach {chars} Zeichen abgebrochen; die Teilantwort wird verworfen und dieselbe Anfrage erneut gesendet ({attempt}/{max})…",
   "stream.phase.planning": "Aufgabe wird geplant…",
+  "stream.phase.preparingToolCall": "Tool-Aufruf wird vorbereitet ({elapsed} s): {tool}",
   "stream.phase.reactiveCompact": "⚡ Prompt zu lang — automatisch komprimiert (reaktive Komprimierung {attempt}/{max})…",
   "stream.phase.refusalFallback": "⚠️ {model} hat die Antwort verweigert — neuer Versuch mit {fallback}…",
   "stream.phase.refusalSwitchback": "🔁 Für eine Testrunde zurück zu {model} gewechselt — bei erneuter Verweigerung bleibt {fallback} für den Rest des Durchgangs aktiv",

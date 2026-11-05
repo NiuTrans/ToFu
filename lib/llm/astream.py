@@ -372,7 +372,8 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
         # Compatibility for narrow request-plan fakes and pre-t0 adapters.
         # Production RequestPlan always carries the monotonic request boundary.
         _attempt_started_at = time.monotonic()
-    _progress = _tp.StreamProgress(0, started_at=_attempt_started_at)
+    _progress = _tp.StreamProgress(
+        0, started_at=_attempt_started_at, on_tool_call_open=on_stream_wait)
 
     # Desktop-agent fallback still uses the proven sync bridge reader.  Keep
     # it off the event loop; server-side direct/proxy routes stay native async

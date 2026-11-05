@@ -13,6 +13,7 @@ import {
   type ConversationBlockViewModel,
   type ConversationTurnViewModel,
 } from '../../presentation/conversation-view-model';
+import type { TransientTurnPresentation } from '../../domain/transient-turn';
 import type { ClassicConversationRendererPorts } from './ports';
 import { iconHtml } from '../../../icons';
 import {
@@ -341,13 +342,21 @@ function elapsedSince(startedAt: number): string {
 
 function waitTickEligible(block: Extract<ConversationBlockViewModel, { kind: 'live-status' }>): boolean {
   const value = block.value;
-  return value.phase === 'waiting_model'
+  const providerWait = value.phase === 'waiting_model'
     && (value.detailKey === 'stream.phase.waitingForResponse'
       || value.detailKey === 'stream.phase.waitingQuotaReset'
-      || value.detailKey === 'stream.phase.streamStalled')
+      || value.detailKey === 'stream.phase.streamStalled');
+  const toolCallGeneration = value.phase === 'llm_thinking'
+    && value.detailKey === 'stream.phase.preparingToolCall';
+  return (providerWait || toolCallGeneration)
     && typeof value.detailArgs?.elapsed === 'number'
     && Number.isFinite(value.detailArgs.elapsed);
 }
+
+/* Stands in for the elapsed argument while locating it in the composed label:
+ * locales that place {model} or {tool} first would otherwise let a digit in
+ * that name be ticked instead of the counter. */
+const ELAPSED_MARKER = '\uE000';
 
 function ensureWaitTickTimer(): void {
   if (waitTickTimer != null) return;
@@ -389,10 +398,10 @@ export function renderLiveStatusBlock(
   const document = node.ownerDocument;
   const phase = value.phase || 'working';
   const goal = value.goalProgress;
-  let label = presentLivePhaseLabel(liveStatusPhase(value),
-    (key, fallback, args) => textFor(ports, key, fallback, args));
-  if (goal && phase !== 'storage_wedged') {
-
+  const composeLabel = (status: TransientTurnPresentation): string => {
+    const label = presentLivePhaseLabel(liveStatusPhase(status),
+      (key, fallback, args) => textFor(ports, key, fallback, args));
+    if (!goal || phase === 'storage_wedged') return label;
     const roleKeys: Record<string, [string, string]> = {
       worker: ['stream.goal.role.worker', 'Worker'],
       planner: ['stream.goal.role.planner', 'Planner'],
@@ -405,8 +414,7 @@ export function renderLiveStatusBlock(
       goal.rootSummary ? 'stream.goal.activeRoot' : 'stream.goal.activePhase',
       goal.rootSummary ? 'Run ongoing · Iteration {iteration} · {role}' : 'Iteration {iteration} · {role}',
       { iteration: goal.iteration, role });
-    label = `${context}${label ? ' · ' + label : ''}`;
-    if (goal.workers.length) label += ' · ' + goal.workers.map(worker =>
+    const workers = goal.workers.map(worker =>
       worker.text + ' · ' + swarmAgentPhaseLabel(worker,
         (key, fallback, args) => textFor(ports, key, fallback, args))
       + (worker.latestTool ? ' · ' + textFor(ports, 'stream.goal.latestTool',
@@ -414,7 +422,9 @@ export function renderLiveStatusBlock(
       + (worker.toolError ? ' · ' + textFor(ports,
         'stream.goal.toolError', 'Latest tool error: {error}', { error: worker.toolError }) : '')
     ).join('; ');
-  }
+    return `${context}${label ? ' · ' + label : ''}${workers ? ' · ' + workers : ''}`;
+  };
+  const label = composeLabel(value);
   if (phase === 'warming') {
     const status = document.createElement('div');
     status.className = 'stream-status';
@@ -435,14 +445,16 @@ export function renderLiveStatusBlock(
   textNode.textContent = label;
   if (waitTickEligible(block)) {
     const elapsed = Number(value.detailArgs!.elapsed);
-    const anchor = String(elapsed);
-    const at = label.indexOf(anchor);
+    const marked = composeLabel({
+      ...value, detailArgs: { ...value.detailArgs, elapsed: ELAPSED_MARKER },
+    });
+    const at = marked.indexOf(ELAPSED_MARKER);
     if (at >= 0) {
       waitTickStates.set(node, {
         anchor: elapsed,
         at: Date.now(),
-        prefix: label.slice(0, at),
-        suffix: label.slice(at + anchor.length),
+        prefix: marked.slice(0, at),
+        suffix: marked.slice(at + ELAPSED_MARKER.length),
       });
       ensureWaitTickTimer();
     } else {

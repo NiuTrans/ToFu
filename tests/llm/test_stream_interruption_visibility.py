@@ -100,6 +100,84 @@ def test_unfinished_tool_arguments_publish_status_while_arriving():
         watcher._thread.join(1)
 
 
+def test_opened_tool_call_is_reported_at_once_after_other_output():
+    """The current output channel, not the attempt's history, names the work:
+    a tool call opened after reasoning or prose is reported immediately with
+    its name, because argument chunks produce no visible frame."""
+    from lib.llm._transport import StreamProgress
+    opened = []
+    progress = StreamProgress(0, on_tool_call_open=opened.append)
+    progress.mark_reasoning('Plan the edit')
+    assert progress.wait_status().kind == 'stream_stalled'
+    assert progress.mark_tool_delta(recognized=True, name='write_file', call_id='call_1')
+    progress.mark_tool_delta(argument_delta='{"path":')
+    assert [(s.kind, s.tool_name, s.tool_call_id) for s in opened] == [
+        ('preparing_tool_call', 'write_file', 'call_1')]
+    status = progress.wait_status()
+    assert (status.kind, status.tool_name, status.tool_call_count) == (
+        'preparing_tool_call', 'write_file', 1)
+    progress.mark_content('Done.')
+    status = progress.wait_status()
+    assert (status.kind, status.tool_name, status.tool_call_id) == ('stream_stalled', '', '')
+    progress.mark_tool_delta(recognized=True, name='run_command', call_id='call_2')
+    assert [s.tool_call_id for s in opened] == ['call_1', 'call_2']
+
+
+def test_raising_tool_call_listener_never_breaks_the_stream():
+    from lib.llm._transport import StreamProgress
+
+    def broken(status):
+        raise RuntimeError('observer failure')
+
+    progress = StreamProgress(0, on_tool_call_open=broken)
+    assert progress.mark_tool_delta(recognized=True, name='read_files', call_id='c')
+    assert progress.wait_status().kind == 'preparing_tool_call'
+
+
+def test_task_names_each_opened_tool_call_and_samples_only_repeat_beats(monkeypatch):
+    import lib.tasks_pkg.manager._stream as manager
+    from tests.support.chat_tasks import chat_task_fixture_guard, chat_task_registry
+
+    task = {'id': 'opened-tool-calls', 'convId': 'opened-tool-conv',
+            '_userId': 1, 'status': 'running', 'content': '', 'thinking': '',
+            'config': {'userId': 1}, 'events': [], 'toolRounds': [],
+            'content_lock': threading.Lock(), 'events_lock': threading.Lock()}
+
+    def status(call_id, count, elapsed=0):
+        return SimpleNamespace(
+            kind='preparing_tool_call', request_elapsed_s=45, semantic_idle_s=0,
+            tool_name='write_file', tool_call_id=call_id, tool_call_count=count,
+            tool_call_elapsed_s=elapsed)
+
+    def dispatch(body, **kwargs):
+        slot = SimpleNamespace(model='fixture')
+        for count in (1, 2, 3):
+            kwargs['on_waiting'](status=status(f'call_{count}', count), slot=slot)
+        for elapsed in (20, 40, 60):
+            kwargs['on_waiting'](status=status('call_3', 3, elapsed), slot=slot)
+        return ({'role': 'assistant', 'content': 'ok',
+                 'reasoning_content': ''}, 'stop', {})
+
+    monkeypatch.setattr(manager, 'dispatch_stream', dispatch)
+    with chat_task_fixture_guard:
+        chat_task_registry[task['id']] = task
+    try:
+        manager.stream_llm_response(
+            task, {'model': 'fixture',
+                   'messages': [{'role': 'user', 'content': 'go'}]}, tag='R1')
+    finally:
+        with chat_task_fixture_guard:
+            chat_task_registry.pop(task['id'], None)
+    events = [event for event in task['events']
+              if event.get('type') == 'phase'
+              and event.get('detailKey') == 'stream.phase.preparingToolCall']
+    assert [event['toolCallId'] for event in events[:3]] == ['call_1', 'call_2', 'call_3']
+    assert events[0]['phase'] == 'llm_thinking'
+    assert events[0]['detailArgs'] == {'model': 'fixture', 'tool': 'write_file', 'elapsed': 0}
+    # Repeat beats of one call share the sampled wait budget (occurrences 1, 2, 4, ...).
+    assert [event['detailArgs']['elapsed'] for event in events[3:]] == [20, 40]
+
+
 def _frame(delta, finish=None):
     return b'data: ' + json.dumps({'choices': [{
         'delta': delta, 'finish_reason': finish,
@@ -211,3 +289,48 @@ def test_failed_partial_arguments_keep_evidence_after_successful_retry(
     assert not evidence['done_seen']
     assert private_argument not in caplog.text
     assert 'synthetic-not-a-credential' not in caplog.text
+
+
+def test_sync_transport_reports_the_opened_tool_call_through_its_wait_port(monkeypatch):
+    """Parser → StreamProgress → ``on_stream_wait``: prose then a tool call in
+    one response announces the call with its provider id while it streams."""
+    import lib.llm.stream as stream
+    import lib.desktop.egress as egress
+    import lib.proxy as proxy
+
+    frames = [
+        _frame({'content': 'Reading the file first.'}),
+        _frame({'tool_calls': [{'index': 0, 'id': 'call_probe', 'type': 'function',
+                                'function': {'name': 'read_files', 'arguments': ''}}]}),
+        _frame({'tool_calls': [{'index': 0, 'function': {'arguments': '{"path":"a.py"}'}}]}),
+        _frame({}, 'tool_calls'),
+        b'data: [DONE]\n\n',
+    ]
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        def iter_content(self, chunk_size):
+            yield from frames
+
+        def close(self):
+            pass
+
+    class Session:
+        def post(self, *args, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(stream, 'get_sync_session', lambda: Session())
+    monkeypatch.setattr(egress, 'route_request', lambda *args, **kwargs: 'direct')
+    monkeypatch.setattr(proxy, 'subscription_route_candidates', lambda *args: [])
+    monkeypatch.setattr(stream, '_proxy_report_outcome', lambda *args, **kwargs: None)
+    statuses = []
+    result = stream.stream_chat(
+        {'model': 'm', 'messages': [{'role': 'user', 'content': 'hi'}]},
+        api_key='synthetic-not-a-credential', base_url='http://fake.local/v1',
+        on_stream_wait=statuses.append)
+
+    assert result.is_verified_complete
+    assert [(s.kind, s.tool_name, s.tool_call_id, s.tool_call_count) for s in statuses] == [
+        ('preparing_tool_call', 'read_files', 'call_probe', 1)]

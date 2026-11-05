@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationTurnViewModel } from '../../presentation/conversation-view-model';
 import type { LiveStatusBlockViewModel, TextBlockViewModel, ThinkingBlockViewModel } from '../../presentation/view-model/types';
 import type { ClassicConversationRendererPorts } from './ports';
@@ -114,6 +114,45 @@ describe('live status elapsed clock', () => {
       detailKey: undefined, detailArgs: undefined }), ports);
     expect(node.querySelector('.stream-phase-elapsed')).toBeNull();
     expect(node.querySelector('.stream-phase-text')?.textContent).toBe('Thinking…');
+  });
+});
+
+describe('live status wait tick', () => {
+  let render: typeof renderLiveStatusBlock;
+  beforeEach(async () => {
+    // The tick interval is module state; a fresh module owns this test's fake clock.
+    vi.resetModules();
+    ({ renderLiveStatusBlock: render } = await import('./text-blocks'));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('advances the elapsed argument even when a name placed before it contains its digits', () => {
+    vi.useFakeTimers({ now: 1_793_693_000_000, toFake: ['Date', 'setInterval', 'clearInterval'] });
+    const node = document.createElement('div');
+    node.className = 'conversation-block conversation-block--live-status';
+    document.body.appendChild(node);
+    // Locales such as ja/ko/de put the name first.
+    const catalog: Record<string, string> = {
+      'stream.phase.preparingToolCall': '{tool} の呼び出しを準備中（{elapsed}秒）',
+      'stream.phase.waitingForResponse': '{model}の応答を待っています（{elapsed}秒経過）…',
+    };
+    const ports: ClassicConversationRendererPorts = { renderSafeMarkdownHtml: text => text,
+      localizedText: (key, fallback, values) => (catalog[key] ?? fallback)
+        .replace(/\{(\w+)\}/g, (_, name: string) => String(values?.[name] ?? '')) };
+    const block = (value: Partial<LiveStatusBlockViewModel['value']>): LiveStatusBlockViewModel => ({
+      kind: 'live-status', blockId: 'live-status', source: {}, identitySource: 'contract',
+      value: { kind: 'attempt', phase: 'llm_thinking', label: '', detail: '', ...value },
+    });
+    const text = () => node.querySelector('.stream-phase-text')?.textContent;
+    render(node, block({ detailKey: 'stream.phase.preparingToolCall',
+      detailArgs: { model: 'm', tool: 'fetch_v2', elapsed: 2 } }), ports);
+    expect(text()).toBe('fetch_v2 の呼び出しを準備中（2秒）');
+    vi.advanceTimersByTime(3_000);
+    expect(text()).toBe('fetch_v2 の呼び出しを準備中（5秒）');
+    render(node, block({ phase: 'waiting_model', detailKey: 'stream.phase.waitingForResponse',
+      detailArgs: { model: 'claude-opus-5.5', elapsed: 5 } }), ports);
+    vi.advanceTimersByTime(2_000);
+    expect(text()).toBe('claude-opus-5.5の応答を待っています（7秒経過）…');
   });
 });
 
