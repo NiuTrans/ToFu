@@ -895,6 +895,28 @@ impl PublicationClaim {
     }
 }
 
+/// Private immutable process identity carried only by the actual worker entry.
+pub(crate) fn execution_witness(process: &Value, claim: Option<&PublicationClaim>) -> io::Result<Value> {
+    use crate::generated_tofudb_ir::{WORKER_EXECUTION_PROCESS_FIELDS, WORKER_EXECUTION_WITNESS_FORMAT};
+    let claim = claim.ok_or_else(|| invalid_input("worker entry requires its exact claim"))?;
+    claim.validate()?;
+    if !process.is_null() {
+        let fields = process.as_object().ok_or_else(|| invalid_input("invalid worker process identity"))?;
+        if fields.len() != WORKER_EXECUTION_PROCESS_FIELDS.len()
+            || WORKER_EXECUTION_PROCESS_FIELDS.iter().any(|key| !fields.contains_key(*key))
+            || !fields["pid"].as_u64().is_some_and(|pid| pid > 0)
+            || WORKER_EXECUTION_PROCESS_FIELDS.iter().filter(|key| **key != "pid")
+                .any(|key| !fields[*key].as_str().is_some_and(|text| !text.is_empty()))
+            || ["started", "pid_namespace"].iter().any(|key|
+                !fields[*key].as_str().is_some_and(|text| text.bytes().all(|byte| byte.is_ascii_digit()))) {
+            return Err(invalid_input("invalid worker process identity"));
+        }
+    }
+    Ok(json!({"format": WORKER_EXECUTION_WITNESS_FORMAT,
+        "claim": {"worker_id": claim.worker_id, "fencing_token": claim.fencing_token},
+        "process": process}))
+}
+
 /// Initial tool entry is admission; subsequent evidence may drain cancellation.
 pub(crate) fn starts_tool_effect(event_type: &str, payload: &[u8]) -> io::Result<bool> {
     if event_type != "tool_effect" { return Ok(false); }

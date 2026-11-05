@@ -2057,17 +2057,25 @@ def _turn_attempt_start(session: Session, payload: Mapping[str, Any]) -> Any:
     _require_conversation_publication_claim(
         session, attempt_id=attempt_id, task_id=task_id, user_id=user_id,
         proof=payload.get('worker_claim'))
+    from lib.storage.worker_execution import execution_witness, WORKER_EXECUTION_CONFIG_KEY
+    witness = (execution_witness(payload['worker_process'], payload.get('worker_claim'))
+               if 'worker_process' in payload else None)
+    config = _load(attempt['config_json']) or {}
     if attempt["status"] == "running":
+        if witness is not None and config.get(WORKER_EXECUTION_CONFIG_KEY) != witness:
+            raise StorageError('database_conflict', 'Worker entry identity cannot change after entry')
         return _attempt_public(attempt)
     if attempt["status"] != "pending" or turn["status"] != "pending":
         return None
 
     now = int(time.time() * 1000)
+    if witness is not None:
+        config[WORKER_EXECUTION_CONFIG_KEY] = witness
     attempt_changed = session.execute(
         "UPDATE storage_generation_attempts SET status='running', "
-        "started_at=COALESCE(started_at,?) WHERE attempt_id=? "
+        "started_at=COALESCE(started_at,?),config_json=? WHERE attempt_id=? "
         "AND task_id=? AND status='pending'",
-        (now, attempt_id, task_id),
+        (now, _dump(config), attempt_id, task_id),
     )
     revision = int(turn["projection_revision"]) + 1
     turn_changed = session.execute(

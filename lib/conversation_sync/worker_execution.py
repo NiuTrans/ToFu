@@ -103,10 +103,18 @@ def execute_claimed_attempt(context, payload):
 
         # Commit entry BEFORE translation, prompt hooks, workspace preparation
         # or any other potentially external effect in the common start path.
+        from lib.process_owner import process_owner
+        process = process_owner()
         started = mark_task_started(attempt['attemptId'], task_id, user_id=owner,
-                                    worker_claim=context.publication_claim())
+            worker_claim=context.publication_claim(), worker_process=process)
         if not started or started.get('status') != 'running':
             raise WorkerProtocolError('conversation worker entry was refused')
+        if process is not None:
+            from lib.storage.worker_execution import execution_witness, WORKER_EXECUTION_CONFIG_KEY
+            entered = get_attempt(attempt['attemptId'], user_id=owner, include_execution_config=True)
+            if ((entered or {}).get('config') or {}).get(WORKER_EXECUTION_CONFIG_KEY) != execution_witness(
+                    process, context.publication_claim()):
+                raise WorkerProtocolError('conversation worker process entry was not acknowledged')
         registered_task = None
 
         def registered(identity):
