@@ -49,7 +49,7 @@ one per package), with exact result equality. This is a filesystem-operation
 reduction, not an end-to-end latency claim.
 
 Project discovery reads `.tofu/skills`, `.agents/skills`, `.codex/skills`, then
-`bundles/yourprovider/skills`, in the order declared by `lib/skills/paths.py`.
+`bundles/meituan/skills`, in the order declared by `lib/skills/paths.py`.
 Owner-global packages live outside any project, under the server data root's
 `skills/users/<owner>` store. Internal-only source packages under `bundles/`
 reach internal/personal source exports, never the opensource mirror. Their
@@ -295,7 +295,7 @@ retain scope selection, localized toasts, diagnostics, and refresh policy.
 
 ## Internal platform skills and MCP boundary
 
-The YourProvider workflow set keeps separate instruction owners for Hope/MLP jobs,
+The Meituan workflow set keeps separate instruction owners for Hope/MLP jobs,
 LongCat canvas evaluation, 学城 documents, EnvSandbox read-only forensics,
 CodeLab SSH, image/container provisioning, and FRIDAY/AIGC LLM-gateway usage
 for synthesis/distillation traffic. Team operating evidence (dated, cited to

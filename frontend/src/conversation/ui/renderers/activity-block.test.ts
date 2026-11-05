@@ -365,7 +365,7 @@ describe('activity fact line is not a second copy of the summary', () => {
 
   it('names the model once on a failed request, keeping provider and key', () => {
     const { dom, node } = row({
-      model: 'claude-opus-5.5', providerId: 'example-corp', keyHint: '2031****4861',
+      model: 'claude-opus-5.5', providerId: 'sankuai', keyHint: '2031****4861',
       summaryKey: 'activity.model.requestFailed',
       summaryArgs: { model: 'claude-opus-5.5' }, reasonCode: 'ModelRefusalError',
     });
@@ -373,21 +373,21 @@ describe('activity fact line is not a second copy of the summary', () => {
       expect(node.querySelector('.activity-event__summary')!.textContent)
         .toBe('claude-opus-5.5 请求失败');
       expect(node.querySelector('.activity-event__facts')!.textContent)
-        .toBe('example-corp · 2031****4861 · ModelRefusalError');
+        .toBe('sankuai · 2031****4861 · ModelRefusalError');
       expect(node.textContent!.split('claude-opus-5.5')).toHaveLength(2);
     } finally { dom.window.close(); }
   });
 
   it('leads with the classified cause, keeping the raw class in the tooltip', () => {
     const { dom, node } = row({
-      model: 'claude-opus-5.5', providerId: 'example-corp', statusCode: 503,
+      model: 'claude-opus-5.5', providerId: 'sankuai', statusCode: 503,
       summaryKey: 'activity.model.requestFailed',
       summaryArgs: { model: 'claude-opus-5.5' },
       reasonCode: 'RateLimitError', envelopeKind: 'upstream_error',
     });
     try {
       const facts = node.querySelector('.activity-event__facts')!;
-      expect(facts.textContent).toBe('上游故障 · example-corp · HTTP 503');
+      expect(facts.textContent).toBe('上游故障 · sankuai · HTTP 503');
       expect(facts.textContent).not.toContain('RateLimitError');
       // The routing class stays reachable without contradicting the cause.
       expect(facts.querySelector<HTMLElement>('.activity-event__cause')!.title)
@@ -400,7 +400,7 @@ describe('activity fact line is not a second copy of the summary', () => {
     // as reported for kunlunbedrock.claude-opus-5.5-m17.
     const { dom, node } = row({
       requestLevel: 'provider_attempt', attempt: 1, attemptScope: 'dispatcher',
-      model: 'kunlunbedrock.claude-opus-5.5-m17', providerId: 'example-corp',
+      model: 'kunlunbedrock.claude-opus-5.5-m17', providerId: 'sankuai',
       keyHint: '2080********6672', statusCode: 503,
       summaryKey: 'activity.model.requestFailed',
       summaryArgs: { model: 'kunlunbedrock.claude-opus-5.5-m17' },
@@ -409,7 +409,7 @@ describe('activity fact line is not a second copy of the summary', () => {
     try {
       const facts = node.querySelector('.activity-event__facts')!;
       expect(facts.textContent)
-        .toBe('上游故障 · example-corp · 2080********6672 · HTTP 503');
+        .toBe('上游故障 · sankuai · 2080********6672 · HTTP 503');
       expect(node.textContent).not.toContain('RateLimitError');
       expect(facts.querySelector<HTMLElement>('.activity-event__cause')!.title)
         .toBe('RateLimitError');
@@ -418,7 +418,7 @@ describe('activity fact line is not a second copy of the summary', () => {
 
   it('keeps a wire model that the summary does not name', () => {
     const { dom, node } = row({
-      model: 'kunlunbedrock.claude-opus-5.5-m17', providerId: 'example-corp',
+      model: 'kunlunbedrock.claude-opus-5.5-m17', providerId: 'sankuai',
       summaryKey: 'activity.model.requestFailed',
       summaryArgs: { model: 'claude-opus-5.5' },
     });

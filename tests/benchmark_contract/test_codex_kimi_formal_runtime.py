@@ -87,7 +87,7 @@ def _runtime_fixture(
         CodexKimiBaselineSettings(
             codex_binary=codex,
             codex_sha256=codex_digest,
-            provider_face="yourprovider-chat",
+            provider_face="meituan-chat",
             provider_slot_id="kimi-slot-fixture",
         ),
     )
@@ -141,7 +141,7 @@ def test_formal_dry_run_is_secret_free_and_round_trips_runtime(
     ]
     assert manifest["codex_kimi_runtime"]["credentialBoundary"] \
         == "launcher-host-only"
-    assert manifest["provider_face"] == "yourprovider-chat"
+    assert manifest["provider_face"] == "meituan-chat"
     assert manifest["provider_slot_id"] == "kimi-slot-fixture"
     assert len(manifest["harbor_binary_sha256"]) == 64
     agent = config["agents"][0]
@@ -252,7 +252,7 @@ def test_formal_release_claim_exists_before_harbor_dispatch(
             "name": "codex", "version": "0.149.1",
             "binarySha256": codex.codex_sha256,
         },
-        provider_face="yourprovider-chat",
+        provider_face="meituan-chat",
         provider_slot_id="kimi-slot-fixture", thinking="high",
         experiment_arm="codex_0_149_1", pair_id="pair-tracked",
         comparison_role="baseline",

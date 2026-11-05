@@ -89,8 +89,8 @@ def test_dispatch_attempt_boundaries(monkeypatch, asynchronous, outcome):
 
 def test_start_fields_mask_slot_key_into_recognition_hint():
     observer = AttemptObserver(lambda **event: None)
-    slot = SimpleNamespace(model='m', routing_provider_id='default',
-                           provider_id='default',
+    slot = SimpleNamespace(model='m', routing_provider_id='sankuai',
+                           provider_id='sankuai',
                            api_key='2208abcdefghij5409')
     fields, _started = observer._start(slot)
     hint = fields['keyHint']

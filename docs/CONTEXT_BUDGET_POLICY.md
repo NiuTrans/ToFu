@@ -321,7 +321,7 @@ second consumer). Specs: `tests/compaction/test_auxiliary_summary_integration.py
 
 **Model price fallback and no summary cost ceiling (owner decision
 2026-11-02).** Problem: Offerings seeded without their own request-name rate card
-(the YourProvider gateway's claude-opus-5.5 and kimi-k3.1-pro carry only a legacy
+(the Meituan gateway's claude-opus-5.5 and kimi-k3.1-pro carry only a legacy
 blended `cost` hint) counted as unpriced in summary routing and settlement,
 although native main-turn settlement already priced them at their model's
 maintained price. An unpriced paid main therefore admitted no paid alternate and
@@ -592,7 +592,7 @@ A line's window belongs to the line: `deepseek-v4.1-flash` (catalogue
 identity), `deepseek-v4-1-flash`, `deepseek-v4-flash` (legacy wire spelling)
 and the versionless canonical `deepseek-flash` are one served model at 1M. The
 2026-09-21 gauge report (128K shown for a route enforcing 1M, live on
-example-corp/YourProvider) came from spelling these as needles `deepseek-flash` /
+sankuai/Meituan) came from spelling these as needles `deepseek-flash` /
 `deepseek-v4-flash`, neither of which is a substring of an id whose version is
 punctuated with a dot, so the V3-era 128K family estimate won silently. The
 max-output table (`_max_output._deepseek_max_output`) rides the same parser.

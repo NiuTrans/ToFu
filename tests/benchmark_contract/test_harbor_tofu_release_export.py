@@ -81,7 +81,7 @@ def _sandbox() -> dict:
 
 def _settings() -> TofuKimiCandidateSettings:
     return TofuKimiCandidateSettings(
-        provider_face="yourprovider-chat",
+        provider_face="meituan-chat",
         provider_slot_id="kimi-slot-a",
         agent_version=TOFU_AGENT_VERSION,
         experiment_arm="prompt_lean_kimi",

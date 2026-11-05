@@ -19,7 +19,7 @@ from lib.tasks_pkg.compaction._tokens import _parse_context_overflow
 
 
 PRESET = 1_000_000
-P, M = 'example-corp', 'deepseek-v4-pro'
+P, M = 'sankuai', 'deepseek-v4-pro'
 
 
 @pytest.fixture(autouse=True)
@@ -168,7 +168,7 @@ def test_expand_only_above_preset():
 # never lower the effective window below today's preset: the compaction gate
 # caps prompts below the pin, so no observation can ever climb out, and
 # expand entries never expire — the mirror of the shrink-side deadlock.
-# Live evidence: example-corp::kimi-k3 pinned at 383,727 (expand) while kimi-k3's
+# Live evidence: sankuai::kimi-k3 pinned at 383,727 (expand) while kimi-k3's
 # real window is 1M (2026-07-26).
 
 def test_resolve_expand_below_preset_does_not_lower_window():
@@ -210,10 +210,10 @@ def test_get_context_limit_kimi_k3_unpinned():
         _get_static_context_limit,
     )
 
-    task = {'config': {'model': 'kimi-k3'}, 'provider_id': 'example-corp'}
+    task = {'config': {'model': 'kimi-k3'}, 'provider_id': 'sankuai'}
     assert _get_static_context_limit(task) == 1_000_000
 
-    k = cl._key('example-corp', 'kimi-k3')
+    k = cl._key('sankuai', 'kimi-k3')
     cl._LEARNED[k] = 383727
     cl._META[k] = {'ts': time.time(), 'source': 'expand', 'strikes': 0}
     assert _get_context_limit(task) == 1_000_000

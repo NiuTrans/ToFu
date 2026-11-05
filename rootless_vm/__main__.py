@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--cache-root", type=Path, required=True)
     run.add_argument("--jobs-dir", type=Path, required=True)
     run.add_argument("--job-name")
-    run.add_argument("--model", default="deepseek-v4-flash-yourprovider")
+    run.add_argument("--model", default="deepseek-v4-flash-meituan")
     run.add_argument("--harness", choices=harness_profile_ids(), default="tofu")
     run.add_argument("--allow-guest-credentials", action="store_true")
     run.add_argument("--oracle", action="store_true")

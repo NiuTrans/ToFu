@@ -35,7 +35,7 @@ SETTINGS = {
     'imageGenEnabled': False, 'imageGenMode': False, 'mcpToolExposure': 'auto',
     'memoryEnabled': True, 'model': MODEL, 'modelRef': MODEL_REF, 'planMode': False,
     'preferredProviderId': '', 'preset': MODEL, 'projectPath': '/project',
-    'projectPaths': ['/project'], 'provider_id': 'example-corp', 'readOnlyPaths': [],
+    'projectPaths': ['/project'], 'provider_id': 'sankuai', 'readOnlyPaths': [],
     'schedulerEnabled': False, 'searchMode': 'multi', 'thinkingDepth': None, 'uiLang': 'zh',
 }
 # The composer snapshot every browser send submits (_buildToolbarOverrides).

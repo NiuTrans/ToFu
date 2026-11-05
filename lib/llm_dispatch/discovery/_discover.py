@@ -187,7 +187,7 @@ def discover_models(base_url: str, api_key: str,
             base_url += '/v1'
     # Normalize URL to /models endpoint
     # If the user specified a custom models_path, use it; otherwise default
-    # to appending /models.  Gateways like YourProvider may use non-standard
+    # to appending /models.  Gateways like Meituan may use non-standard
     # paths (e.g. /v1/openai/native/models).
     if models_path:
         # User-supplied path — join with base URL origin

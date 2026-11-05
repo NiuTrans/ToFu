@@ -48,7 +48,7 @@ from lib.provider.provider_probe_policy import resolve_provider_probe_budget
 
 # Verdict for cells whose capabilities have no probe surface we implement
 # (anything outside image_gen / embedding / transcription). Chat-probing a
-# non-chat model is a guaranteed false positive (the YourProvider gateway's Java
+# non-chat model is a guaranteed false positive (the Meituan gateway's Java
 # router hits ``Random.nextInt(0)`` → "bound must be positive" when the
 # chat-binding candidate list is empty), so unknown non-chat cells are
 # skipped rather than chat-probed. Known non-chat modalities are probed via
@@ -440,7 +440,7 @@ def _reasoning_text(value) -> str:
     Thinking-native models under the tiny probe budget can spend EVERY token
     on one thinking block (stop_reason 'max_tokens', no text part) — that
     block is still generated output, so the cell provably routes,
-    authenticates and generates. 2026-09-08: 25/339 example-corp Anthropic-dialect
+    authenticates and generates. 2026-09-08: 25/339 sankuai Anthropic-dialect
     cells (glm / MiniMax / LongCat families) were falsely invalid_response
     because only text parts counted.
     """
@@ -1396,7 +1396,7 @@ def run_cell_probe_task(task: dict, work: list, timeout: int, *, on_complete=Non
         caps = item[4] if len(item) > 4 else None
         # Per-cell wire face (account/face separation). A work tuple may carry
         # its own (base_url, protocol) because ONE account can expose several
-        # wire faces — e.g. the YourProvider gateway serves Claude over
+        # wire faces — e.g. the Meituan gateway serves Claude over
         # /v1/anthropic and everything else over /v1/openai/native with the
         # same keys. Probing a cell on the wrong face returns a false
         # 'not_found'. Older 5-tuples fall back to the task-level values.

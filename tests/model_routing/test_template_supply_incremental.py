@@ -39,10 +39,10 @@ from lib.provider.provider_template_recipes import (
 )
 
 try:
-    compile_provider_template_bundle('yourprovider',
+    compile_provider_template_bundle('meituan',
                                      selected_model_ids=['gpt-6.1-sol'])
 except ProviderTemplateRecipeError:
-    pytest.skip('yourprovider provider template is not shipped in this build',
+    pytest.skip('meituan provider template is not shipped in this build',
                 allow_module_level=True)
 
 pytestmark = pytest.mark.unit
@@ -54,7 +54,7 @@ _ALIAS = 'kunlunbedrock.gpt-6.1-sol-m17'
 def _seed_card_without_the_new_face(repository, boundary):
     """An OLD aigc card: owns gpt-6.1-sol, predates the kunlun face."""
     bundle = compile_provider_template_bundle(
-        'yourprovider', selected_model_ids=['gpt-6.1-sol'])
+        'meituan', selected_model_ids=['gpt-6.1-sol'])
     document = empty_document(revision=0)
     document['providers'].append(bundle['provider'])
     document['provider_accesses'].append(bundle['provider_access'])

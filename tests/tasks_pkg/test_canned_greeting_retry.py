@@ -1,6 +1,6 @@
 """Guards for the canned-greeting upstream-artifact defense (pt_60b98556a2304b60).
 
-Incident 2026-07-28 06:25→11:20: the example-corp gateway's only Opus 5 request-id
+Incident 2026-07-28 06:25→11:20: the sankuai gateway's only Opus 5 request-id
 (``yuju-claude-opus-5-evaDaily``) intermittently answered ANY request with the
 identical 29-char ``"Hi! How can I help you today?"`` + clean
 ``finish_reason=stop`` (real M-TraceIds). 68+ events / 14 conversations; both
@@ -194,7 +194,7 @@ def _usage():
         '_chunks_received': 8,
         'trace_id': 'M-CANNED-TEST',
         'stream_elapsed_ms': 13400,
-        '_dispatch': {'key': 'example_corp_key_2',
+        '_dispatch': {'key': 'sankuai_key_2',
                       'model': 'yuju-claude-opus-5-evaDaily'},
     }
 

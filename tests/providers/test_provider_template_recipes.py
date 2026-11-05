@@ -388,39 +388,39 @@ def test_every_shared_builtin_compiles_an_onboarding_bundle():
         assert bundle['connections'][0]['base_url'], row['key']
 
 
-def test_yourprovider_flash_wire_names_follow_their_deployment_checkpoint():
+def test_meituan_flash_wire_names_follow_their_deployment_checkpoint():
     """A deployment's checkpoint, not its wire spelling, selects its Model.
 
     The gateway's DeepSeek V4.1 Flash 1017 snapshot keeps the V4-spelled
-    YourProvider deployment confirmed for it, while the V4 cloud mirrors stay on
+    Meituan deployment confirmed for it, while the V4 cloud mirrors stay on
     the separate V4 Flash Model (docs/MODEL_REGISTRATION.md).
     """
     bundles = {
         'deepseek': compile_provider_template_bundle('deepseek', selected_model_ids=['deepseek-v4-flash']),
-        'yourprovider_1017': compile_provider_template_bundle(
-            'yourprovider', selected_model_ids=['deepseek-v4.1-flash-1017']),
-        'yourprovider_v4': compile_provider_template_bundle(
-            'yourprovider', selected_model_ids=['deepseek-v4-flash']),
+        'meituan_1017': compile_provider_template_bundle(
+            'meituan', selected_model_ids=['deepseek-v4.1-flash-1017']),
+        'meituan_v4': compile_provider_template_bundle(
+            'meituan', selected_model_ids=['deepseek-v4-flash']),
     }
     assert bundles['deepseek']['offerings'][0]['model'] == {
         'creator_id': 'deepseek', 'model_id': 'deepseek-v4-flash'}
-    assert bundles['yourprovider_1017']['offerings'][0]['model'] == {
+    assert bundles['meituan_1017']['offerings'][0]['model'] == {
         'creator_id': 'deepseek', 'model_id': 'deepseek-v4.1-flash-1017'}
-    assert bundles['yourprovider_v4']['offerings'][0]['model'] == {
+    assert bundles['meituan_v4']['offerings'][0]['model'] == {
         'creator_id': 'deepseek', 'model_id': 'deepseek-v4-flash'}
 
     assert [row['wire_model_id'] for row in bundles['deepseek']['deployments']] == [
         'deepseek-v4-flash',
     ]
     assert sorted(
-        row['wire_model_id'] for row in bundles['yourprovider_1017']['deployments']
+        row['wire_model_id'] for row in bundles['meituan_1017']['deployments']
     ) == [
         'deepseek-flash',
-        'deepseek-v4-flash-yourprovider',
+        'deepseek-v4-flash-meituan',
         'deepseek-v4.1-flash',
     ]
     assert sorted(
-        row['wire_model_id'] for row in bundles['yourprovider_v4']['deployments']
+        row['wire_model_id'] for row in bundles['meituan_v4']['deployments']
     ) == [
         'deepseek-v4-flash',
         'deepseek-v4-flash-azure',
@@ -431,7 +431,7 @@ def test_yourprovider_flash_wire_names_follow_their_deployment_checkpoint():
     # The rolling request name is a deployment, never a template Model ID.
     with pytest.raises(ProviderTemplateRecipeError, match='deepseek-v4.1-flash'):
         compile_provider_template_bundle(
-            'yourprovider', selected_model_ids=['deepseek-v4.1-flash'])
+            'meituan', selected_model_ids=['deepseek-v4.1-flash'])
 
 
 def test_compiled_offerings_follow_their_model_authority():
@@ -453,7 +453,7 @@ def test_compiled_offerings_follow_their_model_authority():
 def test_bundle_model_rows_keep_the_recipe_context_window():
     # Provider context is constrained only by the resolved Model authority.
     bundle = compile_provider_template_bundle(
-        'yourprovider', selected_model_ids=['Doubao-Seed-1.6'])
+        'meituan', selected_model_ids=['Doubao-Seed-1.6'])
     model = next(
         row for row in bundle['models'] if row['model_id'] == 'Doubao-Seed-1.6')
     assert model['context_window'] == 256000

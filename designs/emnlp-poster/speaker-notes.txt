@@ -140,7 +140,7 @@ requires reauthentication. Selected output still has to be materialized.
 POSTER PRODUCTION
 
 The manuscript supplies title, authors, affiliations and mascot. Official marks
-are Northeastern University, NiuTrans Research and YourProvider LongCat. Finished
+are Northeastern University, NiuTrans Research and Meituan LongCat. Finished
 SWE-agent, SWE-smith and SEED posters informed the visual structure; their
 scientific content and diagrams are not reused. The prior cache-cost discussion
 and result-filtering example are not part of this revision.

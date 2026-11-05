@@ -405,7 +405,7 @@ class ResolveConvSettingsTest(unittest.TestCase):
             conv_settings={'model': 'kimi-k3.1-pro', 'modelRef': None,
                            'preferredProviderId': '', 'thinkingDepth': 'max'},
             overrides={'model': 'claude-opus-5.5', 'modelRef': self._OPUS_REF,
-                       'preferredProviderId': 'example-corp'},
+                       'preferredProviderId': 'sankuai'},
         )
         self.assertEqual((out['model'], out['preset']), ('kimi-k3.1-pro', 'kimi-k3.1-pro'))
         self.assertIsNone(out['modelRef'])
@@ -430,11 +430,11 @@ class ResolveConvSettingsTest(unittest.TestCase):
         out = resolve_conv_settings(
             conv_settings={'thinkingDepth': 'max'},
             overrides={'model': 'claude-opus-5.5', 'modelRef': self._OPUS_REF,
-                       'preferredProviderId': 'example-corp'},
+                       'preferredProviderId': 'sankuai'},
         )
         self.assertEqual(out['model'], 'claude-opus-5.5')
         self.assertEqual(out['modelRef'], self._OPUS_REF)
-        self.assertEqual(out['preferredProviderId'], 'example-corp')
+        self.assertEqual(out['preferredProviderId'], 'sankuai')
 
     def test_all_expected_keys_present(self):
         out = resolve_conv_settings(conv_settings={})

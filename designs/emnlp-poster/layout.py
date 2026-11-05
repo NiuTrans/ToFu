@@ -43,7 +43,7 @@ def make_scene(Scene):
     s.asset('longcat.svg', 639, 20, 170, 41)
     s.text('Northeastern University', 32, 66, 16, 'medium', MUTED, tag='credit')
     s.text('NiuTrans Research', 383, 66, 16, 'medium', MUTED, align='center', tag='credit')
-    s.text('YourProvider LongCat RSI', 724, 66, 16, 'medium', MUTED, align='center', tag='credit')
+    s.text('Meituan LongCat RSI', 724, 66, 16, 'medium', MUTED, align='center', tag='credit')
     s.logo(32, 78, 77, 72)
     s.text('ToFu: A White-Box, Token-Efficient', 132, 103, 82, 'bold')
     s.text('Agent Harness for Researchers', 132, 139, 82, 'bold')
@@ -51,7 +51,7 @@ def make_scene(Scene):
            32, 159, 23, 'medium')
     s.text('Jingang Wang² · Chenglong Wang¹³ · Jingbo Zhu¹³ · Tong Xiao¹³#',
            32, 173, 23, 'medium')
-    s.text('¹ Northeastern University     ² LongCat RSI, YourProvider     ³ NiuTrans Research',
+    s.text('¹ Northeastern University     ² LongCat RSI, Meituan     ³ NiuTrans Research',
            32, 188, 21, color=MUTED)
     s.text('* Equal contribution   + Project lead   # Corresponding author',
            32, 199, 15, color=MUTED, tag='credit')

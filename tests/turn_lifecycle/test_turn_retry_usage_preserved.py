@@ -190,7 +190,7 @@ def test_non_numeric_usage_fields_do_not_break_the_merge(seam):
     skip them rather than raise."""
     orch, _ = seam
     task = _task(usage={'prompt_tokens': 100, 'trace_id': 'abc123',
-                        '_dispatch': {'key': 'example_corp_key_1'}})
+                        '_dispatch': {'key': 'sankuai_key_1'}})
 
     assert orch._maybe_auto_retry_turn(task, cfg={}) is True
     carried = task.get('_checkpointUsage') or {}
