@@ -589,7 +589,17 @@ pub(crate) fn checkpoint(
     expected_version: u64,
     updated_at_ms: u64,
     guard: Option<&CheckpointGuard>,
+    worker_claim: Option<&crate::worker_job::PublicationClaim>,
 ) -> io::Result<Vec<u8>> {
+    if task_id.starts_with("conversation-attempt:") || worker_claim.is_some() {
+        let value: Value = serde_json::from_slice(&value_json)
+            .map_err(|_| invalid_input("invalid task result worker checkpoint"))?;
+        crate::worker_job::require_conversation_publication_claim(
+            database, transaction, task_id.strip_prefix("conversation-attempt:").unwrap_or(""),
+            task_id, worker_claim,
+            matches!(value.get("status").and_then(Value::as_str),
+                     Some("done" | "error" | "aborted" | "interrupted")), true)?;
+    }
     checkpoint_inner(
         database,
         transaction,
@@ -1594,6 +1604,7 @@ mod tests {
                 cache_prefix_hwm: None,
                 last_turn_cache_read: None,
             }),
+            None,
         )
         .unwrap();
 
@@ -1643,6 +1654,7 @@ mod tests {
             .unwrap(),
             0,
             2_000,
+            None,
             None,
         )
         .unwrap();
@@ -1696,6 +1708,7 @@ mod tests {
             0,
             2_000,
             None,
+            None,
         )
         .unwrap();
         checkpoint(
@@ -1712,6 +1725,7 @@ mod tests {
             .unwrap(),
             0,
             2_001,
+            None,
             None,
         )
         .unwrap();
@@ -1801,6 +1815,7 @@ mod tests {
             .unwrap(),
             1,
             3_100,
+            None,
             None,
         )
         .unwrap();

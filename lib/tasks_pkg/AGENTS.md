@@ -11,6 +11,12 @@ context composition, compaction, event folding, and settlement. Read
 `docs/modules/task_engine.md`, `docs/contracts/EVENTS.md`, and
 `docs/contracts/TURN_SETTLEMENT.md`.
 
+`worker_binding.py` carries an explicitly injected conversation claim and the
+shared invocation control scope. Configuration never installs authority.
+`spawn.run_task_inline` uses TaskRuntime's owned worker envelope and joins that
+scope; it does not submit detached work. Verify worker binding/submission tests
+and `test_durable_attempt_execution.py` before changing this lifetime.
+
 ## Editing rules
 
 - Keep one root run loop and one settlement path. Managers, handlers, and

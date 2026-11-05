@@ -99,7 +99,7 @@ def _live_claim(row, worker_id, fence, epoch, now):
 
 def _require_conversation_publication_claim(
     session: Session, *, attempt_id: str, task_id: str, user_id: int,
-    proof: Any, terminal: bool = False,
+    proof: Any, terminal: bool = False, drain_entered: bool = False,
 ) -> None:
     """Fence publication under the domain transaction, never a preceding RPC.
 
@@ -125,8 +125,14 @@ def _require_conversation_publication_claim(
     epoch, now, _ = _lease_authority(session)
     if (not _live_claim(row, proof['worker_id'], proof['fencing_token'], epoch, now)
             or row['task_kind'] != 'conversation-attempt'
-            or (_load(row['payload_json']) or {}).get('attemptId') != attempt_id
-            or (not terminal and int(row['cancel_requested_at_ms']) > 0)):
+            or (_load(row['payload_json']) or {}).get('attemptId') != attempt_id):
+        raise StorageError('database_conflict', 'Worker claim cannot publish this attempt')
+    if not terminal and int(row['cancel_requested_at_ms']) > 0 and not (
+            drain_entered and session.fetch_one(
+                'SELECT 1 AS entered FROM storage_generation_attempts a '
+                'JOIN storage_conversation_turns t ON t.turn_id=a.turn_id '
+                'WHERE a.attempt_id=? AND t.user_id=? AND a.started_at IS NOT NULL',
+                (attempt_id, user_id)) is not None):
         raise StorageError('database_conflict', 'Worker claim cannot publish this attempt')
 
 
@@ -571,8 +577,11 @@ def _worker_job_request_cancel(
         }
 
     queued = str(row["status"]) == "queued"
-    next_status = "cancelled" if queued else str(row["status"])
-    terminal_at_ms = now_ms if queued else 0
+    # Conversation cancellation still owes a terminal Turn. Keep its queued
+    # job claimable for the domain cancel handler; transport is not settlement.
+    domain_cancel = queued and row['task_kind'] == 'conversation-attempt'
+    next_status = "cancelled" if queued and not domain_cancel else str(row["status"])
+    terminal_at_ms = now_ms if queued and not domain_cancel else 0
     session.execute(
         "UPDATE storage_worker_jobs SET status=?, cancel_sequence=?, "
         "cancel_requested_at_ms=?, cancel_reason=?, updated_at_ms=?, "
@@ -585,7 +594,7 @@ def _worker_job_request_cancel(
             now_ms,
             terminal_at_ms,
             now_ms
-            if str(row["status"]) == "suspended"
+            if str(row["status"]) == "suspended" or domain_cancel
             else int(row["available_at_ms"]),
             task_id,
             user_id,

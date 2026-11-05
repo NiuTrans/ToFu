@@ -106,6 +106,9 @@ _EXACT_RULES: tuple[tuple[str, int, str], ...] = (
     ('glm-5v-turbo', 200_000, 'vendor_official'),
     ('hy3-preview', 256_000, 'vendor_official'),
     ('hy4-preview', 1_000_000, 'vendor_official'),
+    # Hy4 (2026-11-04): 1M ctx / 960k max input / 64k max output (TokenHub
+    # model list). Must follow the hy4-preview needle it is a substring of.
+    ('hy4', 1_000_000, 'vendor_official'),
     ('longcat-2.0', 1_000_000, 'vendor_official'),
     # Qwen3.8-Omni-Flash (2026-09-18): 1M ctx / 131K max output (qwencloud model page).
     ('qwen3.8-omni-flash', 1_000_000, 'vendor_official'),

@@ -34,7 +34,7 @@ python -m benchmarks.context_efficiency.cli run \
 python -m benchmarks.context_efficiency.cli run \
   --manifest benchmarks/context_efficiency_manifest.json \
   --stage ablation \
-  --arms tofu-control,tofu-explicit,tofu-routed,tofu-evidence,tofu-ptc,tofu-ptc-additive,tofu-ptc-serial-gateway,tofu-prompt-lean,tofu-effort-medium,tofu-effort-low,tofu-multi-agent,tofu-ws64,tofu-ws96,tofu-ws128
+  --arms tofu-control,tofu-explicit,tofu-routed,tofu-evidence,tofu-ptc,tofu-ptc-additive,tofu-ptc-serial-gateway,tofu-prompt-lean,tofu-effort-medium,tofu-effort-low,tofu-multi-agent
 
 python -m benchmarks.context_efficiency.analyze \
   --results-dir benchmarks/context_efficiency_results --stage ablation \
@@ -46,6 +46,9 @@ python -m benchmarks.context_efficiency.cli run \
   --arms tofu-control,tofu-candidate,codex-mechanism \
   --candidate-config benchmarks/context_efficiency_candidate.json
 ```
+
+Fixed working-set arms were retired with the production threshold setting.
+Historical arm results remain reportable but cannot promote a removed setting.
 
 Every run is resumable. A source fingerprint is part of the run ID, so changing
 the runner, mechanism implementation, or candidate config creates a new JSONL

@@ -40,7 +40,9 @@ def begin_live_flow_turn(task: dict, event: dict) -> None:
         message['_isFlowReview'] = True
     elif event.get('phase') == 'planning':
         message['_isFlowPlanner'] = True
+    from lib.tasks_pkg.worker_binding import publication_arguments
     result = get_storage_client(write=True).command('turn.visible.sync', {
+        **publication_arguments(task),
         'conversation_id': task['convId'], 'user_id': task_user_id(task),
         'attempt_id': task['_attemptId'], 'root_turn_id': task['_turnId'],
         'messages': [message], 'start_index': index, 'live': True,

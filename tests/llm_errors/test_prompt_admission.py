@@ -209,7 +209,7 @@ def test_economic_and_old_first_dispatch_thresholds_do_not_force_loss(monkeypatc
     assert result['totalTokens'] == 478_000
     assert messages == [{'role': 'user', 'content': 'unabridged evidence'}]
     assert task['_lastPromptAdmission']['action'] == 'admit'
-    assert task['_contextBudgetDecision']['economicTargetTokens'] == 128_000
+    assert task['_contextBudgetDecision']['economicTargetTokens'] == 0
 
 
 def test_first_generation_compacts_before_the_main_dispatch(monkeypatch):

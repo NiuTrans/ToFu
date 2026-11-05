@@ -229,22 +229,34 @@ The delivery dependencies and completion evidence are:
 1. **Transactional execution ownership.** A durable binding requires a live
    worker claim in the same transaction as start, progress and terminal
    publication. The current implementation fences these commands on SQL and
-   native TofuDB, including cancellation and batch rollback. An omitted proof
+   native TofuDB, including standalone replay, Flow phases, task checkpoints,
+   cancellation drainage and batch rollback. An omitted proof
    cannot fall back to the legacy path. This is publication authority only;
    `conversation-attempt` is still not a production-qualified worker kind.
 2. **Reconstructible invocation and effect authority.** Reconstruct the existing
    executor from accepted configuration and durable references. Carry principal,
-   lineage, execution account and cancellation through the same kernel. Qualify
+   lineage, execution account and cancellation through the same kernel.
+   `conversation_sync/worker_execution.py` now uses the same accepted-config
+   restoration and task start path; `TaskRuntime.run_owned_worker` retains the
+   caller's physical thread until the ordinary invocation and cleanup exit.
+   Entry commits before preparation effects. Unentered cancellation settles
+   without constructing an executor. Controlled runs exercise these paths on
+   real authorities; entered/unknown work remains refused for replay. Qualify
    provider calls, tools, terminal accounting, never-entered cancellation and
    unknown acknowledgements with crash injection before registering the kind.
    An uncertain external effect
    is reconciled or reported as uncertain, never blindly retried by a new lease.
 3. **Independent process lifetime and durable control.** Move real admission,
-   Stop and execution to that owner. API restart must leave executing work
+   Stop and execution to that owner. Stop for a durable binding now writes the
+   job cancellation authority even without a local carrier; ordinary admission
+   still uses the current composition. API restart must leave executing work
    intact. Prove cross-process idle wake, cancellation and reconnect, then
    worker death and old-writer refusal. Existing in-process commit callbacks
    alone cannot wake a separate idle process. Startup recovery must respect
-   live durable ownership rather than retire another process's tasks.
+   durable ownership rather than retire another process's tasks:
+   `turn.recover` and `task_results.recover_running` still need this separation
+   before process composition is enabled. Lease expiry alone cannot qualify
+   either command to discharge unknown effects or accounting.
 4. **Execution facts and read projections.** Keep committed execution facts and
    their accounting authoritative while projection/delivery can drain and
    reconstruct independently. Browser observation, reconnect and transcript

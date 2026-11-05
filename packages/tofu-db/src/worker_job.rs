@@ -894,6 +894,7 @@ impl PublicationClaim {
 pub(crate) fn require_conversation_publication_claim(
     database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
     attempt_id: &str, task_id: &str, proof: Option<&PublicationClaim>, terminal: bool,
+    drain_entered: bool,
 ) -> io::Result<()> {
     if task_id != format!("conversation-attempt:{attempt_id}") {
         return if proof.is_none() { Ok(()) }
@@ -908,7 +909,8 @@ pub(crate) fn require_conversation_publication_claim(
         || job.payload.get("attemptId").and_then(Value::as_str) != Some(attempt_id)
         || !live_claim_matches(database, &job, &proof.worker_id, proof.fencing_token,
                                database.worker_lease_now_ms()?)
-        || (!terminal && job.cancel_requested_at_ms > 0) {
+        || (!terminal && job.cancel_requested_at_ms > 0
+            && !(drain_entered && crate::turn::attempt_has_entered(database, transaction, attempt_id)?)) {
         return Err(conflict("worker claim cannot publish this attempt"));
     }
     Ok(())
@@ -1126,11 +1128,12 @@ pub(crate) fn request_cancel(
         .map(Some);
     }
     let suspended = job.status == "suspended";
-    if job.status == "queued" {
+    let domain_cancel = job.status == "queued" && job.task_kind == "conversation-attempt";
+    if job.status == "queued" && !domain_cancel {
         remove_queued_index(database, transaction, &job)?;
         job.status = "cancelled".to_owned();
         job.terminal_at_ms = now_ms;
-    } else if suspended {
+    } else if suspended || domain_cancel {
         remove_queued_index(database, transaction, &job)?;
         job.available_at_ms = now_ms;
     }
@@ -1142,7 +1145,7 @@ pub(crate) fn request_cancel(
     job.cancel_reason = reason.to_owned();
     job.updated_at_ms = now_ms;
     put_job(database, transaction, &job)?;
-    if suspended {
+    if suspended || domain_cancel {
         put_queued_index(database, transaction, &job)?;
     }
     encoded_json_bytes(&json!({
@@ -1293,7 +1296,7 @@ mod tests {
         let mut publication = db.begin_with_identity_claim_scopes(7, 41).unwrap();
         require_conversation_publication_claim(&db, &mut publication,
             "publishing", task_id, Some(&PublicationClaim {
-                worker_id: "old".into(), fencing_token: 1 }), false).unwrap();
+                worker_id: "old".into(), fencing_token: 1 }), false, false).unwrap();
         // A domain write disjoint from the job: only the fence's read dependency
         // can prevent this otherwise valid transaction from committing late.
         let visible = EntityKey::new(7, 41, "publication_test", b"visible").unwrap();
@@ -1310,7 +1313,7 @@ mod tests {
         assert!(db.entity_get(&mut current, &visible).unwrap().is_none());
         require_conversation_publication_claim(&db, &mut current,
             "publishing", task_id, Some(&PublicationClaim {
-                worker_id: "new".into(), fencing_token: 2 }), false).unwrap();
+                worker_id: "new".into(), fencing_token: 2 }), false, false).unwrap();
         db.entity_put(&mut current, visible, b"new".to_vec()).unwrap();
         db.commit(current).unwrap();
     }

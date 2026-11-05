@@ -416,6 +416,9 @@ MODEL_PRICING = {
     'kimi-k2.7-code-highspeed':  {'input': 0.95, 'output': 8.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.20, 'name': 'Kimi K2.7 Code (Highspeed)'},
     # ── Tencent Hunyuan ── hy4-preview (2026-08-28): ¥6/¥18 per 1M, cache hit ¥0.3 → $0.829/$2.486 @ 7.24
     'hy4-preview':               {'input': 0.829,'output': 2.486,'cacheWriteMul': 1.00, 'cacheReadMul': 0.05, 'name': 'Hunyuan HY4 Preview'},
+    # hy4 (2026-11-04): list price unchanged from the preview, ¥6/¥18 per 1M, cache hit ¥0.3
+    # (tencent.com announcement) → $0.829/$2.486 @ 7.24. TokenHub bills 50% of list until 2026-12-31.
+    'hy4':                       {'input': 0.829,'output': 2.486,'cacheWriteMul': 1.00, 'cacheReadMul': 0.05, 'name': 'Hunyuan Hy4'},
     # ── Tencent Hunyuan ── cheapest tier (≤16K): ¥1.2/¥4 per 1M = $0.166/$0.553 @ 7.24
     'hy3-preview':               {'input': 0.166,'output': 0.553,'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Hunyuan HY3 Preview'},
     # -- BEGIN yourprovider_template_sync auto-added (regenerated wholesale) --

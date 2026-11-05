@@ -173,6 +173,7 @@ def start_conversation_attempt_executor(
     abort_after_ts: float | None = None,
     on_task_registered: Callable[[str], None] | None = None,
     execution_clock=None,
+    worker_context=None,
 ):
     """Build model context, register an executor, and start it.
 
@@ -201,6 +202,10 @@ def start_conversation_attempt_executor(
         context='conversation executor',
     )
     principal, attended = restore_execution_identity(config)
+    if worker_context is not None:
+        from lib.tasks_pkg.worker_binding import worker_task_identity
+        worker_task_identity(worker_context, conversation_id=conv_id,
+            attempt_id=config.get('_attemptId'), turn_id=config.get('_turnId'), principal=principal)
     from lib.tasks_pkg.plan_mode import normalize_interaction_mode_runtime_config
     config = normalize_interaction_mode_runtime_config(config)
     from lib.tasks_pkg.coordinator_policy import pin_coordinator_request_policy
@@ -247,7 +252,8 @@ def start_conversation_attempt_executor(
             task = create_task(
                 conv_id, api_messages, config,
                 user_id=owner_user_id,principal=principal,
-                supersede=False, execution_clock=execution_clock)
+                supersede=False, execution_clock=execution_clock,
+                **({'worker_context': worker_context} if worker_context is not None else {}))
     finally:
         if task is None and memory_listing is not None:
             memory_listing.release()
@@ -325,24 +331,22 @@ def start_conversation_attempt_executor(
             task['_flow_projection'] = 'flow'
         logger.info('[Chat] Queueing FLOW task %s for conv %s model=%s via=%s',
                     task_id[:8], conv_id[:8], _cfg_model, _flow_entry.__name__)
-        try:
-            from lib.tasks_pkg.spawn import spawn_task
-            with measure_task_startup('submission', identity=timing_identity):
-                spawn_task(task, runner=_flow_entry)
-        except Exception as _spawn_err:
-            logger.exception('[Chat] Failed to start flow thread for task %s conv=%s',
-                             task_id[:8], conv_id[:8])
-            _discard_unstarted_task(task, conv_id)
-            return None, 'executor_start_failed'
     else:
         logger.info('[Chat] Queueing task %s for conv %s model=%s',
                     task_id[:8], conv_id[:8], _cfg_model)
+    if worker_context is not None:
+        # A claimed job owns this physical thread through domain settlement.
+        # Exceptions after entry retain the task and its pending receipts;
+        # they are never misclassified as a rejected background submission.
+        from lib.tasks_pkg.spawn import run_task_inline
+        run_task_inline(task, runner=_flow_entry)
+    else:
         try:
             from lib.tasks_pkg.spawn import spawn_task
             with measure_task_startup('submission', identity=timing_identity):
-                spawn_task(task)
-        except Exception as _spawn_err:
-            logger.exception('[Chat] Failed to start thread for task %s conv=%s',
+                spawn_task(task, **({'runner': _flow_entry} if _flow_entry else {}))
+        except Exception:
+            logger.exception('[Chat] Failed to start task %s conv=%s',
                              task_id[:8], conv_id[:8])
             _discard_unstarted_task(task, conv_id)
             return None, 'executor_start_failed'

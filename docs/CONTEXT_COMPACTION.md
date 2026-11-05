@@ -976,13 +976,13 @@ Specs: `tests/compaction/test_compaction_context_boundaries.py`.
 Cache economics may defer an optional rewrite, never mandatory input admission
 or hard-window recovery. Historical `lastTurnCacheRead` is display metadata,
 not evidence that a new task or a changed model/provider has a warm prefix.
-Automatic compaction defaults to route-window safety, with output/recovery
-reserves; an economic working-set trigger requires an explicit positive request
-or environment setting. Pricing tiers do not select an implicit target. The
+Automatic semantic compaction follows route-window safety, with output/recovery
+reserves. Fixed economic working-set settings are retired; neither configuration
+nor positive rewrite ROI selects an earlier automatic L2 trigger. The
 decision and measurement are in
 [context budgets](CONTEXT_BUDGET_POLICY.md#automatic-compaction-preserves-execution-continuity).
 Economic decisions require current-task, route-compatible cache observations.
-The working-set target is economic; a cache-negative/low-yield decline below window safety stays declined at dispatch.
+Optional rewrite accounting cannot move the route-window trigger or force an economic decline through final admission.
 Proactive safety recovery and final guard share a route-derived window-safety ceiling on every round. Full prompt measurement includes tools; explicit requested output is reserved. There is no separate 256K first-dispatch cap. Astra's maintained capacity is 1,050,000 tokens; its 272,000-token pricing tier is not an admission limit or a proven universal quality sweet spot.
 Route propagation and coordinated L1/L2 adoption: [CONTEXT_BUDGET_POLICY.md](CONTEXT_BUDGET_POLICY.md).
 Receipts distinguish a local economic decline from an attempted summary failure;

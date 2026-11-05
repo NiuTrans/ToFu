@@ -310,7 +310,7 @@ def reset_persistent_event_projection(task_id, event) -> None:
 
 
 def append_persistent_event(task_id, event_id, event, *,
-                            require_attempts_live=None):
+                            require_attempts_live=None, worker_claim=None, user_id=None):
     """Persist one event and wait for its Sidecar transaction to commit.
 
     Batching amortizes concurrent streams, while the per-call acknowledgement
@@ -335,10 +335,10 @@ def append_persistent_event(task_id, event_id, event, *,
     projected = project_persistent_event(task_id, event)
 
     def _raise_if_stale(result):
-        if isinstance(result, dict) and result.get('rejected') == 'attempt_not_live':
+        if isinstance(result, dict) and result.get('rejected') in ('attempt_not_live', 'worker_claim_stale'):
             raise EventAttemptStaleError(
                 f'event {event_id} for task {str(task_id)[:8]} rejected: '
-                'attempt is no longer live')
+                f"publication refused: {result['rejected']}")
         return result
 
     _invalidate_event_read_caches(task_id)
@@ -351,6 +351,8 @@ def append_persistent_event(task_id, event_id, event, *,
             timeout=storage_write_deadline(
                 'event.append_batch', floor_seconds=_PERSIST_TIMEOUT_S),
             require_attempts_live=require_live,
+            **({'worker_claim': worker_claim} if worker_claim is not None else {}),
+            **({'user_id': user_id} if user_id is not None else {}),
         ))
     except EventAttemptStaleError:
         # Definitive fence verdict: a retry can never make the attempt live
@@ -371,6 +373,10 @@ def append_persistent_event(task_id, event_id, event, *,
             }
             if require_live is not None:
                 payload['require_attempts_live'] = require_live
+            if worker_claim is not None:
+                payload['worker_claim'] = worker_claim
+            if user_id is not None:
+                payload['user_id'] = user_id
             result = get_storage_client(write=True).command(
                 'event.append', payload, None, priority='event',
                 deadline=storage_write_deadline(

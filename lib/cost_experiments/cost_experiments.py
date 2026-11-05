@@ -8,12 +8,13 @@ never mixed across variants.
 The two policies are fixed here rather than accepting arbitrary request keys:
 
 ``control``
-    Compatibility baseline: inline MCP schemas and context-window-only L2
-    compaction (``workingSetTokens=0``).
+    Inline MCP schemas with the shared context-window L2 policy.
 
 ``optimized``
-    Current economic defaults: automatic progressive MCP disclosure and a
-    128K working set.
+    Automatic progressive MCP disclosure with the same L2 policy.
+
+Version 2 no longer experiments with fixed compaction thresholds. Old resolved
+specs retain their original version/digest and cannot silently become v2 exposure.
 
 Only the enrollment/split/sample controls are low-code editable.  Keeping the
 arm payloads declarative and bounded prevents an admin typo from changing an

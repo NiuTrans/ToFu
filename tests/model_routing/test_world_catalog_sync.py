@@ -70,14 +70,16 @@ def test_newly_shipped_models_land_in_empty_authority():
 def test_incomplete_provider_catalog_facts_do_not_register_hunyuan_models():
     # Attribution to tencent and provider estimates do not establish a
     # complete official registration. These remain provider-scoped until
-    # reasoning and other required facts have evidence.
+    # reasoning and other required facts have evidence; Hy4 has exact
+    # maintained knowledge (test_hy4_registration.py).
     repository = InMemoryModelRoutingRepository()
     boundary = _boundary()
     sync_world_model_catalog(boundary=boundary, repository=repository)
     document = repository.get(boundary).document
     assert not _has_model(document, 'hy4-preview')
     assert not _has_model(document, 'hy3-preview')
-    assert not any(row['creator_id'] == 'tencent' for row in document['models'])
+    assert {row['model_id'] for row in document['models']
+            if row['creator_id'] == 'tencent'} == {'hy4'}
 
 
 @pytest.mark.parametrize('model_id', ['grok-4.7', 'grok-4.20-multi-agent'])
