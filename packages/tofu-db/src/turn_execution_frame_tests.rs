@@ -172,10 +172,19 @@ fn seeded_vfs()->(Arc<DeterministicVfs>,AuthorityDatabase,u64) {
 
 #[test]
 fn execution_frame_receipt_retry_and_every_commit_fault_keep_atomic_state() {
+    assert_event_batch_commit_faults(true);
+}
+
+#[test]
+fn adjacent_event_receipt_retry_and_every_commit_fault_keep_atomic_state() {
+    assert_event_batch_commit_faults(false);
+}
+
+fn assert_event_batch_commit_faults(frame: bool) {
     let (vfs,mut baseline,revision)=seeded_vfs();let before=state(&baseline);vfs.arm_fault(None).unwrap();
-    let command=ir(revision,3,true);let expected_response=execute(&mut baseline,&command,true).unwrap();
+    let command=ir(revision,3,true);let expected_response=execute(&mut baseline,&command,frame).unwrap();
     let trace=vfs.trace().unwrap();let after=state(&baseline);
-    let bytes=baseline.wal_len().unwrap();assert_eq!(execute(&mut baseline,&command,true).unwrap(),expected_response);
+    let bytes=baseline.wal_len().unwrap();assert_eq!(execute(&mut baseline,&command,frame).unwrap(),expected_response);
     assert_eq!(baseline.wal_len().unwrap(),bytes,"receipt retry appended a frame");
     assert_eq!(baseline.logical_outbox_pending(7,11,10).unwrap().len(),1);
     drop(baseline);
@@ -187,7 +196,7 @@ fn execution_frame_receipt_retry_and_every_commit_fault_keep_atomic_state() {
             let (vfs,mut database,_)=seeded_vfs();
             let occurrence=trace[..=index].iter().filter(|observed|*observed==operation).count();
             vfs.arm_operation_fault(*operation,occurrence,action).unwrap();
-            let result=execute(&mut database,&command,true);
+            let result=execute(&mut database,&command,frame);
             assert!(vfs.operation_fault_fired().unwrap(),"fault {index} {operation:?} must fire");
             // Cut the durable image before Engine::Drop can catch CONTROL up
             // or drain buffered writes. Cleanup cannot strengthen the proof.
@@ -200,7 +209,7 @@ fn execution_frame_receipt_retry_and_every_commit_fault_keep_atomic_state() {
             reopened.configure_logical_outbox(&[72;32],1024*1024,128*1024).unwrap();
             let pending=reopened.logical_outbox_pending(7,11,10).unwrap();
             assert_eq!(pending.len(),usize::from(actual==after),"outbox detached from frame");
-            assert_eq!(execute(&mut reopened,&command,true).unwrap(),expected_response);
+            assert_eq!(execute(&mut reopened,&command,frame).unwrap(),expected_response);
             assert_eq!(state(&reopened),after);
             assert_eq!(reopened.logical_outbox_pending(7,11,10).unwrap().len(),1);
         }

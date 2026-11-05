@@ -6038,6 +6038,7 @@ fn prepare_transaction_ir_mode(
         .filter(|step| matches!(step, TransactionIrStep::TurnEventRecord { .. }))
         .nth(1).is_some();
     let mut turn_event_applied = None;
+    let mut adjacent_turn_projection = None;
     let _steps_timer = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_IR_STEPS);
     let steps = match execution {
         IrStepExecution::Sequential => ir.steps.as_slice(),
@@ -6052,6 +6053,9 @@ fn prepare_transaction_ir_mode(
         }
     };
     for step in steps {
+        if !matches!(step, TransactionIrStep::TurnEventRecord { .. }) {
+            adjacent_turn_projection = None;
+        }
         match step {
             TransactionIrStep::Queue { request, slot } => {
                 slots[*slot as usize] =
@@ -7448,7 +7452,12 @@ fn prepare_transaction_ir_mode(
                 )?));
             }
             TransactionIrStep::TurnEventRecord { request, slot } => {
-                let response = crate::turn::event_record(database, &mut transaction, request)?;
+                let response = if batched_turn_events {
+                    crate::turn::event_record_adjacent(database, &mut transaction, request,
+                        &mut adjacent_turn_projection)?
+                } else {
+                    crate::turn::event_record(database, &mut transaction, request)?
+                };
                 if batched_turn_events {
                     let applied = serde_json::from_slice::<serde_json::Value>(&response)
                         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData,
@@ -8694,6 +8703,7 @@ fn prepare_transaction_ir_mode(
             }
         }
     }
+    drop(adjacent_turn_projection);
     drop(_steps_timer);
     let mut response = result_bytes(&ir.result, &mut slots)?;
     // This completion witness alone grants no cache eligibility. The semantic

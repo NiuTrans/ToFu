@@ -1,6 +1,7 @@
 //! Production single-event witness, public semantics and original checkpoint
 //! boundaries. The unframed arm is the pre-existing execution owner, not a
-//! separately implemented reducer. Every event remains its own transaction.
+//! separately implemented reducer. Witness cases keep one transaction per
+//! event; adjacent_tests covers ordinary composed event transactions.
 use super::*;
 
 fn canonical_projection() -> Value {
@@ -8,6 +9,7 @@ fn canonical_projection() -> Value {
         "toolRounds":[],"segments":[{"type":"text","blockId":"text:terminal",
             "text":"before","deliverable":true,"terminal":true}]})
 }
+
 
 fn head(database: &AuthorityDatabase) -> ProjectionHeadDescriptor {
     let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
@@ -948,3 +950,6 @@ fn execution_frame_runtime_timing_leg() {
         "prefix_sha256":format!("{:x}",Sha256::digest(prefix.as_bytes())),"prefix_bytes":prefix.len(),"strict":true,"measured":"N independent event prepares + N strict commits","reopened_each_sample":true})
     );
 }
+
+#[path = "turn_event_adjacent_tests.rs"]
+mod adjacent_tests;

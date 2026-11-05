@@ -166,6 +166,52 @@ the ordinary path. Run
 set `TMPDIR` to an isolated directory on the filesystem being measured.
 Metadata retention is measured in [storage operations](STORAGE_OPERATIONS.md#large-history-event-persistence).
 
+### Adjacent ordinary events in one transaction (2026-11-05)
+
+Problem: the production delivery FIFO can already compose several ordinary
+`TurnEventRecord` steps in one atomic IR. Nested tool/usage updates still decode
+the same checkpoint and replay its growing patch chain for each step. On the
+25 complete problem histories in `benchmarks/storage_history_cohort.py`, queued
+delivery reconstructed 18.40 GiB of checkpoint inputs after the recovery-size
+fix; the retained histories total only 406.66 MiB. This volume includes seeding
+and verification reads, not just the timed continuation, and is not disk writes.
+
+Decision: the existing sequential IR owner holds at most the immediately
+preceding ordinary event's owned materialized projection. The next adjacent
+event first reads its current Attempt and Turn header through the ordinary
+transaction, retains scope/current-attempt/worker-claim and revision checks,
+and moves that projection only when its scoped entity key and complete physical
+header match. Normalization, guidance preservation, size admission, checkpoint
+rollover and publication still execute through `turn.rs::event_record`'s shared
+implementation. No persisted proof is inferred from this buffer.
+
+Every other IR step clears it, including reads. Refusal, errors, another Turn,
+text/witness fast paths and settlement discard it; only a fully published
+materialized event with a live head supplies its successor. The IR drops the
+last buffer before commit preparation. A failed or conflicting preparation
+therefore leaves no cross-transaction reuse. The buffer moves an allocation
+already needed by ordinary execution, with at most one preceding projection
+retained between adjacent steps; it adds no persistent bytes, global cache,
+retention setting, admission limit or durability option.
+
+Alternatives rejected: a process-wide projection cache requires a separate
+invalidation/lifetime owner; the experimental frame reducer duplicates ordinary
+semantics and changes checkpoint costs. A generic transaction mutation counter
+adds bookkeeping to every entity operation. Restricting reuse to adjacent steps
+in the existing loop gives an explicit invalidation boundary instead. The
+experimental `execution_frame::record` remains test-only.
+
+Executable specifications are in `src/turn_event_adjacent_tests.rs`: exact
+ordinary-owner state and reopen across checkpoint/fast/terminal boundaries,
+stale version/owner/attempt refusal, complete rollback, commit conflict, and an
+intervening checkpoint deletion that must still fail integrity checks. The
+shared write/short-write/lost-sync fault matrix also runs through production IR,
+with receipt replay and outbox atomicity. The isolated work-count test proves
+three nested events read one checkpoint instead of three; invoke it with
+`--ignored --test-threads=1` because its counters are process-wide. Complete
+producer measurements and their limitations belong to
+[task event delivery](TASK_EVENT_DELIVERY.md#complete-history-delivery-measurements).
+
 ### Final production-owner timing
 
 The final combined source is `36b11621e0d9e9a86aa3c774838f3f187d7d456d`
