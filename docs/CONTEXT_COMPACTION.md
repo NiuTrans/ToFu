@@ -561,6 +561,31 @@ moving credential cleanup into transport hides failures from budget settlement.
 The summary-routing, credential-failure and route-cleanup tests specify these
 boundaries.
 
+**Window-sized summary passes.** Problem: human evidence is never elided, so
+the composed summary request had no bound tied to the summarizer. A cold
+rebuild of a long transcript could exceed the route window; the request was
+dispatched anyway, refused, and mandatory admission failed with the source
+intact. Decision: `_summary_input_token_capacity` names the external limit
+(the window's usable context minus receipt output and summary system prompt;
+the char budget is derived from it). When the composed request exceeds it and
+no optional-rewrite quote binds a single request, `_generate_rolling_summary`
+splits the history into consecutive window-sized slices
+(`next_summary_pass`) and summarizes them in order. Each pass is a complete
+authorized summary with its own route, budget key and settlement; its receipt
+becomes the next pass's prior receipt, as a later compaction carries an earlier
+one. Slices end on message boundaries and never open with orphaned tool
+results. A single user message too large for any request is split verbatim at
+whitespace, both halves marked, so every human character still reaches a
+summarizer. Pass count follows the evidence size; usage and call rows
+accumulate in one usage record. A failed or cancelled pass preserves the source
+under that pass's settled failure; fixed evidence that cannot fit beside one
+part is refused without dispatch. A fitting request keeps its single,
+byte-identical path. Alternatives rejected: eliding old human text violates
+the verbatim-evidence rule; head deletion is refused for live tasks; a fixed
+pass or chunk count is a tuning knob; a map-reduce of independent chunk
+summaries loses the ordering a rolling receipt keeps. Spec:
+`tests/compaction/test_summary_input_window.py`.
+
 **Problem:** a long archive exceeded native ordinary literal limits; adopting a summary after failed archival left Continue rebuilding cold history and hid the compaction marker. Startup compaction also lacked a zero-tool-prefix witness. **Decision:** native archive bodies use their declared 64 MiB blob budget and a compact, digest-bound outbox; ordinary literals keep the 8 MiB budget. For a Turn-bound task, the accepted post view and receipt commit before model-view adoption. Create/update failure retains the original input, emits an explicit failed compaction fact without an archive link, and stops provider dispatch. The pending compacting phase stays visible before an archive exists. An empty tool prefix is a valid startup witness. A closed suspended task saves its bounded working view through the same owner-scoped archive repository, including delivered background context and exact tool receipts. This checkpoint retains the original audit snapshot, makes no model call, emits no fictitious compaction, and follows the existing archive retention limit. Owner, Turn, history, policy, media and complete tool-prefix checks still fence restoration; changed or unproved input rebuilds rather than weakening those fences. Current logical-Turn loaded Skill batches remain verbatim through L1/L2; older Turns remain eligible for normal compaction. **Alternatives rejected:** raising all native literal limits broadens unrelated operations; adopting unsaved summaries breaks recovery; hiding pending or failed work makes repeated summarization invisible; relying on a tool-count watermark alone loses late background evidence. Specs: `test_continue_working_context.py`, the cross-backend large archive/restart producer test, and `test_visual_continue_compaction.py`.
 
 **Archive summary representation.** Problem: the source-derived continuity packet belongs in the accepted handoff, but appending it to the archive's 200,000-character `summary` field can reject an otherwise small post view. Decision: automatic and manual accepted archives persist only the narrative in `summary`; the exact complete handoff, including its digest-verified continuity packet, stays in `postMessages`. The receipt's `summary.chars` describes that complete handoff. No continuity observation is clipped and no storage limit changes. Create/update failures retain the original source and preserve an underlying `StorageError`'s code, message, retry class and operation identity instead of converting every rejection into retryable `database_unavailable`. Alternatives rejected: truncating continuity loses required execution evidence; widening the summary limit duplicates the complete handoff in two archive documents; an archive-only fallback without the packet makes Continue lossy. Specifications: `test_unified_continuity.py` and the real SQLite/native archive/restart case in `test_continue_working_context.py`.

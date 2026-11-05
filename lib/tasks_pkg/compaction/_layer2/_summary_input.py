@@ -100,23 +100,38 @@ def _archived_prior_receipt(task: dict | None) -> str:
     return ''
 
 
+def resolve_prior_receipt(
+    messages: list, *, task: dict | None, source_messages: list | None,
+    ports: SummaryInputPorts,
+) -> tuple[str, bool]:
+    """Return ``(receipt, archived)``: the live carrier, else the archive's."""
+    receipt_messages = (source_messages if source_messages is not None
+                        else messages)
+    prior_receipt = ports.prior_receipt(receipt_messages)
+    if prior_receipt:
+        return prior_receipt, False
+    prior_receipt = ports.archived_receipt(task)
+    return prior_receipt, bool(prior_receipt)
+
+
 def compose_summary_input(
     messages: list, current_query: str, *, task: dict | None,
     source_messages: list | None, anchor_text: str, ports: SummaryInputPorts,
+    prior_receipt: str | None = None,
 ) -> SummaryInput:
     """Compose the summary request without clipping user messages or receipts.
 
     Pure apart from the archive receipt read: no logging and no task writes, so
-    a preflight quote can price the request that dispatch later builds.
+    a preflight quote can price the request that dispatch later builds. An
+    explicit ``prior_receipt`` (a rolling pass's predecessor) replaces lookup.
     """
     _char_budget = ports.input_char_budget(task)
     receipt_messages = (source_messages if source_messages is not None
                         else messages)
-    prior_receipt = ports.prior_receipt(receipt_messages)
     prior_receipt_archived = False
-    if not prior_receipt:
-        prior_receipt = ports.archived_receipt(task)
-        prior_receipt_archived = bool(prior_receipt)
+    if prior_receipt is None:
+        prior_receipt, prior_receipt_archived = resolve_prior_receipt(
+            messages, task=task, source_messages=source_messages, ports=ports)
     latest_assistant = ports.latest_assistant(receipt_messages)
     from lib.tasks_pkg.compaction._continuity import build_continuity, render_continuity
     state = build_continuity(messages, task)
@@ -166,15 +181,86 @@ def compose_summary_input(
     )
 
 
+_PASS_CONTINUES = '\n[... this message continues in the next summary pass]'
+_PASS_CONTINUED = '[... continued from the previous summary pass]\n'
+
+
+def next_summary_pass(
+    messages: list, current_query: str, *, task: dict | None,
+    source_messages: list | None, anchor_text: str, ports: SummaryInputPorts,
+    prior_receipt: str, capacity_tokens: int, estimate: Callable,
+) -> tuple[list, list] | None:
+    """Split off the longest leading slice whose one request fits capacity.
+
+    Returns ``(slice, remainder)``. A slice ends on a message boundary and does
+    not open the remainder with orphaned tool results. A single user message
+    too large for any request is split verbatim at whitespace, both halves
+    marked. ``None`` means not even one part fits beside the fixed evidence
+    (query, anchor, receipt, latest conclusions, continuity ledger).
+    """
+    def fits(candidate: list) -> bool:
+        composed = compose_summary_input(
+            candidate, current_query, task=task, source_messages=source_messages,
+            anchor_text=anchor_text, ports=ports, prior_receipt=prior_receipt)
+        return estimate(composed.prompt) <= capacity_tokens
+
+    if fits(messages):
+        return list(messages), []
+    low, high = 0, len(messages) - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits(messages[:middle]):
+            low = middle
+        else:
+            high = middle - 1
+    end = low
+    while 0 < end < len(messages) and messages[end].get('role') == 'tool':
+        end -= 1
+    end = end or low
+    if end:
+        return list(messages[:end]), list(messages[end:])
+    split = _split_user_message(messages[0], fits)
+    if split is None:
+        return None
+    head, tail = split
+    return [head], [tail, *messages[1:]]
+
+
+def _split_user_message(message, fits: Callable) -> tuple[dict, dict] | None:
+    """Largest verbatim head of one user message that fits, cut at whitespace."""
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return None
+    content = message.get('content')
+    if isinstance(content, list):
+        content = '\n'.join(
+            block.get('text', '') for block in content
+            if isinstance(block, dict) and block.get('type') == 'text'
+            and isinstance(block.get('text'), str))
+    if not isinstance(content, str) or len(content) < 2:
+        return None
+    low, high = 0, len(content) - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits([dict(message, content=content[:middle] + _PASS_CONTINUES)]):
+            low = middle
+        else:
+            high = middle - 1
+    if not low:
+        return None
+    cut = max(content.rfind(' ', 0, low), content.rfind('\n', 0, low)) + 1 or low
+    return (dict(message, content=content[:cut] + _PASS_CONTINUES),
+            dict(message, content=_PASS_CONTINUED + content[cut:]))
+
+
 def build_summary_input(
     messages: list, current_query: str, *, task: dict | None,
     source_messages: list | None, anchor_text: str, log_prefix: str,
-    ports: SummaryInputPorts,
+    ports: SummaryInputPorts, prior_receipt: str | None = None,
 ) -> list:
     """Compose the dispatched request, then report it without mutating task state."""
     composed = compose_summary_input(
         messages, current_query, task=task, source_messages=source_messages,
-        anchor_text=anchor_text, ports=ports)
+        anchor_text=anchor_text, ports=ports, prior_receipt=prior_receipt)
     if composed.prior_receipt_archived:
         logger.info('%s Prior receipt recovered from compaction archive',
                     log_prefix)

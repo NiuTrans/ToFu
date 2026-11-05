@@ -19,6 +19,7 @@ from lib.llm.stream_result import UnverifiedProviderStreamError
 from lib.tasks_pkg.compaction._ownership import compaction_owner_key
 from lib.tasks_pkg.compaction._layer2._summary_input import (
     SummaryInputPorts, build_summary_input, compose_summary_input,
+    next_summary_pass, resolve_prior_receipt,
     _archived_prior_receipt as _archived_prior_receipt,
 )
 from lib.tasks_pkg.compaction._layer2._summary_transport import (
@@ -38,6 +39,7 @@ from lib.tasks_pkg.compaction._layer2._prompt import (
     _extract_prior_receipt,
     _format_messages_for_summary,
     _summary_input_char_budget,
+    _summary_input_token_capacity,
 )
 
 logger = get_logger(__name__)
@@ -297,6 +299,63 @@ def _summary_request_key(
     return digest.hexdigest()
 
 
+def _generate_rolling_summary(messages: list, current_query: str, log_prefix: str,
+                              *, conv_id: str, task: dict | None, on_delta,
+                              usage_out: dict | None, anchor_text: str,
+                              source_messages: list | None,
+                              output_budget_tokens: int | None,
+                              input_tokens: int) -> str | None:
+    """Summarize evidence larger than the summarizer window in rolling passes.
+
+    Human evidence stays verbatim, so one request cannot always carry it. Each
+    pass is a complete authorized summary of the next window-sized slice, and
+    its receipt is the following pass's prior receipt, exactly as a later
+    compaction carries an earlier one. Pass count follows the evidence size;
+    usage accumulates in ``usage_out``. Any failed or cancelled pass returns
+    ``None`` with its own settled failure, so the caller preserves source.
+    """
+    from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
+    capacity_tokens = _summary_input_token_capacity(task)
+    tag = f'{log_prefix}[Summary]' if log_prefix else '[Summary]'
+    logger.info('%s Summary input %d tokens exceeds the summarizer window capacity '
+                '%d; summarizing in rolling window-sized passes',
+                tag, input_tokens, capacity_tokens)
+    ports = _summary_input_ports()
+    receipt = resolve_prior_receipt(
+        messages, task=task, source_messages=source_messages, ports=ports)[0]
+    remaining = list(messages)
+    call_rows = []
+    passes = 0
+    while remaining:
+        planned = next_summary_pass(
+            remaining, current_query, task=task, source_messages=source_messages,
+            anchor_text=anchor_text, ports=ports, prior_receipt=receipt,
+            capacity_tokens=capacity_tokens, estimate=_estimate_total_tokens)
+        if planned is None:
+            logger.warning('%s Required summary evidence exceeds the summarizer window '
+                           'even one part at a time; keeping source intact', tag)
+            return None
+        pass_messages, remaining = planned
+        passes += 1
+        logger.info('%s Rolling summary pass %d: %d messages, %d remaining',
+                    tag, passes, len(pass_messages), len(remaining))
+        if isinstance(usage_out, dict):
+            usage_out.pop('_summaryCalls', None)
+        receipt = _generate_query_aware_summary(
+            pass_messages, current_query, log_prefix, conv_id=conv_id, task=task,
+            on_delta=None if remaining else on_delta, usage_out=usage_out,
+            anchor_text=anchor_text, source_messages=source_messages,
+            output_budget_tokens=output_budget_tokens, prior_receipt=receipt,
+            planned_pass=True)
+        if isinstance(usage_out, dict):
+            call_rows.extend(usage_out.get('_summaryCalls') or ())
+            if call_rows:
+                usage_out['_summaryCalls'] = list(call_rows)
+        if receipt is None:
+            return None
+    return receipt
+
+
 def _generate_query_aware_summary(messages: list, current_query: str,
                                    log_prefix: str = '',
                                    conv_id: str = '',
@@ -307,7 +366,8 @@ def _generate_query_aware_summary(messages: list, current_query: str,
                                    source_messages: list | None = None,
                                    expected_route: dict | None = None,
                                    output_budget_tokens: int | None = None,
-                                   ) -> str | None:
+                                   prior_receipt: str | None = None,
+                                   planned_pass: bool = False) -> str | None:
     """Generate a complete query-aware summary on an authorized route.
 
     The main-model policy is the default. Opt-in qualified policies require
@@ -338,6 +398,7 @@ def _generate_query_aware_summary(messages: list, current_query: str,
     history). Both reach the model as VERBATIM EVIDENCE — the model authors
     the receipt's Objective itself (see ``_ensure_summary_objective``), so
     the receipt can track goal replacement across a long conversation.
+    Requests over the summarizer window roll (``_generate_rolling_summary``).
     """
     authority_evidence = _summary_authority_evidence(task)
     from lib.tasks_pkg.compaction._summary_accounting import summary_model_admission
@@ -377,7 +438,16 @@ def _generate_query_aware_summary(messages: list, current_query: str,
     _summary_messages = build_summary_input(
         messages, current_query, task=task, source_messages=source_messages,
         anchor_text=anchor_text, log_prefix=tag, ports=_summary_input_ports(),
-    )
+        prior_receipt=prior_receipt)
+    from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
+    composed_input_tokens = _estimate_total_tokens(_summary_messages)
+    if not (planned_pass or expected_route is not None
+            or composed_input_tokens <= _summary_input_token_capacity(task)):
+        return _generate_rolling_summary(
+            messages, current_query, log_prefix, conv_id=conv_id, task=task,
+            on_delta=on_delta, usage_out=usage_out, anchor_text=anchor_text,
+            source_messages=source_messages, output_budget_tokens=output_budget_tokens,
+            input_tokens=composed_input_tokens)
 
     codex_provider = _codex_subscription_provider(task)
     summary_affinity_id = _summary_cache_affinity_id(conv_id, task)
@@ -401,8 +471,7 @@ def _generate_query_aware_summary(messages: list, current_query: str,
         model = task.get('model') or cfg.get('model') or cfg.get('preset')
 
         from lib.tasks_pkg.compaction._summary_routing import select_summary_route
-        from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
-        summary_input_tokens = _estimate_total_tokens(_summary_messages)
+        summary_input_tokens = composed_input_tokens
         summary_route = select_summary_route(
             task, input_tokens=summary_input_tokens,
             output_tokens=_SUMMARY_MAX_TOKENS,
@@ -767,6 +836,13 @@ def _generate_query_aware_summary(messages: list, current_query: str,
                 if failure_evidence is not None:
                     usage_out['_summaryFailure'] = failure_evidence
 
+    return _shaped_summary_text(content, usage, tag=tag, conv_id=conv_id,
+                                anchor_text=anchor_text)
+
+
+def _shaped_summary_text(content, usage, *, tag: str, conv_id: str,
+                         anchor_text: str) -> str | None:
+    """Shape one complete provider result into the receipt text, or ``None``."""
     if not isinstance(content, str) or not content.strip():
         logger.warning('%s Summary model returned empty or non-text content', tag)
         return None

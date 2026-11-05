@@ -54,7 +54,7 @@ FUNCTION_LINE_BUDGETS = _unique_budgets(
     ('lib/llm/chat.py', 'chat', 590),
     ('lib/paper/report_engine/worker.py', 'run_report_task', 414),
     ('lib/tasks_pkg/compaction/_layer2/_compact.py', 'execute_compact_tool', 431),
-    ('lib/tasks_pkg/compaction/_layer2/_summary.py', '_generate_query_aware_summary', 504),
+    ('lib/tasks_pkg/compaction/_layer2/_summary.py', '_generate_query_aware_summary', 482),
     ('lib/tasks_pkg/context_composer/_providers.py', 'collect_context_blocks', 605),
     ('lib/tasks_pkg/handlers/project.py', '_handle_project_tool', 561),
     ('lib/tasks_pkg/manager/_events.py', '_append_event_ordered', 593),

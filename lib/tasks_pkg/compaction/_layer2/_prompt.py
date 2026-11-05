@@ -530,6 +530,23 @@ def _elide_to_budget(parts: list[tuple[str, str]], char_budget: int) -> str:
     return sep.join(out)
 
 
+def _summary_input_token_capacity(task: dict | None) -> int:
+    """Tokens one summary request may carry within the summarizer's window.
+
+    The external limit is the route's context window: usable context after
+    its output/compaction reserves, minus the receipt output and the summary
+    system prompt. Verbatim human evidence can exceed the char budget below,
+    so this is also the bound every dispatched summary request must meet.
+    """
+    try:
+        usable = _usable_context(_get_context_limit(task))
+    except Exception as e:
+        logger.debug('[Compact] usable-context lookup failed, using 96k '
+                     'fallback: %s', e)
+        usable = 96_000
+    return max(4_000, usable - _SUMMARY_MAX_TOKENS - 2_000)
+
+
 def _summary_input_char_budget(task: dict | None) -> int:
     """Char ceiling for the summary LLM's INPUT, sized to the model window.
 
@@ -544,13 +561,7 @@ def _summary_input_char_budget(task: dict | None) -> int:
     conservative ~3 chars/token, and clamp to the historical 200k so large
     windows behave as before.
     """
-    try:
-        usable = _usable_context(_get_context_limit(task))
-    except Exception as e:
-        logger.debug('[Compact] usable-context lookup failed, using 96k '
-                     'fallback: %s', e)
-        usable = 96_000
-    input_token_budget = max(4_000, usable - _SUMMARY_MAX_TOKENS - 2_000)
+    input_token_budget = _summary_input_token_capacity(task)
     # Convert token budget → char budget at ~1 char/token. This is the
     # CJK-worst-case ratio (the entropy heuristic counts ~1 token per CJK
     # char), so the char cap is SAFE for Chinese/Japanese input — the exact

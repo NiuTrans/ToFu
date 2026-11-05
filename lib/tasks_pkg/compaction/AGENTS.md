@@ -67,8 +67,11 @@ its explicit ports preserve policy/fault injection. Verify the compaction suite,
 context-snapshot and long-agent contracts; `benchmarks/compaction_compare.py`
 checks frozen-source outcomes before measuring component CPU/allocation.
 
-Summary request preparation lives in `_summary_input.py`; `_summary_transport.py`
+Summary request preparation lives in `_summary_input.py`, including the
+window-sized pass planner; `_summary_transport.py`
 retains observations and paid usage for one logical summary across authorized
-route attempts. `_summary.py` owns authority rechecks, credential grant cleanup
-and budget settlement. Verify summary-routing, route-cleanup, stream-completion,
-credential-failure and preservation contracts before changing these boundaries.
+route attempts. `_summary.py` owns authority rechecks, credential grant cleanup,
+budget settlement and rolling passes over the summarizer window. Verify
+summary-routing, route-cleanup, stream-completion, credential-failure,
+preservation and `test_summary_input_window.py` contracts before changing
+these boundaries.
