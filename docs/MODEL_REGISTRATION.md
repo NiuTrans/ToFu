@@ -1300,6 +1300,13 @@ own projection) that only a live public catalogue supplies; a
 repository-authored template row is owner-authored supply, not a release. The
 first report records the current candidates as a baseline and reports none; a
 catalogue first seen later contributes its standing listings the same way.
+The state also records each catalogue's first observation: the fetch time of
+the first snapshot the watch classified. A lead is standing when its catalogue
+is first observed in that report or its upstream listing time
+(`catalog_feed.listed_at`, the feed row's `created`) predates that first
+observation; a candidate whose every lead is standing joins the baseline
+automatically and is never new. A missing, zero or invalid listing time is
+unknown, never old: such a candidate is new when it appears after the baseline.
 Reviews record `deferred` or `declined` with reason, date and checked HTTPS
 sources, only for a currently listed identity, so an announced but unlisted
 model cannot be pre-suppressed. Deferred candidates appear in every report;
@@ -1309,9 +1316,37 @@ new candidates, 1 none, 2 no cached live catalogue or unreadable state (never
 evidence that nothing shipped); `--review` and `--baseline` are commands, not
 predicates, and exit 0 once done or 2 when refused.
 `data/config/model_release_watch.json` is
-deployment maintainer state (one baseline list plus one review per decided
-identity), not owner data; a corrupt file fails closed instead of
-re-baselining, and a deleted one re-baselines on the next report.
+deployment maintainer state (one baseline list, each catalogue's first
+observation, and one review per decided identity), not owner data. A version-1
+file upgrades on its next report or review, keeping its baseline and reviews
+and taking `initialized_at` as every known catalogue's first observation; a
+corrupt file (including a version-1 file without `initialized_at`) fails
+closed instead of re-baselining, and a deleted one re-baselines on the next
+report.
+
+**Rotated listings.** Problem: OpenRouter lists far more models than the feed
+keeps. The projection sorts rows newest-first by `created` and keeps 256 seeds
+per source, so whenever a newer model leaves that window an older one enters
+it. Compared only with the identities seen at first observation, the old row
+looked like a release: on 2026-10-30 the watch reported `openai/gpt-5-nano`
+(listed 2025-08-07) as new, and each false alarm costs a full scheduled agent
+run. Decision: the feed cache keeps every projected seed's upstream listing
+time per source, the template merge surfaces it only as
+`catalog_feed.listed_at`, and the watch classifies each lead by it against the
+recorded first observation of its catalogue, as above. The cut-off is the
+snapshot's fetch time, not the report time: a model listed between that fetch
+and the first report was in no baseline, so it must be new. Listing times are
+optional at the same feed cache version, so a cache written before them reads
+as unknown times (the previous behaviour) until its next refresh. Alternatives
+rejected: a recency window or age threshold (a tuning knob that still misfires
+on any rotation older than it and hides any release younger than it); a wider
+feed window (moves the rotation boundary without removing it, and the window
+bounds onboarding seeds, not the watch); declining each rotated listing by
+review or a per-model exception (pays the agent run the watch exists to save,
+once per rotation); listing times inside offering recipes (recipes compile
+into owner bundles, which would then carry catalogue evidence no Offering
+owns); a new feed cache version (today's cache would become unreadable and the
+predicate would exit 2 until the next 08:30 refresh).
 
 **Schedule.** The owner runs it as one `schedule_create` agent task after the
 08:30 update (`17 9 * * *`): `condition_command` runs the watch from the
@@ -1355,11 +1390,11 @@ target conversation refuses the turn; the candidate stays new for the next run.
 
 Alternatives rejected: letting daily research publish feed-only Models into
 owner storage (bypasses maintained knowledge and tests; one extraction proves
-provenance, not correctness); a recency window (the feed cache keeps no listing
-dates, and a window is a tuning knob); triaging the 128 standing listings found
-at introduction (mostly old relay rows); a new scheduler task type (the
-proactive agent already owns clock-gated full-tool turns). Specification:
-`tests/model_catalog/test_release_watch.py`.
+provenance, not correctness); triaging the 128 standing listings found at
+introduction (mostly old relay rows); a new scheduler task type (the proactive
+agent already owns clock-gated full-tool turns). Specification:
+`tests/model_catalog/test_release_watch.py`; listing-time retention:
+`tests/providers/test_provider_template_feed.py`.
 
 ## Browser projection
 
