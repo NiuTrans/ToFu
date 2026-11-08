@@ -830,7 +830,7 @@ not a byte bound: valid Unicode/escaped output and configuration can exceed
 the response cap in aggregate. Tests traverse large native and Sidecar pages
 without truncation or duplicate IDs, including deletion between pages.
 Unacknowledged rows are durable user state, never expired to satisfy a budget.
-One collective wake adds one short-lived workflow row per delivery batch.
+A collective wake adds no queue row; it is a Turn created under the lane fence.
 
 Durable Flow execution receipts use the existing owner-scoped orchestration
 run/event operations on both authorities. Each admitted effect adds a start and

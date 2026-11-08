@@ -17,7 +17,7 @@ from lib.knowledge import ingest, store
 from lib.knowledge.repository import KnowledgeRepository
 from lib.identity import require_user_id
 from lib.storage.v2_embedded_client import EmbeddedStorageV2Client
-from serverctl_pkg.native_engine import EnginePreparationError, source_fingerprint
+from serverctl_pkg.native_engine import EngineAdmissionRefusedError, source_fingerprint
 from tofu_db.embedded import EmbeddedRuntime
 
 
@@ -92,7 +92,7 @@ class DurableHtmlCorpus:
             if expected['source_sha256'] is None or identity != expected:
                 # The engine's typed refusal: test lanes skip an inherited
                 # engine with the TOFU_TEST_TOFUDB_BIN remedy instead of failing.
-                raise EnginePreparationError('native library is not built from this checkout')
+                raise EngineAdmissionRefusedError('native library is not built from this checkout')
             self.build_identity = identity
             self.library_sha256 = (provenance.library_sha256 if provenance is not None else
                 hashlib.sha256(self.engine.with_name('libtofu_db.so').read_bytes()).hexdigest())

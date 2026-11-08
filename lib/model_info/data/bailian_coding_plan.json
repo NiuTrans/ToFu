@@ -1,0 +1,20 @@
+{
+  "brand": "qwen",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "bailian_coding_plan",
+  "category": "subscription",
+  "name": "Alibaba Bailian Coding Plan",
+  "base_url": "https://coding.dashscope.aliyuncs.com/v1",
+  "catalog_mode": "curated",
+  "catalog_source": {"url": "https://help.aliyun.com/zh/model-studio/coding-plan", "checked_at": "2026-11-06"},
+  "subscription": {"key_console_url": "https://bailian.console.aliyun.com/cn-beijing/subscription/coding-plan"},
+  "_plan_note": "Pro ¥200/month: 6,000 requests per 5 hours, 45,000 per week, 90,000 per month. Key sk-sp-…; pay-as-you-go keys and base URLs do not work here. Terms: only inside coding tools, never automation scripts, app backends or batch calls; inputs and outputs may be used for model improvement. International accounts use https://coding-intl.dashscope.aliyuncs.com/v1.",
+  "offering_recipes": [
+    {"model_id": "qwen3.7-plus", "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "qwen3.6-plus", "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "qwen3.5-plus", "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "kimi-k2.5", "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "glm-5", "capabilities": ["text", "thinking"]},
+    {"model_id": "MiniMax-M2.5", "capabilities": ["text", "thinking"]}
+  ]
+}

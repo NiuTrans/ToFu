@@ -256,6 +256,90 @@ def test_real_command_birth_input_provenance_budget_report_review_and_duplicate_
     assert launches == ['task-a'] and len(pairs) == 1
 
 
+def test_recovery_scan_between_birth_commit_and_bind_starts_under_the_grant_association(
+        runtime, monkeypatch):
+    """A slow create ACK lets accepted-attempt recovery claim before the delegation binds."""
+    import lib.conversation_sync.command_service as module
+    from lib.conversation_sync.task_start import start_conversation_attempt_executor
+    import lib.conversation_sync.task_start as startup
+    r = runtime
+    stored, launches, observed = {}, [], {}
+    claim = '@dispatching:worker-attempt:process-owner'
+    class PairClient:
+        def command(self, operation, payload, command_id):
+            assert operation == 'turn.create_pair'
+            stored.update(deepcopy({'_needsStart': True,
+                'turn': {'turnId': 'worker-turn', 'conversationId': payload['conversation_id'],
+                    'actor': 'assistant', 'kind': 'reply', 'projection': {}, 'projectionRevision': 1},
+                'attempt': {'attemptId': 'worker-attempt', 'turnId': 'worker-turn',
+                    'conversationId': payload['conversation_id'], 'operation': 'create',
+                    'status': 'pending', 'taskId': '', 'config': payload['config']}}))
+            # Committed; the ACK is delayed past the recovery grace.
+            observed['execution'] = r.c.repo.read(r.assignment['id'])['execution']
+            observed['scan'] = commands.recover_dispatchable_attempts(created_before_ms=1 << 62)
+            return deepcopy(stored)
+    def dispatchable(*, created_before_ms, limit):
+        attempt = stored['attempt']
+        if attempt['status'] != 'pending' or attempt['taskId']:
+            return []
+        return [{'turn': deepcopy(stored['turn']), 'config': deepcopy(attempt['config']), 'userId': 7,
+                 'attempt': {key: value for key, value in attempt.items() if key != 'config'}}]
+    def claim_start(attempt_id, *, user_id):
+        attempt = stored['attempt']
+        if attempt['status'] != 'pending' or attempt['taskId'] not in ('', claim):
+            return False
+        attempt['taskId'] = claim
+        return True
+    def get_attempt(*a, include_execution_config=False, **kw):
+        attempt = deepcopy(stored['attempt'])
+        if not include_execution_config: attempt.pop('config', None)
+        return attempt
+    def bind_task(attempt_id, task_id, **kw):
+        stored['attempt']['taskId'] = task_id
+        return {'taskId': task_id}
+    def fail_start(attempt_id, envelope, **kw):
+        stored['attempt'].update(status='failed', error=envelope)
+    def create_task(conv, messages, cfg, *, user_id, principal, **kw):
+        return {'id': 'task-a', 'convId': conv, 'config': cfg, 'messages': messages,
+                '_principalContext': principal.to_payload(), '_userId': user_id,
+                'abort_event': threading.Event(), 'status': 'pending', 'usage': {},
+                '_turnId': cfg['_turnId'], '_attemptId': cfg['_attemptId']}
+    def provider(task, **kw):
+        launches.append(task['id'])
+        admission.validate_task(task)
+
+    r.c.repo.attempt_get = get_attempt
+    monkeypatch.setattr('lib.turn_lifecycle._turn_client', lambda **kw: PairClient())
+    for name, value in (('list_dispatchable_attempts', dispatchable), ('claim_attempt_start', claim_start),
+                        ('get_attempt', get_attempt), ('get_turn', lambda *a, **kw: deepcopy(stored['turn'])),
+                        ('bind_task', bind_task), ('fail_start', fail_start),
+                        ('get_conversation_revision', lambda *a, **kw: 1)):
+        monkeypatch.setattr(module, name, value)
+    monkeypatch.setattr(startup, '_throttled_cleanup_old_tasks', lambda: None)
+    monkeypatch.setattr(startup, 'create_task', create_task)
+    monkeypatch.setattr(startup, '_prepare_unbound_task_dispatch', lambda *a: (a[2], None, False))
+    monkeypatch.setattr('lib.turn_lifecycle.build_api_messages', lambda *a, **kw: [{'role': 'user', 'content': 'brief', '_initiator': 'brain'}])
+    monkeypatch.setattr('lib.tasks_pkg.spawn.spawn_task', provider)
+    commands = module.ConversationTurnCommandService(build_user_message=lambda message, *a: message,
+        was_aborted_after=lambda *a: False,
+        start_task=lambda conv, cfg, data, watermark, bind, **kw: start_conversation_attempt_executor(
+            conv, cfg, abort_after_ts=watermark, on_task_registered=bind, **kw))
+    service = ProjectDispatchService(r.c.repo, commands=commands, turn_get=lambda *a, **kw: deepcopy(stored['turn']),
+                                     attempt_get=get_attempt)
+
+    outcome = service.dispatch(r.assignment['id'], principal=r.c.principal)
+
+    assert observed['execution'] is None
+    assert observed['scan'] == {'examined': 1, 'recovered': 1, 'settledFailed': 0}
+    assert stored['attempt']['status'] == 'pending' and stored['attempt']['taskId'] == 'task-a'
+    assert launches == ['task-a']
+    association = {'turnId': 'worker-turn', 'attemptId': 'worker-attempt',
+                   'taskId': 'project-worker:' + r.assignment['id']}
+    assert r.c.repo.read(r.assignment['id'])['execution'] == association
+    # The delegation's own bind is idempotent and its lost claim starts nothing.
+    assert outcome['dispatch'] == 'accepted' and outcome['execution']['attemptId'] == 'worker-attempt'
+
+
 @pytest.mark.parametrize('state', ['active', 'revoked', 'unknown'])
 def test_consultation_summary_is_admitted_only_through_its_grant_account(runtime, monkeypatch, state):
     """Summaries charge the consult grant like answers; its fences still refuse."""

@@ -102,6 +102,66 @@ def test_quiesce_preserves_prior_user_stop():
         _cleanup(task['id'])
 
 
+def test_shutdown_quiesce_closes_admission_for_this_process():
+    from lib.tasks_pkg.manager import quiesce_running_tasks, task_admission_closed
+    assert not task_admission_closed()
+    quiesce_running_tasks(reason='server_shutdown')
+    assert task_admission_closed()
+    late = _mk_running('cv-q-late')
+    try:
+        # Registered after the snapshot: the same restart interruption.
+        assert late['aborted'] is True
+        assert late['_abort_reason'] == 'server_shutdown'
+        assert late['abort_event'].is_set()
+    finally:
+        _cleanup(late['id'])
+
+
+def test_other_quiesce_reasons_keep_admission_open():
+    from lib.tasks_pkg.manager import quiesce_running_tasks, task_admission_closed
+    quiesce_running_tasks(reason='maintenance')
+    assert not task_admission_closed()
+
+
+def test_turn_commands_defer_after_shutdown_quiesce():
+    """2026-11-06: killed background commands woke their conversations during
+    shutdown and started turns the teardown then failed."""
+    from lib.conversation_sync.command_service import ConversationTurnCommandService
+    from lib.tasks_pkg.manager import quiesce_running_tasks
+    from lib.turn_lifecycle import LifecycleConflict
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError('no gateway may run once admission is closed')
+
+    service = ConversationTurnCommandService(
+        build_user_message=unexpected, was_aborted_after=unexpected, start_task=unexpected)
+    quiesce_running_tasks(reason='server_shutdown')
+    with pytest.raises(LifecycleConflict) as turn:
+        service.create_turn('cv-q-turn', 1, {'commandId': 'c-turn'}, request_started_at=0.0)
+    with pytest.raises(LifecycleConflict) as attempt:
+        service.create_attempt('cv-q-turn', 'turn-1', 1, {
+            'commandId': 'c-attempt', 'operation': 'continue',
+            'expectedProjectionRevision': 1,
+        }, request_started_at=0.0)
+    # The refusal every producer already defers on rather than retiring work.
+    assert turn.value.code == attempt.value.code == 'lane_busy'
+
+
+def test_rejected_submission_of_a_quiesced_task_settles_as_restart_interruption(monkeypatch):
+    import lib.tasks_pkg.spawn as spawn
+    settled = []
+    monkeypatch.setattr('lib.tasks_pkg.manager.finalize_chat_task_aborted',
+                        lambda task: settled.append(('aborted', task['id'])))
+    monkeypatch.setattr('lib.tasks_pkg.manager.finalize_chat_task_error',
+                        lambda task, error, **kwargs: settled.append(('error', task['id'])))
+    monkeypatch.setattr(spawn, '_settle_unscheduled_workspace',
+                        lambda task: settled.append(('workspace', task['id'])))
+    task = {'id': 'task-q', 'convId': 'cv-q', 'status': 'pending', 'config': {},
+            'aborted': True, '_abort_reason': 'server_shutdown'}
+    spawn._finalize_rejected_submission(task, RuntimeError('agent task already scheduled'))
+    assert settled == [('aborted', 'task-q'), ('workspace', 'task-q')]
+
+
 def test_NC_neutered_quiesce_leaves_task_running():
     """NC: if quiesce is a no-op, a running task stays un-aborted → the atexit
     PG-stop would race its DB writes (the cascade). Proves quiesce is

@@ -61,7 +61,7 @@ class NativeGoalRecoveryConfiguration:
             io_timeout_ms=timeout)
 
 
-def recovery_options(task=None):
+def recovery_options(task=None, *, application=None):
     """Read explicit application policy for command preflight or bound execution."""
     from lib.tasks_pkg.native_invocation import NativePreparedInvocation
     if task is not None:
@@ -72,9 +72,11 @@ def recovery_options(task=None):
     else:
         from quart import current_app, has_app_context
         from lib.tasks_pkg.native_application import NativeApplicationBinding
-        if not has_app_context():
-            return {}
-        binding = current_app.extensions.get('tofu_native_application')
+        if application is None:
+            if not has_app_context():
+                return {}
+            application = current_app
+        binding = application.extensions.get('tofu_native_application')
         if not isinstance(binding, NativeApplicationBinding) or binding.closed:
             return {}
         configuration = binding.configuration.goal_recovery

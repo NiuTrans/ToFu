@@ -1,12 +1,13 @@
 /** channels endpoint facade (docs/CHANNELS.md). Wire DTOs come from api/channels.generated.ts. */
 import type { EndpointPorts } from './contracts';
+import type { AuditPage } from '../channels.generated';
 import type {
   Channel, ChannelAccountUpdate, ChannelAccountView, ChannelThreadPage, ChannelThreadUpdate,
   ChannelThreadView, GitHubAccountUpdate, GitHubAccountView, OutboxItemView, OutboxPage,
 } from '../channels.generated';
 
 export function createChannelsEndpoints(ports: EndpointPorts) {
-  const { get, put, post } = ports;
+  const { get, put, post, _resolve } = ports;
   return {
     dxAccount: (signal?: AbortSignal) => get<ChannelAccountView>('/api/v4/channels/dx', { signal }),
     updateDxAccount: (update: ChannelAccountUpdate, signal?: AbortSignal) =>
@@ -30,6 +31,12 @@ export function createChannelsEndpoints(ports: EndpointPorts) {
       post<OutboxItemView>(`/api/v4/channels/outbox/${encodeURIComponent(id)}/approve`, {}, { signal }),
     discardOutbox: (id: string, signal?: AbortSignal) =>
       post<OutboxItemView>(`/api/v4/channels/outbox/${encodeURIComponent(id)}/discard`, {}, { signal }),
+    /** What Tofu recorded for other people on the owner's behalf, newest first; `before` is a page's nextBefore. */
+    audit: (channel: Channel, before = '', signal?: AbortSignal) =>
+      get<AuditPage>('/api/v4/channels/audit', { query: before ? { channel, before } : { channel }, signal }),
+    /** Browser URL of an original image attached to an outbox item (a draft's thumbnail). */
+    outboxAttachmentUrl: (id: string, index: number) =>
+      _resolve(`/api/v4/channels/outbox/${encodeURIComponent(id)}/attachments/${encodeURIComponent(index)}`),
   };
 }
 

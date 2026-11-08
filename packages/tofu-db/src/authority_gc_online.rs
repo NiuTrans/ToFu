@@ -1857,6 +1857,23 @@ pub struct OnlineGarbageCollectionDriver<D: OnlineGcDatabase = AuthorityDatabase
 }
 
 const DRIVER_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The block store whose first catalog location table the driver publishes:
+/// the cached one while it lives (weak, so a replaced search index is not
+/// kept alive), else resolved under a non-blocking hold.
+fn catalog_location_store<D: OnlineGcDatabase>(
+    cached: &mut Option<std::sync::Weak<crate::block::BlockStore>>,
+    database: &Mutex<D>,
+) -> Option<Arc<crate::block::BlockStore>> {
+    if let Some(blocks) = cached.as_ref().and_then(std::sync::Weak::upgrade) {
+        return Some(blocks);
+    }
+    let guard = database.try_lock().ok()?;
+    let blocks = guard.gc_database().ok()?.block_store_shared();
+    drop(guard);
+    *cached = Some(Arc::downgrade(&blocks));
+    Some(blocks)
+}
 const DRIVER_STACK_BYTES: usize = 1024 * 1024;
 pub(crate) const DRIVER_STOP_JOIN_BUDGET: Duration = Duration::from_secs(5);
 
@@ -1877,12 +1894,14 @@ impl<D: OnlineGcDatabase> OnlineGarbageCollectionDriver<D> {
         volume_pressure: bool,
     ) -> io::Result<Self> {
         let handle = collector.handle();
-        {
+        let mut catalog_blocks = {
             let mut guard = database
                 .lock()
                 .map_err(|_| io::Error::other("authority mutex poisoned"))?;
             guard.install_gc_handle(handle.clone())?;
-        }
+            // A search index still opening is resolved when an epoch is due.
+            guard.gc_database().ok().map(|database| Arc::downgrade(&database.block_store_shared()))
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::new(AtomicBool::new(false));
         let thread = std::thread::Builder::new()
@@ -1899,6 +1918,18 @@ impl<D: OnlineGcDatabase> OnlineGarbageCollectionDriver<D> {
                             break;
                         }
                         if collector.should_run_now(volume_pressure) {
+                            // The store's first catalog location table is built
+                            // here, off the authority mutex, even when this
+                            // epoch's capture then defers under foreground
+                            // contention. A failed build is retried next epoch.
+                            if let Some(blocks) = catalog_location_store(&mut catalog_blocks, &database) {
+                                let _ = blocks.publish_first_catalog_locations(|| {
+                                    if stop.load(Ordering::Acquire) {
+                                        return Err(would_block("online GC driver stopped"));
+                                    }
+                                    Ok(())
+                                });
+                            }
                             // Epoch errors are already accounted as deferred;
                             // the driver stays alive and retries on cadence.
                             let _ = collector.run_epoch(&database, &stop);

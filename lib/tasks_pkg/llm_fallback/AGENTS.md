@@ -6,8 +6,8 @@ selection, refusal and failure semantics.
 
 ## Owners
 
-- `_requests`: switch-back admission and configured destination bodies, using
-  the shared turn-requirements and wire-tool owners.
+- `_requests`: configured destination bodies, using the shared
+  turn-requirements and wire-tool owners.
 - `_transport`: credential recovery around the stream manager, physical-input
   receipts and factual stream-outcome logging.
 - `_usage`: one paid-response ledger for ordinary, reactive, configured, pool,

@@ -7,17 +7,24 @@
  * assistive tech and narrow panes), the outbox card of one channel, owner
  * commands whose control shows progress and keeps a failure beside it, the
  * account re-read while a session is connecting (a session reports each
- * transition once and nothing pushes it to the tab), and the Global Router link.
+ * transition once and nothing pushes it to the tab), the Global Router link,
+ * the credential vault entries a channel may use as its secret, and the audit
+ * of what Tofu recorded for other people (C11), page by page.
  * Entry points: element, card, cardSection, facts, hint, empty, chip, rowField,
  * statusLine, isConnecting, feedback, clearFeedback, runCommand, refreshWhileConnecting,
- * routerLink, threadTable, threadRow, selectCell, staticCell, outboxCard.
- * Dependencies: tofu-ui factories, the opening tab's lifecycle scope and the
- * runtime `closeSettings` / `loadConversation` bindings.
+ * routerLink, threadTable, threadRow, selectCell, staticCell, outboxCard, vaultEntryNames,
+ * createAuditList, auditCopy, timeText.
+ * Dependencies: tofu-ui factories, i18n (the channel-independent audit copy), the
+ * opening tab's lifecycle scope, the `Api.credentials` list and the runtime
+ * `closeSettings` / `loadConversation` bindings.
  */
 import { featureRegistry } from '../../feature-registry';
+import { t } from '../../i18n';
 import type { LifecycleScope } from '../../lifecycle';
 import { createAlert, createButton, createField, createSpinner, type FieldHandle, type FieldOptions } from '../../ui';
-import type { AccountState, OutboxItemView, OutboxState } from '../../api/channels.generated';
+import type {
+  AccountState, AuditPage, OutboxAttachmentView, OutboxAuthority, OutboxDecision, OutboxItemView, OutboxState,
+} from '../../api/channels.generated';
 
 export type Tone = 'ok' | 'busy' | 'idle' | 'bad';
 
@@ -58,6 +65,47 @@ export interface OutboxCopy {
   approve: string;
   discard: string;
   state: (state: OutboxState) => string;
+  /** Channels with attachments (大象) name them; others never list any. */
+  attachments?: AttachmentCopy;
+  /** A draft's approval code, which the owner's own chat message names to decide it (C11). */
+  code?: (code: string) => string;
+}
+
+export interface AuditCopy {
+  title: string;
+  hint: string;
+  empty: string;
+  more: string;
+  loadFailed: (error: unknown) => string;
+  state: (state: OutboxState) => string;
+  /** Whose request recorded the item. */
+  authority: (authority: OutboxAuthority) => string;
+  /** The latest decision on the item, made at `time`; an undecided draft has none. */
+  decision: (decision: OutboxDecision, time: string) => string;
+  /** The names of the files an item carries. */
+  attachments: (names: string) => string;
+}
+
+export interface AuditPorts {
+  /** The page after `before` (a page's nextBefore). */
+  more: (before: string) => Promise<AuditPage>;
+  isCurrent: () => boolean;
+}
+
+export interface AuditList {
+  el: HTMLElement;
+  /** A (re-)read of the newest page: it replaces every item shown, including pages loaded since. */
+  setPage: (page: AuditPage) => void;
+  /** A failed read: replaces the loading state, or reports beside the title over a shown list. */
+  showError: (text: string) => void;
+}
+
+export interface AttachmentCopy {
+  label: string;
+  previewOf: (name: string) => string;
+  pending: string;
+  /** The URL of an attached original image (its thumbnail). */
+  imageUrl: (itemId: string, index: number) => string;
 }
 
 export interface OutboxDecisions {
@@ -66,6 +114,11 @@ export interface OutboxDecisions {
 }
 
 type RuntimeBindings = { closeSettings?: () => void; loadConversation?: (id: string) => void };
+
+type CredentialsFacade = { list: () => Promise<unknown> };
+
+// Vault entries owned by other features are never offered as a channel's secret.
+const RESERVED_ENTRY = /^(skill|channel)\./;
 
 export function element<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text = ''): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -101,6 +154,12 @@ export function facts(rows: Array<[string, string | Node]>): HTMLDListElement {
     list.appendChild(item);
   }
   return list;
+}
+
+/** A date and time in the page's language. */
+export function timeText(ms: number): string {
+  return new Intl.DateTimeFormat(document.documentElement.lang || undefined, { dateStyle: 'medium', timeStyle: 'short' })
+    .format(new Date(ms));
 }
 
 export function hint(text: string): HTMLElement {
@@ -218,6 +277,16 @@ export function routerLink(conversationId: string | null, open: string, missing:
   });
 }
 
+/** Names of the owner's vault entries a channel may use as its secret; none when the vault is not listed. */
+export async function vaultEntryNames(): Promise<string[]> {
+  const credentials = (featureRegistry.Api as { credentials?: CredentialsFacade } | undefined)?.credentials;
+  if (!credentials) return [];
+  const listing = await credentials.list().catch(() => null) as { credentials?: Array<{ name?: unknown }> } | null;
+  return (listing?.credentials ?? [])
+    .map((entry) => (typeof entry.name === 'string' ? entry.name : ''))
+    .filter((name) => name && !RESERVED_ENTRY.test(name));
+}
+
 /** Threads under one header row; the header is presentation only, each cell names itself. */
 export function threadTable(columns: ThreadColumns, rows: HTMLElement[]): HTMLElement {
   const table = element('div', 'channel-table');
@@ -255,7 +324,48 @@ export function staticCell(label: string, value: string): HTMLElement {
   return cell;
 }
 
-/** One channel's outbox: each item's state, thread and text, with its owner decisions. */
+function byteSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * An item's attachments: each name, type and size with its delivery state; an
+ * original image also shows its thumbnail, and a preview copy names its original.
+ */
+function attachmentList(item: OutboxItemView, copy: OutboxCopy, attachments: AttachmentCopy): HTMLElement {
+  const list = element('ul', 'channel-outbox-attachments');
+  list.setAttribute('aria-label', attachments.label);
+  const byIndex = new Map<number, OutboxAttachmentView>(item.attachments.map((entry) => [entry.index, entry]));
+  for (const attachment of item.attachments) {
+    const row = element('li', 'channel-outbox-attachment');
+    if (attachment.kind === 'image' && attachment.renditionOf === null) {
+      const thumbnail = element('img', 'channel-outbox-thumbnail');
+      thumbnail.src = attachments.imageUrl(item.id, attachment.index);
+      thumbnail.alt = attachment.name;
+      thumbnail.loading = 'lazy';
+      thumbnail.decoding = 'async';
+      row.appendChild(thumbnail);
+    }
+    const text = element('div', 'channel-outbox-attachment-text');
+    text.appendChild(element('span', 'channel-outbox-attachment-name', attachment.name));
+    const source = attachment.renditionOf === null ? undefined : byIndex.get(attachment.renditionOf);
+    const facts = [attachment.type, byteSize(attachment.size)];
+    if (source) facts.unshift(attachments.previewOf(source.name));
+    text.appendChild(element('span', 'channel-outbox-attachment-meta', facts.join(' · ')));
+    if (attachment.error) text.appendChild(element('span', 'channel-outbox-error', attachment.error));
+    row.appendChild(text);
+    const state = attachment.state === 'pending'
+      ? chip(attachments.pending, 'idle')
+      : chip(copy.state(attachment.state), attachment.state === 'sent' ? 'ok' : 'bad');
+    row.appendChild(state);
+    list.appendChild(row);
+  }
+  return list;
+}
+
+/** One channel's outbox: each item's state, thread, text and attachments, with its owner decisions. */
 export function outboxCard(items: OutboxItemView[], copy: OutboxCopy, view: CommandView,
                            decide: OutboxDecisions): HTMLElement {
   const section = card(copy.title);
@@ -271,6 +381,9 @@ export function outboxCard(items: OutboxItemView[], copy: OutboxCopy, view: Comm
     meta.append(chip(copy.state(item.state), OUTBOX_TONE[item.state]),
                 element('span', 'channel-outbox-thread', item.threadTitle || item.thread),
                 element('span', 'channel-key', item.thread));
+    if (item.state === 'draft' && copy.code) {
+      meta.appendChild(element('span', 'channel-outbox-code', copy.code(item.approvalCode)));
+    }
     head.appendChild(meta);
     const actions = element('div', 'channel-outbox-actions');
     if (item.state === 'draft') {
@@ -289,9 +402,112 @@ export function outboxCard(items: OutboxItemView[], copy: OutboxCopy, view: Comm
     }
     if (actions.childElementCount) head.appendChild(actions);
     row.append(head, element('div', 'channel-outbox-text', item.text));
+    if (copy.attachments && item.attachments.length) row.appendChild(attachmentList(item, copy, copy.attachments));
     if (item.error) row.appendChild(element('div', 'channel-outbox-error', item.error));
     list.appendChild(row);
   }
   section.appendChild(list);
   return section;
+}
+
+function auditItem(item: OutboxItemView, copy: AuditCopy): HTMLElement {
+  const row = element('div', 'channel-audit-item');
+  const meta = element('div', 'channel-outbox-meta');
+  meta.append(chip(copy.state(item.state), OUTBOX_TONE[item.state]),
+              element('span', 'channel-outbox-thread', item.threadTitle || item.thread),
+              element('span', 'channel-key', item.thread),
+              element('span', 'channel-audit-time', timeText(item.createdAtMs)));
+  row.append(meta, element('div', 'channel-outbox-text', item.text));
+  if (item.attachments.length) {
+    const names = new Intl.ListFormat(document.documentElement.lang || undefined, { type: 'conjunction' })
+      .format(item.attachments.map((attachment) => attachment.name));
+    row.appendChild(element('div', 'channel-audit-fact', copy.attachments(names)));
+  }
+  row.appendChild(element('div', 'channel-audit-fact', copy.authority(item.authority)));
+  if (item.decision) {
+    row.appendChild(element('div', 'channel-audit-fact', copy.decision(item.decision, timeText(item.decision.atMs))));
+  }
+  if (item.error) row.appendChild(element('div', 'channel-outbox-error', item.error));
+  return row;
+}
+
+/** The audit card's copy; `state` names an item's state in the tab's own words. */
+export function auditCopy(state: (state: OutboxState) => string): AuditCopy {
+  return {
+    title: t('settings.channels.audit.title'), hint: t('settings.channels.audit.hint'),
+    empty: t('settings.channels.audit.empty'), more: t('settings.channels.audit.more'),
+    loadFailed: (error) => t('settings.channels.audit.loadFailed',
+                             { error: error instanceof Error ? error.message : String(error) }),
+    state,
+    authority: (authority) => t(`settings.channels.audit.authority.${authority}` as const),
+    decision: (decision, time) => t('settings.channels.audit.decided', {
+      decision: t(`settings.channels.audit.kind.${decision.kind}` as const),
+      by: t(`settings.channels.audit.by.${decision.by}` as const), time,
+    }),
+    attachments: (names) => t('settings.channels.audit.attachments', { names }),
+  };
+}
+
+/**
+ * The audit card (C11): every item Tofu recorded for other people, newest
+ * first, whatever became of it — its state, thread, time, exact text and
+ * files, whose request recorded it and the owner's latest decision. It is
+ * read-only (drafts are decided in the outbox card); older pages load on
+ * request, and a re-read of the newest page replaces them.
+ */
+export function createAuditList(copy: AuditCopy, ports: AuditPorts): AuditList {
+  const section = card(copy.title);
+  section.classList.add('channel-audit');
+  const body = element('div', 'channel-audit-body');
+  body.appendChild(createSpinner());
+  section.append(hint(copy.hint), body);
+  const list = element('div', 'channel-audit-items');
+  let before: string | null = null;
+  let pages = 0;
+  const more = createButton({
+    label: copy.more, variant: 'ghost', size: 'sm',
+    onClick: () => { void readMore(); },
+  });
+  more.classList.add('channel-audit-more');
+
+  function append(page: AuditPage): void {
+    list.append(...page.items.map((item) => auditItem(item, copy)));
+    before = page.nextBefore;
+    more.hidden = !before;
+    more.disabled = false;
+  }
+
+  async function readMore(): Promise<void> {
+    if (!before) return;
+    const shown = pages;
+    more.disabled = true;
+    clearFeedback(more);
+    try {
+      const page = await ports.more(before);
+      if (ports.isCurrent() && shown === pages) append(page);
+    } catch (error) {
+      if (!ports.isCurrent() || shown !== pages) return;
+      more.disabled = false;
+      feedback(more, copy.loadFailed(error));
+    }
+  }
+
+  function setPage(page: AuditPage): void {
+    pages += 1;
+    list.replaceChildren();
+    if (!page.items.length) {
+      before = null;
+      body.replaceChildren(empty(copy.empty));
+      return;
+    }
+    append(page);
+    body.replaceChildren(list, more);
+  }
+
+  function showError(text: string): void {
+    if (body.contains(list)) feedback(section.firstElementChild!, text);
+    else body.replaceChildren(createAlert({ variant: 'error', title: text }).el);
+  }
+
+  return { el: section, setPage, showError };
 }

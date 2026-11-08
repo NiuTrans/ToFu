@@ -143,13 +143,17 @@ def _retire(process: subprocess.Popen, output, primary: BaseException | None):
 
 def run_activity_supervised(argv: list[str], *, cwd, env: dict[str, str],
                             stall_seconds: float, pass_fds: tuple[int, ...] = (),
-                            cancellation=None) -> subprocess.CompletedProcess[str]:
-    """Run ``argv`` with no total deadline; only a stall or Stop ends it early."""
+                            cancellation=None, binary: bool = False) -> subprocess.CompletedProcess:
+    """Run ``argv`` with no total deadline; only a stall or Stop ends it early.
+
+    ``binary`` captures raw bytes so binary patch/diff payloads are never
+    rewritten by text-mode universal-newline decoding.
+    """
     if not math.isfinite(stall_seconds) or stall_seconds <= 0:
         raise ValueError('Stall window must be positive and finite')
     process = subprocess.Popen(
         argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=not binary,
         start_new_session=(os.name == 'posix'), pass_fds=pass_fds,
     )
     output = primary = None

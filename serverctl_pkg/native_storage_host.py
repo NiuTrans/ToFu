@@ -182,21 +182,40 @@ def serve(args, *, supervisor_factory=_new_supervisor) -> int:
     finally:
         normal_stop = stopped.is_set() or not owner_alive()
         stopped.set()
-        if token:
-            remove_connection_file(connection, token=token)
-        # start() performs admission before publishing its child; wait until
-        # that boundary so stop cannot be cleared by a late runtime.start().
-        while not startup_done.is_set() and supervisor.status().get('pid') is None:
-            startup_done.wait(0.05)
-        runtime.stop(timeout=NATIVE_DAEMON_STOP_SECONDS)
-        starter.join(timeout=5.0)
-        if starter.is_alive():
-            raise RuntimeError('native storage startup did not join shutdown')
-        record['state'] = 'stopped' if normal_stop else 'failed'
-        record['error'] = errors[-1] if errors else ''
-        write_record(state_path, record)
-        os.close(args.lease_fd)
-        os.close(args.manager_fd)
+        stop_error = ''
+        try:
+            if token:
+                remove_connection_file(connection, token=token)
+            # start() performs admission before publishing its child; wait until
+            # that boundary so stop cannot be cleared by a late runtime.start().
+            while not startup_done.is_set() and supervisor.status().get('pid') is None:
+                startup_done.wait(0.05)
+            try:
+                runtime.stop(timeout=NATIVE_DAEMON_STOP_SECONDS)
+            except Exception as exc:
+                # The terminal record is the evidence the manager verifies
+                # before replacing this host. A failed stop must still publish
+                # it: otherwise the record keeps the stale 'ready' state and
+                # the manager can only report an unconfirmed clean close, then
+                # latch the crash loop. The error stays in the record so the
+                # next explicit restart sees why the drain failed.
+                stop_error = f'{type(exc).__name__}: {str(exc)[:300]}'
+                errors.append(stop_error)
+                logging.exception('resident native storage shutdown failed')
+            starter.join(timeout=5.0)
+            if starter.is_alive():
+                stop_error = 'native storage startup did not join shutdown'
+                errors.append(stop_error)
+            record['state'] = (
+                'stopped' if normal_stop and not stop_error else 'failed')
+            record['error'] = errors[-1] if errors else ''
+            write_record(state_path, record)
+        finally:
+            for descriptor in (args.lease_fd, args.manager_fd):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
     return 0
 
 

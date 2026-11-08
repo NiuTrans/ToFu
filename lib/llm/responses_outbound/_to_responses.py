@@ -45,6 +45,7 @@ from lib.llm.conversion import (
 )
 from lib.llm.responses_outbound._message_phase import replay_phase_messages
 from lib.llm.responses_replay import ReplayOrderError, ordered_replay
+from lib.llm.tool_call_ids import tool_call_id_contract, wire_tool_call_ids
 from lib.log import get_logger
 from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 
@@ -475,6 +476,10 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
 
     out['input'] = _messages_to_input(
         body.get('messages') or [], reverse,
+        wire_ids=wire_tool_call_ids(
+            body.get('messages') or [],
+            tool_call_id_contract(
+                'responses', body.get('_admission_logical_model') or model)),
         replay_response_items=replay_enabled,
         allow_compaction=compaction_enabled,
         programmatic_tool_names=programmatic_names,
@@ -539,8 +544,10 @@ def _input_image_part(block: dict, default_image_detail: str) -> dict:
     return part
 
 
-def _function_call_items(msg: dict, reverse: dict) -> list[dict]:
+def _function_call_items(msg: dict, reverse: dict,
+                         wire_ids: dict | None = None) -> list[dict]:
     """Compile current canonical calls once; native order cannot override them."""
+    wire_ids = wire_ids or {}
     calls = []
     for tc in msg.get('tool_calls') or []:
         if tc.get('type', 'function') != 'function':
@@ -548,7 +555,7 @@ def _function_call_items(msg: dict, reverse: dict) -> list[dict]:
         func = tc.get('function') or {}
         function_call = {
             'type': 'function_call',
-            'call_id': tc.get('id', ''),
+            'call_id': wire_ids.get(tc.get('id', ''), tc.get('id', '')),
             'name': _truncate_name(func.get('name', ''), reverse),
             'arguments': (func.get('arguments', '{}')
                           if isinstance(func.get('arguments', '{}'), str)
@@ -567,6 +574,7 @@ def _function_call_items(msg: dict, reverse: dict) -> list[dict]:
 
 
 def _messages_to_input(messages: list, reverse: dict, *,
+                       wire_ids: dict | None = None,
                        replay_response_items: bool = False,
                        allow_compaction: bool = False,
                        programmatic_tool_names: set[str] | None = None,
@@ -615,7 +623,8 @@ def _messages_to_input(messages: list, reverse: dict, *,
                 and role not in ('system', 'developer')):
             continue
 
-        function_calls = _function_call_items(msg, reverse) if role == 'assistant' else []
+        function_calls = (_function_call_items(msg, reverse, wire_ids)
+                          if role == 'assistant' else [])
         if replay_response_items and role == 'assistant':
             try:
                 native_order = ordered_replay(
@@ -655,6 +664,7 @@ def _messages_to_input(messages: list, reverse: dict, *,
             if not caller_present or caller is None:
                 caller = call_caller_by_result_object.get(id(msg), caller)
             call_id = str(msg.get('tool_call_id') or '')
+            call_id = (wire_ids or {}).get(call_id, call_id)
             tool_name = call_name_by_result_object.get(id(msg), '')
             is_program = (isinstance(caller, dict)
                           and caller.get('type') == 'program')

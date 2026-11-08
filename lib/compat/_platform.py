@@ -24,6 +24,7 @@ import sys
 import tempfile
 
 from lib.log import get_logger
+from runtime_path_policy import get_runtime_base
 
 logger = get_logger(__name__)
 
@@ -90,23 +91,19 @@ def get_username(fallback: str = 'postgres') -> str:
 # ═══════════════════════════════════════════════════════════════════════
 
 def get_temp_dir() -> str:
-    """Return the project-local temp directory (``data/tmp/``).
+    """Return ``data/tmp/`` in the runtime data root.
 
-    Uses a project-local directory instead of the system ``/tmp`` because
-    ``/tmp`` may not be accessible (or may be on a different filesystem)
-    on all deployment machines, while the project directory is always
-    available.
+    Uses it instead of the system ``/tmp`` because ``/tmp`` may not be
+    accessible (or may be on a different filesystem) on all deployment
+    machines, while the runtime data root is always writable.
 
-    Falls back to ``tempfile.gettempdir()`` only if the project-local
-    directory cannot be created.
+    Falls back to ``tempfile.gettempdir()`` only if that directory cannot
+    be created.
 
     Returns:
         Absolute path to a usable temp directory.
     """
-    _project_tmp = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        'data', 'tmp',
-    )
+    _project_tmp = os.path.join(get_runtime_base(), 'data', 'tmp')
     try:
         os.makedirs(_project_tmp, exist_ok=True)
         return _project_tmp
@@ -218,34 +215,46 @@ def set_pipe_nonblocking(fd) -> bool:
 
 
 def safe_select_pipes(read_fds, timeout=0.2):
-    """Platform-safe select() on pipe file descriptors.
+    """Wait until any of ``read_fds`` is readable or at end-of-file.
 
-    On Unix, uses ``select.select()``.
+    On Unix, uses ``select.poll()``, which has no descriptor-number ceiling:
+    long-lived servers open descriptors above select()'s FD_SETSIZE (1024),
+    where ``select.select()`` raises. A closed stream cannot be waited on;
+    when no member can be, the call still waits ``timeout``, so a caller's
+    polling loop never spins.
     On Windows, ``select()`` only works on sockets, so this returns
     all fds as "readable" (caller should use non-blocking read with
     exception handling).
 
     Args:
-        read_fds: List of file descriptors to check for readability.
+        read_fds: File objects or descriptors to wait on.
         timeout: Timeout in seconds.
 
     Returns:
-        List of readable file descriptors.
+        The members of ``read_fds`` that are readable or at end-of-file.
     """
+    import time
     if IS_WINDOWS:
         # select() doesn't work on pipes on Windows.
         # Return all fds — caller should handle BlockingIOError.
-        import time
         time.sleep(timeout)
         return list(read_fds)
-    else:
-        import select
+    import select
+    poller = select.poll()
+    waited = {}
+    for stream in read_fds:
         try:
-            readable, _, _ = select.select(read_fds, [], [], timeout)
-            return readable
-        except (ValueError, OSError) as _e_audit:
-            logger.debug('[_platform] safe_select_pipes caught %s: %s', type(_e_audit).__name__, _e_audit)
-            return []
+            descriptor = stream if isinstance(stream, int) else stream.fileno()
+        except (ValueError, OSError):
+            continue  # closed: nothing left to read
+        poller.register(descriptor, select.POLLIN)
+        waited[descriptor] = stream
+    if not waited:
+        time.sleep(timeout)
+        return []
+    return [waited[descriptor]
+            for descriptor, events in poller.poll(timeout * 1000)
+            if not events & select.POLLNVAL]
 
 
 # ═══════════════════════════════════════════════════════════════════════

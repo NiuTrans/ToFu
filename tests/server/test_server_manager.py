@@ -1098,6 +1098,77 @@ def test_restart_waits_for_just_stopped_sidecar_lease(
     }]
 
 
+def _restart_without_worker(manager, project, monkeypatch):
+    starts = []
+    monkeypatch.setattr(sm, 'read_lock_status', lambda _path: _status(project))
+    monkeypatch.setattr(manager, 'stop', lambda **_kwargs: {'ok': True, 'message': 'stopped cleanly'})
+    monkeypatch.setattr(manager, '_active_storage_lease', lambda: {'held': False})
+    monkeypatch.setattr(manager, 'start', lambda **kwargs: starts.append(kwargs) or {'ok': True})
+    return starts
+
+
+def test_restart_without_forwarded_environment_applies_dotenv_like_serverctl(
+        tmp_path, monkeypatch):
+    """The browser door forwards no serverEnv. A .env edit must take effect
+    through it exactly as through serverctl, keeping an operator's shell value."""
+    project = _project(tmp_path)
+    dotenv = project / '.env'
+    dotenv.write_text('TOFU_AGENT_QUEUE_CAPACITY=8\nTOFU_SHUTDOWN_HARD_SECS=60\n')
+    manager = sm.LifecycleManager(str(project))
+    starts = _restart_without_worker(manager, project, monkeypatch)
+
+    # serverctl forwards its shell value for the queue and fills the rest from .env.
+    assert manager.restart(server_env={
+        'TOFU_AGENT_QUEUE_CAPACITY': '128', 'TOFU_SHUTDOWN_HARD_SECS': '60'}, source='serverctl')['ok']
+    assert manager._state['serverEnvOverrides'] == {'TOFU_AGENT_QUEUE_CAPACITY': '128'}
+
+    dotenv.write_text('TOFU_AGENT_QUEUE_CAPACITY=64\nTOFU_SHUTDOWN_HARD_SECS=90\n'
+                      'TOFU_HTTP_WRITE_STALL_SECS=30\n')
+    assert manager.restart(source='application-update')['ok']
+    prepared = starts[-1]['_prepared_environment']
+    assert prepared['TOFU_SHUTDOWN_HARD_SECS'] == '90'
+    assert prepared['TOFU_HTTP_WRITE_STALL_SECS'] == '30'
+    assert prepared['TOFU_AGENT_QUEUE_CAPACITY'] == '128'
+    assert manager._worker_shutdown_hard_seconds() == 90.0
+
+    dotenv.write_text('TOFU_AGENT_QUEUE_CAPACITY=64\n')
+    assert manager.restart(source='application-update')['ok']
+    assert starts[-1]['server_env'] == {'TOFU_AGENT_QUEUE_CAPACITY': '128'}
+
+
+def test_restart_without_forwarded_environment_keeps_the_adopted_live_port(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    (project / '.env').write_text('PORT=15000\n')
+    manager = sm.LifecycleManager(str(project))
+    starts = _restart_without_worker(manager, project, monkeypatch)
+    monkeypatch.setattr(sm, '_live_worker_port', lambda _status: (15123, 'argv'))
+    assert manager._reconcile_live_worker_port({'pid': 42})
+    assert manager._state['serverEnvOverrides'] == {'PORT': '15123'}
+
+    assert manager.restart(source='application-update')['ok']
+    assert starts[-1]['_prepared_environment']['PORT'] == '15123'
+    assert manager.port == 15123
+
+
+def test_state_without_override_provenance_infers_it_from_current_dotenv(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    (project / '.env').write_text('TOFU_AGENT_QUEUE_CAPACITY=8\nTOFU_SHUTDOWN_HARD_SECS=60\n')
+    first = sm.LifecycleManager(str(project))
+    first._state['serverEnv'] = {'TOFU_AGENT_QUEUE_CAPACITY': '128', 'TOFU_SHUTDOWN_HARD_SECS': '60'}
+    first._save()
+    first.close()
+    persisted = json.loads(first.state_path.read_text())
+    persisted.pop('serverEnvOverrides')
+    first.state_path.write_text(json.dumps(persisted))
+
+    second = sm.LifecycleManager(str(project))
+    try:
+        assert second._state['serverEnvOverrides'] == {'TOFU_AGENT_QUEUE_CAPACITY': '128'}
+    finally:
+        second.close()
+
+
 def test_application_probe_combines_identity_and_readiness(monkeypatch):
     calls = []
 

@@ -106,7 +106,7 @@ _CODEX_USER_AGENT = (f'codex-tui/{CODEX_CLIENT_VERSION} (Mac OS 26.5.0; arm64) '
 _CLAUDE_USER_AGENT = f'claude-cli/{CLAUDE_CODE_VERSION} (external, cli)'
 
 #: Provider-config ``oauth`` values this module knows how to bridge.
-OAUTH_PROVIDERS = ('claude', 'codex')
+OAUTH_PROVIDERS = ('claude', 'codex', 'kimi')
 
 
 # ══════════════════════════════════════════════════════════
@@ -462,7 +462,7 @@ def resolve_oauth_request(oauth: str, body: dict, extra_headers: dict | None,
     """Resolve the live token + identity headers for a slot.
 
     Args:
-        oauth: ``'claude'`` or ``'codex'`` — the subscription kind.
+        oauth: ``'claude'``, ``'codex'`` or ``'kimi'`` — the subscription kind.
         body: the OpenAI-shaped request body (pre-translation).
         extra_headers: caller headers to merge the identity headers onto.
         user_id: caller's tenant — threaded through the token-refresh chain
@@ -482,6 +482,20 @@ def resolve_oauth_request(oauth: str, body: dict, extra_headers: dict | None,
     """
     from lib.llm.llm_errors import SubscriptionLoginRequiredError
     hdrs = dict(extra_headers or {})
+
+    if oauth == 'kimi':
+        # Kimi Code: Bearer token on its OpenAI-compatible endpoint. The
+        # identity headers name Tofu honestly (lib/oauth/kimi.py) — Kimi
+        # treats a tampered client identifier as a violation.
+        from lib.oauth.kimi import kimi_get_valid_token, kimi_identity_headers
+        from lib.oauth.token_store import load_token
+        token = kimi_get_valid_token(user_id=user_id)
+        if not token:
+            raise SubscriptionLoginRequiredError(
+                'Kimi Code subscription not logged in (no valid OAuth token)')
+        device_id = str((load_token('kimi') or {}).get('device_id') or '')
+        hdrs.update(kimi_identity_headers(device_id))
+        return token, hdrs, body
 
     if oauth == 'codex':
         from lib.oauth.codex import codex_get_valid_token
@@ -694,6 +708,19 @@ _MANAGED_SPECS = {
         ],
         'stream_only': False,
     },
+    'kimi': {
+        'id': 'oauth_kimi',
+        'name': 'Kimi Code (membership)',
+        # Documented OpenAI-compatible Kimi Code base (Chat Completions).
+        'base_url': 'https://api.kimi.com/coding/v1',
+        'protocol': '',
+        # Reasoning wires come from each Model's maintained inference profile.
+        'thinking_format': '',
+        # Resolved at provision time from this plan-key template's roster.
+        'roster_template': 'kimi_code',
+        'models': [],
+        'stream_only': False,
+    },
 }
 
 #: Compatibility marker inside the one-way legacy-plan compiler. The real
@@ -722,6 +749,14 @@ def _managed_oauth_entry(provider: str, plan_type: str = None) -> dict:
                 'catalog_visibility': ('hide' if mid == 'codex-auto-review'
                                        else 'list'),
             } for mid in _codex_tier_models(plan_type)]
+    elif provider == 'kimi':
+        # One roster for both Kimi Code paths: the plan-key template is the
+        # source, so sign-in and a pasted Console key expose the same supply.
+        from lib.provider.provider_template_recipes import load_provider_templates
+        template = next((row for row in load_provider_templates()
+                         if row['key'] == spec['roster_template']), None)
+        models = copy.deepcopy(template['offering_recipes']) if template else []
+        catalog_source = 'template'
     else:
         models = spec['models']
         catalog_source = 'static'
@@ -825,6 +860,17 @@ def _upsert_oauth_provider(
                 # even when its on-disk catalog is missing or unreadable.
                 return False
             directory = current.document['models']
+            if entry.get('id') == 'oauth_kimi':
+                # Same rule as Codex below: bind plan wires to the maintained
+                # first-party Moonshot identities, never author Model facts.
+                known_ids = {r['model_id'] for r in directory if r['creator_id'] == 'moonshot'}
+                missing_ids = {r['model_id'] for r in entry['models']} - known_ids
+                if missing_ids:
+                    from lib.model_routing.model_defaults import official_model_directory
+                    from lib.provider.provider_template_recipes import load_provider_templates
+                    templates = [r for r in load_provider_templates() if r['key'] == 'kimi' and r.get('category') == 'official']
+                    directory = directory + [r for r in official_model_directory(templates)
+                        if r['creator_id'] == 'moonshot' and r['model_id'] in missing_ids]
             if entry.get('id') == 'oauth_codex' and entry.get('catalog_source') == 'remote_cache':
                 known_ids = {r['model_id'] for r in directory if r['creator_id'] == 'openai'}
                 missing_ids = {r['model_id'] for r in entry['models']} - known_ids

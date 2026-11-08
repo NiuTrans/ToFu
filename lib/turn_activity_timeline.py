@@ -135,6 +135,52 @@ _TOOL_TERMINAL_SKIP_STATUSES = frozenset({
 _TOOL_TERMINAL_ABORT_STATUSES = frozenset({'abort', 'aborted', 'interrupted'})
 _PROTOCOL_ONLY_TOOL_NAMES = frozenset({'execute_tools'})
 
+# Presentation of established summary-owner codes, not a retry/auth taxonomy.
+_SUMMARY_FAILURE_MESSAGES: dict[str, tuple[str, str]] = {
+    'summary_rate_limited': (
+        'activity.compaction.failure.summary_rate_limited',
+        'The summary service is rate limited. Wait, then retry.'),
+    'summary_provider_unavailable': (
+        'activity.compaction.failure.summary_provider_unavailable',
+        'The summary service is temporarily unavailable. Try again later.'),
+    'summary_permission_denied': (
+        'activity.compaction.failure.summary_permission_denied',
+        'The summary request was not authorized. Check the connection permissions.'),
+    'summary_route_unavailable': (
+        'activity.compaction.failure.summary_route_unavailable',
+        'No authorized summary route is available. Check the summary model and Connections settings.'),
+    'summary_route_revalidation_failed': (
+        'activity.compaction.failure.summary_route_revalidation_failed',
+        'The summary route or settings changed. Check the summary model and Connections settings, then retry.'),
+    'summary_incomplete': (
+        'activity.compaction.failure.summary_incomplete',
+        'The summary response was incomplete and was not used. Retry or choose another summary model.'),
+    'summary_empty': (
+        'activity.compaction.failure.summary_empty',
+        'The summary response was empty and was not used. Retry or choose another summary model.'),
+    'summary_cancelled': (
+        'activity.compaction.failure.summary_cancelled',
+        'Summary generation was cancelled. Retry when you are ready.'),
+    'summary_dispatch_failed': (
+        'activity.compaction.failure.summary_dispatch_failed',
+        'The summary request failed. Check the diagnostics before retrying.'),
+    'summary_credentials_unavailable': (
+        'activity.compaction.failure.summary_credentials_unavailable',
+        'Summary credentials are unavailable. Check the selected connection and its login or credential source, then retry.'),
+}
+_SUMMARY_FAILURE_LEGACY_CODES = {
+    'summary_failed': 'summary_dispatch_failed',
+    'summary_pipeline_exception': 'summary_dispatch_failed',
+}
+
+
+def _is_failure_archive_bridge(value: Any) -> bool:
+    """Internal receipt join identities are not saved, inspectable archives."""
+    return isinstance(value, str) and value.startswith((
+        'summary-failed:', 'summary-declined:', 'summary-aborted:',
+        'summary-cancelled:', 'summary-rejected:', 'failed:',
+    ))
+
 
 def _text(value: Any, limit: int) -> str:
     if value is None:
@@ -235,6 +281,63 @@ def _compaction_fact_text(value: Any, limit: int = 160) -> str:
     ):
         return '<redacted>'
     return _text(value, limit)
+
+
+def _summary_failure_detail(receipt: Mapping[str, Any], reason: Any) -> dict[str, Any]:
+    """Project safe display facts; never reconstruct auth or infer paid attempts.
+
+    The summary owner validates structured errors. Legacy codes can still name
+    a cause without certifying ingress, attempts or credential availability.
+    Recorded route outcomes remain diagnostic selections, not observed dispatch
+    identities, and never supply a guessed physical request count.
+    """
+    from lib.tasks_pkg.compaction._summary_failure import (
+        validate_summary_attempts,
+        validate_summary_failure,
+    )
+
+    summary = receipt.get('summary')
+    summary = summary if isinstance(summary, Mapping) else {}
+    failure = validate_summary_failure(summary.get('failure')) or {}
+    code = failure.get('code')
+    if code not in _SUMMARY_FAILURE_MESSAGES:
+        code = next((
+            _SUMMARY_FAILURE_LEGACY_CODES.get(value, value)
+            for value in (reason, receipt.get('outcomeReason'))
+            if type(value) is str and (
+                value in _SUMMARY_FAILURE_MESSAGES
+                or value in _SUMMARY_FAILURE_LEGACY_CODES)
+        ), '')
+    if not code:
+        return {}
+    detail_key, message = _SUMMARY_FAILURE_MESSAGES[code]
+    args: dict[str, Any] = {'code': code}
+    for key in ('attempts', 'limit'):
+        value = failure.get(key)
+        if type(value) is int and 0 <= value <= _INTEGER_MAX:
+            args[key] = value
+    for key in ('authIssue', 'credentialSource'):
+        if key in failure:
+            args[key] = failure[key]
+    attempts = validate_summary_attempts(summary.get('attempts'))
+    if attempts:
+        args.update({
+            'selectedModels': [_compaction_fact_text(row['modelId']) for row in attempts],
+            'selectedProviders': [_compaction_fact_text(row['providerId']) for row in attempts],
+            'routeStatuses': [row['status'] for row in attempts],
+            'providerIngress': [
+                'reached' if row.get('providerReached') is True else
+                'not_reached' if row.get('providerReached') is False else 'unknown'
+                for row in attempts
+            ],
+        })
+    result: dict[str, Any] = {
+        'detail': message, 'detailKey': detail_key, 'detailArgs': args,
+    }
+    status_code = failure.get('statusCode')
+    if type(status_code) is int and 100 <= status_code <= 599:
+        result['statusCode'] = status_code
+    return result
 
 
 def _summary_calls(value: Any) -> list[dict[str, Any]]:
@@ -349,6 +452,8 @@ def _normalize_entry(raw: Any) -> dict[str, Any] | None:
         if key not in _ENTRY_FIELDS or value is None:
             continue
         if key in _STRING_LIMITS:
+            if key == 'archiveId' and _is_failure_archive_bridge(_text(value, _STRING_LIMITS[key])):
+                continue
             rendered = (value if key in {'taskId', 'attemptId', 'anchorBlockId'}
                         else _compaction_fact_text(value, _STRING_LIMITS[key])
                         if key in {'taskModel', 'summaryModel', 'summarySelectedModel', 'summaryProviderId'}
@@ -1489,8 +1594,11 @@ def _fold_compaction_event(
     the earlier generic phase row keeps one compaction fact per archive.
     """
     archive_id = _text(raw_event.get('archiveId'), _IDENTIFIER_MAX_CHARS)
+    receipt = raw_event.get('receipt')
+    receipt = receipt if isinstance(receipt, Mapping) else {}
+    receipt_status = _text(receipt.get('status'), 32).lower()
     if not archive_id and not (raw_event.get('type') == EventType.COMPACTION_DONE
-                               and (raw_event.get('receipt') or {}).get('status') == 'failed'):
+                               and receipt_status in {'failed', 'aborted', 'rejected', 'cancelled'}):
         return
     producer = _producer_identity(raw_event, task)
     _retire_superseded_compaction_starts(entries, producer)
@@ -1522,7 +1630,6 @@ def _fold_compaction_event(
     phase_start = phase_row.get('startedAt')
     if phase_row:
         entries.remove(phase_row)
-    receipt = raw_event.get('receipt')
     if (raw_event.get('type') == EventType.COMPACTION_DONE and not prior
             and isinstance(receipt, Mapping) and receipt.get('status') == 'declined'):
         # A decline after summary I/O kept the original context: its start
@@ -1543,8 +1650,6 @@ def _fold_compaction_event(
         # Sparse replay/legacy has no witnessed start. Never inspect future
         # segments to fabricate it; producer-start placement is conservative.
         anchors['anchorPosition'] = 'producer-start'
-    receipt = receipt if isinstance(receipt, Mapping) else {}
-    receipt_status = _text(receipt.get('status'), 32).lower()
     completed = str(raw_event.get('type') or '') == EventType.COMPACTION_DONE
     started_at = int(prior.get('startedAt') or phase_start or now)
     summary = receipt.get('summary')
@@ -1569,6 +1674,8 @@ def _fold_compaction_event(
     detail = _diagnostic_text(
         raw_event.get('reason') or receipt.get('outcomeReason'),
     )
+    failure_detail = {} if archive_failed else _summary_failure_detail(
+        receipt, raw_event.get('reason'))
     if archive_failed:
         detail = ''
     _append_or_update(entries, {
@@ -1583,7 +1690,7 @@ def _fold_compaction_event(
         'durationMs': duration_ms,
         'kind': 'status',
         'status': ('failed' if failed else 'succeeded' if completed else 'running'),
-        'severity': 'warning' if failed else 'info',
+        'severity': 'warning' if failed or failure_detail else 'info',
         'summary': ('Could not save compacted context; original context retained.' if archive_failed else
                     'Context compaction made no reduction' if failed else
                     'Context compacted' if completed else
@@ -1593,9 +1700,11 @@ def _fold_compaction_event(
                        'activity.compaction.succeeded' if completed else
                        'activity.compaction.running'),
         'detail': detail,
+        **failure_detail,
         'phase': Phase.COMPACTING,
         'reasonCode': 'context_compaction',
-        **({'archiveId': archive_id} if archive_id else {}),
+        **({'archiveId': archive_id}
+           if archive_id and not _is_failure_archive_bridge(archive_id) else {}),
         'trigger': trigger,
         'tokenCountKind': _text(
             raw_event.get('tokenCountKind')

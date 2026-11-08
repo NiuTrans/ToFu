@@ -6,6 +6,7 @@
  * health; those concepts cannot affect what a Model is or how it is displayed.
  */
 
+import { createModelCapabilityTaxonomy } from '../../core/model-capability-taxonomy';
 import { detectVendor } from './vendor';
 import type {
   AaScore,
@@ -14,6 +15,11 @@ import type {
   ModelCatalogDocument,
   VendorGroup,
 } from './types';
+
+/** Resolves a capability list to its kind id (server-projected taxonomy). */
+export type ModelKindResolver = (capabilities: readonly string[]) => string;
+
+const fallbackKindOf: ModelKindResolver = createModelCapabilityTaxonomy().modelKind;
 
 function unique(values: readonly string[]): string[] {
   return [...new Set(values.filter(Boolean))];
@@ -50,11 +56,11 @@ export function countAaScoredModels(groups: readonly VendorGroup[]): number {
 
 /**
  * Supply-channel and serving-variant tokens that do not change what a model
- * IS: ``Qwen3_8-27B-Meituan`` is Qwen3.8-27B rented through Meituan, a
+ * IS: ``Qwen3_8-27B-YourProvider`` is Qwen3.8-27B rented through YourProvider, a
  * ``vendor/`` namespace is a supply path, and a trailing ``instruct`` tag on
  * one twin of an otherwise identical registration is the same snapshot.
  */
-const SUPPLY_IDENTITY_TOKENS = new Set(['meituan', 'fp8', 'instruct']);
+const SUPPLY_IDENTITY_TOKENS = new Set(['yourprovider', 'fp8', 'instruct']);
 
 /**
  * Near-name twins that must never collapse: OpenAI sells
@@ -104,10 +110,12 @@ function compareRegistrations(left: ModelCatalogRow, right: ModelCatalogRow): nu
  * row (bare id > clean id > priced > scored > shorter), filling facts the
  * canonical registration lacks from its twins.
  */
-function collapseRegistrations(rows: ModelCatalogRow[]): ModelCatalogRow {
+function collapseRegistrations(rows: ModelCatalogRow[], kindOf: ModelKindResolver): ModelCatalogRow {
   const [survivor, ...twins] = [...rows].sort(compareRegistrations);
   for (const twin of twins) {
     survivor.pricing ??= twin.pricing;
+    survivor.mediaPricing ??= twin.mediaPricing;
+    survivor.mediaProfile ??= twin.mediaProfile;
     survivor.releaseDate ??= twin.releaseDate;
     survivor.registeredQualityRank ??= twin.registeredQualityRank;
     survivor.aa ??= twin.aa;
@@ -115,6 +123,7 @@ function collapseRegistrations(rows: ModelCatalogRow[]): ModelCatalogRow {
     survivor.lifecycle ??= twin.lifecycle;
     survivor.capabilities = unique([...survivor.capabilities, ...twin.capabilities]);
   }
+  if (twins.length) survivor.kind = kindOf(survivor.capabilities);
   return survivor;
 }
 
@@ -132,6 +141,7 @@ function compareModels(left: ModelCatalogRow, right: ModelCatalogRow): number {
 export function buildVendorGroups(
   document: ModelCatalogDocument,
   aaScores: Record<string, AaScore> = {},
+  kindOf: ModelKindResolver = fallbackKindOf,
 ): VendorGroup[] {
   if (document.contract_version !== 'tofu.model-routing/v2') return [];
   const creators = new Map(document.creators.map((row) => [row.creator_id, row]));
@@ -145,13 +155,15 @@ export function buildVendorGroups(
     const creatorLabel = creator?.name || model.creator_id;
     const vendor = detectVendor(model.creator_id, creatorLabel, model.model_id);
     const score = Number(model.quality_rank);
+    const capabilities = unique(model.capabilities ?? []);
     const row: ModelCatalogRow = {
       creatorId: model.creator_id,
       creatorLabel,
       modelId: model.model_id,
       displayName: model.display_name || model.model_id,
       brand: vendor.icon,
-      capabilities: unique(model.capabilities ?? []),
+      capabilities,
+      kind: kindOf(capabilities),
       contextWindow: Number(model.context_window) || 0,
       inferenceProfile: model.inference_profile,
       registeredQualityRank: Number.isFinite(score) && score > 0 ? score : null,
@@ -159,13 +171,15 @@ export function buildVendorGroups(
       registrationState: model.registration_state, registrationIssues: model.registration_issues,
       aa: aaScores[`${model.creator_id}::${model.model_id}`] ?? null,
       pricing: model.list_pricing ?? model.official_pricing ?? null,
+      mediaPricing: model.media_pricing ?? model.official_media_pricing ?? null,
+      mediaProfile: model.media_profile ?? model.official_media_profile ?? null,
       lifecycle: model.lifecycle,
     };
     rows.push(row);
   }
 
   // One row per semantic model: provider namespaces and supply-channel
-  // variants (Meituan, Fireworks accounts, FP8 re-registrations) are the
+  // variants (YourProvider, Fireworks accounts, FP8 re-registrations) are the
   // same Model rented through different supply paths, not different Models.
   const byIdentity = new Map<string, ModelCatalogRow[]>();
   for (const row of rows) {
@@ -177,7 +191,7 @@ export function buildVendorGroups(
 
   const groups = new Map<string, VendorGroup>();
   for (const registrations of byIdentity.values()) {
-    const row = collapseRegistrations(registrations);
+    const row = collapseRegistrations(registrations, kindOf);
     const vendor = detectVendor(row.creatorId, row.creatorLabel, row.modelId);
     const group = groups.get(vendor.id) ?? {
       vendorId: vendor.id,
@@ -202,4 +216,21 @@ export function buildVendorGroups(
     return rightBest - leftBest || left.label.localeCompare(right.label);
   });
   return result;
+}
+
+/** Models per kind id across every vendor group (after identity collapse). */
+export function countModelKinds(groups: readonly VendorGroup[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const group of groups) {
+    for (const row of group.models) counts.set(row.kind, (counts.get(row.kind) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** Keep only the Models of one kind; null keeps every Model. Empty vendors drop. */
+export function filterGroupsByKind(groups: VendorGroup[], kind: string | null): VendorGroup[] {
+  if (!kind) return groups;
+  return groups
+    .map((group) => ({ ...group, models: group.models.filter((row) => row.kind === kind) }))
+    .filter((group) => group.models.length > 0);
 }

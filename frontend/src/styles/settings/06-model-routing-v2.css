@@ -65,6 +65,13 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
 .stg-provider-card-v2 .stg-cap.image_gen,.stg-v2-manager .stg-cap.image_gen{color:#db2777;background:rgba(244,114,182,.14)}
 .stg-provider-card-v2 .stg-cap.embedding,.stg-v2-manager .stg-cap.embedding{color:#0d9488;background:rgba(45,212,191,.14)}
 .stg-provider-card-v2 .stg-cap.thinking,.stg-v2-manager .stg-cap.thinking{color:#c2410c;background:rgba(251,146,60,.15)}
+.stg-provider-card-v2 .stg-cap.video,.stg-v2-manager .stg-cap.video{color:#a16207;background:rgba(250,204,21,.16)}
+.stg-provider-card-v2 .stg-cap.audio_chat,.stg-v2-manager .stg-cap.audio_chat{color:#0369a1;background:rgba(56,189,248,.14)}
+.stg-provider-card-v2 .stg-cap.video_gen,.stg-v2-manager .stg-cap.video_gen{color:#9333ea;background:rgba(192,132,252,.15)}
+.stg-provider-card-v2 .stg-cap.audio_gen,.stg-v2-manager .stg-cap.audio_gen{color:#b45309;background:rgba(251,191,36,.16)}
+.stg-provider-card-v2 .stg-cap.tts,.stg-v2-manager .stg-cap.tts{color:#0e7490;background:rgba(34,211,238,.13)}
+.stg-provider-card-v2 .stg-cap.transcription,.stg-v2-manager .stg-cap.transcription{color:#4338ca;background:rgba(129,140,248,.14)}
+.stg-provider-card-v2 .stg-cap.reranking,.stg-v2-manager .stg-cap.reranking{color:#4d7c0f;background:rgba(163,230,53,.16)}
 .stg-tpl-wizard-alias{color:var(--s-gold-dim,#a87d2e)!important}
 
 .stg-v2-close{border:1px solid var(--border,#ddd);background:var(--bg-primary,#fff);color:var(--text-primary,#222);font:600 12px/1.2 inherit;cursor:pointer}

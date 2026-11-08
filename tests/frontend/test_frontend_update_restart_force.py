@@ -495,6 +495,29 @@ const flush = () => new Promise((r) => setImmediate(r));
     await _restartCheckHealth();
     check('slow_boot_eventually_completes', _restartDone && domElement('updRestartPct').textContent === '100%');
   }
+  // Nothing answering for the slow window names the host check; a later
+  // answer returns to the ordinary slow notice and still completes.
+  {
+    reset({firstThrows409:false});
+    await restartServer();
+    _restartPreBootId = 'old';
+    _restartAcceptedAt = Date.now() - 400000;
+    Api.health.info = async () => { throw new Error('Failed to fetch'); };
+    await _restartCheckHealth();
+    check('unreachable_first_probe_is_only_slow', domElement('updRestartSub').textContent === 'update.restartTimeout');
+    _restartUnreachableSince = Date.now() - 181000;
+    await _restartCheckHealth();
+    await _restartCheckHealth();
+    check('unreachable_names_host_check', domElement('updRestartSub').textContent === 'update.restartUnreachable');
+    check('unreachable_warns_once', toastCalls.filter(x => x[1] === 'update.restartUnreachable').length === 1);
+    check('unreachable_keeps_observation', !_restartDone && _restartActive);
+    Api.health.info = async () => ({ok:true,bootId:'new',boot:{status:'running',phaseTotal:9,currentPhase:{index:2,key:'exclusive_storage'}}});
+    await _restartCheckHealth();
+    check('answer_restores_slow_notice', domElement('updRestartSub').textContent === 'update.restartTimeout');
+    Api.health.info = async () => ({ok:true,bootId:'new',boot:{status:'ready'}});
+    await _restartCheckHealth();
+    check('unreachable_then_ready_completes', _restartDone);
+  }
   {
     reset({firstThrows409:false});
     Api.health.info = async () => ({ok:true,bootId:'running',boot:{status:'running',phaseTotal:9,currentPhase:{index:3,key:'storage_authority_sql'}}});

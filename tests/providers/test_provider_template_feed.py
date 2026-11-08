@@ -96,6 +96,25 @@ def test_billing_redirect_and_non_chat_rows_are_excluded():
     assert len(projected['openrouter']) == 1
 
 
+def test_generated_media_decides_the_kind_of_a_text_emitting_row():
+    """An image or video producer that also emits text is no chat route."""
+    projected = feed.recipes_from_catalog([
+        row('google/gemini-3.1-flash-image', architecture={
+            'input_modalities': ['text', 'image'], 'output_modalities': ['image', 'text']}),
+        row('google/gemini-omni-1.2-flash', architecture={
+            'input_modalities': ['text', 'video'], 'output_modalities': ['text', 'video']}),
+        row('openai/gpt-audio', architecture={
+            'input_modalities': ['text', 'audio'], 'output_modalities': ['text', 'audio']}),
+    ])['openrouter']
+    caps = {recipe['model_id']: recipe['capabilities'] for recipe in projected}
+    # Image generation runs on the chat endpoint with an image modality.
+    assert caps['google/gemini-3.1-flash-image'] == ['image_gen']
+    # No executor consumes a video route, so video producers are not seeded.
+    assert 'google/gemini-omni-1.2-flash' not in caps
+    # A text reply that may carry audio stays a chat route.
+    assert caps['openai/gpt-audio'] == ['text', 'thinking']
+
+
 def test_billing_channels_cannot_break_full_template_compilation(monkeypatch):
     import lib.provider.provider_template_recipes as recipes
     standard = 'meta/muse-spark-test-1.3'

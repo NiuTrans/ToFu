@@ -1,10 +1,12 @@
 """Delivery identity batches reads without caching repository authority."""
+import os
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from lib import integration_control as ic
-from lib.project_mod import delivery
+from lib.project_mod import delivery, task_delta_delivery
 
 pytestmark = pytest.mark.unit
 
@@ -72,3 +74,22 @@ def test_git_failure_propagates(repository, monkeypatch):
     monkeypatch.setattr(ic, '_git', fail)
     with pytest.raises(ic.IntegrationError, match='identity unavailable'):
         delivery._canonical(str(repository))
+
+
+def test_identity_reads_outlast_a_wall_clock_deadline(repository, tmp_path, monkeypatch):
+    """On a loaded volume these reads are slow, not stuck: only a stall ends them."""
+    workspace = tmp_path / 'linked'
+    ic._git(repository, ['worktree', 'add', '--detach', str(workspace)], check=True)
+    retired = tmp_path / 'retired'
+    retired.mkdir()
+    original = subprocess.run
+
+    def deadline_expires(argv, *args, **kwargs):
+        if (argv and os.path.basename(str(argv[0])).startswith('git')
+                and any(word in argv for word in ('rev-parse', 'worktree'))):
+            raise subprocess.TimeoutExpired(argv, kwargs.get('timeout') or 30.0)
+        return original(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', deadline_expires)
+    assert delivery._canonical(str(workspace)) == (repository, workspace)
+    assert task_delta_delivery.retired_workspace_placeholder(repository, retired)

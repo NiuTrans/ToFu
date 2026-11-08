@@ -40,7 +40,8 @@ def _read_instance_lock_entry(lock_path):
 
 def _pid_is_live_server(pid):
     """True iff *pid* is alive AND its ``/proc/<pid>/cmdline`` still looks like
-    our ``server.py``.
+    one of our server entries: ``server.py``, or ``local_kernel.py``, which
+    serves the same application for the app that launched it.
 
     A dead pid → False, including an exited one that its parent has not reaped
     yet: signal 0 still reaches such a zombie and its cmdline reads empty, so
@@ -60,7 +61,7 @@ def _pid_is_live_server(pid):
         return True  # cannot inspect → assume a live server, refuse to reclaim
     if not cmdline.strip():
         return True  # ambiguous → conservative
-    return 'server.py' in cmdline
+    return 'server.py' in cmdline or 'local_kernel.py' in cmdline
 
 
 # ── Loop-heartbeat sidecar (cross-process wedge detection for lock reclaim) ──

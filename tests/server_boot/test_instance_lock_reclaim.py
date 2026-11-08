@@ -231,6 +231,26 @@ def test_refuses_live_local_server(srv, tmp_path):
 
 # ── helper-level checks ──────────────────────────────────────────────────────
 
+@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='reads /proc/<pid>/cmdline')
+def test_live_local_kernel_keeps_its_lock(srv, tmp_path):
+    """``local_kernel.py`` serves the same application: its lock is not PID reuse."""
+    child = subprocess.Popen(
+        [sys.executable, '-c', 'import sys; sys.stdin.read()', 'local_kernel.py'],
+        stdin=subprocess.PIPE)
+    try:
+        lock, holder = _flocked_holder_lock(tmp_path, child.pid)
+        try:
+            assert srv._acquire_instance_lock(
+                lock, _Log(), hostname='thishost') == (False, None)
+            assert srv._pid_is_live_server(child.pid) is True
+            assert os.path.exists(lock)
+        finally:
+            holder.close()
+    finally:
+        child.stdin.close()
+        child.wait(timeout=30)
+
+
 def test_pid_is_live_server_dead_pid(srv):
     assert srv._pid_is_live_server(_dead_pid()) is False
 

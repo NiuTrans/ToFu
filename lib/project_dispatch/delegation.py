@@ -32,6 +32,18 @@ class CoordinatorWorkerPolicy:
     coordinator_model: str
 
 
+class CoordinatorModelMissing(PermissionError):
+    """This Coordinator request runs without a model, so it can issue no Worker.
+
+    Continuations record the Coordinator's own model; a request that started
+    without one is refused identically on every delegation, so the refusal
+    carries its own effect and recovery instead of the generic retry advice.
+    """
+    execution_started = False
+    recovery = ('No worker was created. Delegating again in this request fails the same way; '
+                'report this blocker and its remedy to the human instead of retrying.')
+
+
 def owner_default_model(owner: int) -> str:
     """The model an owner's new conversations default to."""
     from lib.identity import require_user_id
@@ -214,8 +226,12 @@ def policy_for_task(repository, task, attempt):
     if continuation is not None:
         return deepcopy(continuation['request']['delegation']['policy'])
     policy = task.get('_coordinatorWorkerPolicy')
-    if not isinstance(policy, CoordinatorWorkerPolicy) or not policy.tools or not policy.coordinator_model:
+    if not isinstance(policy, CoordinatorWorkerPolicy) or not policy.tools:
         raise PermissionError('Coordinator worker capabilities have not been issued by tool assembly')
+    if not policy.coordinator_model:
+        raise CoordinatorModelMissing(
+            'This Coordinator request has no model, so it cannot issue Workers: the human selects '
+            'a model in this conversation (or configures a default model), then sends the request again')
     _, prior = request_delegation(repository, task)
     if prior is not None:
         return deepcopy(prior['request']['delegation']['policy'])
@@ -333,9 +349,10 @@ def review_worker(repository, task, arguments):
             raise ValueError('Worker review is immutable; delegate a new repair assignment')
         if checkpoint:
             project_root = str(Path(repository.project).expanduser().resolve())
-            workspace = repository.get_workspace(project_root, attempt.get('taskId'), user_id=repository.owner)
+            work_id = repository.workspace_task_id(row)
+            workspace = repository.get_workspace(project_root, work_id, user_id=repository.owner)
             if (not workspace or workspace.get('checkpoint_sha') != checkpoint
-                    or workspace.get('task_id') != attempt.get('taskId')
+                    or workspace.get('task_id') != work_id
                     or workspace.get('user_id') != repository.owner or workspace.get('state') == 'discarded'
                     or workspace.get('project_root') != project_root
                     or (workspace.get('origin') or {}).get('_projectDispatchAdmission') != repository._admission(row)):

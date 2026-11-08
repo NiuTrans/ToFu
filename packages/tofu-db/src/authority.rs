@@ -2963,6 +2963,7 @@ impl AuthorityDatabase {
             .map(|prepared| prepared.committed_result(committed.sequence))
             .collect();
         self.worker_control.publish(worker_queue_changed, &worker_cancelled_tasks);
+        self.worker_control.publish_conversations(owner_user_id, conversation_notices.keys());
         if search_invalidated {
             self.note_search_invalidation_commit(tenant_id, owner_user_id);
         }

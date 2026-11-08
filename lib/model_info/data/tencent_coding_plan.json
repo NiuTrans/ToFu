@@ -1,0 +1,17 @@
+{
+  "brand": "hunyuan",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "tencent_coding_plan",
+  "category": "subscription",
+  "name": "Tencent Cloud Coding Plan",
+  "base_url": "https://api.lkeap.cloud.tencent.com/coding/v3",
+  "catalog_mode": "curated",
+  "catalog_source": {"url": "https://cloud.tencent.com.cn/document/product/1823/130092", "checked_at": "2026-11-06"},
+  "subscription": {"key_console_url": "https://console.cloud.tencent.com/tokenhub/codingplan"},
+  "_plan_note": "Lite ¥40 (about 1,200 requests per 5 hours, 9,000 per week, 18,000 per month) and Pro ¥200 (6,000 / 45,000 / 90,000). Key sk-sp-…. Terms: only inside coding tools, never automation scripts, app backends or batch calls. No multimodal input. Limits per the official OpenClaw guide (product/1823/130094). The tc-code-latest Auto router is not a model identity and is not listed.",
+  "offering_recipes": [
+    {"model_id": "glm-5", "capabilities": ["text", "thinking"], "context_window": 202752, "max_output_tokens": 16384},
+    {"model_id": "kimi-k2.5", "capabilities": ["text", "thinking"], "context_window": 262144, "max_output_tokens": 32768},
+    {"model_id": "MiniMax-M2.5", "request_ids": ["minimax-m2.5"], "capabilities": ["text", "thinking"], "context_window": 196608, "max_output_tokens": 32768}
+  ]
+}

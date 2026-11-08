@@ -5,7 +5,7 @@ import { t } from '../i18n/index';
 import { escapeHtml } from '../html-safety';
 import { watchRestartPreparation } from '../features/settings/restart-preparation';
 import { dockRestartProgress, recordRestartDiagnostic, offerRestartReload } from '../features/settings/restart-progress-dock';
-import { projectRestartHealth, restartPhaseProgress } from '../features/settings/restart-observation';
+import { projectRestartHealth, restartPhaseProgress, restartWaitNotice } from '../features/settings/restart-observation';
 
 const Api = runtimeScope.Api;
 if (!Api || typeof Api !== 'object') throw new Error('utility-panels runtime dependency is unavailable: Api');
@@ -1107,7 +1107,10 @@ var _restartPollStartTimer = null;
 var _restartHealthProbeActive = false;
 var _restartAttemptGeneration = 0;
 var _restartDone = false;
-var _restartSlowWarning = false;
+// The wait notice on screen ('' | 'slow' | 'unreachable'), and when probes
+// started going unanswered after any process last answered (0 = answering).
+var _restartNotice = '';
+var _restartUnreachableSince = 0;
 var _restartObservedBoot = null;
 // The server's bootId captured BEFORE we trigger the restart. The re-exec
 // mints a fresh bootId (os.execv keeps the PID + start-time, so bootId is the
@@ -1291,7 +1294,8 @@ function _restartBeginExperience() {
   _restartHealthProbeActive = false;
   _restartActive = true;
   _restartDone = false;
-  _restartSlowWarning = false;
+  _restartNotice = '';
+  _restartUnreachableSince = 0;
   _restartObservedBoot = null;
   _restartT0 = Date.now();
   _restartPreparationSnapshot = null;
@@ -1474,13 +1478,15 @@ function _restartSucceed(version, info) {
   offerRestartReload(document.getElementById('updRestartCard'), t('boot.reload'), t('boot.dismiss'));
 }
 
-/** Warn once without giving up observation or permitting a duplicate restart. */
-function _restartTimeout() {
-  if (_restartDone || _restartSlowWarning) return;
-  _restartSlowWarning = true;
+/** Warn without giving up observation or permitting a duplicate restart. */
+function _restartShowNotice(notice) {
+  if (_restartDone || !notice || notice === _restartNotice) return;
+  _restartNotice = notice;
+  const unreachable = notice === 'unreachable';
+  const text = t(unreachable ? 'update.restartUnreachable' : 'update.restartTimeout');
   const sub = document.getElementById('updRestartSub');
-  if (sub) sub.textContent = t('update.restartTimeout');
-  showToast('⏳', t('update.restartTimeout'), '', 6000);
+  if (sub) sub.textContent = text;
+  showToast(unreachable ? '⚠️' : '⏳', text, '', unreachable ? 12000 : 6000);
 }
 
 /** A latched server failure has an actual cause and a phase-local retry. */
@@ -1794,9 +1800,13 @@ async function _restartCheckHealth() {
   } else if (verdict.kind === 'unavailable' && !_restartBootingAt) {
     _restartBootingAt = Date.now();
   }
-  if ((Date.now() - waitingSince) / 1000 > _RESTART_SLOW_AFTER_S) {
-    _restartTimeout();
-  }
+  const now = Date.now();
+  if (verdict.kind !== 'unavailable') _restartUnreachableSince = 0;
+  else if (!_restartUnreachableSince) _restartUnreachableSince = now;
+  _restartShowNotice(restartWaitNotice(
+    (now - waitingSince) / 1000,
+    _restartUnreachableSince ? (now - _restartUnreachableSince) / 1000 : 0,
+    _RESTART_SLOW_AFTER_S));
 }
 
 /** Classify whether the restarted process loaded DIFFERENT source than the

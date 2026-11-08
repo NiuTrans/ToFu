@@ -14,4 +14,9 @@
 # debug-build signatures so test installs upgrade cleanly across CI builds).
 !app/debug.keystore
 /.testharness/
+# android/native/build-proot.sh output: downloads, work tree, jniLibs.
+/native/build/
 .tofu*
+# Runtime image builder outputs and download cache (runtime/README.md).
+/runtime/out/
+/runtime/cache/

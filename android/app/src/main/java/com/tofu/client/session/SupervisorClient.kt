@@ -26,8 +26,9 @@ import java.util.concurrent.TimeUnit
 class SupervisorClient(
     http: OkHttpClient = defaultClient(),
     private val diagnostics: DiagLog? = null,
+    /** Never This phone's credential: a supervisor is a URL kernel's host-side daemon. */
     private val cookieProvider: (String) -> String? = { origin ->
-        CookieManager.getInstance().getCookie(origin)
+        if (LocalKernelCookie.isReservedUrl(origin)) null else CookieManager.getInstance().getCookie(origin)
     },
 ) {
     // Control-plane cookies belong to this exact origin, including with an

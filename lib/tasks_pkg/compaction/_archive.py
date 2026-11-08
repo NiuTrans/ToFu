@@ -174,6 +174,28 @@ def _archive_transcript(conv_id: str, messages: list, summary: str = '',
             logger.debug('[Compact] model extract failed: %s', _m_e)
             model = ''
 
+    # Keep the folded messages reachable from the TASK, not only from the
+    # archive row: the trajectory exporter runs where the conversation store
+    # may not be readable (headless agent runtime), and a compacted run's
+    # export must still contain every pre-compaction round. The compaction
+    # archive stays the durable authority; this is the same content retained
+    # for the run's own export, deduplicated by the exporter against the
+    # working view's retained tail. Each record is appended BEFORE the
+    # archive write so an archive/storage failure cannot silently lose the
+    # rounds either.
+    if task is not None:
+        try:
+            import copy as _copy
+            task.setdefault('_compaction_archives', []).append({
+                'messages': _copy.deepcopy(messages),
+                'trigger': trigger,
+                'round_num': int(round_num or 0),
+                'msgs_before': int(msgs_before or len(messages)),
+                'msgs_after': int(msgs_after or 0),
+            })
+        except Exception as _rec_e:
+            logger.debug('[Compact] task-local archive record failed: %s', _rec_e)
+
     from lib.tasks_pkg.compaction._ownership import compaction_owner_key
     conv_id = compaction_owner_key(task, conv_id)
     # Storage validates the parent authorization link AND child scope. Reuse
@@ -195,7 +217,9 @@ def _archive_transcript(conv_id: str, messages: list, summary: str = '',
     )
     if archive_id is None:
         if task and task.get('_turnId') and not task.get('aborted'):
-            fail_compaction_archive(task, None, {'trigger': trigger, 'round_num': round_num})
+            fail_compaction_archive(task, None, {
+                'trigger': trigger, 'round_num': round_num,
+                'tokens_before': tokens_before, 'msgs_before': msgs_before})
         return None
     logger.info('[Compact] Transcript archived conv=%s  id=%s  trigger=%s  '
                 'messages=%d  tokens=%d→%d',

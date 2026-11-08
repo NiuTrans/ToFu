@@ -1,0 +1,27 @@
+{
+  "brand": "doubao",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "ark_coding_plan",
+  "category": "subscription",
+  "name": "Volcengine Ark Coding Plan",
+  "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+  "catalog_mode": "curated",
+  "catalog_source": {"url": "https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-plan-overview", "checked_at": "2026-11-06"},
+  "subscription": {"key_console_url": "https://ark.volcengine.com/region:cn-beijing/apikey"},
+  "_plan_note": "Personal Lite/Pro plans with 5-hour, weekly and monthly limits. Quota applies only inside AI coding tools; using the plan key or base URL elsewhere may be treated as abuse. The pay-as-you-go /api/v3 base bills extra and must not be used with the plan. Limits per the plan overview (1024k/256k etc. recorded conservatively in thousands). ark-code-latest selects the console's model and is not listed.",
+  "offering_recipes": [
+    {"model_id": "doubao-seed-evolving", "context_window": 1024000, "max_output_tokens": 256000},
+    {"model_id": "doubao-seed-2.1-pro", "context_window": 1024000, "max_output_tokens": 256000},
+    {"model_id": "doubao-seed-2.1-lite", "context_window": 1024000, "max_output_tokens": 256000},
+    {"model_id": "doubao-seed-2.0-mini", "context_window": 256000, "max_output_tokens": 128000},
+    {"model_id": "kimi-k3.1-pro", "capabilities": ["text", "vision", "video", "thinking"], "context_window": 1024000},
+    {"model_id": "kimi-k3", "capabilities": ["text", "vision", "video", "thinking"], "context_window": 1024000, "max_output_tokens": 128000},
+    {"model_id": "kimi-k2.8-preview", "context_window": 1024000},
+    {"model_id": "glm-5.3", "capabilities": ["text", "thinking"], "context_window": 1024000, "max_output_tokens": 128000},
+    {"model_id": "glm-5.3-flash", "capabilities": ["text", "vision", "thinking"], "context_window": 1024000, "max_output_tokens": 128000},
+    {"model_id": "deepseek-v4-pro", "capabilities": ["text", "thinking"], "context_window": 1024000, "max_output_tokens": 384000},
+    {"model_id": "deepseek-v4-flash", "capabilities": ["text", "vision", "thinking"], "context_window": 1024000, "max_output_tokens": 384000},
+    {"model_id": "deepseek-v4.1-flash", "capabilities": ["text", "vision", "thinking"], "context_window": 1024000, "max_output_tokens": 384000},
+    {"model_id": "deepseek-v4.1-flash-economy", "context_window": 1024000, "max_output_tokens": 384000}
+  ]
+}

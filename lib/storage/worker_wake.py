@@ -4,13 +4,10 @@ This is a transport hint port. It neither claims nor settles work. Existing
 worker heartbeat deadlines bound long waits; reconnect invalidates observations.
 """
 import threading
-import time
 
-from lib.log import get_logger
+from lib.storage.commit_wake import StorageCommitWakeSource
 from lib.storage.errors import StorageError
 from lib.storage.generated_worker_control import FORMAT
-
-logger = get_logger(__name__)
 
 
 class WorkerControlSignals:
@@ -39,38 +36,15 @@ class WorkerControlSignals:
                     event.set()
 
 
-class StorageWorkerWakeSource:
+class StorageWorkerWakeSource(StorageCommitWakeSource):
     def __init__(self, client_factory, policy):
-        from tofu_db._request_cancellation import RequestCancellation
-        self._factory, self._policy = client_factory, policy
+        super().__init__(client_factory, watch_method='worker_watch',
+            interval_ms=policy['heartbeatIntervalMilliseconds'],
+            backoff_ms=policy['failureBackoffMilliseconds'],
+            thread_name='durable-worker-wake')
         self.signals = WorkerControlSignals()
-        self._stop = threading.Event()
-        self._thread = None
-        self._lifecycle_lock = threading.Lock()
-        self._cancellation = RequestCancellation()
 
-    def start(self, hint):
-        # Enroll before the first queue read. A commit in the startup gap is
-        # returned by the next watch instead of relying on a local producer.
-        try:
-            cursor = self._watch(None)['cursor']
-        except Exception:
-            if not self._stop.is_set():
-                raise
-            return self.close
-        with self._lifecycle_lock:
-            if self._stop.is_set():
-                return self.close
-            thread = threading.Thread(target=self._run, args=(cursor, hint),
-                                      name='durable-worker-wake', daemon=True)
-            thread.start()
-            self._thread = thread
-        return self.close
-
-    def _watch(self, cursor):
-        response = self._factory().worker_watch(cursor=cursor,
-            deadline_unix_ms=int(time.time() * 1000) + self._policy['heartbeatIntervalMilliseconds'],
-            cancellation=self._cancellation)
+    def _validate(self, response):
         if (not isinstance(response, dict) or set(response) != {'format', 'cursor', 'cancelTasks'}
                 or response['format'] != FORMAT or not isinstance(response['cursor'], dict)
                 or set(response['cursor']) != {'epoch', 'queue', 'cancel'}
@@ -81,36 +55,15 @@ class StorageWorkerWakeSource:
                     not isinstance(response['cancelTasks'], list)
                     or not all(isinstance(value, str) and value for value in response['cancelTasks'])))):
             raise StorageError('database_protocol_error', 'Invalid worker watch response')
-        return response
 
-    def _run(self, cursor, hint):
-        while not self._stop.is_set():
-            try:
-                response = self._watch(cursor)
-                current = response['cursor']
-                if cursor is None or current['epoch'] != cursor['epoch'] or current['queue'] != cursor['queue']:
-                    hint('authority-commit')
-                if cursor is None or current['epoch'] != cursor['epoch']:
-                    self.signals.refresh(None)
-                elif response['cancelTasks'] is None or response['cancelTasks']:
-                    self.signals.refresh(response['cancelTasks'])
-                cursor = current
-            except Exception as error:
-                if self._stop.is_set():
-                    return
-                logger.warning('[DurableWorker] authority watch interrupted: %s', type(error).__name__)
-                cursor = None
-                self.signals.refresh(None)
-                # The established failure policy owns retries. No idle DB poll.
-                self._stop.wait(self._policy['failureBackoffMilliseconds'] / 1000)
+    def _observe(self, cursor, response, hint):
+        current = response['cursor']
+        if cursor is None or current['epoch'] != cursor['epoch'] or current['queue'] != cursor['queue']:
+            hint('authority-commit')
+        if cursor is None or current['epoch'] != cursor['epoch']:
+            self.signals.refresh(None)
+        elif response['cancelTasks'] is None or response['cancelTasks']:
+            self.signals.refresh(response['cancelTasks'])
 
-    def interrupt(self):
-        self._stop.set()
-        self._cancellation.cancel()
-
-    def close(self):
-        self.interrupt()
-        with self._lifecycle_lock:
-            thread = self._thread
-        if thread is not None:
-            thread.join()
+    def _interrupted(self, hint):
+        self.signals.refresh(None)

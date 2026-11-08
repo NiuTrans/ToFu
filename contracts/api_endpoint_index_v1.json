@@ -2123,6 +2123,40 @@
       "handler": "capabilities"
     },
     {
+      "method": "POST",
+      "path": "/api/v4/capabilities/environment/refresh",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Re-scan this kernel's environment capabilities",
+      "tags": [
+        "capabilities"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/capabilities.py",
+      "handler": "refresh_environment_capabilities"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/channels/audit",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "List what Tofu recorded for other people on the owner's behalf, newest first",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "list_channel_audit_v1"
+    },
+    {
       "method": "GET",
       "path": "/api/v4/channels/dx",
       "transport": "http",
@@ -2199,7 +2233,7 @@
       "path": "/api/v4/channels/dx/threads/<thread_key>",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "Set a 大象 thread's ingress mode or reply policy (null restores the default)",
+      "summary": "Set a 大象 thread's ingress mode, reply policy (null restores the default) or owner note",
       "tags": [
         "channels"
       ],
@@ -2271,7 +2305,7 @@
       "path": "/api/v4/channels/github/threads/<path:thread_key>",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "Set a GitHub thread's ingress mode or reply policy (null restores the default)",
+      "summary": "Set a GitHub thread's ingress mode, reply policy (null restores the default) or owner note",
       "tags": [
         "channels"
       ],
@@ -2319,6 +2353,25 @@
       "documented": true,
       "owner": "routes/api_v1/channels.py",
       "handler": "approve_channel_outbox_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/channels/outbox/<item_id>/attachments/<int:index>",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "rawSuccess": true,
+      "summary": "Read an original image attached to an outbox item (a draft's thumbnail)",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "channel_outbox_attachment_v1"
     },
     {
       "method": "POST",
@@ -6862,7 +6915,7 @@
       "path": "/api/v4/oauth/device-login",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "Start a device-authorization login flow (Codex)",
+      "summary": "Start a device-authorization login flow (Codex, Kimi Code)",
       "tags": [
         "capabilities"
       ],
@@ -6878,7 +6931,7 @@
       "path": "/api/v4/oauth/device-login",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "Start a device-authorization login flow (Codex)",
+      "summary": "Start a device-authorization login flow (Codex, Kimi Code)",
       "tags": [
         "capabilities"
       ],
@@ -10728,6 +10781,42 @@
       "documented": true,
       "owner": "routes/api_v1/router.py",
       "handler": "router_instruction_resume"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/router/owner-delegation",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read the owner's delegation to their main coordinator and its audit log",
+      "tags": [
+        "router"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_owner_delegation_read"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/router/owner-delegation",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Grant or revoke the main coordinator's delegation to act for the owner",
+      "tags": [
+        "router"
+      ],
+      "scope": "admin",
+      "public": false,
+      "requiredScopes": [
+        "admin"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_owner_delegation"
     },
     {
       "method": "GET",

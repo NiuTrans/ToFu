@@ -195,22 +195,25 @@ def _evidence_memo_scope(messages: list[dict], state: dict,
 
 
 def reconcile_checklist_context(messages: list[dict], task: dict | None,
-                                *, memoize: bool = True) -> None:
-    """Retain at most one current recovery carrier; keep historical tool rows.
+                                *, protected_count: int = 0) -> None:
+    """Withdraw stale recovery sections from a projection being rewritten.
 
+    ``messages[:protected_count]`` is history a provider request already
+    carried; it stays byte-identical, so a superseded carrier there remains
+    history like an older todo receipt, and the newest evidence still wins.
     Only runtime-owned active_checklist sections may be removed. User text and
     neighboring managed sections are untouched. Durable UI audit notes are not
-    messages and are never rewritten by this reconciliation. ``memoize=False``
-    is the transient compaction-candidate path: it must not write the
-    task-scoped evidence memo (rejected candidates leave no runtime effects).
+    messages and are never rewritten by this reconciliation. It never writes
+    the task-scoped evidence memo: rejected compaction candidates leave no
+    runtime effects.
     """
     if not task or not (isinstance(task.get('_todoState'), dict) or task.get('_todos')):
         return
     from lib.tasks_pkg.context_composer._sections import remove_managed_section
     evidence = _current_evidence(messages, todo_state_from_task(task),
-                                 task=task, memoize=memoize)
-    kept = []
-    for message in messages:
+                                 task=task, memoize=False)
+    kept = messages[:protected_count]
+    for message in messages[protected_count:]:
         if _is_checklist_carrier(message) and message is not evidence:
             message = remove_managed_section(message, 'active_checklist')
         if message is not None:
@@ -234,7 +237,6 @@ def restore_checklist_context(messages: list[dict], *, task: dict | None,
     """Restore only after actual evidence loss, never merely after a new update."""
     if task and task.get('aborted'):
         return
-    reconcile_checklist_context(messages, task)
     block = build_checklist_context_block(messages, task)
     if block is None:
         return
@@ -245,15 +247,18 @@ def restore_checklist_context(messages: list[dict], *, task: dict | None,
 
 
 def carry_checklist_through_compaction(messages: list[dict], task: dict | None,
-                                       model: str = '') -> None:
+                                       model: str = '', *,
+                                       protected_count: int = 0) -> None:
     """Project current progress into a candidate, before token/adoption checks.
 
     Compaction already rewrites the prefix and has its own audit event. Carry
     accepted state as part of that projection rather than delete it then emit
     another independent intervention next round. No task mutations or notes:
-    rejected candidates must leave no runtime effects.
+    rejected candidates must leave no runtime effects. A layer that keeps the
+    previous request's messages byte-identical passes their count as
+    ``protected_count``.
     """
-    reconcile_checklist_context(messages, task, memoize=False)
+    reconcile_checklist_context(messages, task, protected_count=protected_count)
     block = build_checklist_context_block(messages, task, memoize=False)
     if block is not None:
         from lib.tasks_pkg.context_composer._render import render_context

@@ -144,6 +144,15 @@ class ChannelStore:
     def _echo_key(self, channel: str, kind: str, value: str) -> str:
         return f'{self._root}echo/{channel}/{kind}/{_digest(value.lower())}'
 
+    def _audit_prefix(self, channel: str) -> str:
+        return f'{self._root}audit/{channel}/'
+
+    def _audit_key(self, item: OutboxItem) -> str:
+        return self._audit_prefix(ThreadKey.parse(item.thread).channel) + f'{item.created_at_ms:020d}-{item.id}'
+
+    def _batch_key(self, command_id: str) -> str:
+        return f'{self._root}batch/{_digest(command_id)}'
+
     # ── account ───────────────────────────────────────────────────────
     def account(self, channel: str) -> dict[str, Any] | None:
         return self._get(self._account_key(channel))[0]
@@ -234,6 +243,17 @@ class ChannelStore:
             raise StorageError('database_conflict', 'Channel event claim changed concurrently')
         return existing, False
 
+    def record_event_media(self, event: ChannelEvent, media: list[dict[str, Any]]) -> None:
+        """Record the resolved media of a claimed event (C9) before it is routed."""
+        key = self._event_key(event.thread, event.external_id)
+
+        def change(current):
+            if current is None:
+                raise ChannelError('event_missing', 'Recorded channel event disappeared')
+            current['media'] = media
+            return current
+        self._update(key, change)
+
     def mark_routed(self, event: ChannelEvent, deliveries: list[dict[str, Any]]) -> None:
         key = self._event_key(event.thread, event.external_id)
 
@@ -307,8 +327,12 @@ class ChannelStore:
         value, version = self._get(self._outbox_key(item_id))
         return (OutboxItem.from_record(value) if value else None), version
 
-    def create_outbox_item(self, item: OutboxItem) -> tuple[OutboxItem, bool]:
-        """CAS-create; an existing item with the same identity is returned unchanged."""
+    def create_outbox_item(self, item: OutboxItem, *, audit: bool = False) -> tuple[OutboxItem, bool]:
+        """CAS-create; an existing item with the same identity is returned unchanged.
+
+        ``audit`` lists the item in the owner's audit of messages recorded on
+        their behalf for other people (C11), in creation order.
+        """
         try:
             self._put(self._outbox_key(item.id), item.to_record(), 0)
         except StorageError as error:
@@ -320,9 +344,56 @@ class ChannelStore:
             if existing.state not in ('sent', 'discarded'):
                 # Heal an item whose index write was lost after its create.
                 self._index_active(existing)
+            if audit:
+                self._index_audit(existing)
             return existing, False
         self._index_active(item)
+        if audit:
+            self._index_audit(item)
         return item, True
+
+    def _index_audit(self, item: OutboxItem) -> None:
+        key = self._audit_key(item)
+        current, version = self._get(key)
+        if current is None:
+            try:
+                self._put(key, {'itemId': item.id}, version)
+            except StorageError as error:
+                if not is_conflict(error):
+                    raise
+
+    def audit_page(self, channel: str, *, before: str = '') -> tuple[list[OutboxItem], str | None]:
+        """Newest-first page of the audited items of ``channel``; ``before`` is the previous cursor."""
+        prefix = self._audit_prefix(channel)
+        limit = LIMITS['readPageEvents']
+        rows = self._list(prefix, before=prefix + (before if before else _KEY_END), limit=limit)
+        items = []
+        for row in rows:
+            item, _ = self.outbox_item(str((row.get('value') or {}).get('itemId') or ''))
+            if item is not None:
+                items.append(item)
+        cursor = rows[-1]['key'][len(prefix):] if len(rows) == limit else None
+        return items, cursor
+
+    # ── delivered batches ─────────────────────────────────────────────
+    def record_batch(self, command_id: str, conversation_id: str, event_ids: list[str]) -> None:
+        """Remember which events one delivery command carried (C11 review scope).
+
+        A batch steered into a running Turn leaves only its command ID there.
+        """
+        key = self._batch_key(command_id)
+        current, version = self._get(key)
+        if current is None:
+            try:
+                self._put(key, {'commandId': command_id, 'conversationId': conversation_id,
+                                'eventIds': list(event_ids)}, version)
+            except StorageError as error:
+                if not is_conflict(error):
+                    raise
+
+    def batch(self, command_id: str) -> dict[str, Any] | None:
+        record = self._get(self._batch_key(command_id))[0]
+        return record if record and record.get('commandId') == command_id else None
 
     def save_outbox_item(self, item: OutboxItem, expected_version: int) -> int:
         """CAS write of a state transition; keeps the active index in step."""

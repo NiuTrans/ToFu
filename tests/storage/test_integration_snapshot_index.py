@@ -145,8 +145,56 @@ def test_borrowed_stat_cache_never_hides_working_bytes(repository, tmp_path, fla
     assert actual == git(root, 'write-tree', env=env)
     assert git(root, 'cat-file', '-p', actual + ':changed.txt') == 'locally modified'
 
-@pytest.mark.parametrize('flag', ['--assume-unchanged', '--skip-worktree'])
-def test_clean_snapshot_rejects_flagged_index(repository, flag):
+# Commands that lstat every working-tree path. On a network volume each walk
+# costs one metadata round trip per tracked file, so their count is the cost.
+def _walks_working_tree(args):
+    command = args[0]
+    return (command in {'add', 'status'}
+            or (command == 'diff' and '--cached' not in args)
+            or (command == 'ls-files' and '--others' in args))
+
+
+@pytest.mark.parametrize('dirty', [False, True])
+def test_snapshot_walks_the_working_tree_once_per_observation(
+        repository, monkeypatch, dirty):
+    import threading
     root = repository
-    git(root, 'update-index', flag, 'changed.txt')
-    assert ic._clean_input_tree(root, git(root, 'rev-parse', 'HEAD'), cancel=None) == ''
+    if dirty:
+        (root / 'changed.txt').write_text('modified\n')
+        (root / 'borrowed.txt').write_text('untracked input\n')
+    walks = []
+    original = ic._git
+
+    def observe(checkout, args, **kwargs):
+        if _walks_working_tree(args):
+            walks.append(args[0])
+        return original(checkout, args, **kwargs)
+
+    monkeypatch.setattr(ic, '_git', observe)
+    parent = git(root, 'rev-parse', 'HEAD')
+    snapshot, baseline = ic._task_input_checkpoint(
+        root, parent, 'walk-count', threading.Event())
+    # Two agreeing observations prove the input stable; each is one walk.
+    assert walks == ['add', 'add']
+    assert baseline == parent
+    env = {**os.environ, 'GIT_INDEX_FILE': str(root.parent / 'reference-index')}
+    git(root, 'read-tree', parent, env=env)
+    git(root, 'add', '-A', '--', '.', env=env)
+    assert git(root, 'rev-parse', snapshot + '^{tree}') == git(root, 'write-tree', env=env)
+    assert (snapshot == parent) is (not dirty)
+
+
+@pytest.mark.parametrize('path', ['node_modules/pkg/index.js', 'pkg/cache.pyc'])
+def test_capture_refuses_forbidden_paths_without_touching_the_writer_index(
+        repository, tmp_path, path):
+    root = repository
+    target = root / path
+    target.parent.mkdir(parents=True)
+    target.write_text('runtime bytes\n')
+    index = root / '.git' / 'index'
+    before = index.read_bytes()
+    with pytest.raises(ic.IntegrationError, match='forbidden'):
+        ic._alternate_index_tree(root, git(root, 'rev-parse', 'HEAD'),
+                                 str(tmp_path / 'private-index'))
+    assert index.read_bytes() == before
+    assert git(root, 'status', '--porcelain', '--', path) == '?? ' + path

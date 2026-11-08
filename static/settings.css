@@ -3242,6 +3242,13 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
 .stg-provider-card-v2 .stg-cap.image_gen,.stg-v2-manager .stg-cap.image_gen{color:#db2777;background:rgba(244,114,182,.14)}
 .stg-provider-card-v2 .stg-cap.embedding,.stg-v2-manager .stg-cap.embedding{color:#0d9488;background:rgba(45,212,191,.14)}
 .stg-provider-card-v2 .stg-cap.thinking,.stg-v2-manager .stg-cap.thinking{color:#c2410c;background:rgba(251,146,60,.15)}
+.stg-provider-card-v2 .stg-cap.video,.stg-v2-manager .stg-cap.video{color:#a16207;background:rgba(250,204,21,.16)}
+.stg-provider-card-v2 .stg-cap.audio_chat,.stg-v2-manager .stg-cap.audio_chat{color:#0369a1;background:rgba(56,189,248,.14)}
+.stg-provider-card-v2 .stg-cap.video_gen,.stg-v2-manager .stg-cap.video_gen{color:#9333ea;background:rgba(192,132,252,.15)}
+.stg-provider-card-v2 .stg-cap.audio_gen,.stg-v2-manager .stg-cap.audio_gen{color:#b45309;background:rgba(251,191,36,.16)}
+.stg-provider-card-v2 .stg-cap.tts,.stg-v2-manager .stg-cap.tts{color:#0e7490;background:rgba(34,211,238,.13)}
+.stg-provider-card-v2 .stg-cap.transcription,.stg-v2-manager .stg-cap.transcription{color:#4338ca;background:rgba(129,140,248,.14)}
+.stg-provider-card-v2 .stg-cap.reranking,.stg-v2-manager .stg-cap.reranking{color:#4d7c0f;background:rgba(163,230,53,.16)}
 .stg-tpl-wizard-alias{color:var(--s-gold-dim,#a87d2e)!important}
 
 .stg-v2-close{border:1px solid var(--border,#ddd);background:var(--bg-primary,#fff);color:var(--text-primary,#222);font:600 12px/1.2 inherit;cursor:pointer}
@@ -5105,6 +5112,48 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
   overflow-wrap: anywhere;
 }
 
+.channel-settings .channel-outbox-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.channel-settings .channel-outbox-attachment {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.channel-settings .channel-outbox-thumbnail {
+  flex: none;
+  width: var(--control-h-md);
+  height: var(--control-h-md);
+  border-radius: var(--radius-xs);
+  object-fit: cover;
+  background: var(--s-cream);
+}
+
+.channel-settings .channel-outbox-attachment-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.channel-settings .channel-outbox-attachment-name {
+  overflow-wrap: anywhere;
+}
+
+.channel-settings .channel-outbox-attachment-meta {
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
 /* ── GitHub Enterprise disclosure (Database panel summary treatment) ── */
 .channel-settings .channel-advanced > summary {
   display: flex;
@@ -5346,6 +5395,122 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
 
 .channel-settings :is(.dx-thread-row, .dx-thread-reply, .dx-thread-bulk-actions, .dx-chat-option)[hidden] {
   display: none;
+}
+
+/* Notification robot (dx-robot.ts): the refusal's fix under its detail, numbered setup steps. */
+.channel-settings .dx-robot-fix {
+  margin-top: var(--space-1);
+  font-weight: var(--weight-medium);
+}
+
+.channel-settings .dx-robot-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+  padding-inline-start: var(--space-5);
+  color: var(--s-ink);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+
+/* The owner's assistant (dx-assistant.ts, C11): notes are multi-line fields
+   with the panel's input surface; a thread's note sits under its controls. */
+.channel-settings textarea.ui-input {
+  margin: 0;
+  border: var(--s-border);
+  box-shadow: none;
+  color: var(--s-ink);
+}
+
+.channel-settings textarea.ui-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.channel-settings :is(.dx-thread-note, .dx-thread-note-editor) {
+  padding-inline-start: calc(var(--space-4) + var(--space-2));
+}
+
+.channel-settings .dx-thread-note {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.channel-settings .dx-thread-note-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.channel-settings :is(.dx-thread-note, .dx-thread-note-editor)[hidden] {
+  display: none;
+}
+
+/* A draft's approval code, typed back in a chat: monospace, on the text's surface. */
+.channel-settings .channel-outbox-code {
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
+  background: var(--s-cream);
+  color: var(--s-ink);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+}
+
+/* Audit (channel-settings-view.ts createAuditList): the outbox's item rhythm, read-only. */
+.channel-settings .channel-audit-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.channel-settings .channel-audit-items {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--s-line);
+}
+
+.channel-settings .channel-audit-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3) 0;
+}
+
+.channel-settings .channel-audit-item:first-child {
+  padding-top: 0;
+}
+
+.channel-settings .channel-audit-item:last-child {
+  padding-bottom: 0;
+}
+
+.channel-settings .channel-audit-item + .channel-audit-item {
+  border-top: 1px solid var(--s-line);
+}
+
+.channel-settings :is(.channel-audit-time, .channel-audit-fact) {
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+
+.channel-settings .channel-audit-more {
+  align-self: flex-start;
 }
 
 /* Narrow panes stack each thread and show every cell's own label. */

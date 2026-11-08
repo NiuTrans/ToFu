@@ -3,6 +3,8 @@
 ``run`` freezes its configuration in ``<work-dir>/run.json`` on first use; a
 rerun with the same work dir resumes from that file (only ``--concurrency``
 and ``--max-attempts`` may change) and never recomputes measured trials.
+New runs carry the benchmark-source guard (``source_guard`` true in
+``run.json``); a run frozen before it existed resumes without it.
 """
 from __future__ import annotations
 
@@ -39,10 +41,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--max-attempts", type=int, default=3, help="attempts per trial for unmeasured outcomes")
     run.add_argument("--tasks-dir", type=Path)
     run.add_argument("--tasks", help="comma-separated task names (default: every task in --tasks-dir)")
-    run.add_argument("--arms", default="tofu,opencode", help="comma-separated arms: tofu, opencode, pi")
+    run.add_argument("--arms", default="tofu,opencode",
+                     help="comma-separated arms: tofu, opencode, pi, claude-code")
     run.add_argument("--protocol", choices=sorted(PROTOCOLS), default="vendor-6h")
     run.add_argument("--model", default="glm-5.3-flash", help="wire model name the agents send")
     run.add_argument("--relay-url", help="model relay base URL reachable from sandbox containers")
+    run.add_argument("--anthropic-url",
+                     help="Anthropic bridge base URL reachable from sandbox containers (claude-code arm)")
     run.add_argument("--files-url", help="artifact base URL (default: <relay-url>/files)")
     run.add_argument("--artifacts-manifest", type=Path)
     run.add_argument("--endpoint", help="sandboxGateway endpoint .../system/<cluster>")
@@ -67,6 +72,8 @@ def frozen_config(args) -> dict:
     if not args.tasks_dir or not args.relay_url or not args.artifacts_manifest or not args.endpoint \
             or not args.image or not args.proxy:
         raise SystemExit("a new run needs --tasks-dir --relay-url --artifacts-manifest --endpoint --image --proxy")
+    if "claude-code" in args.arms.split(",") and not args.anthropic_url:
+        raise SystemExit("the claude-code arm needs --anthropic-url (python -m evaluations.terminal_bench.anthropic_bridge)")
     tasks_dir = args.tasks_dir.resolve()
     names = [task.name for task in list_tasks(tasks_dir, args.tasks.split(",") if args.tasks else None)]
     identity = verify_task_identity(tasks_dir, names)
@@ -92,6 +99,8 @@ def frozen_config(args) -> dict:
         "context_tokens": args.context_tokens,
         "poll_interval_sec": args.poll_interval_sec,
         "run_label": args.run_label or args.work_dir.name,
+        "anthropic_url": args.anthropic_url.rstrip("/") if args.anthropic_url else None,
+        "source_guard": True,
     }
     args.work_dir.mkdir(parents=True, exist_ok=True)
     run_file.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
@@ -114,7 +123,8 @@ def main(argv: list[str] | None = None) -> int:
         image=config["image"], branch=config["branch"], proxy=config["proxy"],
         max_alive_min=config["max_alive_min"], max_attempts=config["max_attempts"],
         context_tokens=config["context_tokens"], poll_interval_sec=config["poll_interval_sec"],
-        run_label=config["run_label"])
+        run_label=config["run_label"], anthropic_url=config.get("anthropic_url"),
+        source_guard=bool(config.get("source_guard")))
     summary = Runner(run_config).run(args.concurrency)
     print(json.dumps(summary["arms"], indent=2))
     return 0

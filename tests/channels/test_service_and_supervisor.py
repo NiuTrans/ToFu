@@ -450,6 +450,27 @@ def test_supervisor_starts_restarts_and_stops_from_configuration(store, router, 
     assert not FakeAdapter.instances[1].running
 
 
+def test_a_restart_reports_the_exit_until_the_new_session_connects(
+        store, router, installed, enabled, supervisor):
+    from lib.router.watchdog.signals import UNHEALTHY_CHANNEL_STATES
+    enabled()
+    assert supervisor.reconcile_owner(OWNER, store=store, adapter_factory=FakeAdapter) == 'started'
+    store.set_status('dx', 'connected', '', connected_at_ms=5)
+    refused = ('disconnected', 'bridge exited (1): SSO_SESSION_CONFIGURATION: refused')
+    for restart in (1, 2):
+        FakeAdapter.instances[-1].running = False
+        FakeAdapter.instances[-1].exit = refused
+        assert supervisor.reconcile_owner(OWNER, store=store, adapter_factory=FakeAdapter) == 'started'
+        status = store.account('dx')['status']
+        # What Settings and the Router Watchdog read after the tick: the exit, never a fresh 'starting'.
+        assert (status['state'], status['detail']) == refused and status['state'] in UNHEALTHY_CHANNEL_STATES
+        assert status['connectedAtMs'] == 5
+        if restart == 1:
+            failing_since = status['updatedAtMs']
+    assert status['updatedAtMs'] == failing_since  # a persistent failure keeps the time it began
+    assert len(FakeAdapter.instances) == 3 and FakeAdapter.instances[-1].running
+
+
 @pytest.mark.parametrize('state', ['needs_login', 'kicked'])
 def test_session_required_and_kickoff_stop_restarts_until_reenabled(
         store, router, installed, enabled, supervisor, state):

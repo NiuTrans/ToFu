@@ -58,7 +58,8 @@ def _channel(store, owner: int, conversation_id: str, turn_id: str) -> dict[str,
 
 
 def _enqueue(store, owner: int, channel: dict[str, Any], conversation_id: str, turn_id: str,
-             kind: str, text: str, key: str, *, reply_to: str | None = None) -> None:
+             kind: str, text: str, key: str, *, reply_to: str | None = None,
+             attachments: list[dict[str, Any]] | None = None) -> None:
     text = str(text or '').strip()
     if not text:
         return
@@ -67,7 +68,7 @@ def _enqueue(store, owner: int, channel: dict[str, Any], conversation_id: str, t
     try:
         outbox.enqueue(owner, channel['thread'], text, idempotency_key=key, reply_to=reply_to,
                        origin={'kind': kind, 'conversationId': conversation_id, 'turnId': turn_id},
-                       store=store)
+                       attachments=attachments, store=store)
     except ChannelError as error:
         logger.warning('[Channels] %s not enqueued turn=%s: %s', kind, turn_id, error.code)
 
@@ -255,6 +256,26 @@ def _notify_notice_failure(task: dict[str, Any], owner: int, conversation_id: st
              f'{turn_id}:notice-review:{outcome}', reply_to=reply_to)
 
 
+def _final_answer_attachments(task: dict[str, Any], owner: int, conversation_id: str,
+                              channel: dict[str, Any], text: str) -> tuple[str, list[dict[str, Any]]]:
+    """The answer's explicitly linked workspace files (C10), and a note per refused one.
+
+    Reading them never blocks the answer itself: any failure sends the text alone.
+    """
+    from lib.channels.model import CHANNEL_TRAITS, ThreadKey
+    try:
+        if not CHANNEL_TRAITS[ThreadKey.parse(channel['thread']).channel].get('attachments'):
+            return text, []
+        from lib.channels.attachments import for_final_answer
+        files, notes = for_final_answer(task, owner, conversation_id, text)
+    except Exception:
+        logger.warning('[Channels] final-answer attachments skipped conv=%s', conversation_id, exc_info=True)
+        return text, []
+    if notes:
+        text = text.rstrip() + '\n\n' + '\n'.join(f'（未附上：{note}）' for note in notes)
+    return text, files
+
+
 def on_task_terminal(task: dict[str, Any]) -> None:
     if task.get('_parentTaskId') or task.get('_transientRuntime'):
         return
@@ -277,8 +298,10 @@ def on_task_terminal(task: dict[str, Any]) -> None:
     if outcome == 'done' and silent_turn_declared(task):
         return
     if outcome == 'done':
-        _enqueue(store, int(owner), channel, conversation_id, turn_id, 'router_reply',
-                 str(task.get('content') or ''), turn_id)
+        text, files = _final_answer_attachments(task, int(owner), conversation_id, channel,
+                                                str(task.get('content') or ''))
+        _enqueue(store, int(owner), channel, conversation_id, turn_id, 'router_reply', text, turn_id,
+                 attachments=files)
     _enqueue(store, int(owner), channel, conversation_id, turn_id, 'router_status',
              _TERMINAL_LABELS[outcome], f'{turn_id}:terminal:{outcome}')
 

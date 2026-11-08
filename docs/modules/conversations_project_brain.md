@@ -17,6 +17,7 @@ Schema: [`project_brain_v1.schema.json`](../../contracts/project_brain_v1.schema
 | Event append, projection fold, receipt, checkpoint | `lib/storage_authority_sql/operations_pkg/_project_brain.py` |
 | Operation registration | `lib/storage_authority_sql/operation_domains/project_brain.py` |
 | Automatic work signals, context, overlap, Checkers | `lib/conversations/project_brain.py` |
+| Integration radar: cross-checkout change records, notices, landing notices | `lib/project_mod/integration_radar.py` |
 | Backup-backed cutover and restart reconciliation | `lib/conversations/project_brain_startup.py` |
 | Read projection and human command HTTP API | `routes/api_v1/project_brain.py` |
 | Retained browser UI | `frontend/src/runtime/sections/project-brain.js` |
@@ -128,15 +129,57 @@ Problem: broad project feeds distract ordinary workers. Decision: only the exact
 - Human Watch mutations fold a bounded narrative on their existing event, so
   current Watch state reaches the eligible coordinator without a second event.
 
-## File overlap advisory
+## Integration radar
 
-After a successful write, the runtime compares normalized changed paths against
-other running tasks owned by the same user/project. A prefix overlap queues one
-user-role advisory for both tasks before their next tool round and pushes a UI
-hint. Deduplication is by task pair plus overlap path, with at most 20 keys per
-task. Settlement discards undelivered advice. This data is process-local: it is
-never written to Feed, Board, or a persistent inbox, and detection
-failure is fail-soft.
+**Problem (2026-11-07).** Conversations editing the same code did not know about each
+other. The former file overlap advisory compared project-relative paths of tasks running
+at the same instant in the same process: a write in `.tofu/worktrees/a/lib/x.py` never
+matched `lib/x.py` in another worktree, the API host and the execution host saw different
+peers, work that was unlanded but idle was invisible, and the advice named no one. Yet
+34% of the landings between 11-01 and 11-07 had a branch living at the same time that
+changed the same source file. The earlier Board asked agents to post and claim work, which they
+forgot; per-module locks made writers wait for hours (owner decision 2026-10-28).
+
+**Decision.** `lib/project_mod/integration_radar.py` derives awareness from what
+writers actually do and checks it against Git. After every successful write
+(`note_file_signal`), the writer's paths are recorded relative to the Git checkout they
+were written in, under the repository's shared `<git-common-dir>/tofu-radar/`: one
+record per conversation and checkout, written only by that conversation, so every
+process and every worktree sees the same facts. A recorded path counts while that
+checkout still differs from its merge base with the shared checkout's current branch
+(committed, uncommitted, deleted or untracked); it stops counting once landed or
+reverted, and a record leaves with its checkout. Known generated outputs
+(`generated_integration.output_family`) are not recorded, because landing rebuilds
+them from the merged sources. Delivery is notify-only, at the moment it matters:
+
+- the writer of a file that another conversation's unlanded work also changes gets the
+  other conversation's title and id, checkout, branch, last edit time and the exact
+  `git diff` that shows their version; the other conversation gets the mirror notice at
+  its next round boundary;
+- the first write of a file in a linked worktree lists the commits the current branch
+  landed on it since the worktree's branch point;
+- after `git_land` publishes a merge, every conversation whose unlanded work changes a
+  landed file gets a notice to merge before verifying (or, in the shared checkout, that
+  its uncommitted edits were merged on top), and the landed checkout's records retire.
+
+Advice joins the task's existing bounded queue (at most 20 keys per task, deduplicated)
+before the next tool round, with a `path_overlap` UI hint; notices from other writers and
+landers wait in `notices/<conversation>.jsonl` until a round boundary of that
+conversation consumes them. The radar's files are reconstructible advice, never
+authority: no write, landing or tool call waits for or is refused by them, and every
+failure is fail-soft. Git runs only for a candidate overlap, a first touch or a landing;
+an ordinary write reads one small directory (measured on the shared volume: about 14 ms
+for 20 records plus the atomic record write). Edits that bypass the write tools and the
+command journal reach the radar when they are committed.
+
+**Alternatives rejected.** A self-reported Board or claims: agents do not maintain
+them and stale claims mislead. Locks or serialization per module: owner decision
+2026-10-28. Storing the records in the storage authority: a cross-engine contract for
+advisory data the repository already scopes. Querying every worktree's status per
+write: a whole-tree walk per checkout on the shared volume. Keeping the in-process
+snapshot: it cannot see the other host, other worktrees or idle unlanded work.
+Specifications: `tests/project_mod/test_integration_radar.py` and the overlap case in
+`tests/project_mod/test_project_brain_signal_driven.py`.
 
 ## Executable Charter and Checkers
 

@@ -1,5 +1,24 @@
 import java.security.MessageDigest
 
+// Local kernel runtime, produced outside this build (android/README.md "Local kernel"):
+// -Ptofu.localKernel.jniLibsDir=<dir with arm64-v8a/libproot.so, libproot-loader.so, …>
+// -Ptofu.localKernel.assetsDir=<assets root with kernel/index.json and its archives>
+// Without them the app builds without the runtime and reports it as not available.
+val localKernelJniLibs = providers.gradleProperty("tofu.localKernel.jniLibsDir").orNull?.let { file(it) }?.also { dir ->
+    val abis = dir.listFiles().orEmpty().filter { it.isDirectory }.map { it.name }
+    require(abis == listOf("arm64-v8a")) { "tofu.localKernel.jniLibsDir=$dir must contain exactly arm64-v8a/, found $abis" }
+    for (library in listOf("libproot.so", "libproot-loader.so")) {
+        require(File(dir, "arm64-v8a/$library").isFile) { "tofu.localKernel.jniLibsDir=$dir lacks arm64-v8a/$library" }
+    }
+}
+val localKernelAssets = providers.gradleProperty("tofu.localKernel.assetsDir").orNull?.let { file(it) }?.also { dir ->
+    require(File(dir, "kernel/index.json").isFile) { "tofu.localKernel.assetsDir=$dir lacks kernel/index.json" }
+    // AGP's asset merger gunzips every *.gz asset and drops the extension, which would break
+    // the archives' pinned names and SHA-256; the runtime archives are named *.tgz instead.
+    val gzipped = dir.walk().filter { it.isFile && it.extension.equals("gz", ignoreCase = true) }.toList()
+    require(gzipped.isEmpty()) { "tofu.localKernel.assetsDir: AGP would gunzip $gzipped while merging assets; name runtime archives *.tgz" }
+}
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -83,6 +102,10 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
+    // proot's and talloc's licence texts (android/native/licenses) are the assets
+    // ui/LicencesScreen shows, packaged in place rather than copied.
+    sourceSets.getByName("main").assets.srcDir(rootProject.file("native/licenses"))
+
     // buildConfig=true generates com.tofu.client.BuildConfig with VERSION_NAME /
     // VERSION_CODE (off by default in AGP 8+), consumed by the home-screen
     // version footer so the shipped version is visible in-app.
@@ -122,13 +145,35 @@ android {
             }
         }
     }
+    // MigrationTestHelper reads Room's exported schemas as assets. An app
+    // module's unit tests only see the tested variant's merged assets (test
+    // source-set assets are ignored), so they are DEBUG assets: release APKs
+    // never ship them, and the release unit-test variant skips that test.
+    sourceSets.getByName("debug").assets.srcDir("$projectDir/schemas")
     // The Compose Compiler version is now governed by the
     // org.jetbrains.kotlin.plugin.compose plugin (pinned to the Kotlin
     // version in the root build), so no manual composeOptions is needed.
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        // proot and its loader are executables shipped as lib*.so: they must be extracted
+        // into nativeLibraryDir (extractNativeLibs=true), the only app location Android
+        // still lets an app exec at targetSdk 29+.
+        jniLibs.useLegacyPackaging = true
     }
+    // A gzip stream does not compress again: store the runtime archives so the first
+    // install inflates them once.
+    androidResources.noCompress += "tgz"
+
+    sourceSets.getByName("main") {
+        localKernelJniLibs?.let { jniLibs.srcDir(it) }
+        localKernelAssets?.let { assets.srcDir(it) }
+    }
+}
+
+ksp {
+    // One JSON per schema version, committed: the migration-test history.
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {
@@ -146,12 +191,25 @@ dependencies {
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
+    testImplementation("androidx.room:room-testing:2.6.1")
 
     // ── Encrypted secrets (Keystore-backed) ──
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // ── Headless login / session ──
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // ── SSH kernels: the tunnel the phone dials out (ssh/**) ──
+    // Apache MINA SSHD's client; net.i2p eddsa supplies Ed25519, which Android
+    // lacks at API 26. No BouncyCastle: Android already registers a stripped
+    // provider named "BC". MINA never uses commons-logging, so its bridge goes.
+    // sshd-core and sshd-common each ship Maven's META-INF/DEPENDENCIES listing,
+    // which the APK cannot hold twice; the exclusion lives beside its cause.
+    implementation("org.apache.sshd:sshd-core:2.20.1") {
+        exclude(group = "org.slf4j", module = "jcl-over-slf4j")
+    }
+    implementation("net.i2p.crypto:eddsa:0.3.0")
+    android.packaging.resources.excludes += "/META-INF/DEPENDENCIES"
 
     // ── WebView (androidx variant, cookie APIs) ──
     implementation("androidx.webkit:webkit:1.11.0")

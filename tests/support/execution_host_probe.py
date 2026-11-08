@@ -2,6 +2,8 @@
 
 Used only by resident-host process tests. The public execution host and manager
 lease are unchanged; the application factory supplies a controlled owned thread.
+A ``fail-close`` file in the project makes the joined shutdown raise its text
+as a TimeoutError, like a shutdown stack whose bounded stop expired.
 """
 import asyncio
 import os
@@ -39,6 +41,9 @@ def application(shutdown, _plan):
     async def close():
         if worker.ident is not None:
             await asyncio.to_thread(worker.join)
+        failure = root / 'fail-close'
+        if failure.exists():
+            raise TimeoutError(failure.read_text())
 
     return SimpleNamespace(startup=startup, shutdown=close, extensions={
         'tofu_shutdown_requested': shutdown, 'tofu_boot_runner': runner})

@@ -81,6 +81,48 @@ def test_execution_survives_reattach_and_stop_waits_for_physical_exit(tmp_path):
             service.stop(30)
 
 
+def _stop_releasing_drain(service, record, **options):
+    with ThreadPoolExecutor() as pool:
+        stopped = pool.submit(service.stop, 30, **options)
+        wait_for(lambda: (service.project / 'draining').exists())
+        os.kill(record['pid'], signal.SIGUSR1)
+        return stopped.result(30)
+
+
+def test_failed_close_is_preserved_unless_an_explicit_replacement_retires_it(tmp_path):
+    service = ProbeService(str(tmp_path), sys.executable)
+    plan = {'application': 'controlled-execution'}
+    (tmp_path / 'fail-close').write_text('process background services did not stop')
+    try:
+        service.ensure(plan, environment(tmp_path))
+        first = wait_for(lambda: (value if (value := service.record()).get('state') == 'ready' else None))
+        with pytest.raises(RuntimeError, match='shutdown failed: TimeoutError: process background'):
+            _stop_releasing_drain(service, first)
+        assert not service.host_matches(first)
+        assert service.record()['state'] == 'failed'
+        with pytest.raises(RuntimeError, match='explicit restart'):
+            service.ensure(plan, environment(tmp_path))
+
+        assert service.stop(30) == ''
+        (tmp_path / 'draining').unlink()
+        service.ensure(plan, environment(tmp_path))
+        second = wait_for(lambda: (value if (value := service.record()).get('state') == 'ready' else None))
+        retired = _stop_releasing_drain(service, second, retire_failed_close=True)
+        assert retired == 'TimeoutError: process background services did not stop'
+        assert not process_matches(second['pid'], second['processStartTime'])
+        assert not service.state_path.exists()
+
+        (tmp_path / 'fail-close').unlink()
+        service.ensure(plan, environment(tmp_path))
+        third = wait_for(lambda: (value if (value := service.record()).get('state') == 'ready' else None))
+        assert third['serviceId'] not in (first['serviceId'], second['serviceId'])
+    finally:
+        remaining = service.record()
+        if service.host_matches(remaining):
+            os.kill(remaining['pid'], signal.SIGUSR1)
+            service.stop(30)
+
+
 def test_manager_exec_retains_execution_and_exit_waits_for_physical_drain(tmp_path):
     program = """import os, signal, sys
 from tests.server.test_execution_service import ProbeService, environment

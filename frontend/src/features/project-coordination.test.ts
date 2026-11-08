@@ -267,7 +267,7 @@ it('keeps authorization form drafts, disclosures and focus mounted during manual
 it('pages an empty matching roster page without hiding its next-page action and includes assignment recipients', async () => {
   const p = ports();
   p.workerConversations = vi.fn(async (_path, cursor) => cursor
-    ? { conversations: [{ conversationId: 'new-shell', title: 'Not yet started', turnCount: 0, coordinatorId: 'coord' }], nextCursor: null, coverage: 'complete' as const }
+    ? { conversations: [{ conversationId: 'new-shell', title: 'Not yet started', turnCount: 0, coordinatorId: 'coord', folderId: null }], nextCursor: null, coverage: 'complete' as const }
     : { conversations: [], nextCursor: 'next-page', coverage: 'page' as const });
   const run = openProjectCoordination(p); await rendered();
   document.querySelectorAll<HTMLButtonElement>('[role=tab]')[1].click();

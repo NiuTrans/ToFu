@@ -7,7 +7,7 @@ injected ports; no route module is imported here.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 from lib.conversation_sync.command_service import ConversationTurnCommandService
@@ -34,27 +34,6 @@ def _was_aborted_after(
     from lib.conversation_sync.pending_abort import was_pending_abort_after
 
     return was_pending_abort_after(conversation_id, user_id, started_at)
-
-
-def _start_task(
-    conversation_id: str,
-    config: dict[str, Any],
-    request_data: Mapping[str, Any],
-    abort_after_ts: float | None,
-    on_task_registered: Callable[[str], None],
-    *, execution_clock=None,
-) -> tuple[str, Any]:
-    from lib.conversation_sync.task_start import (
-        start_conversation_attempt_executor,
-    )
-
-    return start_conversation_attempt_executor(
-        conversation_id,
-        config,
-        abort_after_ts=abort_after_ts,
-        on_task_registered=on_task_registered,
-        execution_clock=execution_clock,
-    )
 
 
 def _mutate_file_changes(
@@ -138,7 +117,6 @@ def _retain_media_attachments(
 conversation_turn_commands = ConversationTurnCommandService(
     build_user_message=_build_user_message,
     was_aborted_after=_was_aborted_after,
-    start_task=_start_task,
     mutate_file_changes=_mutate_file_changes,
     retain_attachments=_retain_media_attachments,
 )

@@ -2,16 +2,24 @@
  * its card (the card itself wears the shared coordination-leader styles), the
  * compact header on the router conversation, and the compact Router controls
  * it hosts (the Worker model select also shows on Project Router coordinator
- * conversations). Tokens only; shared controls keep their ui-kit styling. */
+ * conversations; "Act for me" is the owner's delegation). Tokens only; shared
+ * controls keep their ui-kit styling. */
 #globalRouterEntry{flex-shrink:0}
 .global-router-header{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-1) var(--space-3);padding:var(--space-2) var(--space-4);border-bottom:var(--control-edge-inset) solid var(--border);color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui)}
 .global-router-header[hidden]{display:none}
 .global-router-header-subtitle{min-width:0;overflow-wrap:anywhere}
 /* Compact disclosures: the summary is the at-a-glance value; an open one takes the row. */
 .global-router-header>details[open]{flex-basis:100%}
-.router-worker-model,.router-instructions,.router-watchdog{min-width:0;color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui)}
-.router-instructions>summary,.router-watchdog>summary{cursor:pointer;color:var(--text-tertiary);overflow-wrap:anywhere}
-.router-instructions>summary:hover,.router-watchdog>summary:hover{color:var(--text-primary)}
+.router-worker-model,.router-instructions,.router-watchdog,.router-owner-delegation{min-width:0;color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui)}
+.router-instructions>summary,.router-watchdog>summary,.router-owner-delegation>summary{cursor:pointer;color:var(--text-tertiary);overflow-wrap:anywhere}
+.router-instructions>summary:hover,.router-watchdog>summary:hover,.router-owner-delegation>summary:hover{color:var(--text-primary)}
+/* "Act for me" (docs/ROUTER.md R9): the grant switch, its state and the last audited use. */
+.router-owner-delegation-body{display:flex;flex-direction:column;gap:var(--space-1);padding-top:var(--space-2)}
+.router-owner-delegation-body>p{margin:0;overflow-wrap:anywhere}
+.router-owner-delegation-body>[hidden]{display:none}
+.router-owner-delegation-advisory{color:var(--warning-text)}
+.router-owner-delegation-last{color:var(--text-tertiary)}
+.router-owner-delegation-error{color:var(--error-text)}
 /* The Worker model is one labelled select on a single row; a failed read is
  * one quiet line beside its retry. */
 .router-worker-model{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1) var(--space-2)}

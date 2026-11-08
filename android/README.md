@@ -314,6 +314,287 @@ export TOFU_SUPERVISOR_PROJECTS=/abs/path/to/tofu   # ':'-separated allow-list
 Then in the app: edit the server → set **Project path** to the same absolute
 path → open it from the server list → use the **Start / Stop** controls.
 
+## Local kernel (Tofu on this phone)
+
+**Problem.** The phone itself should run the complete harness, not only a WebView
+onto a remote server. Decision (Android design, Option B at targetSdk 34; the
+device spike S1 is pending): the APK ships an Ubuntu 24.04 arm64 userland and a
+Tofu payload, runs them under proot, and starts the normal Linux server in
+local-kernel mode on `127.0.0.1`. The server half is
+[`docs/ANDROID_LOCAL_KERNEL.md`](../docs/ANDROID_LOCAL_KERNEL.md) (launch
+contract); proot itself is [`native/README.md`](native/README.md). The Kernels
+list's "This phone" starts it through `session/LocalKernelController`, which
+adapts the API below to the kernel model; the session cookie, the keep-running
+policy, the running-work signal, the notification permission and the licences
+screen are in [`docs/SUPERVISOR_DESIGN.md`](docs/SUPERVISOR_DESIGN.md) §5.
+
+| Concern | Owner (`app/src/main/java/com/tofu/client/runtime/`) |
+|---|---|
+| Public API: `availability`, `start`, `stop`, `state`, `endpoint`, `secret`, `setHasRunningWork` | `LocalKernel.kt` |
+| State machine, restart budget, stop protocol | `LocalKernelSupervisor.kt`, `LocalKernelState.kt` |
+| Foreground service, notifications, wakelock | `LocalKernelService.kt` |
+| Install, SHA-256 and manifest checks, payload pointers | `RuntimeInstaller.kt`, `TarReader.kt`, `RuntimeIndex.kt`, `KernelLayout.kt` |
+| Per-install secret | `KernelSecret.kt`, `AndroidKeyStoreSecretWrapper.kt` |
+| proot command, launch protocol, readiness, signals | `KernelProcess.kt`, `AndroidKernelRuntime.kt` |
+
+**Building with the runtime.** Both inputs come from other build steps and are
+passed as Gradle properties; each is validated when set:
+
+```
+./gradlew :app:assembleDebug \
+  -Ptofu.localKernel.jniLibsDir=<proot BUILD_DIR>/jniLibs \
+  -Ptofu.localKernel.assetsDir=<assets root holding kernel/index.json and its archives>
+```
+
+`jniLibsDir` must contain exactly `arm64-v8a/` with `libproot.so` and
+`libproot-loader.so` (a matched pair from one proot build). Without the
+properties the app builds without the runtime and LOCAL reports "Not available in
+this build"; the same holds on devices without arm64 (no `libproot.so` in
+`nativeLibraryDir`), so the APK stays installable everywhere for URL kernels.
+`packaging.jniLibs.useLegacyPackaging = true` is unconditional: Android 10+ lets an
+app exec files only from `nativeLibraryDir`, so the `.so` files must be extracted
+at install (stored compressed in the APK).
+
+**Runtime contract v1, consumer side.**
+- `assets/kernel/index.json`: `{"format":1,"abi":"arm64-v8a","rootfs":{version,file,sha256,size},"payload":{…}}`.
+  Versions become directory names and must match `[A-Za-z0-9][A-Za-z0-9._+-]*`.
+- Each archive is a deterministic gzip-compressed tar named `rootfs-<version>.tgz`
+  / `payload-<version>.tgz`. Never `*.gz`: AGP's asset merger gunzips every
+  `*.gz` asset and drops the extension (sdk-common `AssetItem.shouldBeUnGzipped`),
+  which would break the pinned name and SHA-256; the build refuses `*.gz` under
+  `assetsDir` and stores `*.tgz` uncompressed (`androidResources.noCompress`).
+  Its first entry, `.manifest.json` (frozen by the producer in
+  `android/runtime/README.md` §2),
+  is `{"format":1,"entries":[{"path","type","mode","size","sha256","target"}]}`:
+  `type` is `file`/`dir`/`symlink`/`hardlink`, `mode` is a JSON string of four
+  octal digits equal to the tar header's mode (`"0755"`, `"4755"`, `"1777"`;
+  anything else is a malformed manifest), `size`+`sha256` are required for
+  files and `target` for links, paths are archive-relative, and the producer's
+  other keys (`abi`, `kind`, `version`, `inputs`) are ignored. Only those four entry
+  types are accepted (ustar, PAX per-entry headers, GNU long names); devices,
+  FIFOs and global PAX headers are refused.
+- Layout, all under `files/kernel/` (nothing in `cache`, which Android may clear
+  under a running process): `rootfs/` (+ `rootfs.version`), `payload/<version>/`
+  with the `current` and `previous` symlinks, `data/` (bound at `/var/lib/tofu`),
+  `home/` (`/root`), `proot-tmp/` (`PROOT_TMP_DIR`) and `shm/` (`/dev/shm`). The
+  last two are emptied before every launch. The rootfs path never moves:
+  proot's `--link2symlink` stores absolute host paths.
+- Install: an archive's size and SHA-256 are checked against the index *before*
+  extraction and a mismatch is refused. Extraction goes to a staging directory,
+  every entry is checked against the manifest (type, mode, size, SHA-256, link
+  target; nothing missing or extra) and the directory is renamed into place.
+  Paths with `..`, absolute paths and writes through a symlink parent are refused.
+  Permission bits and mtimes are applied; set-id bits are not representable
+  through java.nio and are inert on `/data` (mounted `nosuid`) and under proot.
+- Hard links become relative symlinks to their target: AOSP's
+  `private/app_neverallows.te` forbids apps to create hard links.
+- A new payload launches as *pending*. Only after its kernel answered
+  `/api/v4/meta` does `commit` switch `current` (one atomic rename of a symlink)
+  and keep the replaced payload as `previous`, the last-known-good; older payloads
+  are deleted. A pending payload that ends in safe mode is rejected and the next
+  start runs `current` again (with no committed payload it is retried). The
+  rootfs is replaced only when its pinned version changes; packages installed with
+  apt are lost then.
+
+**Launch.** `libproot.so --kill-on-exit --link2symlink --root-id --rootfs=…
+--bind=/dev --bind=/proc --bind=/sys --sysvipc --ashmem-memfd --bind=<shm>:/dev/shm
+--bind=<payload>:/opt/tofu --bind=<data>:/var/lib/tofu --bind=<home>:/root
+--cwd=/opt/tofu /opt/tofu/bin/tofu-local-kernel --data-dir /var/lib/tofu`, with
+the complete environment `PROOT_LOADER`, `PROOT_TMP_DIR`, `PATH`, `HOME=/root`,
+`LANG=C.UTF-8` (proot hands it to the guest; no `LD_*`). `--sysvipc`,
+`--ashmem-memfd` and the `/dev/shm` bind are the proot lane's recommendations,
+pending S1. The secret is written to stdin and stdin is closed; the single stdout
+record gives the port and the server's pid; readiness is a credential-less
+`GET /api/v4/meta` polled at the app's existing start-poll cadence
+(`ServerLifecycle.START_POLL_INTERVAL_MS`). There is no boot deadline: a first
+boot under proot is unmeasured, and Stop is always available.
+
+**States.** `Stopped → Starting → Ready`, `Stopping` while a stop drains,
+`Failed(cause)` and `SafeMode` until the user starts it again. The service is a
+`specialUse` foreground service, started only while the app is in the foreground,
+`START_NOT_STICKY`: after process death the kernel waits for the user.
+`LocalKernel.start` asks for the service and starts the supervisor itself, so
+`state` already shows the start when it returns `Requested` (a caller awaiting
+its outcome never sees the previous run's); the service only enters the
+foreground and follows the supervisor.
+
+| End of a generation | Result |
+|---|---|
+| the app asked for the stop | `Stopped` |
+| proot itself died by SIGKILL (status 0x80 + 9) | `Failed(KilledBySystem)`, guidance shown, no restart |
+| status 0 (the in-app shutdown) | `Stopped` |
+| status 2 (usage or secret format) | `Failed(UsageError)` |
+| bad stdout record, readiness answered 1xx/3xx/4xx | `Failed(ProtocolViolation)` |
+| `503 server_boot_failed`, or any other status | crash: restart at once; the 5th crash within 120 s → `SafeMode` |
+
+proot exits with the status of the last guest that exited normally (255 if none),
+so statuses other than proot's own SIGKILL are hints: the server's own exits
+(0, 1, 2) come through, but a guest's signal death can surface as any earlier
+status. Non-zero is restarted as a crash; a stale 0 stops without a restart loop.
+The restart budget is the desktop lifecycle manager's (`server_manager.py`
+`DEFAULT_MAX_FAILURES`, `DEFAULT_FAILURE_WINDOW`); a requested stop never spends
+it and a user start resets it.
+
+**Stopping.** proot ignores SIGTERM and must never be SIGKILLed alone (it sets no
+`PTRACE_O_EXITKILL`, so its guests would run on untraced). A stop sends SIGTERM to
+the server pid from the stdout record; `--kill-on-exit` ends the rest. Before that
+record exists, or at the launch contract's stop deadline, 35 s after SIGTERM
+(§7: `TOFU_SHUTDOWN_HARD_SECS` 30 s plus `server_manager.py`'s 5 s margin;
+`LaunchProtocol.STOP_ESCALATION_MS`), the stop is forced with SIGQUIT to proot, found
+as the app's direct child in `/proc`, which SIGKILLs every guest and exits.
+Android's `java.lang.Process` has no `pid()`, and `destroy()` would only send the
+ignored SIGTERM and close the pipes. Once proot has exited, and before every
+launch, any remaining process of the app's uid (other than the app) is SIGKILLed:
+those are guests a killed proot left behind.
+
+**Killed by the system (Android 12+ phantom processes).** Verified in AOSP
+(`PhantomProcessList.java`, `ActivityManagerService.java`,
+`ActivityManagerConstants.java`):
+- Every process an app forks counts against a system-wide limit of 32
+  (`max_phantom_processes`, DeviceConfig namespace `activity_manager`). Above it,
+  victims are taken from the app whose process is least important, oldest first,
+  with SIGKILL; the app itself survives. A foreground service makes the app more
+  important but does not exempt its children, and proot is this app's oldest.
+- Children of apps in the background (process state `HOME` or lower priority) are
+  also killed for sustained CPU use, together with the app. A running foreground
+  service is state `FOREGROUND_SERVICE` and is exempt from that rule.
+- Android 12L and later gate both rules behind the feature flag
+  `settings_enable_monitor_phantom_procs`; Android 12 has no such flag.
+
+Guidance shown with `KilledBySystem`: on Android 14+, Settings → System →
+Developer options → **Disable child process restrictions** (AOSP Settings, first
+in `android14-release`); on Android 12–13, from a computer:
+`adb shell "/system/bin/device_config set_sync_disabled_for_tests persistent; /system/bin/device_config put activity_manager max_phantom_processes 2147483647"`
+(both subcommands exist in `DeviceConfigService` of 12, 12L and 13; no
+developer.android.com page documents the limit). Before Android 12 the app only
+offers a restart.
+
+**Secret.** 256 bits from SecureRandom as `tofu_admin_<64 hex>`, generated once
+per install, kept only as AES-GCM ciphertext under a non-exportable AndroidKeyStore
+key in `noBackupFilesDir`, written to the kernel's stdin and never to argv, the
+environment, Room, URLs, saved state or logs (crash stderr tails are scrubbed of
+it). A stored secret that no longer decrypts fails the start instead of being
+replaced: the kernel's data already admitted it.
+
+**Notifications, wakelock, backup.** Channels "Local kernel" (low importance;
+the ongoing "Tofu is running on this phone" with Open and Stop, and failure
+notices with guidance) and "Approval needed" (high importance, for approval
+prompts). A partial wakelock is held only while `LocalKernel.setHasRunningWork`
+is true and the kernel is ready; the app sets it from the kernel's
+`/health/quiescence` while the user is away from This phone. The first start on
+Android 13+ asks for `POST_NOTIFICATIONS`; if it is denied the kernel still runs,
+but the ongoing notification (with Stop) and the failure notices stay hidden, so
+the "This phone" card carries its own Stop. `allowBackup="false"` stays, and
+`res/xml/data_extraction_rules.xml` excludes every domain from cloud backup and
+device transfer (targetSdk 31+ no longer stops device transfer through
+`allowBackup` alone).
+
+**Decisions.**
+- *Forced stop through proot, then a `/proc` sweep.* Rejected: `Process.destroy()`
+  (SIGTERM, which proot ignores), SIGKILL to proot (guests survive untraced),
+  reflection on the process pid (not public API on Android).
+- *A system kill is not restarted.* Restarting would fight the platform's policy
+  and, under a persistent limit, loop into a misleading safe mode; the user needs
+  the guidance first.
+- *Hard links as relative symlinks.* `Files.createLink` is denied on Android;
+  copies would duplicate binaries such as git's dozens of hard-linked commands.
+- *A JDK-only tar reader* instead of a dependency: four entry types and three
+  header formats are all the producer emits.
+
+**Only a device can verify:** proot launch at targetSdk 34 (W^X, 16 KB pages);
+foreground-service survival, Doze, OEM process killers and background-start
+limits; the signal and exit-status behaviour of proot above; the phantom-process
+limit in a long run — several Workers and tool calls over an extended period, with
+the developer option off and on; the recommended proot options; extraction time
+and disk use; AndroidKeyStore wrap/unwrap; notifications with
+`POST_NOTIFICATIONS` denied; the This phone flow end to end (the WebView loading
+the local kernel with the cookie installed, no other 127.0.0.1 port reached,
+the stop on leaving the app or switching kernels, Keep running across screen-off
+and Doze, the wakelock following running tasks).
+
+Verification on the host: the pure-JVM tier of `./test-local.sh` runs
+`LocalKernelSupervisorTest` (fake process seams), `KernelProcessTest` (including a
+real `/bin/sh` child for stdin, SIGTERM and SIGKILL) and `KernelSecretTest`; its
+Robolectric tier runs `RuntimeInstallerTest` against real archives;
+`./gradlew test` adds `LocalKernelServiceTest` and `LocalKernelManifestTest`
+(merged manifest and backup rules). APK checks with stub libraries and assets:
+
+```
+mkdir -p /tmp/jni/arm64-v8a && : > /tmp/jni/arm64-v8a/libproot.so && : > /tmp/jni/arm64-v8a/libproot-loader.so
+./gradlew :app:assembleDebug -Ptofu.localKernel.jniLibsDir=/tmp/jni -Ptofu.localKernel.assetsDir=<stub assets root>
+unzip -lv app/build/outputs/apk/debug/app-debug.apk | grep -E 'lib/arm64-v8a/|assets/kernel/'  # .so Defl, .tgz Stored
+$ANDROID_HOME/build-tools/35.0.0/zipalign -c -P 16 -v 4 app/build/outputs/apk/debug/app-debug.apk
+$ANDROID_HOME/build-tools/35.0.0/aapt2 dump xmltree --file AndroidManifest.xml app/build/outputs/apk/debug/app-debug.apk | grep extractNativeLibs
+```
+
+## Device self-check
+
+The on-device half of spike S1 ([docs/ANDROID_KERNELS.md](../docs/ANDROID_KERNELS.md))
+lives in `app/src/main/java/com/tofu/client/selfcheck/`. Open it from the kernel
+list, under **Copy diagnostics** → **Device self-check**; the screen is
+`SelfCheckActivity`, the run is coordinated by `SelfCheckRun`, and
+`SelfCheckService` is a `specialUse` foreground service so the background phase
+runs under exactly the local kernel's conditions.
+
+**Owner flow, three taps:** open **Device self-check**, tap **Run self-check**,
+then share the report. When the foreground stress phase ends the screen asks you
+to press Home; the background phase then runs under the foreground service, and
+the completion notification carries **Share report** (it opens the share sheet
+directly). The duration preset (1, 5, 15 or 60 minutes **per phase**, default 5)
+is a diagnostic choice: 5 minutes is AOSP's `POWER_CHECK_INTERVAL`, so each phase
+spans at least one system scan.
+
+What a run measures, in order:
+
+1. **Facts** (`AndroidDeviceFacts`): manufacturer/model/device, release, SDK and
+   security patch, page size and clock tick (`Os.sysconf`), ABIs, targetSdk,
+   versionName/buildId, `Os.uname()`, free storage and total RAM, battery-
+   optimization exemption, standby bucket, background restriction, notification
+   permission, the runtime versions in `assets/kernel/index.json`, and the
+   SHA-256 of `libproot.so`/`libproot-loader.so` in `nativeLibraryDir`.
+2. **Exec** (`ExecChecks`): `libproot.so --version` from `nativeLibraryDir`;
+   under proot `/bin/true`, `/bin/sh -c 'echo ok'`, the payload's
+   `/opt/tofu/python/bin/python3 -V` and `/usr/bin/git --version`; and a direct
+   `execve()` of `rootfs/usr/bin/true` without proot — harmless, and expected to
+   be refused at targetSdk ≥ 29. The guest checks reuse the kernel's own proot
+   command line and environment, so they measure what the kernel will get.
+3. **Kernel** (`KernelCheck`): start through `LocalKernel`, time to Ready, then
+   `GET /api/v4/meta` and the cheap authenticated read `GET /api/v4/swarm/config`
+   twice — without a credential (default deny must answer 401) and with
+   `Authorization: Bearer <secret>` (200). A kernel the check started is stopped
+   again; an already-ready one is only probed; a starting/stopping one is left
+   alone and the check is skipped.
+4. **Child-process stress** (`ChildStress`): one proot generation per phase with
+   32 sleepers (AOSP's system-wide cap) plus 2 CPU-busy workers, and a deaths
+   timeline with times and signals, sampled from `/proc` every second and from
+   the orchestrator's `wait -n -p`. Every child is cleaned up afterwards
+   (SIGQUIT to proot, then SIGKILL to survivors, matched by `/proc` start time).
+   The stress test is skipped while a local kernel is active: its processes
+   would be the cap's first victims and would corrupt the measurement.
+5. **Exit reasons**: `ActivityManager.getHistoricalProcessExitReasons` for the
+   app's own process on API 30+.
+
+The report is one JSON document (`selfcheckVersion: 1`) with a `summary` that
+maps onto the S1 questions, plus the human-readable summary screen. **Share
+report** sends the JSON through the share sheet via the app's existing
+FileProvider (`cache-path` already covers `cacheDir`). Reports contain no kernel
+secret, tokens, cookies, account names, Wi-Fi names or file contents: collectors
+never read them, HTTP probes keep only status and timings, and every string is
+scrubbed at serialization (`SelfCheckRedactor`, tested in
+`SelfCheckRedactionTest`).
+
+Liveness bounds (the self-check's own contract, not tunables): 60 s per exec
+command, 15 min for each kernel wait (start and stop), 1 s stress sampling,
+15 s for stress cleanup. If the app process dies mid-run, the next open kills the
+pids the run recorded and writes an `interrupted` report that embeds the last
+one, with the app's exit reasons since it started.
+
+Tests: the pure-JVM tier covers the report schema, redaction, the stress deaths
+timeline and cleanup, and the runtime-missing skip paths with fake process
+runners and system services; `AndroidSelfCheckFactsTest` (Robolectric) covers
+the device facts against shadow power/usage/notification/activity services and
+the share intent. See "Running the unit tests".
+
 ## Report a problem (error回传)
 
 **Problem.** A tester may have only a phone, without adb, an emulator or a
@@ -452,11 +733,11 @@ permanently, even if the list is later emptied.
 instead of a hand-made code, Tofu serves one itself
 (`routes/api_v1/mobile.py`):
 
-- `GET /api/v1/mobile/connect` — a scan-to-connect page. Its QR is built from
+- `GET /api/v4/mobile/connect` — a scan-to-connect page. Its QR is built from
   `location` in the browser, so the encoded address is correct behind any
   reverse-proxy prefix (code-server `/proxy/<port>/`, cloud IDE, …). Point the
   phone at it from the operator's authenticated browser.
-- `GET /api/v1/mobile/connect/link?url=…&name=…` — JSON
+- `GET /api/v4/mobile/connect/link?url=…&name=…` — JSON
   `{url, name, deepLink, qr}`: the `tofu://connect` deep link plus its PNG
   `data:` URI. `url` defaults to the request root but callers behind a proxy
   prefix should pass their exact address.
@@ -464,6 +745,16 @@ instead of a hand-made code, Tofu serves one itself
 Both sit behind the normal auth gate. The deep link decodes to the same
 `DeepLink.Connect` the scanner/paste paths use, so a scan adds the server in one
 tap.
+
+**SSH kernels.** For a Tofu that runs on a machine you can SSH into (its
+port stays on that machine's loopback): *Add → SSH tunnel*, enter host, SSH
+port, user and the Tofu port (15000), then either copy *This phone's key* into
+that machine's `~/.ssh/authorized_keys` or save the account password. The
+first tap on the kernel shows the host's key fingerprint; compare it with
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the machine before
+*Trust and connect*. A host whose key later changes is refused until the kernel
+is deleted and added again. Design and limits:
+[`docs/SUPERVISOR_DESIGN.md`](docs/SUPERVISOR_DESIGN.md) §6.
 
 ## Update check
 
@@ -502,8 +793,10 @@ A hardening pass over the whole shell:
   up later) use the shared 48dp `TouchTarget` (`Components.kt`).
 - **Platform niceties.** `enableOnBackInvokedCallback` (Android 13+ predictive
   back) and a `<monochrome>` launcher layer for themed icons.
-- **Bilingual UI.** Every user-facing string moved to `values/strings.xml` with a
-  `values-zh-rCN/strings.xml` translation, selected by device locale. Session-
+- **Bilingual UI.** Every user-facing string lives in a `values/strings*.xml`
+  file with its `values-zh-rCN/` translation, selected by device locale
+  (`StringResourcesTranslationTest` fails for a translatable default string
+  without one). Session-
   layer diagnostics (`ServerLifecycle`, `TofuProbe`, retry copy) remain English
   by design — they are near-technical and pinned by pure tests.
 - **Phone/tablet layout.** The server list is a `LazyVerticalGrid` with
@@ -520,8 +813,10 @@ A hardening pass over the whole shell:
   renders the native screens at phone (small/large/dark), tablet landscape and
   tablet portrait configs with the JVM `layoutlib` — no emulator. Run
   `./gradlew :app:recordPaparazziDebug` to (re)record golden PNGs under
-  `app/src/test/snapshots/images/`; a plain `./gradlew test` then verifies against
-  them. `TofuTheme`'s status-bar cast was made safe (`as? Activity`) so the theme
+  `app/src/test/snapshots/images/`; `./gradlew :app:verifyPaparazziDebug` then
+  verifies against them. A plain `./gradlew test` only renders them and passes
+  with stale goldens, so run the verify task after any change to a rendered
+  screen. `TofuTheme`'s status-bar cast was made safe (`as? Activity`) so the theme
   renders off-device. The generated images are the artifact a reviewer opens to
   check phone-vs-tablet proportions.
 
@@ -534,16 +829,25 @@ The canonical target is `./gradlew test` (needs the Android SDK). For a fast
 proof without the SDK, `./test-local.sh` runs two tiers on a plain JDK 17 +
 `kotlinc`:
 
-- **Pure-JVM tier** (200 tests: `ServerUrl`, `LoginForm`, `CookieHeaders`,
+- **Pure-JVM tier** (319 tests: `ServerUrl`, `LoginForm`, `CookieHeaders`,
   `ProfileForm`, `SessionManager` + `SessionController` via the `CookieSink` /
-  `SecretVault` seams (incl. the login-retry and meta-preflight suites),
-  `ApiMetaGate`, `InteractiveSso`, `ServerLifecycle`, `SupervisorUrl`,
-  `TofuProbe`) —
-  no Android runtime. `SupervisorRunner` stays Gradle-tier (it needs
-  `SupervisorClient` → `android.webkit` + `org.json`, absent from the pure
-  classpath).
-- **Robolectric tier** (6 tests: `CookieBridge` against a shadow `CookieManager`;
-  `ReauthWebViewClient` latch + consecutive-failure cap + dead-link routing) — runs headless on the JVM, no device/emulator.
+  `SecretVault` seams (incl. the login-retry and meta-preflight suites and the
+  kernel kind dispatch), `KernelController`, `ApiMetaGate`, `InteractiveSso`,
+  `ServerLifecycle`, `SupervisorUrl`, `TofuProbe`, the local kernel's
+  supervisor, process and secret suites, This phone's adapter, credential
+  and lifecycle suites, and the device self-check's report, redaction, stress
+  and run suites) —
+  no Android runtime. `SupervisorRunner` and `UrlKernelController` stay
+  Gradle-tier (they need `SupervisorClient` → `android.webkit` + `org.json`,
+  absent from the pure classpath), as do `ProfilesViewModel`, the Room
+  migration tests and the `ssh/` carrier tests (MINA SSHD is not in `LIBS`).
+- **Robolectric tier** (20 tests: `CookieBridge` against a shadow `CookieManager`,
+  incl. the local credential's host scope;
+  `ReauthWebViewClient` latch + consecutive-failure cap + dead-link routing +
+  the 127.0.0.1 guard;
+  `RuntimeInstaller` against real archives) — runs headless on the JVM, no device/emulator.
+  `LocalKernelService`, `ThisPhoneAndroidTest` and the merged-manifest checks stay
+  Gradle-tier (they need `Dispatchers.Main`, merged assets and AGP's merged manifest).
   Needs the Robolectric jars + an instrumented `android-all` in `LIBS`.
 
 The jars are fetched reproducibly by the committed `fetch-test-deps.sh` (pinned

@@ -790,7 +790,7 @@ tests on a missing `vite` package.
 
 **Decision:** each prerequisite is an explicit capability check with an
 actionable reason, applied where the capability is consumed. The engine's
-typed refusal (`EnginePreparationError`) becomes a skip that names
+typed refusal (`EngineAdmissionRefusedError`) becomes a skip that names
 `TOFU_TEST_TOFUDB_BIN` and the SQLite lane wherever a native authority
 starts: `flask_app`, any fixture or test body (the `pytest_runtest_setup` and
 `pytest_runtest_call` wrappers in `tests/conftest.py`), the native
@@ -798,11 +798,14 @@ starts: `flask_app`, any fixture or test body (the `pytest_runtest_setup` and
 child-process tests (`require_native_engine_for_checkout()` before they
 spawn). A lane that selected `TOFU_TEST_TOFUDB_BIN` keeps every refusal fatal,
 and no other exception is reclassified, so an owner that refuses a mismatched
-engine raises `EnginePreparationError` itself, private benchmark authorities
+engine raises `EngineAdmissionRefusedError` itself, private benchmark authorities
 such as the native HTML corpus (`benchmarks/knowledge_html/durable.py`)
 included; a bare `RuntimeError` bypasses the wrappers and fails every worktree.
 Binary discovery uses the same typed refusal for an absent executable or an
-invalid explicit binary path. The selected native backend still refuses to
+invalid explicit binary path. Timeouts and failures of preparation commands,
+such as the execution service's generation plan, keep the base
+`EnginePreparationError` and fail: they belong to the code under test, and
+reporting them as a missing engine hid a failing qualification as a skip. The selected native backend still refuses to
 start; only the existing test prerequisite boundary classifies the failure.
 `tests/conftest.py` verifies the selected artifact once per process; native
 `semantic_authority` pins its recorded `TOFUDB_EXPECTED_SHA256` instead of

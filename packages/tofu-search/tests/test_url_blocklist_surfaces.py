@@ -1,0 +1,101 @@
+"""search.skip_domains blocks a URL at the fetch gate AND in search listings.
+
+A blocked result must never reach the model through a search listing: the
+listing carries the page's URL, title, snippet and fetched excerpts, which is
+how hidden benchmark tests leaked through an otherwise-guarded fetch gate.
+"""
+import pytest
+
+from tofu_search import SearchConfig, perform_web_search
+from tofu_search.fetch.utils import _should_fetch
+from tofu_search.search import orchestrator
+
+pytestmark = pytest.mark.unit
+
+
+def test_fetch_gate_refuses_url_prefix_and_allows_other_paths(monkeypatch):
+    cfg = SearchConfig(skip_domains={'github.com/harbor-framework'})
+    monkeypatch.setattr('tofu_search.fetch.utils.get_config', lambda: cfg)
+    diag = {}
+    assert _should_fetch(
+        'https://github.com/harbor-framework/terminal-bench/blob/main/README.md', diag) is False
+    assert diag['reason'] == 'skip_domain'
+    assert 'harbor-framework' in diag['detail']
+    assert _should_fetch('https://github.com/python/cpython/blob/main/README.rst') is True
+
+
+def test_host_rule_boundary_at_the_fetch_gate(monkeypatch):
+    cfg = SearchConfig(skip_domains={'x.com'})
+    monkeypatch.setattr('tofu_search.fetch.utils.get_config', lambda: cfg)
+    assert _should_fetch('https://www.dropbox.com/s/abc/file.pdf') is True
+    assert _should_fetch('https://x.com/user/status/1') is False
+
+
+def _search(monkeypatch, rows, skip_domains):
+    monkeypatch.setattr(orchestrator, 'search_ddg_html', lambda *args: rows)
+    monkeypatch.setattr(orchestrator, 'as_completed', lambda futures, **kwargs: iter(futures))
+    return perform_web_search(
+        'pipeline parallel pytorch', engines=['DDG-HTML'],
+        fetch_pages=False, filter_pages=False, rerank=False, deepen=False,
+        config=SearchConfig(skip_domains=skip_domains))
+
+
+def test_search_listing_drops_blocked_urls_and_keeps_others(monkeypatch):
+    rows = [
+        {'url': 'https://github.com/harbor-framework/terminal-bench/blob/main/archive/x/README.md',
+         'title': 'hidden test file', 'snippet': 'def test_pipeline_parallel(world_size): ...'},
+        {'url': 'https://docs.pytorch.org/docs/main/distributed.pipelining.html',
+         'title': 'Pipeline Parallelism', 'snippet': 'pipeline parallel training in pytorch'},
+    ]
+    result = _search(monkeypatch, rows, {'github.com/harbor-framework'})
+    urls = [r['url'] for r in result]
+    assert urls == ['https://docs.pytorch.org/docs/main/distributed.pipelining.html']
+    rendered = str(result)
+    assert 'harbor-framework' not in rendered
+    assert 'hidden test file' not in rendered
+
+
+def test_search_listing_drops_answer_hosts_and_wildcard_repositories(monkeypatch):
+    rows = [
+        {'url': 'https://marginlab.ai/explorers/terminal-bench/x', 'title': 'explorer',
+         'snippet': 'pipeline parallel tests'},
+        {'url': 'https://github.com/lynl7130/terminal-bench/blob/main/x',
+         'title': 'fork', 'snippet': 'pipeline parallel fork'},
+        {'url': 'https://github.com/pytorch/pytorch', 'title': 'pytorch',
+         'snippet': 'pipeline parallel pytorch framework'},
+    ]
+    result = _search(monkeypatch, rows, {'marginlab.ai', 'github.com/*/terminal-bench'})
+    assert [r['url'] for r in result] == ['https://github.com/pytorch/pytorch']
+
+
+def test_blocked_rows_do_not_reserve_the_result_budget(monkeypatch):
+    rows = [
+        {'url': f'https://github.com/harbor-framework/terminal-bench/x{i}',
+         'title': 'pipeline parallel', 'snippet': 'pipeline parallel'} for i in range(3)
+    ] + [{'url': 'https://docs.pytorch.org/pipelining', 'title': 'pipeline parallel docs',
+          'snippet': 'pipeline parallel documentation'}]
+    result = _search(monkeypatch, rows, {'github.com/harbor-framework'})
+    assert [r['url'] for r in result] == ['https://docs.pytorch.org/pipelining']
+
+
+def test_deepen_link_selection_uses_the_same_url_rule(monkeypatch):
+    """A blocked outbound link is refused by the real deepen_results pipeline."""
+    from tofu_search.config import SearchConfig
+    from tofu_search.search import deepen
+    fetched = []
+
+    def fake_fetch(url, **kwargs):
+        fetched.append(url)
+        return 'deep content'
+
+    monkeypatch.setattr(deepen, 'fetch_page_content', fake_fetch)
+    monkeypatch.setattr(deepen, 'get_config',
+                        lambda: SearchConfig(skip_domains={'github.com/harbor-framework'}))
+    results = [{'url': 'https://docs.example/page', 'relevance': 'lexical_match',
+                'title': 'pipeline parallel', 'snippet': 'pipeline parallel',
+                'full_content': 'pipeline parallel text\n--- Page Links ---\n'
+                                '- [pipeline parallel hidden](https://github.com/harbor-framework/x)\n'
+                                '- [pipeline parallel public](https://docs.example/other)\n'}]
+    deepen.deepen_results('pipeline parallel pytorch', results, max_links=5)
+    assert 'https://github.com/harbor-framework/x' not in fetched
+    assert fetched == ['https://docs.example/other']

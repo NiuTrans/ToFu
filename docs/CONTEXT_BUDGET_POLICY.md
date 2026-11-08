@@ -307,6 +307,23 @@ exact-match source, timestamp, ranking and eligible-route count) separately
 from price evidence. The canonical knob/qualification contract is
 `contracts/config_knobs_v1.json`.
 
+**Complete issued-parent quote fence.** Problem: picker-visible siblings and a
+fresh profile revision could hide a disposed or changed member of the original
+issued group; unchanged model/price was not unchanged authority. Decision: one
+readiness owner validates the primary and every issued handle, original
+owner/tenant/revision, detached slot witnesses and exact indexed picker membership,
+including when no native ContextVar is bound. Explicit main/disable and retained-main
+AA quotes bind this same complete group without auxiliary discovery. Initial
+selection, requalification and dispatch compare detached authority before effects.
+The existing private request digest includes these parents, the caller's quote
+constraints and actual output allowance: a stale quote is refused, while a newly
+valid authorization is not suppressed by the old failure. No candidate, retry,
+price or time setting is added. Rejected: global slot walks, replacing issuance
+with a fresh profile revision, checking only the chosen credential or price, and
+reusing a failed request identity after its authorization changed. Specifications:
+`tests/compaction/test_issued_parent_summary_route.py` and
+`tests/compaction/test_summary_request_identity.py`.
+
 **Paid APIs before owner resources (owner decision 2026-11-02).** Problem:
 subscription/local resources ranked first, so summaries spent the owner's
 personal subscription quota while organization-billed API routes were
@@ -321,7 +338,7 @@ second consumer). Specs: `tests/compaction/test_auxiliary_summary_integration.py
 
 **Model price fallback and no summary cost ceiling (owner decision
 2026-11-02).** Problem: Offerings seeded without their own request-name rate card
-(the Meituan gateway's claude-opus-5.5 and kimi-k3.1-pro carry only a legacy
+(the YourProvider gateway's claude-opus-5.5 and kimi-k3.1-pro carry only a legacy
 blended `cost` hint) counted as unpriced in summary routing and settlement,
 although native main-turn settlement already priced them at their model's
 maintained price. An unpriced paid main therefore admitted no paid alternate and
@@ -592,7 +609,7 @@ A line's window belongs to the line: `deepseek-v4.1-flash` (catalogue
 identity), `deepseek-v4-1-flash`, `deepseek-v4-flash` (legacy wire spelling)
 and the versionless canonical `deepseek-flash` are one served model at 1M. The
 2026-09-21 gauge report (128K shown for a route enforcing 1M, live on
-sankuai/Meituan) came from spelling these as needles `deepseek-flash` /
+example-corp/YourProvider) came from spelling these as needles `deepseek-flash` /
 `deepseek-v4-flash`, neither of which is a substring of an id whose version is
 punctuated with a dot, so the V3-era 128K family estimate won silently. The
 max-output table (`_max_output._deepseek_max_output`) rides the same parser.

@@ -75,15 +75,15 @@ def prepare_conflict_repair(row, receipt):
     if set(repair_paths) - set(paths):
         raise ic.IntegrationError('Conflict repair changed paths outside the original task delta; create new owned work')
     patch = ic._git(root, ['--literal-pathspecs', 'diff', '--binary', '--full-index', '--no-ext-diff',
-                          '--no-textconv', source, checkpoint, '--', *paths], check=True).stdout
+                          '--no-textconv', source, checkpoint, '--', *paths], check=True, binary=True).stdout
     with tempfile.TemporaryDirectory(prefix='delivery-repair-', dir=str(ic._workspace_root())) as directory:
         patch_path = Path(directory) / 'repair.patch'
-        patch_path.write_text(patch, encoding='utf-8')
+        patch_path.write_bytes(patch)
         scratch = Path(directory) / 'proposal'
         ic._git(root, ['worktree', 'add', '--detach', str(scratch), source], timeout=90, check=True)
         try:
             if patch:
-                ic._git(scratch, ['apply', '--whitespace=nowarn', str(patch_path)], check=True)
+                ic._git(scratch, ['apply', '--binary', '--whitespace=nowarn', str(patch_path)], check=True)
             target = ic._alternate_index_checkpoint(scratch, source, row['task_id'])
         finally:
             # Only this call's temporary proposal is reclaimable, never the

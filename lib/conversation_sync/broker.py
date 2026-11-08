@@ -327,6 +327,16 @@ class ConversationWakeBroker:
                 "ownerHistoryCapacity": self._owner_history_capacity,
             }
 
+    def invalidate(self, scopes: list[dict] | None) -> None:
+        """A storage epoch/gap invalidates all subscriptions; hints stay scoped."""
+        with self._lock:
+            keys = self._subscriptions if scopes is None else {
+                _scope(scope['userId'], scope['conversationId']) for scope in scopes}
+            subscribers = tuple(subscription for key in keys
+                                for subscription in self._subscriptions.get(key, ()))
+        for subscription in subscribers:
+            subscription.wake()
+
     def wake(self, user_id: Any, conversation_id: str, sequence: int | None) -> None:
         key = _scope(user_id, conversation_id)
         with self._lock:

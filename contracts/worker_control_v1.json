@@ -1,9 +1,19 @@
 {
   "format": "tofu.worker-control/v1",
   "operation": "worker_control.watch",
-  "request": {"cursor": "null or the previous response cursor"},
-  "cursor": {"epoch": "authority process UUID", "queue": "u64 generation", "cancel": "u64 generation"},
-  "response": {"format": "tofu.worker-control/v1", "cursor": "current cursor", "cancelTasks": "task IDs observed during this wait, or null when a gap requires rechecking all active claims"},
+  "request": {
+    "cursor": "null or the previous response cursor"
+  },
+  "cursor": {
+    "epoch": "authority process UUID",
+    "queue": "u64 generation",
+    "cancel": "u64 generation"
+  },
+  "response": {
+    "format": "tofu.worker-control/v1",
+    "cursor": "current cursor",
+    "cancelTasks": "task IDs observed during this wait, or null when a gap requires rechecking all active claims"
+  },
   "semantics": {
     "authority": "Authenticated transport control; hints confer no execution, ownership or cancellation authority.",
     "commit": "Queue index and cancellation mutations publish after commit, before delivery acknowledgement; rollback may cause a harmless invalidation but never an execution.",
@@ -12,5 +22,16 @@
     "reconnect": "A new authority epoch or lost response invalidates the queue and active claim observations.",
     "retention": "Only generations and currently waiting connections are retained. No notification log or durable user data is created.",
     "shutdown": "Authority shutdown wakes every waiting connection before joining transport workers. A client joins its watch by interrupting only the socket exclusively borrowed by that request; a cancelled pooled session is retired before reuse."
+  },
+  "embeddedAbi": {
+    "format": "tofu.commit-watch-abi/v1",
+    "declarations": [
+      "void* tofudb_embed_watch_open(void*);",
+      "void tofudb_embed_watch_cancel(void*);",
+      "void tofudb_embed_watch_free(void*);",
+      "intptr_t tofudb_embed_watch_execute(void*, const uint8_t*, size_t, uint8_t*, size_t);"
+    ],
+    "lifetime": "The runtime retains admitted calls. Each watch token owns its authority condition and cancellation flag. Cancel may precede enrollment or race execute; free follows joined execute and detached cancellation borrowers. Runtime close cancels all tokens before joining calls. A token grants no semantic execution authority.",
+    "replay": "Response buffer growth may repeat only the read watch; an intervening commit returns a gap and invalidates observations. No command receipt or durable mutation occurs."
   }
 }

@@ -66,6 +66,14 @@ class EngineCommandFailedError(EnginePreparationError):
     """A completed child refused its candidate; timeout/cancellation stay distinct."""
 
 
+class EngineAdmissionRefusedError(EnginePreparationError):
+    """The selected engine pair cannot serve this source; preparing a matching pair repairs it.
+
+    Timeouts and failures of preparation commands keep the base type: they are
+    failures of the work being prepared, not a missing engine prerequisite.
+    """
+
+
 class EngineSourceChangedError(EnginePreparationError):
     """Observed source drift; only prepublication preparation may retry it."""
 
@@ -491,8 +499,12 @@ def _failure_output(reader, size: int, head_bytes: int = 4096, tail_bytes: int =
 
 
 def build_identity(binary: Path) -> dict:
-    output = _run([str(binary), '--build-info'], cwd=binary.parent,
-                  environment=dict(os.environ), timeout=10)
+    try:
+        output = _run([str(binary), '--build-info'], cwd=binary.parent,
+                      environment=dict(os.environ), timeout=10)
+    except EnginePreparationError as exc:
+        # The selected engine could not report its identity, so it is not admitted.
+        raise EngineAdmissionRefusedError(str(exc)) from exc
     try:
         info = json.loads(output)
         if (info['format'] != 'tofu-db-build.v1'
@@ -500,13 +512,13 @@ def build_identity(binary: Path) -> dict:
             raise ValueError('invalid engine identity')
         return info
     except (ValueError, KeyError, TypeError) as exc:
-        raise EnginePreparationError('Storage engine has no verifiable source identity; an engine update is required.') from exc
+        raise EngineAdmissionRefusedError('Storage engine has no verifiable source identity; an engine update is required.') from exc
 
 
 def verify_current(binary: Path, root: Path) -> None:
     expected = source_fingerprint(root)
     if expected is not None and build_identity(binary)['source_sha256'] != expected:
-        raise EnginePreparationError('Storage engine does not match this application. Use Update or Restart to prepare the matching engine; the existing server has not been stopped.')
+        raise EngineAdmissionRefusedError('Storage engine does not match this application. Use Update or Restart to prepare the matching engine; the existing server has not been stopped.')
 
 
 def verify_library(binary: Path) -> None:
@@ -525,7 +537,7 @@ def verify_library(binary: Path) -> None:
                 or info.get('embedded_allocator') != selected_allocator):
             raise ValueError('engine pair differs')
     except (OSError, KeyError, ValueError, TypeError) as exc:
-        raise EnginePreparationError('The embedded storage engine pair is incomplete or mismatched. Use Update to prepare it.') from exc
+        raise EngineAdmissionRefusedError('The embedded storage engine pair is incomplete or mismatched. Use Update to prepare it.') from exc
 
 
 def _cached_library_matches_source(binary: Path, expected: str) -> bool:

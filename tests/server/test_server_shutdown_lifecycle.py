@@ -403,6 +403,7 @@ def test_legacy_daily_report_scheduler_facade_is_thread_free(monkeypatch):
 
 @pytest.mark.parametrize(('module_name', 'thread_name', 'event_names', 'stop_name'), [
     ('lib.cgroup_guard', '_monitor_thread', ('_monitor_stop',), 'stop_monitor'),
+    ('lib.database_panel.maintenance', '_thread', ('_stop',), 'stop_maintenance'),
     ('lib.fs_keepalive', '_thread', ('_stop_event',), 'stop_fs_keepalive'),
     ('lib.llm_dispatch.health_local', '_thread', ('_stop_event', '_wake_event'),
      'stop_local_health_checker'),
@@ -436,6 +437,8 @@ def test_worker_stop_contract_releases_only_a_stopped_owner(
     if module_name == 'lib.fs_keepalive':
         monkeypatch.setattr(module, '_running', True)
         monkeypatch.setattr(module, '_probe_runtime', None)
+    if module_name == 'lib.database_panel.maintenance':
+        monkeypatch.setattr(module, '_started', True)
     if module_name == 'lib.oauth.codex_catalog':
         monkeypatch.setattr(module, '_worker_started', True)
     if module_name == 'lib.presence.registry':
@@ -447,6 +450,8 @@ def test_worker_stop_contract_releases_only_a_stopped_owner(
     assert all(event.is_set() for event in events)
     if module_name == 'lib.fs_keepalive':
         assert module._running is False
+    if module_name == 'lib.database_panel.maintenance':
+        assert module._started is False
     if module_name == 'lib.oauth.codex_catalog':
         assert module._worker_started is False
     if module_name == 'lib.presence.registry':

@@ -439,3 +439,13 @@ def test_window_public_surface_is_limited_to_api_and_tofu_modules():
 
     transport = _read('frontend/src/api/transport.ts')
     assert 'globals.__TOFU_' not in transport
+
+
+def test_bundle_canary_serves_the_boot_required_owner_delegation_state():
+    """Boot reads need a complete fixture or every build fails before upload."""
+    from scripts.frontend_bundle_canary import _api_body
+
+    state = _api_body('/api/v4/router/owner-delegation')['data']
+    assert state['active'] is False
+    assert state['grant'] is None
+    assert state['actions'] == []

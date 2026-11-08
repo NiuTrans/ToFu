@@ -295,7 +295,7 @@ part to the shared internal servers (below). `export.py --mode internal` and
 | Credential vault + its key | `data/config/` | same paths, mode 0600 |
 | All installed skill packages, vendored engines included | `.tofu/skills`, `data/skills` | same paths |
 | Shareable platform config | `features.json`, `pricing.json`, `private_hosts.json`, `site_packs/` | same paths |
-| Meituan-tagged platform lessons | `data/memories`, `.tofu/memories` | same paths |
+| YourProvider-tagged platform lessons | `data/memories`, `.tofu/memories` | same paths |
 | Internal MCP sources | sibling repos, `tools/github-batch-mcp` | `vendor/` |
 
 Deliberately NOT carried, each for a functional reason rather than a secrecy
@@ -329,9 +329,28 @@ push never commits it; and skill packages keep their vendored `node_modules`
 while their own `.skillignore` (session tickets, identity bindings) is
 honoured.
 
+**Internal snapshot push targets (owner decision 2026-11-06).** Problem:
+Internal releases also need a home outside the corporate Git platform, while
+the Internal tree carries company endpoints and shared configuration that must
+never reach a public repository. Decision: `export.py --mode internal
+--handoff DIR --push` snapshot-pushes only onto a configured internal remote
+(`_GIT_REPOS['internal']`) or onto a GitHub repository that the API reports,
+at that moment, as private and owned by the user account the publish
+credential authenticates as. `--git-url` names the target and `--dest` its own
+snapshot repository, so a new target's history starts from the current
+export. `_publish._require_internal_push_target` admits the target before the
+snapshot repository changes and again immediately before `git push`; an Open
+remote is refused before any network access, and URL rewrites
+(`insteadOf`, `pushInsteadOf`, `pushurl`) that would deliver elsewhere are
+refused. Alternatives considered: a hardcoded GitHub URL, rejected as a second
+unverified destination in code; publishing Internal through the Open
+publisher, rejected because one misconfiguration would publish company
+material; trusting a repository name without a visibility check, rejected
+because a repository can be public or change visibility.
+
 `install.sh` additionally provisions the runtime those capabilities need —
 Node ≥22, `@datafe/llm-cli` + `@mtfe/mtsso-auth-official` + `@mtfe/mtskills`,
-and `mt-paas-sandbox-python-sdk` from Meituan's own index — and then reports
+and `mt-paas-sandbox-python-sdk` from YourProvider's own index — and then reports
 what is ready and what still needs a one-time sign-in.
 
 ### Carried skills and MCP registrations (verification)
@@ -687,8 +706,8 @@ issue.
 | `TOFU_RUN_PYTHON_CACHE=auto|1|0` / `TOFU_RUN_PYTHON_CACHE_TTL_DAYS` | Auto-select repeat-heavy network-workspace Python bytecode caching, force it for experiments, or disable it; days an unused namespace is kept (default 7). There is no size quota; see `docs/modules/infra_runtime.md` |
 | `TOFU_SERVER_PYTHON_CACHE=auto|1|0` / `TOFU_SERVER_PYTHON_CACHE_DIR` | Let the stdlib lifecycle manager select, force, disable, or relocate its project/interpreter-scoped host-local server bytecode cache, which the commands the worker runs share. There is no size quota: only bytecode nothing can use is removed (`docs/modules/infra_runtime.md`). An existing `PYTHONPYCACHEPREFIX` or `PYTHONDONTWRITEBYTECODE` wins |
 | `TOFU_RUNTIME_REPLICA=auto|on|off` | Run the managed worker from a verified local copy of its Python environment when that environment lives on a network/FUSE volume (`auto`: only onto a local root at least 3x faster; `on`: skip the speed comparison). Copies build in the background after the worker is ready and are never install targets; see `docs/modules/infra_runtime.md` |
-| `TOFU_LOCAL_WORKSPACES=off|auto|on` | Opt in to placing managed task checkouts on a local disk (`auto`: provably persistent local disks only; `on`: also container overlays). The default `off` keeps them under the data root |
-| `TOFU_LOCAL_DIR` | One private local directory for both placements (`runtime-replicas/`, `workspaces/`); otherwise `XDG_CACHE_HOME`/`XDG_STATE_HOME`, then the home directory, are tried |
+| `TOFU_LOCAL_WORKSPACES=off|auto|on` | Place managed task checkouts and agent lanes on a local disk. Task checkouts default to `off` (they stay under the data root because they hold uncommitted work); `auto` allows only provably persistent local disks at least 3x faster. Agent lanes (`scripts/lane.py`, `lib/project_mod/lanes.py`) default to `on`, including container overlays, because their durable state is in Git (branch commits plus a saved work-in-progress ref written at every settlement) and their checkouts are reconstructible. `off` keeps both under the data root |
+| `TOFU_LOCAL_DIR` | One private local directory for the placements (`runtime-replicas/`, `workspaces/`, `lanes/`); otherwise `XDG_CACHE_HOME`/`XDG_STATE_HOME`, then the home directory, are tried |
 | `TOFU_TOKEN_COUNT_CACHE_CAPACITY` | Digest-only repeated-text token-count entries (personal probe: 64..512 in normal profiles; distributed: 1,024; hard ceiling: 4,096) |
 | `TOFU_USAGE_CACHE_CAPACITY` | Recent per-conversation provider-usage anchors used by the exact-first token counter (personal probe: 128..2,048; 8 GiB reference: 256; probe-failure fallback: 128; distributed: 4,096; hard ceiling: 8,192). Capacity/TTL eviction safely falls through to the next local counter tier; retained model/role/signature fields are bounded and memory-pressure relief may clear the reconstructible working set. |
 | `TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY` | Legacy process-local exact sliding-window endpoint/client buckets (personal probe: 512..4,096; 8 GiB reference: 1,024; probe-failure fallback: 512; distributed: 4,096; hard ceiling: 16,384). The endpoint/client store derives a second envelope of at most 128 timestamps per configured bucket, capped at 1,048,576 total; the legacy counter utility reclaims LRU state. Credential spending state has no count-based eviction; this setting does not limit HTTP throughput. Sidecar-backed endpoint/client counters ignore this knob. |

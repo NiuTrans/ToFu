@@ -199,6 +199,7 @@ def test_background_service_start_is_per_app_idempotent(monkeypatch):
     import threading
     from types import SimpleNamespace
 
+    import lib.database_panel.maintenance as database_panel_maintenance
     import lib.oauth.codex_catalog as codex_catalog
     import lib.oauth.outbound as oauth_outbound
     import lib.scheduler.manager as scheduler_manager
@@ -224,6 +225,9 @@ def test_background_service_start_is_per_app_idempotent(monkeypatch):
 
     monkeypatch.setattr(
         scheduler_manager, 'start_scheduler_worker', start_scheduler_worker)
+    monkeypatch.setattr(
+        database_panel_maintenance, 'start_maintenance',
+        lambda: calls.append('database-panel-maintenance') or True)
     monkeypatch.setattr(oauth_outbound, 'reconcile_oauth_providers',
                         lambda: calls.append('oauth-reconcile'))
     monkeypatch.setattr(codex_catalog, 'start_codex_catalog_refresher',
@@ -235,16 +239,18 @@ def test_background_service_start_is_per_app_idempotent(monkeypatch):
         extensions = {}
 
     app = App()
-    assert background_services.start_registered_background_services(app) == 3
+    assert background_services.start_registered_background_services(app) == 4
     assert background_services.start_registered_background_services(app) == 0
     assert calls == [
-        'scheduler', 'oauth-reconcile', 'codex-catalog', 'plugin',
+        'scheduler', 'database-panel-maintenance', 'oauth-reconcile',
+        'codex-catalog', 'plugin',
     ]
 
 
 def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
     import lib.channels.dx.supervisor as channel_supervisor
     import lib.channels.github.supervisor as github_supervisor
+    import lib.database_panel.maintenance as database_panel_maintenance
     import lib.evolution.automation as evolution_automation
     import lib.knowledge.enrichment as knowledge_enrichment
     import lib.knowledge.image_ocr_jobs as knowledge_ocr
@@ -275,6 +281,9 @@ def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
     monkeypatch.setattr(
         github_supervisor, 'stop_github_sessions', stopped('github-sessions'))
     monkeypatch.setattr(
+        database_panel_maintenance, 'stop_maintenance',
+        stopped('database-panel-maintenance'))
+    monkeypatch.setattr(
         plugin_registry, 'run_shutdown_hooks',
         lambda app: calls.append(('plugin', {'app': app})) or 1)
 
@@ -282,7 +291,7 @@ def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
         extensions = {'tofu_registered_background_services': True}
 
     app = App()
-    assert background_services.stop_registered_background_services(app, timeout=0.25) == 8
+    assert background_services.stop_registered_background_services(app, timeout=0.25) == 9
     assert background_services.stop_registered_background_services(app, timeout=0.25) == 0
     # Channel sessions stop after the scheduler, whose tick restarts them.
     assert calls == [
@@ -294,12 +303,14 @@ def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
         ('scheduler', {'timeout': 0.25}),
         ('channel-bridges', {'timeout': 0.25}),
         ('github-sessions', {'timeout': 0.25}),
+        ('database-panel-maintenance', {'timeout': 0.25}),
     ]
 
 
 def test_background_service_shutdown_retains_latch_on_timeout(monkeypatch):
     import lib.channels.dx.supervisor as channel_supervisor
     import lib.channels.github.supervisor as github_supervisor
+    import lib.database_panel.maintenance as database_panel_maintenance
     import lib.evolution.automation as evolution_automation
     import lib.knowledge.enrichment as knowledge_enrichment
     import lib.knowledge.image_ocr_jobs as knowledge_ocr
@@ -322,11 +333,13 @@ def test_background_service_shutdown_retains_latch_on_timeout(monkeypatch):
         channel_supervisor, 'stop_channel_bridges', lambda **_kwargs: True)
     monkeypatch.setattr(
         github_supervisor, 'stop_github_sessions', lambda **_kwargs: True)
+    monkeypatch.setattr(
+        database_panel_maintenance, 'stop_maintenance', lambda **_kwargs: True)
     monkeypatch.setattr(plugin_registry, 'run_shutdown_hooks', lambda _app: 0)
 
     class App:
         extensions = {'tofu_registered_background_services': True}
 
     app = App()
-    assert background_services.stop_registered_background_services(app) == 6
+    assert background_services.stop_registered_background_services(app) == 7
     assert app.extensions['tofu_registered_background_services'] is True

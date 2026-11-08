@@ -408,6 +408,31 @@ pub(crate) fn worker_root_for_task(
     }
 }
 
+pub(crate) fn worker_root_for_event_stream(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    task_id: &str,
+) -> io::Result<Option<String>> {
+    let Some((parent, child)) = task_id.split_once("#agent:") else {
+        return worker_root_for_task(database, transaction, task_id);
+    };
+    let parent_root = worker_root_for_task(database, transaction, parent)?;
+    let child_root = worker_root_for_task(database, transaction, child)?;
+    if parent_root.is_none() && child_root.is_none() {
+        return Ok(None);
+    }
+    let birth = read_header(database, transaction, child)?
+        .and_then(|header| header.child_invocation);
+    if parent_root.is_none() || parent_root != child_root
+        || birth.as_ref().is_none_or(|identity|
+            identity["parent_task_id"].as_str() != Some(parent)
+            || identity["child_task_id"].as_str() != Some(child))
+    {
+        return Err(invalid_input("Inspector stream differs from child birth"));
+    }
+    Ok(parent_root)
+}
+
 fn tool_rows(value: &Value) -> io::Result<std::borrow::Cow<'_, [Value]>> {
     use std::borrow::Cow;
     match value.get("tool_rounds") {

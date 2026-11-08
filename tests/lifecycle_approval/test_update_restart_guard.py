@@ -51,6 +51,9 @@ import pytest
 
 import lib.lifecycle_approval as la
 
+HUMAN_UI = {'kind': 'human-ui', 'ownerUserId': 1, 'subject': 'session-key', 'credential': 'session',
+            'browser': 'fetch-metadata', 'userAgent': 'Mozilla/5.0', 'remoteAddr': '127.0.0.1'}
+
 
 def _install_shim():
     import server  # noqa: F401 — side-effect installs the full Flask→Quart shim
@@ -158,7 +161,7 @@ class UpdateRestartGuardTest(unittest.TestCase):
 
     def _approved_token(self, action='restart'):
         rec = la.create_request(action, origin={'ua': 'pytest'})
-        decided = la.decide(rec['id'], True)
+        decided = la.decide(rec['id'], True, provenance=HUMAN_UI)
         assert decided and decided['status'] == 'approved'
         return rec['id']
 
@@ -468,6 +471,31 @@ class UpdateRestartGuardTest(unittest.TestCase):
 
     # ── approval list/decide endpoints (the human UI surface) ───────
 
+    def test_only_the_owners_browser_can_decide_an_approval(self):
+        """An API key, a script or an agent (no UI session, no same-origin browser
+        evidence) cannot approve: 11-05 an agent approved a restart on a chat
+        instruction. The owner decision 2026-11-06 closed that path."""
+        rec = la.create_request('restart', origin={'ua': 'pytest-agent'})
+        async def go(headers):
+            return await self.app.test_client().post(
+                f"/api/v1/update/lifecycle-approvals/{rec['id']}/decide",
+                headers=headers, json={'approved': True})
+        for headers in (self._hdr(), {**self._hdr(), 'Sec-Fetch-Site': 'same-origin'},
+                        {'Cookie': f'tofu_session={self.admin_token}', 'Sec-Fetch-Site': 'cross-site'}):
+            refused = _run(go(headers))
+            self.assertIn(refused.status_code, (401, 403))
+        self.assertEqual(la.get(rec['id'])['status'], 'pending')
+        decided = _run(go(self._ui_hdr()))
+        self.assertEqual(decided.status_code, 200)
+        record = _run(decided.get_json())['record']
+        self.assertEqual(record['decided_via']['credential'], 'session')
+        with self.assertRaises(PermissionError):
+            la.decide(rec['id'], False, provenance={'kind': 'explicit-user-instruction-via-codex-chat'})
+
+    def _ui_hdr(self):
+        return {'Cookie': f'tofu_session={self.admin_token}', 'Sec-Fetch-Site': 'same-origin',
+                'User-Agent': 'Mozilla/5.0 (pytest owner)'}
+
     def test_list_and_decide_endpoints(self):
         rec = la.create_request('restart', origin={'ua': 'pytest-list'})
         async def go():
@@ -476,7 +504,7 @@ class UpdateRestartGuardTest(unittest.TestCase):
                                  headers=self._hdr())
             r_dec = await c.post(
                 f"/api/v1/update/lifecycle-approvals/{rec['id']}/decide",
-                headers=self._hdr(), json={'approved': True})
+                headers=self._ui_hdr(), json={'approved': True})
             r_get = await c.get(f"/api/v1/update/lifecycle-approvals/{rec['id']}",
                                 headers=self._hdr())
             return r_list, r_dec, r_get
@@ -493,7 +521,7 @@ class UpdateRestartGuardTest(unittest.TestCase):
         async def go():
             return await self.app.test_client().post(
                 '/api/v1/update/lifecycle-approvals/nope/decide',
-                headers=self._hdr(), json={'approved': True})
+                headers=self._ui_hdr(), json={'approved': True})
         r = _run(go())
         self.assertEqual(r.status_code, 404)
 

@@ -43,7 +43,7 @@ from runtime_guards import (
     proc_stat_fields,
 )
 from tofu_dotenv import read_dotenv_values
-from serverctl_pkg.restart_budget import ARTIFACT_PREPARATION_SECONDS
+from serverctl_pkg.restart_budget import ARTIFACT_PREPARATION_SECONDS, NATIVE_SERVICE_STOP_SECONDS
 
 
 STATE_VERSION = 1
@@ -1125,6 +1125,18 @@ def project_server_env(project_path: str) -> dict[str, str]:
     }
 
 
+def _operator_overrides(server_env: dict[str, str],
+                        project_environment: dict[str, str]) -> dict[str, str]:
+    """Forwarded values the project's ``.env`` did not supply at request time.
+
+    serverctl fills a key absent from its shell from ``.env``, so a forwarded
+    value equal to ``.env`` came from there (or agreed with it) and follows
+    later ``.env`` edits; only a differing value is an operator override.
+    """
+    return {key: value for key, value in server_env.items()
+            if project_environment.get(key) != value}
+
+
 def managed_worker_environment(
     project_path: str,
     manager_values: dict[str, str],
@@ -1287,6 +1299,22 @@ def _source_interpreter(python: str) -> str:
     return authoritative_interpreter(python)
 
 
+class _StorageLeaseStillHeld(RuntimeError):
+    """A replaced storage host's authority is still exiting.
+
+    The host is gone but its native daemon has not released the OS authority
+    lease yet (SIGKILL cannot interrupt uninterruptible network-volume I/O).
+    This is a retryable departure, not a failed start: the manager defers the
+    spawn through the existing storage-blocker path instead of latching the
+    crash loop.
+    """
+
+    def __init__(self, lease: dict[str, Any]) -> None:
+        self.lease = dict(lease)
+        super().__init__(
+            f'storage authority lease is still held by pid {lease.get("pid")}')
+
+
 class LifecycleManager:
     """Own exactly one project's desired/observed server state."""
 
@@ -1358,6 +1386,9 @@ class LifecycleManager:
             'worker': {},
             'serverArgs': [],
             'serverEnv': default_env,
+            # The serverEnv values an operator forwarded over .env; a restart
+            # without a forwarded environment reapplies these on current .env.
+            'serverEnvOverrides': {},
             'port': _server_port([], {**os.environ, **default_env}),
             'restartCount': 0,
             # restartCount predates exit-intent accounting and may contain a
@@ -1422,6 +1453,16 @@ class LifecycleManager:
         if normalized_environment != state['serverEnv']:
             self._state_needs_save = True
         state['serverEnv'] = normalized_environment
+        overrides = (loaded.get('serverEnvOverrides')
+                     if loaded.get('version') == STATE_VERSION else {})
+        if not isinstance(overrides, dict):
+            # State written before override provenance: a value that still
+            # matches the current .env follows .env from now on. Loading never
+            # rewrites a state file another host's manager may own.
+            overrides = _operator_overrides(state['serverEnv'], self._project_env)
+        state['serverEnvOverrides'] = {
+            str(key): str(value) for key, value in overrides.items()
+            if state['serverEnv'].get(str(key)) == str(value)}
         if not isinstance(state.get('failureHistory'), list):
             state['failureHistory'] = []
         if not isinstance(state.get('storageBlocker'), dict):
@@ -1456,6 +1497,7 @@ class LifecycleManager:
                 # Persisted request provenance is unavailable. Discard the
                 # whole forwarded envelope, not only the path that exposed it.
                 state['serverEnv'] = dict(self._project_env)
+            state['serverEnvOverrides'] = {}
             effective_environment = dict(os.environ)
             effective_environment.update(state['serverEnv'])
             state['port'] = _server_port([], effective_environment)
@@ -1578,6 +1620,7 @@ class LifecycleManager:
             self._set_observed('crashloop' if recovery.get('requiresRestart') else 'degraded',
                                recovery['error'])
             return False
+        from serverctl_pkg.resident_service import ServiceOwnerDraining
         try:
             environment = self._worker_environment(self._state.get('serverEnv') or {}, self.port)
             environment.setdefault('TOFU_STORAGE_CONNECTION_FILE', self._native_storage.result_path())
@@ -1586,6 +1629,17 @@ class LifecycleManager:
                 raise RuntimeError('execution configuration or code changed; explicit restart required')
             self._execution.stop()
             self._execution.ensure(plan, environment)
+        except ServiceOwnerDraining as exc:
+            # A killed host's cmdline vanishes before its descriptors close, so
+            # its lease can outlive the departure briefly. That is the same
+            # failure still exiting, retried within the host stop budget.
+            draining_since = recovery.setdefault('drainingSince', _now())
+            if _now() - draining_since < NATIVE_SERVICE_STOP_SECONDS:
+                self._set_observed('degraded', f'execution service is still exiting: {exc}')
+                return False
+            recovery.update(requiresRestart=True, error=f'execution recovery failed: {exc}')
+            self._set_observed('degraded', recovery['error'])
+            return False
         except Exception as exc:
             recovery.update(requiresRestart=True, error=f'execution recovery failed: {exc}')
             self._set_observed('degraded', recovery['error'])
@@ -2179,6 +2233,9 @@ class LifecycleManager:
         server_env = dict(self._state.get('serverEnv') or {})
         server_env['PORT'] = str(observed)
         self._state['serverEnv'] = server_env
+        # The adopted listener outranks .env until an operator forwards a port.
+        self._state['serverEnvOverrides'] = {
+            **(self._state.get('serverEnvOverrides') or {}), 'PORT': str(observed)}
         self._state['serverArgs'] = _rewrite_explicit_server_port(
             [str(arg) for arg in self._state.get('serverArgs') or []], observed)
         self._state['lastPortReconciledAt'] = _now()
@@ -2716,9 +2773,24 @@ class LifecycleManager:
         storage_changes = self._native_storage.needs_replacement(storage_plan, reset_failed=reset_failed)
         execution_changes = self._execution.needs_replacement(execution_plan, reset_failed=reset_failed)
         if storage_changes or execution_changes:
-            self._execution.stop()
+            # An explicit restart already resets failure latches. The API worker
+            # is gone by now, so an executor that exited after an unclean close
+            # must not turn the requested replacement into an outage.
+            retired = self._execution.stop(retire_failed_close=reset_failed)
+            if retired:
+                logger.warning(
+                    'explicit restart replaced an execution host that exited '
+                    'after an unclean close: %s', retired)
         if storage_changes:
             self._native_storage.stop()
+            # The host process is gone, but an unreapable daemon can outlive
+            # it and still hold the authority lease. Waiting here reuses the
+            # existing orphan-reap policy; a lease that survives it defers the
+            # replacement to the automatic storage-blocker retry instead of
+            # starting a host whose engine would be refused.
+            storage_lease = self._wait_for_stopped_sidecar_release()
+            if self._storage_lease_blocks_worker(storage_lease):
+                raise _StorageLeaseStillHeld(storage_lease)
         if storage_plan:
             env['TOFU_STORAGE_CONNECTION_FILE'] = self._native_storage.ensure(storage_plan, env)
         if execution_plan:
@@ -2794,6 +2866,21 @@ class LifecycleManager:
                 storage_plan, execution_plan = prepared_storage_plan, prepared_execution_plan
             env = self._ensure_resident_services(env, storage_plan, execution_plan,
                                                 reset_failed=reset_failed_storage)
+        except _StorageLeaseStillHeld as exc:
+            # The previous authority is still exiting. Keep the spawn pending
+            # behind the existing storage blocker so reconcile retries it as
+            # soon as the OS lease disappears, without spending the crash
+            # budget or requiring another human restart.
+            maintenance = exc.lease.get('kind') == 'offline_maintenance'
+            self._defer_for_storage_lease(exc.lease, resume_source=source)
+            self._save()
+            return {
+                'ok': maintenance,
+                'message': self._storage_blocker_message(exc.lease),
+                'waitingForMaintenance': maintenance,
+                'blockedByStorageLease': True,
+                **self.status(),
+            }
         except Exception as exc:
             message = f'resident service preparation failed: {exc}'
             self._set_observed('crashloop', message)
@@ -2967,6 +3054,8 @@ class LifecycleManager:
             if server_env is not None:
                 self._project_env = dict(project_environment or {})
                 self._state['serverEnv'] = forwarded_environment
+                self._state['serverEnvOverrides'] = _operator_overrides(
+                    forwarded_environment, self._project_env)
                 self._state['environmentQuarantine'] = {}
             if server_args is not None or server_env is not None:
                 effective_env = dict(os.environ)
@@ -3172,6 +3261,12 @@ class LifecycleManager:
                 live = read_lock_status(self.project)
                 if live.get('running') and not self._identity_error(live):
                     self._reconcile_live_worker_port(live)
+            if server_env is None:
+                # The browser door forwards nothing. Apply what serverctl
+                # would forward now: the current .env plus recorded operator
+                # overrides, so a .env edit takes effect through either door.
+                server_env = {**project_server_env(self.project),
+                              **(self._state.get('serverEnvOverrides') or {})}
             launch_args = [str(arg) for arg in (
                 server_args if server_args is not None else self._state.get('serverArgs') or [])]
             if len(launch_args) > 32 or any(len(arg) > 4096 for arg in launch_args):
@@ -3201,15 +3296,15 @@ class LifecycleManager:
                     'Worker lifecycle changed during restart preparation; retry against current state.')}
             if server_args is not None:
                 self._state['serverArgs'] = [str(arg) for arg in server_args]
-            if server_env is not None:
-                self._project_env = dict(project_environment or {})
-                self._state['serverEnv'] = forwarded_environment
-                self._state['environmentQuarantine'] = {}
-            if server_args is not None or server_env is not None:
-                effective_env = dict(os.environ)
-                effective_env.update(self._state.get('serverEnv') or {})
-                self._state['port'] = _server_port(
-                    self._state.get('serverArgs') or [], effective_env)
+            self._project_env = dict(project_environment or {})
+            self._state['serverEnv'] = forwarded_environment
+            self._state['serverEnvOverrides'] = _operator_overrides(
+                forwarded_environment, self._project_env)
+            self._state['environmentQuarantine'] = {}
+            effective_env = dict(os.environ)
+            effective_env.update(self._state.get('serverEnv') or {})
+            self._state['port'] = _server_port(
+                self._state.get('serverArgs') or [], effective_env)
             stopped = self.stop(source=source, keep_desired_running=True)
             if not stopped.get('ok'):
                 logger.error(

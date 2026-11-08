@@ -15,13 +15,13 @@ from collections import defaultdict
 
 from lib.identity import tenant_scope
 from lib.log import get_logger
+from lib.model_info.capability_taxonomy import CHAT_EXCLUDED_CAPS as _NON_CHAT
 
 logger = get_logger(__name__)
 
 _MAIN = 'main'
 _AA_CHEAPEST = 'aa-cheapest'
 _CHEAPEST_ALIAS = 'qualified-cheapest'
-_NON_CHAT = {'embedding', 'image_gen', 'transcription', 'tts'}
 
 
 def _mapping(value):
@@ -200,7 +200,8 @@ def _authorized_buckets(dispatcher, profiles, *, owner, tenant, pin, provider,
                 and provenance.get('tenantId') == tenant):
             index[(profile.get('providerId'), provenance.get('offeringId'),
                    profile.get('modelId'))].append(profile)
-    slots = list(dispatcher.slots)
+    with dispatcher._lock:
+        slots = list(dispatcher._selection_scope(pin))
     route_keys = set()
     for slot in slots:
         execution_pin = str(getattr(slot, 'provider_id', '') or '')
@@ -273,8 +274,11 @@ def _bucket_prices(bucket, input_tokens, output_tokens):
     return prices if prices and all(price is not None for price in prices) else []
 
 
-def _parent_route_identities(bucket):
-    """Complete native parent witnesses only; legacy slots cannot assert billing."""
+def _parent_route_identities(bucket, *, issued_parent=None):
+    """Keep the original issued group; profiles cannot replace its revision."""
+    if issued_parent is not None:
+        return tuple(dict(identity) for identity in issued_parent['_parentRouteIdentities'])
+    # Legacy callers have no issued-group port; retain their existing full join.
     identities = []
     for slot, profile in bucket['members']:
         provenance = profile['provenance']
@@ -355,8 +359,9 @@ def select_summary_route(task, input_tokens, output_tokens, *,
                 and tenant_scope(task['_tenant_id']) != tenant_scope(tenant)):
             result['reason'] = 'conflicting_tenant_identity'
             return result
-        from lib.llm_dispatch.native_context_scope import native_compaction_route_ready
-        if not native_compaction_route_ready(task):
+        from lib.llm_dispatch.native_context_scope import native_compaction_route_evidence
+        issued_parent = native_compaction_route_evidence(task)
+        if issued_parent is False:
             result['reason'] = 'native_parent_route_unready'
             return result
         from lib.llm_dispatch import get_dispatcher
@@ -371,7 +376,8 @@ def select_summary_route(task, input_tokens, output_tokens, *,
                 get_dispatcher(), profiles, owner=owner, tenant=tenant,
                 pin=pin, provider=provider, allow_mixed_scope=True)
             expanded_keys = sorted(key for key in expanded if key[1] == model)
-            if len(expanded_keys) == 1 and _parent_route_identities(expanded[expanded_keys[0]]):
+            if len(expanded_keys) == 1 and _parent_route_identities(
+                    expanded[expanded_keys[0]], issued_parent=issued_parent):
                 buckets, main_keys = expanded, expanded_keys
         if len(main_keys) != 1:
             result['reason'] = 'main_route_unresolved'
@@ -379,6 +385,16 @@ def select_summary_route(task, input_tokens, output_tokens, *,
         main_key = main_keys[0]
         main = buckets[main_key]
         result['providerId'] = main_key[0]
+        parent_identities = _parent_route_identities(main, issued_parent=issued_parent)
+        if issued_parent is not None:
+            result.update(routeIdentity=dict(issued_parent['routeIdentity']),
+                          _parentRouteIdentities=parent_identities)
+            # Own profile/price reads remain available even for explicit main.
+            # They cannot refresh stale issuance, nor authorize auxiliary work.
+            if any(profile['provenance'].get('revision') != issued_parent['routeIdentity']['revision']
+                   for _, profile in main['members']):
+                result['reason'] = 'parent_route_changed'
+                return result
 
         restrictions = (task.get('provider_id'), config.get('providerId'),
                         config.get('provider_id'))
@@ -408,7 +424,7 @@ def select_summary_route(task, input_tokens, output_tokens, *,
                     parent_offering_ids={profile['provenance']['offeringId']
                                          for _, profile in main['members']},
 
-                    parent_route_identities=_parent_route_identities(main),
+                    parent_route_identities=parent_identities,
                     main_cost=main_cost, main_serves_summary=main_serves_summary,
                     excluded_routes=excluded_routes)
             except Exception as exc:
@@ -436,12 +452,12 @@ def select_summary_route(task, input_tokens, output_tokens, *,
                 capacity_output_tokens=capacity_output_tokens,
                 subscription_main=False,
 
-                parent_route_identities=_parent_route_identities(main),
+                parent_route_identities=parent_identities,
                 parent_offering_ids={profile['provenance']['offeringId']
                                      for _, profile in main['members']},
                 main_cost=main_cost, excluded_routes=excluded_routes,
                 main_serves_summary=main_serves_summary)
-            if native.get('requestOwned'):
+            if native.get('requestOwned') or native.get('reason') == 'parent_route_changed':
                 return native
             if native.get('_requestRoute'):
                 result['_requestRoute'] = native['_requestRoute']

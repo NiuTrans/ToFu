@@ -31,12 +31,12 @@ def _bundle(path, *, secret='carried-key'):
         'contract_version': CONTRACT_VERSION,
         'document': {
             **empty_document(),
-            'providers': [{'provider_id': 'sankuai', 'name': 'Meituan',
+            'providers': [{'provider_id': 'example-corp', 'name': 'Default',
                            'scope': 'public'}],
             'provider_accesses': [{
                 'provider_access_id': 'access_1',
-                'provider_id': 'sankuai',
-                'display_name': 'Meituan',
+                'provider_id': 'example-corp',
+                'display_name': 'YourProvider',
                 'enabled': True,
                 'quota_policy': {},
             }],
@@ -73,7 +73,7 @@ def test_import_reseals_and_commits_then_removes_the_plaintext_bundle(tmp_path):
     assert result['status'] == 'imported_carried_authority'
     assert result['credentials'] == 1
     authority = repository.get(boundary)
-    assert [p['provider_id'] for p in authority.document['providers']] == ['sankuai']
+    assert [p['provider_id'] for p in authority.document['providers']] == ['example-corp']
     assert repository.resolve_secret(boundary, 'mrs_carried') == 'carried-key'
     assert not bundle.exists(), 'the plaintext bundle is consumed by a successful import'
     assert read_carried_bundle(str(bundle)) is None
@@ -130,5 +130,5 @@ def test_bootstrap_prefers_the_carried_authority_over_legacy_providers(tmp_path,
 
     assert result['status'] == 'imported_carried_authority'
     providers = [p['provider_id'] for p in repository.get(boundary).document['providers']]
-    assert providers == ['sankuai']
+    assert providers == ['example-corp']
     assert repository.resolve_secret(boundary, 'mrs_carried') == 'carried-key'

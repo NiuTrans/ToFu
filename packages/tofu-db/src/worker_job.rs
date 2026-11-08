@@ -986,14 +986,16 @@ pub(crate) fn require_conversation_publication_claim(
     attempt_id: &str, task_id: &str, proof: Option<&PublicationClaim>, terminal: bool,
     drain_entered: bool,
 ) -> io::Result<()> {
+    // The SQL authority sends the same literal reasons (_worker_jobs.py).
+    use crate::semantic_executor::conflict_fence;
     if task_id != format!("conversation-attempt:{attempt_id}") {
         return if proof.is_none() { Ok(()) }
-            else { Err(conflict("attempt has no durable worker binding")) };
+            else { Err(conflict_fence("Attempt has no durable worker binding")) };
     }
-    let proof = proof.ok_or_else(|| conflict("durable attempt requires a worker claim"))?;
+    let proof = proof.ok_or_else(|| conflict_fence("Durable attempt requires a worker claim"))?;
     proof.validate()?;
     let job = read_job(database, transaction, task_id)?
-        .ok_or_else(|| conflict("worker claim cannot publish this attempt"))?;
+        .ok_or_else(|| conflict_fence("Worker claim cannot publish this attempt"))?;
     if job.user_id != transaction.owner_user_id()
         || job.task_kind != "conversation-attempt"
         || job.payload.get("attemptId").and_then(Value::as_str) != Some(attempt_id)
@@ -1001,7 +1003,7 @@ pub(crate) fn require_conversation_publication_claim(
                                database.worker_lease_now_ms()?)
         || (!terminal && job.cancel_requested_at_ms > 0
             && !(drain_entered && crate::turn::attempt_has_entered(database, transaction, attempt_id)?)) {
-        return Err(conflict("worker claim cannot publish this attempt"));
+        return Err(conflict_fence("Worker claim cannot publish this attempt"));
     }
     Ok(())
 }

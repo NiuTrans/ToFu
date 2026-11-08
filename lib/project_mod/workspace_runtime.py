@@ -2,7 +2,8 @@
 
 Entry point: prepare_workspace_runtime(source, workspace). Python gets a
 private environment prefix with the source's installed packages readable;
-pip writes stay local. Node packages are shared through an ignored private directory.
+pip writes stay local. Node packages are shared through an ignored private directory;
+the frontend toolchain's caches stay local to each checkout.
 The caller owns task authorization, serialization and durable path receipts.
 """
 from __future__ import annotations
@@ -12,6 +13,12 @@ import shlex
 import shutil
 from pathlib import Path
 import subprocess
+
+# Caches the frontend toolchain writes inside node_modules/ on every build or
+# test run: Vite's default cacheDir (.vite) and config-bundle directory
+# (.vite-temp), and Vitest's default module cache (.vitest-cache). They are
+# not packages, so they are never linked to the source checkout.
+NODE_TOOL_CACHE_DIRECTORIES = frozenset({'.vite', '.vite-temp', '.vitest-cache'})
 
 
 def prepare_workspace_runtime(source: str, workspace: str, *, restricted: bool = False) -> list[str]:
@@ -73,9 +80,11 @@ def prepare_workspace_runtime(source: str, workspace: str, *, restricted: bool =
         # Keep the directory real: conventional node_modules/ ignore rules
         # do not match a root-level symlink. Only installed package entries
         # are links; task-local installs can replace them without replacing
-        # the source project's node_modules directory.
+        # the source project's node_modules directory, and the toolchain
+        # creates its caches here on first use.
         destination.mkdir()
         for entry in dependencies.iterdir():
-            (destination / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
+            if entry.name not in NODE_TOOL_CACHE_DIRECTORIES:
+                (destination / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
         created.append('node_modules')
     return created

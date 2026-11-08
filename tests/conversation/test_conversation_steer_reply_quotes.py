@@ -30,16 +30,25 @@ def steer_conversation(chat_sidecar):
         yield
     finally:
         from lib import agent_inbox
+        from tests.support.chat_tasks import chat_task_registry
         agent_inbox.reset_for_test(CONV)
+        for task in list(chat_task_registry.values()):
+            if task.get('convId') == CONV:
+                chat_task_registry.pop(task['id'])
         delete_conversation(CONV, user_id=1)
 
 
 def _start_running_turn(flask_client, monkeypatch):
     import lib.conversation_sync.task_start as task_start_runtime
+    from tests.support.chat_tasks import register_local_executor
 
     def fake_start(conv_id, config, **kwargs):
         # generation_attempts.task_id is UNIQUE — every start needs its own.
         task_id = f'steer-quotes-{uuid.uuid4().hex[:8]}'
+        # The stub executor is this process's executor of the accepted attempt,
+        # so the steer publishes its wakeup into this process's inbox.
+        register_local_executor(task_id, conv_id=conv_id, attempt_id=config['_attemptId'],
+                                turn_id=config['_turnId'])
         kwargs['on_task_registered'](task_id)
         return task_id, None
 

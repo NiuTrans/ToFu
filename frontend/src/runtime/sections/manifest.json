@@ -240,6 +240,12 @@
    "output": "frontend/src/runtime/image-generation-runtime.generated.js",
    "moduleImports": [
     {
+     "source": "frontend/src/features/image/composer-constraints.ts",
+     "bindings": [
+      "supportedImageComposerOptions"
+     ]
+    },
+    {
      "source": "frontend/src/html-safety.ts",
      "bindings": [
       "escapeHtml"
@@ -824,7 +830,8 @@
      "source": "frontend/src/features/settings/restart-observation.ts",
      "bindings": [
       "projectRestartHealth",
-      "restartPhaseProgress"
+      "restartPhaseProgress",
+      "restartWaitNotice"
      ]
     }
    ],
@@ -957,6 +964,14 @@
     {
      "source": "frontend/src/features/settings/catpaw-settings.ts",
      "bindings": ["catpawSettings"]
+    },
+    {
+     "source": "frontend/src/features/settings/kimi-code-login.ts",
+     "bindings": ["kimiCodeLogin"]
+    },
+    {
+     "source": "frontend/src/features/settings/subscription-plans.ts",
+     "bindings": ["subscriptionPlans"]
     },
     {
      "source": "frontend/src/features/settings/model-routing-authority.ts",

@@ -183,6 +183,13 @@ timeouts leaves status behind the same body; changing live projection fields
 without their revision breaks positional replay. No backend switch, polling
 lane, task limit or tuning setting is introduced.
 
+One lifecycle-owned authority watch wakes the broker from committed changes,
+including writes in a separate execution process. A cursor gap or authority
+restart invalidates every current subscription; scoped hints retain owner and
+conversation identity. Streams subscribe before their first replay. An unchanged
+watch cursor needs no replay query: quiet stream heartbeats report the last
+delivered cursor, while reconnect and invalidation resume canonical replay.
+
 The stream confirms a quiet subscription with an immediate heartbeat. Later
 heartbeat deadlines advance only after a delivered frame; redundant broker wake
 hints cannot postpone them. Browser wake/invalidation uses the existing full
@@ -243,6 +250,34 @@ Paired offline diagnostics: `benchmarks/turn_state_measure.mjs`,
 Client DOM measurements and shell receipt caching: [rendering performance](../TURN_RENDERING_PERFORMANCE.md); offline reducer clocks alone never admit DOM/startup/I/O latency.
 
 ## Owners
+
+### Durable execution admission
+
+**Problem:** constructing a conversation executor in an HTTP process couples
+accepted work to API restarts and duplicates execution when admission loses
+its acknowledgement. **Decision:** ordinary Chat, Goal, Flow, Coordinator,
+queued activation and timer continuation submit the accepted Attempt through
+`turn.attempt.dispatch_worker`. Its one transaction binds the deterministic task
+and enqueues its WorkerJob. HTTP acknowledges the pending binding; the common
+claimed worker restores the accepted configuration and invokes the existing
+executor. Request replay cannot replace identity, configuration or the original
+Stop watermark. Worker execution uses its own monotonic clock; an ingress clock
+is not serialized as evidence from another process.
+
+Stop commits cancellation before acknowledging it. Unentered work settles
+without constructing an executor or requiring an execution grant that may
+already be revoked. Configuration/authorization failure before entry has a
+terminal Turn receipt and creates no fictitious task-result or exit witness.
+After entry, physical exit and accounting retain their existing proof
+requirements. Preparation failures preserve their actionable model/provider
+cause while unknown external effects prohibit automatic replay. Startup errors
+arrive through the same canonical Turn projection after HTTP acceptance.
+
+**Alternatives considered:** spawning locally after a missing acknowledgement
+can duplicate effects; retaining a separate conversation queue duplicates the
+WorkerJob owner; dispatching every child as another root destroys the shared
+invocation, account and cancellation scopes. Descendants continue to use those
+common owners.
 
 | Concern | Owner |
 |---|---|
@@ -464,10 +499,13 @@ notification wrapper. Both queue-list and snapshot readers use the shared pure
 `test_background_completion_queue_projection.py` and `test_background_completion_ui.py`.
 New completion rows have passive `background_receipt` kind and never start a
 Turn individually. Earlier `workflow_step` completion rows remain readable and
-are skipped by ordinary dispatch after an upgrade. Once all known commands for
-the owner and conversation have published, a single workflow wake starts an
-idle Turn; queued human or other work takes priority and consumes the receipts
-without an extra wake. That Turn rehydrates up to 32 durable receipts into its
+are skipped by ordinary dispatch after an upgrade. Once every command for the
+owner and conversation has published, a single collective wake Turn starts
+under the `turn.create_pair` lane fence; no queue row stands in for it, so a
+busy lane persists nothing, and wake rows stored by earlier releases are
+retired without a Turn. Queued human or other work takes priority and consumes
+the receipts without an extra wake. That Turn rehydrates up to 32 durable
+receipts into its
 background-command inbox lane; the coalesced inbox message presents them at
 one model boundary, and the confirmed receipt ACK removes only those rows.
 Remaining receipts stay visible for a later Turn. Startup and maintenance scan

@@ -105,6 +105,10 @@ class RunConfig:
     context_tokens: int
     poll_interval_sec: int
     run_label: str
+    # Anthropic bridge base URL in front of the relay (Claude Code arm only).
+    anthropic_url: str | None = None
+    # Benchmark-source blocklist in each arm's own mechanism (source_guard.py).
+    source_guard: bool = False
 
     def to_json(self) -> dict:
         return {key: str(value) if isinstance(value, Path) else value for key, value in self.__dict__.items()}
@@ -128,22 +132,31 @@ class Runner:
     def agent_for(self, task: harness.Task, arm: str) -> dict:
         model_base_url = f"{self.config.relay_url.rstrip('/')}/arm/{arm}-{self.config.run_label}/v1"
         timeout = harness.agent_timeout_for(task, self.protocol)
+        guarded = self.config.source_guard
         if arm == "tofu":
             return harness.tofu_agent(artifact=self.artifacts["tofu"], files_url=self.config.files_url,
                                       model_base_url=model_base_url, model=self.config.model,
                                       timeout_sec=timeout, instruction=task.instruction,
                                       context_tokens=self.config.context_tokens,
-                                      output_tokens=self.protocol.max_tokens)
+                                      output_tokens=self.protocol.max_tokens, source_guard=guarded)
         if arm == "opencode":
             return harness.opencode_agent(artifact=self.artifacts["opencode"], files_url=self.config.files_url,
                                           model_base_url=model_base_url, model=self.config.model,
                                           instruction=task.instruction, context_tokens=self.config.context_tokens,
-                                          output_tokens=self.protocol.max_tokens)
+                                          output_tokens=self.protocol.max_tokens, source_guard=guarded)
         if arm == "pi":
             return harness.pi_agent(artifact=self.artifacts["pi"], files_url=self.config.files_url,
                                     model_base_url=model_base_url, model=self.config.model,
                                     instruction=task.instruction, context_tokens=self.config.context_tokens,
-                                    output_tokens=self.protocol.max_tokens)
+                                    output_tokens=self.protocol.max_tokens, source_guard=guarded)
+        if arm == "claude-code":
+            if not self.config.anthropic_url:
+                raise ValueError("the claude-code arm needs anthropic_url (the Anthropic bridge)")
+            return harness.claude_code_agent(
+                artifact=self.artifacts["claude-code"], files_url=self.config.files_url,
+                anthropic_base_url=f"{self.config.anthropic_url.rstrip('/')}/arm/{arm}-{self.config.run_label}",
+                model=self.config.model, instruction=task.instruction, output_tokens=self.protocol.max_tokens,
+                source_guard=guarded)
         raise ValueError(f"unknown arm {arm!r}")
 
     def spec_for(self, task: harness.Task, arm: str, attempt: int) -> dict:

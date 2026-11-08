@@ -68,9 +68,12 @@ def project_coordination_conversations():
     from quart import request
     from lib.conversations.coordinator_conversations import conversation_page
     from lib.project_dispatch.history import PROCESS_RECIPIENT_ORIGINS
+    from routes.conversations import _live_busy_conversation_ids
     try:
-        return api_ok(conversation_page(_owner(), _path(), request.args.get('cursor'),
-                                        recipient_origins=PROCESS_RECIPIENT_ORIGINS))
+        owner = _owner()
+        return api_ok(conversation_page(owner, _path(), request.args.get('cursor'),
+                                        recipient_origins=PROCESS_RECIPIENT_ORIGINS,
+                                        busy_conversation_ids=_live_busy_conversation_ids(owner)))
     except Exception as exc:
         return _safe_route_error_response(exc)
 

@@ -1,0 +1,2639 @@
+{
+ "n_attempts": 20,
+ "missing_http_error": [],
+ "models": [
+  "glm-5.3"
+ ],
+ "per_arm_model": {
+  "A1|glm-5.3": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": 88.6,
+    "lo": 61.0,
+    "hi": 120.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": 287.6,
+    "lo": 145.4,
+    "hi": 429.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "calls": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   }
+  },
+  "A2|glm-5.3": {
+   "final": {
+    "est": 0.8,
+    "lo": 0.4,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": 0.8,
+    "lo": 0.4,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": 55.8,
+    "lo": 24.0,
+    "hi": 82.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": 3404.4,
+    "lo": 157.8,
+    "hi": 9722.6,
+    "n": 5,
+    "tasks": 5
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "calls": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   }
+  },
+  "A3|glm-5.3": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": 92.8,
+    "lo": 56.2,
+    "hi": 135.4,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": 259.6,
+    "lo": 143.0,
+    "hi": 398.4,
+    "n": 5,
+    "tasks": 5
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "calls": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   }
+  },
+  "A4|glm-5.3": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": 74.2,
+    "lo": 50.0,
+    "hi": 100.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": 468.6,
+    "lo": 86.6,
+    "hi": 1195.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "calls": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   }
+  }
+ },
+ "pooled": {
+  "A1": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": 88.6,
+    "lo": 61.0,
+    "hi": 120.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload_first": {
+    "est": 88.6,
+    "lo": 61.0,
+    "hi": 120.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": 287.6,
+    "lo": 145.4,
+    "hi": 429.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion_first": {
+    "est": 287.6,
+    "lo": 145.4,
+    "hi": 429.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "reasoning": {
+    "est": 192.0,
+    "lo": 72.0,
+    "hi": 320.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "calls": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "missing_operation_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "no_tool_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "patch": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "visible": {
+    "est": 88.6,
+    "lo": 61.0,
+    "hi": 117.2,
+    "n": 5,
+    "tasks": 5
+   }
+  },
+  "A2": {
+   "final": {
+    "est": 0.8,
+    "lo": 0.4,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": 0.8,
+    "lo": 0.4,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": 55.8,
+    "lo": 23.2,
+    "hi": 82.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload_first": {
+    "est": 55.8,
+    "lo": 24.0,
+    "hi": 82.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": 3404.4,
+    "lo": 157.8,
+    "hi": 9722.6,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion_first": {
+    "est": 3404.4,
+    "lo": 157.8,
+    "hi": 9722.6,
+    "n": 5,
+    "tasks": 5
+   },
+   "reasoning": {
+    "est": 3342.6,
+    "lo": 90.0,
+    "hi": 9690.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "calls": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "missing_operation_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "no_tool_first": {
+    "est": 0.2,
+    "lo": 0.0,
+    "hi": 0.6,
+    "n": 5,
+    "tasks": 5
+   },
+   "patch": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "visible": {
+    "est": 55.8,
+    "lo": 25.6,
+    "hi": 82.8,
+    "n": 5,
+    "tasks": 5
+   }
+  },
+  "A3": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": 92.8,
+    "lo": 56.2,
+    "hi": 131.87499999999892,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload_first": {
+    "est": 92.8,
+    "lo": 56.2,
+    "hi": 134.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": 259.6,
+    "lo": 143.0,
+    "hi": 398.4,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion_first": {
+    "est": 259.6,
+    "lo": 143.0,
+    "hi": 398.4,
+    "n": 5,
+    "tasks": 5
+   },
+   "reasoning": {
+    "est": 171.8,
+    "lo": 88.2,
+    "hi": 287.2,
+    "n": 5,
+    "tasks": 5
+   },
+   "calls": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "missing_operation_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "no_tool_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "patch": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "visible": {
+    "est": 92.8,
+    "lo": 56.2,
+    "hi": 135.4,
+    "n": 5,
+    "tasks": 5
+   }
+  },
+  "A4": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": 74.2,
+    "lo": 51.2,
+    "hi": 99.4,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload_first": {
+    "est": 74.2,
+    "lo": 50.0,
+    "hi": 99.4,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": 468.6,
+    "lo": 85.4,
+    "hi": 1195.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion_first": {
+    "est": 468.6,
+    "lo": 85.4,
+    "hi": 1195.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "reasoning": {
+    "est": 398.4,
+    "lo": 34.0,
+    "hi": 1103.6,
+    "n": 5,
+    "tasks": 5
+   },
+   "calls": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "missing_operation_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "no_tool_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "patch": {
+    "est": 61.0,
+    "lo": 41.8,
+    "hi": 81.6,
+    "n": 5,
+    "tasks": 5
+   },
+   "visible": {
+    "est": 74.2,
+    "lo": 51.4,
+    "hi": 100.8,
+    "n": 5,
+    "tasks": 5
+   }
+  }
+ },
+ "paired": {
+  "A2-A1|insert": {
+   "final": {
+    "est": -0.5,
+    "lo": -1.0,
+    "hi": 0.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": -0.5,
+    "lo": -1.0,
+    "hi": 0.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": -75.5,
+    "lo": -143.0,
+    "hi": -8.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 7754.0,
+    "lo": -57.0,
+    "hi": 15565.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A2-A1|insert|S": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -8.0,
+    "lo": -8.0,
+    "hi": -8.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": -57.0,
+    "lo": -57.0,
+    "hi": -57.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2-A1|insert|M": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|insert|L": {
+   "final": {
+    "est": -1.0,
+    "lo": -1.0,
+    "hi": -1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": -1.0,
+    "lo": -1.0,
+    "hi": -1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -143.0,
+    "lo": -143.0,
+    "hi": -143.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 15565.0,
+    "lo": 15565.0,
+    "hi": 15565.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2-A1|replace": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -2.0,
+    "lo": -2.0,
+    "hi": -2.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 57.0,
+    "lo": 57.0,
+    "hi": 57.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2-A1|replace|S": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|replace|M": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -2.0,
+    "lo": -2.0,
+    "hi": -2.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 57.0,
+    "lo": 57.0,
+    "hi": 57.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2-A1|replace|L": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|delete": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -1.0,
+    "lo": -1.0,
+    "hi": -1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": -43.0,
+    "lo": -43.0,
+    "hi": -43.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2-A1|delete|S": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|delete|M": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -1.0,
+    "lo": -1.0,
+    "hi": -1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": -43.0,
+    "lo": -43.0,
+    "hi": -43.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2-A1|delete|L": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|multi": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -10.0,
+    "lo": -10.0,
+    "hi": -10.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 62.0,
+    "lo": 62.0,
+    "hi": 62.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2-A1|multi|S": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|multi|M": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -10.0,
+    "lo": -10.0,
+    "hi": -10.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 62.0,
+    "lo": 62.0,
+    "hi": 62.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2-A1|multi|L": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|all": {
+   "final": {
+    "est": -0.2,
+    "lo": -0.6,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": -0.2,
+    "lo": -0.6,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": -32.8,
+    "lo": -88.2,
+    "hi": -2.8,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": 3116.8,
+    "lo": -30.4,
+    "hi": 9342.8,
+    "n": 5,
+    "tasks": 5
+   }
+  },
+  "A3-A1|insert": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 9.0,
+    "lo": -8.0,
+    "hi": 26.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 29.0,
+    "lo": -42.0,
+    "hi": 100.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A3-A1|replace": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -8.0,
+    "lo": -8.0,
+    "hi": -8.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 71.0,
+    "lo": 71.0,
+    "hi": 71.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3-A1|delete": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 8.0,
+    "lo": 8.0,
+    "hi": 8.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": -283.0,
+    "lo": -283.0,
+    "hi": -283.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3-A1|multi": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 3.0,
+    "lo": 3.0,
+    "hi": 3.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 14.0,
+    "lo": 14.0,
+    "hi": 14.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3-A1|all": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": 4.2,
+    "lo": -5.8,
+    "hi": 15.6,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": -28.0,
+    "lo": -164.0,
+    "hi": 71.2,
+    "n": 5,
+    "tasks": 5
+   }
+  },
+  "A4-A1|insert": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": -17.0,
+    "lo": -21.0,
+    "hi": -13.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 713.0,
+    "lo": -50.0,
+    "hi": 1476.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A4-A1|replace": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -4.0,
+    "lo": -4.0,
+    "hi": -4.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": -15.0,
+    "lo": -15.0,
+    "hi": -15.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4-A1|delete": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -8.0,
+    "lo": -8.0,
+    "hi": -8.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": -394.0,
+    "lo": -394.0,
+    "hi": -394.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4-A1|multi": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -26.0,
+    "lo": -26.0,
+    "hi": -26.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": -112.0,
+    "lo": -112.0,
+    "hi": -112.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4-A1|all": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": -14.4,
+    "lo": -21.4,
+    "hi": -7.4,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": 181.0,
+    "lo": -249.4,
+    "hi": 853.3749999999975,
+    "n": 5,
+    "tasks": 5
+   }
+  },
+  "A4-A3|insert": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": -26.0,
+    "lo": -47.0,
+    "hi": -5.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 684.0,
+    "lo": -8.0,
+    "hi": 1376.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A4-A3|replace": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 4.0,
+    "lo": 4.0,
+    "hi": 4.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": -86.0,
+    "lo": -86.0,
+    "hi": -86.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4-A3|delete": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -16.0,
+    "lo": -16.0,
+    "hi": -16.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": -111.0,
+    "lo": -111.0,
+    "hi": -111.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4-A3|multi": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -29.0,
+    "lo": -29.0,
+    "hi": -29.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": -126.0,
+    "lo": -126.0,
+    "hi": -126.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4-A3|all": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": -18.6,
+    "lo": -34.6,
+    "hi": -3.6,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": 209.0,
+    "lo": -112.0,
+    "hi": 798.8,
+    "n": 5,
+    "tasks": 5
+   }
+  },
+  "A3-A2|insert": {
+   "final": {
+    "est": 0.5,
+    "lo": 0.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 0.5,
+    "lo": 0.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 84.5,
+    "lo": 0.0,
+    "hi": 169.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": -7725.0,
+    "lo": -15465.0,
+    "hi": 15.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A3-A2|replace": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -6.0,
+    "lo": -6.0,
+    "hi": -6.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 14.0,
+    "lo": 14.0,
+    "hi": 14.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3-A2|delete": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 9.0,
+    "lo": 9.0,
+    "hi": 9.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": -240.0,
+    "lo": -240.0,
+    "hi": -240.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3-A2|multi": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 13.0,
+    "lo": 13.0,
+    "hi": 13.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": -48.0,
+    "lo": -48.0,
+    "hi": -48.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3-A2|all": {
+   "final": {
+    "est": 0.2,
+    "lo": 0.0,
+    "hi": 0.6,
+    "n": 5,
+    "tasks": 5
+   },
+   "first": {
+    "est": 0.2,
+    "lo": 0.0,
+    "hi": 0.6,
+    "n": 5,
+    "tasks": 5
+   },
+   "payload": {
+    "est": 37.0,
+    "lo": -0.6,
+    "hi": 104.0,
+    "n": 5,
+    "tasks": 5
+   },
+   "completion": {
+    "est": -3144.8,
+    "lo": -9324.0,
+    "hi": 2.0,
+    "n": 5,
+    "tasks": 5
+   }
+  }
+ },
+ "taxonomy": {
+  "A1|glm-5.3": {
+   "first_error": {},
+   "final_class": {},
+   "tool_ok_but_wrong": 0,
+   "n": 5
+  },
+  "A1|all": {
+   "first_error": {},
+   "final_class": {},
+   "tool_ok_but_wrong": 0,
+   "n": 5
+  },
+  "A2|glm-5.3": {
+   "first_error": {},
+   "final_class": {
+    "no_change": 1
+   },
+   "tool_ok_but_wrong": 0,
+   "n": 5
+  },
+  "A2|all": {
+   "first_error": {},
+   "final_class": {
+    "no_change": 1
+   },
+   "tool_ok_but_wrong": 0,
+   "n": 5
+  },
+  "A3|glm-5.3": {
+   "first_error": {},
+   "final_class": {},
+   "tool_ok_but_wrong": 0,
+   "n": 5
+  },
+  "A3|all": {
+   "first_error": {},
+   "final_class": {},
+   "tool_ok_but_wrong": 0,
+   "n": 5
+  },
+  "A4|glm-5.3": {
+   "first_error": {},
+   "final_class": {},
+   "tool_ok_but_wrong": 0,
+   "n": 5
+  },
+  "A4|all": {
+   "first_error": {},
+   "final_class": {},
+   "tool_ok_but_wrong": 0,
+   "n": 5
+  }
+ },
+ "by_type": {
+  "A1|insert": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 95.5,
+    "lo": 48.0,
+    "hi": 143.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 281.0,
+    "lo": 127.0,
+    "hi": 435.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A1|insert|S": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 48.0,
+    "lo": 48.0,
+    "hi": 48.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A1|insert|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A1|insert|L": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 143.0,
+    "lo": 143.0,
+    "hi": 143.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A1|replace": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 66.0,
+    "lo": 66.0,
+    "hi": 66.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 98.0,
+    "lo": 98.0,
+    "hi": 98.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A1|replace|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A1|replace|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 66.0,
+    "lo": 66.0,
+    "hi": 66.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A1|replace|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A1|delete": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 77.0,
+    "lo": 77.0,
+    "hi": 77.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 501.0,
+    "lo": 501.0,
+    "hi": 501.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A1|delete|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A1|delete|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 77.0,
+    "lo": 77.0,
+    "hi": 77.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A1|delete|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A1|multi": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 109.0,
+    "lo": 109.0,
+    "hi": 109.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 277.0,
+    "lo": 277.0,
+    "hi": 277.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A1|multi|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A1|multi|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 109.0,
+    "lo": 109.0,
+    "hi": 109.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A1|multi|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A2|insert": {
+   "final": {
+    "est": 0.5,
+    "lo": 0.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 0.5,
+    "lo": 0.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 20.0,
+    "lo": 0.0,
+    "hi": 40.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 8035.0,
+    "lo": 70.0,
+    "hi": 16000.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A2|insert|S": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 40.0,
+    "lo": 40.0,
+    "hi": 40.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|insert|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A2|insert|L": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|replace": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 64.0,
+    "lo": 64.0,
+    "hi": 64.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 155.0,
+    "lo": 155.0,
+    "hi": 155.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|replace|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A2|replace|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 64.0,
+    "lo": 64.0,
+    "hi": 64.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|replace|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A2|delete": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 76.0,
+    "lo": 76.0,
+    "hi": 76.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 458.0,
+    "lo": 458.0,
+    "hi": 458.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|delete|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A2|delete|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 76.0,
+    "lo": 76.0,
+    "hi": 76.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|delete|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A2|multi": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 99.0,
+    "lo": 99.0,
+    "hi": 99.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 339.0,
+    "lo": 339.0,
+    "hi": 339.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|multi|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A2|multi|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 99.0,
+    "lo": 99.0,
+    "hi": 99.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|multi|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|insert": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 104.5,
+    "lo": 40.0,
+    "hi": 169.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 310.0,
+    "lo": 85.0,
+    "hi": 535.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A3|insert|S": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 40.0,
+    "lo": 40.0,
+    "hi": 40.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3|insert|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|insert|L": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 169.0,
+    "lo": 169.0,
+    "hi": 169.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3|replace": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 58.0,
+    "lo": 58.0,
+    "hi": 58.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 169.0,
+    "lo": 169.0,
+    "hi": 169.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3|replace|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|replace|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 58.0,
+    "lo": 58.0,
+    "hi": 58.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3|replace|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|delete": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 85.0,
+    "lo": 85.0,
+    "hi": 85.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 218.0,
+    "lo": 218.0,
+    "hi": 218.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3|delete|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|delete|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 85.0,
+    "lo": 85.0,
+    "hi": 85.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3|delete|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|multi": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 112.0,
+    "lo": 112.0,
+    "hi": 112.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 291.0,
+    "lo": 291.0,
+    "hi": 291.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3|multi|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|multi|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 112.0,
+    "lo": 112.0,
+    "hi": 112.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3|multi|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|insert": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 78.5,
+    "lo": 35.0,
+    "hi": 122.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 994.0,
+    "lo": 77.0,
+    "hi": 1911.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A4|insert|S": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 35.0,
+    "lo": 35.0,
+    "hi": 35.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|insert|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|insert|L": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 122.0,
+    "lo": 122.0,
+    "hi": 122.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|replace": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 62.0,
+    "lo": 62.0,
+    "hi": 62.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 83.0,
+    "lo": 83.0,
+    "hi": 83.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|replace|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|replace|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 62.0,
+    "lo": 62.0,
+    "hi": 62.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|replace|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|delete": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 69.0,
+    "lo": 69.0,
+    "hi": 69.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 107.0,
+    "lo": 107.0,
+    "hi": 107.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|delete|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|delete|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 69.0,
+    "lo": 69.0,
+    "hi": 69.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|delete|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|multi": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 83.0,
+    "lo": 83.0,
+    "hi": 83.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 165.0,
+    "lo": 165.0,
+    "hi": 165.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|multi|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|multi|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 83.0,
+    "lo": 83.0,
+    "hi": 83.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|multi|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  }
+ }
+}

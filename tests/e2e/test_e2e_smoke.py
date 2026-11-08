@@ -23,11 +23,12 @@ render path runs UNCHANGED; only the upstream token source is faked. The
 ``web_search`` execution seam (``_web_search_one``) is likewise stubbed so the
 tool-round test needs no network.
 
-The patch is installed at SESSION scope (autouse) BEFORE the session-scoped
-``live_server`` ever handles a request, and a module-level SENTINEL counts stub
-invocations. Each chat test asserts the sentinel advanced — so if the patch
-ever misses and a REAL model streams, the test FAILS LOUDLY instead of
-silently passing on real output.
+The module-scoped autouse fixture installs the stubs before chat execution and
+owns the genuine durable worker service: the bare ``live_server`` starts ASGI
+and storage, not production background workers. Accepted chat jobs still pass
+through real claims, task entry and settlement. Workers join before the stubs
+are restored. A module-level SENTINEL counts stub invocations; each chat test
+asserts it advanced, so a missed patch cannot silently pass on real output.
 
 WHAT IT PROVES THAT NOTHING ELSE DOES
 -------------------------------------
@@ -200,8 +201,8 @@ def _install_llm_stubs(flask_app):
     into unrelated tests later scheduled on the same xdist worker.
     """
     import tofu_search
-    import lib.tasks_pkg.llm_fallback._call as llm_fb
     import lib.tasks_pkg.handlers.search._core as search_core
+    from lib.durable_worker.runtime import ensure_workers_started, stop_workers
     from tests.support.model_routing import install_native_test_model_route
 
     # A blank disposable authority has no callable route. Install the same
@@ -225,12 +226,18 @@ def _install_llm_stubs(flask_app):
     tofu_search.perform_web_search = _stub_perform_web_search
     search_core.perform_web_search = _stub_perform_web_search
     try:
+        # The HTTP command only enqueues its accepted Attempt. Arm the same
+        # claimed execution owner production uses, not a synthetic task result.
+        ensure_workers_started(flask_app)
         yield
     finally:
-        _fallback_transport.stream_llm_response = saved['llm_fb']
-        search_core.perform_web_search = saved['search_core']
-        if saved['tofu'] is not None:
-            tofu_search.perform_web_search = saved['tofu']
+        try:
+            stop_workers(flask_app)
+        finally:
+            _fallback_transport.stream_llm_response = saved['llm_fb']
+            search_core.perform_web_search = saved['search_core']
+            if saved['tofu'] is not None:
+                tofu_search.perform_web_search = saved['tofu']
 
 
 def _wait_app_ready(page, timeout=15000):

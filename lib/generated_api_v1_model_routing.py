@@ -409,8 +409,17 @@ OPENAPI_SCHEMAS = {'CatpawLocalImportApplyResponse': {'additionalProperties': Fa
                                                                  "developer's own API; relay means "
                                                                  'a third-party inference host, '
                                                                  'aggregator or gateway, not an '
-                                                                 'endorsement.',
-                                                  'enum': ['official', 'relay', 'local']},
+                                                                 'endorsement; subscription means '
+                                                                 "a vendor's own plan-bound coding "
+                                                                 'endpoint reached with a plan '
+                                                                 'key, whose quota and terms '
+                                                                 'belong to the plan and whose '
+                                                                 'declared limits are Offering '
+                                                                 'limits, never Model facts.',
+                                                  'enum': ['official',
+                                                           'relay',
+                                                           'local',
+                                                           'subscription']},
                                      'key': {'minLength': 1, 'type': 'string'},
                                      'name': {'type': 'string'}},
                       'required': ['key'],
@@ -896,6 +905,165 @@ EXTERNAL_DEFS = {'__document': {'$defs': {'capabilities': {'items': {'$ref': '#/
                                                                          'minLength': 1,
                                                                          'type': 'string'}},
                                                'type': 'object'},
+                          'mediaModalities': {'items': {'enum': ['text',
+                                                                 'image',
+                                                                 'video',
+                                                                 'audio']},
+                                              'maxItems': 4,
+                                              'minItems': 1,
+                                              'type': 'array',
+                                              'uniqueItems': True},
+                          'mediaPriceRate': {'additionalProperties': False,
+                                             'description': 'One official per-unit rate. unit is a '
+                                                            'media price unit of '
+                                                            'lib/model_info/capability_taxonomy '
+                                                            'MEDIA_PRICE_UNITS: per generated '
+                                                            'image, per second of generated '
+                                                            'video/audio, per generation request '
+                                                            '(one song or clip), per minute of '
+                                                            'input audio, or per million input '
+                                                            'characters.',
+                                             'properties': {'estimated': {'description': 'True '
+                                                                                         'when the '
+                                                                                         'creator '
+                                                                                         'publishes '
+                                                                                         'the '
+                                                                                         'amount '
+                                                                                         'as a '
+                                                                                         'per-unit '
+                                                                                         'estimate '
+                                                                                         'while '
+                                                                                         'billing '
+                                                                                         'by '
+                                                                                         'tokens.',
+                                                                          'type': 'boolean'},
+                                                            'price': {'minimum': 0,
+                                                                      'type': 'number'},
+                                                            'tier': {'description': 'The size, '
+                                                                                    'quality, '
+                                                                                    'resolution or '
+                                                                                    'mode this '
+                                                                                    'rate applies '
+                                                                                    'to.',
+                                                                     'maxLength': 128,
+                                                                     'minLength': 1,
+                                                                     'type': 'string'},
+                                                            'unit': {'enum': ['per_image',
+                                                                              'per_second',
+                                                                              'per_request',
+                                                                              'per_minute',
+                                                                              'per_million_characters']}},
+                                             'required': ['unit', 'price'],
+                                             'type': 'object'},
+                          'mediaPricing': {'additionalProperties': False,
+                                           'description': 'Official media-unit prices of an image, '
+                                                          'video, audio or speech Model. Token '
+                                                          'prices stay in pricing; the units a '
+                                                          'Model may use follow its model kind.',
+                                           'properties': {'currency': {'enum': ['USD', 'CNY']},
+                                                          'rates': {'items': {'$ref': '#/$defs/mediaPriceRate'},
+                                                                    'maxItems': 32,
+                                                                    'minItems': 1,
+                                                                    'type': 'array'}},
+                                           'required': ['currency', 'rates'],
+                                           'type': 'object'},
+                          'mediaProfile': {'additionalProperties': False,
+                                           'description': 'Officially documented generation and '
+                                                          'recognition constraints of a media '
+                                                          'Model. Every field is optional; absence '
+                                                          'means undocumented, never unsupported.',
+                                           'properties': {'aspect_ratios': {'items': {'pattern': '^[1-9][0-9]{0,2}:[1-9][0-9]{0,2}$',
+                                                                                      'type': 'string'},
+                                                                            'maxItems': 32,
+                                                                            'minItems': 1,
+                                                                            'type': 'array',
+                                                                            'uniqueItems': True},
+                                                          'audio_formats': {'description': 'Synthesized '
+                                                                                           'output '
+                                                                                           'formats, '
+                                                                                           'or '
+                                                                                           'accepted '
+                                                                                           'input '
+                                                                                           'formats '
+                                                                                           'for '
+                                                                                           'recognition.',
+                                                                            'items': {'pattern': '^[a-z0-9]{1,16}$',
+                                                                                      'type': 'string'},
+                                                                            'maxItems': 32,
+                                                                            'minItems': 1,
+                                                                            'type': 'array',
+                                                                            'uniqueItems': True},
+                                                          'durations_s': {'description': 'Selectable '
+                                                                                         'output '
+                                                                                         'lengths '
+                                                                                         'in '
+                                                                                         'seconds.',
+                                                                          'items': {'exclusiveMinimum': 0,
+                                                                                    'maximum': 86400,
+                                                                                    'type': 'number'},
+                                                                          'maxItems': 32,
+                                                                          'minItems': 1,
+                                                                          'type': 'array',
+                                                                          'uniqueItems': True},
+                                                          'input_modalities': {'$ref': '#/$defs/mediaModalities'},
+                                                          'max_audio_bytes': {'description': 'Largest '
+                                                                                             'accepted '
+                                                                                             'input '
+                                                                                             'audio '
+                                                                                             'upload.',
+                                                                              'minimum': 1,
+                                                                              'type': 'integer'},
+                                                          'max_input_chars': {'minimum': 1,
+                                                                              'type': 'integer'},
+                                                          'max_outputs': {'description': 'Maximum '
+                                                                                         'images '
+                                                                                         'or clips '
+                                                                                         'per '
+                                                                                         'request.',
+                                                                          'maximum': 1000,
+                                                                          'minimum': 1,
+                                                                          'type': 'integer'},
+                                                          'native_audio': {'description': 'Generated '
+                                                                                          'video '
+                                                                                          'carries '
+                                                                                          'a '
+                                                                                          'synchronized '
+                                                                                          'audio '
+                                                                                          'track.',
+                                                                           'type': 'boolean'},
+                                                          'output_modalities': {'$ref': '#/$defs/mediaModalities'},
+                                                          'resolutions': {'description': 'Named '
+                                                                                         'output '
+                                                                                         'resolutions '
+                                                                                         'such as '
+                                                                                         '1K, 2K, '
+                                                                                         '720p or '
+                                                                                         '1080p.',
+                                                                          'items': {'maxLength': 32,
+                                                                                    'minLength': 1,
+                                                                                    'type': 'string'},
+                                                                          'maxItems': 16,
+                                                                          'minItems': 1,
+                                                                          'type': 'array',
+                                                                          'uniqueItems': True},
+                                                          'sizes': {'description': 'Accepted '
+                                                                                   'WIDTHxHEIGHT '
+                                                                                   'output sizes, '
+                                                                                   'or auto.',
+                                                                    'items': {'pattern': '^([1-9][0-9]{1,4}x[1-9][0-9]{1,4}|auto)$',
+                                                                              'type': 'string'},
+                                                                    'maxItems': 32,
+                                                                    'minItems': 1,
+                                                                    'type': 'array',
+                                                                    'uniqueItems': True},
+                                                          'voices': {'items': {'maxLength': 64,
+                                                                               'minLength': 1,
+                                                                               'type': 'string'},
+                                                                     'maxItems': 256,
+                                                                     'minItems': 1,
+                                                                     'type': 'array',
+                                                                     'uniqueItems': True}},
+                                           'type': 'object'},
                           'migrationMetadata': {'additionalProperties': False,
                                                 'properties': {'context_repair_receipt_id': {'$ref': '#/$defs/identifier'},
                                                                'migrated_at': {'minimum': 0,
@@ -919,7 +1087,38 @@ EXTERNAL_DEFS = {'__document': {'$defs': {'capabilities': {'items': {'$ref': '#/
                                                                           'dated_snapshot',
                                                                           'retired']},
                                                    'list_pricing': {'$ref': '#/$defs/pricing'},
+                                                   'media_pricing': {'$ref': '#/$defs/mediaPricing'},
+                                                   'media_profile': {'$ref': '#/$defs/mediaProfile'},
                                                    'model_id': {'$ref': '#/$defs/identifier'},
+                                                   'official_media_pricing': {'$ref': '#/$defs/mediaPricing',
+                                                                              'description': 'Read-only '
+                                                                                             'projection '
+                                                                                             'of '
+                                                                                             'maintained '
+                                                                                             'media '
+                                                                                             'prices '
+                                                                                             'while '
+                                                                                             'media_pricing '
+                                                                                             'is '
+                                                                                             'absent; '
+                                                                                             'stripped '
+                                                                                             'on '
+                                                                                             'write.'},
+                                                   'official_media_profile': {'$ref': '#/$defs/mediaProfile',
+                                                                              'description': 'Read-only '
+                                                                                             'projection '
+                                                                                             'of '
+                                                                                             'the '
+                                                                                             'maintained '
+                                                                                             'media '
+                                                                                             'profile '
+                                                                                             'while '
+                                                                                             'media_profile '
+                                                                                             'is '
+                                                                                             'absent; '
+                                                                                             'stripped '
+                                                                                             'on '
+                                                                                             'write.'},
                                                    'official_pricing': {'$ref': '#/$defs/pricing'},
                                                    'quality_rank': {'type': 'number'},
                                                    'registration_issues': {'items': {'maxLength': 256,
@@ -935,12 +1134,14 @@ EXTERNAL_DEFS = {'__document': {'$defs': {'capabilities': {'items': {'$ref': '#/
                                                                                                                                        'maxItems': 8,
                                                                                                                                        'minItems': 1,
                                                                                                                                        'type': 'array'},
-                                                                                                              'maxProperties': 5,
+                                                                                                              'maxProperties': 7,
                                                                                                               'propertyNames': {'enum': ['release_date',
                                                                                                                                          'list_pricing',
                                                                                                                                          'inference_profile',
                                                                                                                                          'capabilities',
-                                                                                                                                         'context_window']},
+                                                                                                                                         'context_window',
+                                                                                                                                         'media_pricing',
+                                                                                                                                         'media_profile']},
                                                                                                               'type': 'object'},
                                                                                             'release_date': {'pattern': '^[0-9]{4}-[0-9]{2}(-[0-9]{2})?$',
                                                                                                              'type': 'string'},
@@ -1467,6 +1668,113 @@ EXTERNAL_DEFS = {'__document': {'$defs': {'capabilities': {'items': {'$ref': '#/
                                                 'minLength': 1,
                                                 'type': 'string'}},
                       'type': 'object'},
+ 'mediaModalities': {'items': {'enum': ['text', 'image', 'video', 'audio']},
+                     'maxItems': 4,
+                     'minItems': 1,
+                     'type': 'array',
+                     'uniqueItems': True},
+ 'mediaPriceRate': {'additionalProperties': False,
+                    'description': 'One official per-unit rate. unit is a media price unit of '
+                                   'lib/model_info/capability_taxonomy MEDIA_PRICE_UNITS: per '
+                                   'generated image, per second of generated video/audio, per '
+                                   'generation request (one song or clip), per minute of input '
+                                   'audio, or per million input characters.',
+                    'properties': {'estimated': {'description': 'True when the creator publishes '
+                                                                'the amount as a per-unit estimate '
+                                                                'while billing by tokens.',
+                                                 'type': 'boolean'},
+                                   'price': {'minimum': 0, 'type': 'number'},
+                                   'tier': {'description': 'The size, quality, resolution or mode '
+                                                           'this rate applies to.',
+                                            'maxLength': 128,
+                                            'minLength': 1,
+                                            'type': 'string'},
+                                   'unit': {'enum': ['per_image',
+                                                     'per_second',
+                                                     'per_request',
+                                                     'per_minute',
+                                                     'per_million_characters']}},
+                    'required': ['unit', 'price'],
+                    'type': 'object'},
+ 'mediaPricing': {'additionalProperties': False,
+                  'description': 'Official media-unit prices of an image, video, audio or speech '
+                                 'Model. Token prices stay in pricing; the units a Model may use '
+                                 'follow its model kind.',
+                  'properties': {'currency': {'enum': ['USD', 'CNY']},
+                                 'rates': {'items': {'$ref': '#/$defs/mediaPriceRate'},
+                                           'maxItems': 32,
+                                           'minItems': 1,
+                                           'type': 'array'}},
+                  'required': ['currency', 'rates'],
+                  'type': 'object'},
+ 'mediaProfile': {'additionalProperties': False,
+                  'description': 'Officially documented generation and recognition constraints of '
+                                 'a media Model. Every field is optional; absence means '
+                                 'undocumented, never unsupported.',
+                  'properties': {'aspect_ratios': {'items': {'pattern': '^[1-9][0-9]{0,2}:[1-9][0-9]{0,2}$',
+                                                             'type': 'string'},
+                                                   'maxItems': 32,
+                                                   'minItems': 1,
+                                                   'type': 'array',
+                                                   'uniqueItems': True},
+                                 'audio_formats': {'description': 'Synthesized output formats, or '
+                                                                  'accepted input formats for '
+                                                                  'recognition.',
+                                                   'items': {'pattern': '^[a-z0-9]{1,16}$',
+                                                             'type': 'string'},
+                                                   'maxItems': 32,
+                                                   'minItems': 1,
+                                                   'type': 'array',
+                                                   'uniqueItems': True},
+                                 'durations_s': {'description': 'Selectable output lengths in '
+                                                                'seconds.',
+                                                 'items': {'exclusiveMinimum': 0,
+                                                           'maximum': 86400,
+                                                           'type': 'number'},
+                                                 'maxItems': 32,
+                                                 'minItems': 1,
+                                                 'type': 'array',
+                                                 'uniqueItems': True},
+                                 'input_modalities': {'$ref': '#/$defs/mediaModalities'},
+                                 'max_audio_bytes': {'description': 'Largest accepted input audio '
+                                                                    'upload.',
+                                                     'minimum': 1,
+                                                     'type': 'integer'},
+                                 'max_input_chars': {'minimum': 1, 'type': 'integer'},
+                                 'max_outputs': {'description': 'Maximum images or clips per '
+                                                                'request.',
+                                                 'maximum': 1000,
+                                                 'minimum': 1,
+                                                 'type': 'integer'},
+                                 'native_audio': {'description': 'Generated video carries a '
+                                                                 'synchronized audio track.',
+                                                  'type': 'boolean'},
+                                 'output_modalities': {'$ref': '#/$defs/mediaModalities'},
+                                 'resolutions': {'description': 'Named output resolutions such as '
+                                                                '1K, 2K, 720p or 1080p.',
+                                                 'items': {'maxLength': 32,
+                                                           'minLength': 1,
+                                                           'type': 'string'},
+                                                 'maxItems': 16,
+                                                 'minItems': 1,
+                                                 'type': 'array',
+                                                 'uniqueItems': True},
+                                 'sizes': {'description': 'Accepted WIDTHxHEIGHT output sizes, or '
+                                                          'auto.',
+                                           'items': {'pattern': '^([1-9][0-9]{1,4}x[1-9][0-9]{1,4}|auto)$',
+                                                     'type': 'string'},
+                                           'maxItems': 32,
+                                           'minItems': 1,
+                                           'type': 'array',
+                                           'uniqueItems': True},
+                                 'voices': {'items': {'maxLength': 64,
+                                                      'minLength': 1,
+                                                      'type': 'string'},
+                                            'maxItems': 256,
+                                            'minItems': 1,
+                                            'type': 'array',
+                                            'uniqueItems': True}},
+                  'type': 'object'},
  'migrationMetadata': {'additionalProperties': False,
                        'properties': {'context_repair_receipt_id': {'$ref': '#/$defs/identifier'},
                                       'migrated_at': {'minimum': 0, 'type': 'number'},
@@ -1482,7 +1790,19 @@ EXTERNAL_DEFS = {'__document': {'$defs': {'capabilities': {'items': {'$ref': '#/
                           'inference_profile': {'$ref': '#/$defs/inferenceProfile'},
                           'lifecycle': {'enum': ['stable', 'preview', 'dated_snapshot', 'retired']},
                           'list_pricing': {'$ref': '#/$defs/pricing'},
+                          'media_pricing': {'$ref': '#/$defs/mediaPricing'},
+                          'media_profile': {'$ref': '#/$defs/mediaProfile'},
                           'model_id': {'$ref': '#/$defs/identifier'},
+                          'official_media_pricing': {'$ref': '#/$defs/mediaPricing',
+                                                     'description': 'Read-only projection of '
+                                                                    'maintained media prices while '
+                                                                    'media_pricing is absent; '
+                                                                    'stripped on write.'},
+                          'official_media_profile': {'$ref': '#/$defs/mediaProfile',
+                                                     'description': 'Read-only projection of the '
+                                                                    'maintained media profile '
+                                                                    'while media_profile is '
+                                                                    'absent; stripped on write.'},
                           'official_pricing': {'$ref': '#/$defs/pricing'},
                           'quality_rank': {'type': 'number'},
                           'registration_issues': {'items': {'maxLength': 256, 'type': 'string'},
@@ -1497,12 +1817,14 @@ EXTERNAL_DEFS = {'__document': {'$defs': {'capabilities': {'items': {'$ref': '#/
                                                                                                               'maxItems': 8,
                                                                                                               'minItems': 1,
                                                                                                               'type': 'array'},
-                                                                                     'maxProperties': 5,
+                                                                                     'maxProperties': 7,
                                                                                      'propertyNames': {'enum': ['release_date',
                                                                                                                 'list_pricing',
                                                                                                                 'inference_profile',
                                                                                                                 'capabilities',
-                                                                                                                'context_window']},
+                                                                                                                'context_window',
+                                                                                                                'media_pricing',
+                                                                                                                'media_profile']},
                                                                                      'type': 'object'},
                                                                    'release_date': {'pattern': '^[0-9]{4}-[0-9]{2}(-[0-9]{2})?$',
                                                                                     'type': 'string'},

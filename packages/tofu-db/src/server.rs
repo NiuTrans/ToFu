@@ -1032,7 +1032,7 @@ pub(crate) fn dispatch_one_request_inner_mode(
     allow_parallel: bool,
 ) -> io::Result<RequestDispatch> {
     if allow_parallel {crate::fsync_stats::note_foreground_request();}
-    let response = if request.operation == crate::worker_control::WATCH_OPERATION && stores.worker_control.is_some() {
+    let response = if matches!(request.operation.as_str(), crate::worker_control::WATCH_OPERATION | crate::worker_control::CONVERSATION_WATCH_OPERATION) && stores.worker_control.is_some() {
         let (control, scope) = stores.worker_control.as_ref().unwrap();
         control.respond(request, session.negotiated.schema_id, admitted_at_ms, *scope).into()
     } else if matches!(request.operation.as_str(), crate::daemon_checkpoint::CAPABILITIES | crate::daemon_checkpoint::CONTROL)
@@ -1540,7 +1540,8 @@ fn error_response(
                 SemanticExecutionError::AuthorityScopeMismatch => STATUS_FORBIDDEN,
                 SemanticExecutionError::DeadlineElapsed => STATUS_DEADLINE_ELAPSED,
                 SemanticExecutionError::UnsupportedOperation => STATUS_NOT_IMPLEMENTED,
-                SemanticExecutionError::Conflict => STATUS_CONFLICT,
+                SemanticExecutionError::Conflict
+                | SemanticExecutionError::ConflictFence(_) => STATUS_CONFLICT,
                 // Legacy serves this code as a bare 500 fallthrough; tofu-db
                 // classifies it as the caller-correctable conflict it is.
                 SemanticExecutionError::PluginStorageIncompatible => STATUS_CONFLICT,
@@ -1557,12 +1558,13 @@ fn error_response(
                 | SemanticExecutionError::CapacityBusy => STATUS_RESOURCE_EXHAUSTED,
             };
             let code = execution.code();
-            // Integrity, literal validation fences and deterministic resource
-            // bounds carry their exact diagnostic; every other code keeps the
-            // historic behavior of echoing the code as the message.
+            // Integrity, literal validation and conflict fences and
+            // deterministic resource bounds carry their exact diagnostic;
+            // every other code keeps echoing the code as the message.
             let error_message = match &execution {
                 SemanticExecutionError::Integrity(message) => message.clone(),
-                SemanticExecutionError::InvalidPayloadFence(reason) => (*reason).to_owned(),
+                SemanticExecutionError::InvalidPayloadFence(reason)
+                | SemanticExecutionError::ConflictFence(reason) => (*reason).to_owned(),
                 SemanticExecutionError::SearchCursorInvalidPayload => {
                     "invalid conversation search cursor".to_owned()
                 }

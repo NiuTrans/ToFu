@@ -77,7 +77,12 @@ def _create(scope: dict, arguments: dict) -> dict:
 
 
 def execute_coordinator_tool(task: dict, name: str, arguments: dict, *, runtime_context=None) -> str:
-    """Handle explicit create/dispatch/read; all results preserve owner scope."""
+    """Handle explicit create/dispatch/read; all results preserve owner scope.
+
+    Reads and the replay-safe delegation re-read through dispatch contention
+    (``reread_on_contention``): a lost CAS or a torn snapshot never reaches the model.
+    """
+    from lib.project_dispatch.admission import reread_on_contention
     from lib.storage.errors import StorageError
     try:
         scope = _scope(task)
@@ -89,7 +94,10 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict, *, runtime_
         elif name in {'delegate_project_work', 'await_project_workers'}:
             from .coordinator_workers import delegate, await_workers
             if name == 'delegate_project_work':
-                result = delegate(task, scope, arguments)
+                # Unchanged arguments replay the same Worker, so contention reruns
+                # the command instead of returning an uncertain outcome.
+                result = reread_on_contention(task, lambda: delegate(task, scope, arguments),
+                                              label='coordinator delegation')
             else:
                 result = await_workers(
                     task, scope, arguments, runtime_context=runtime_context)
@@ -99,7 +107,8 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict, *, runtime_
             result = ProjectDispatchService(ProjectDispatchRepository(scope['user_id'], scope['project_path'])).review_for_coordinator(task, scope, arguments)
         elif name == 'get_project_workers':
             from .coordinator_workers import get_workers
-            result = get_workers(task, scope, arguments)
+            result = reread_on_contention(task, lambda: get_workers(task, scope, arguments),
+                                          label='coordinator worker page', effect_free=True)
         elif name in {'finish_project_request', 'cancel_project_work', 'request_user_decision'}:
             from lib.project_dispatch.repository import ProjectDispatchRepository
             repository = ProjectDispatchRepository(scope['user_id'], scope['project_path'])
@@ -143,19 +152,26 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict, *, runtime_
             repository = ProjectDispatchRepository(scope['user_id'], scope['project_path'])
             service = ProjectDispatchService(repository)
             assignment_id = str(arguments.get('assignment_id') or '')
-            assignment = repository.read(assignment_id)
             principal = PrincipalContext.from_payload(task['_principalContext'])
-            if (assignment['request']['coordinatorId'] != scope['conversation_id']
-                    or assignment['grant']['tenant'] != principal.tenant_id):
-                raise PermissionError('Assignment belongs to another Coordinator or tenant')
-            binding = repository.admission(assignment_id)
+
+            def owned_admission():
+                assignment = repository.read(assignment_id)
+                if (assignment['request']['coordinatorId'] != scope['conversation_id']
+                        or assignment['grant']['tenant'] != principal.tenant_id):
+                    raise PermissionError('Assignment belongs to another Coordinator or tenant')
+                return repository.admission(assignment_id)
             if name == 'dispatch_project_assignment':
+                binding = reread_on_contention(task, owned_admission, label='coordinator assignment read',
+                                               effect_free=True)
                 revision = arguments.get('expected_revision')
                 if type(revision) is not int or revision != binding['revision']:
                     raise ValueError('expected_revision must match the current human grant revision')
                 result = service.dispatch_authorized(binding)
             else:
-                result = service.view_for_coordinator(assignment_id, scope=scope)
+                def view():
+                    owned_admission()
+                    return service.view_for_coordinator(assignment_id, scope=scope)
+                result = reread_on_contention(task, view, label='coordinator assignment view', effect_free=True)
         elif name in _router_only_tools():
             from lib.router.tools import execute_router_tool
             result = execute_router_tool(task, scope, name, arguments)
@@ -167,7 +183,8 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict, *, runtime_
         return json.dumps(result, ensure_ascii=False)
     except (PermissionError, ValueError, KeyError, StorageError) as error:
         # A typed refusal states its own effect and recovery; generic errors stay uncertain.
-        return json.dumps({'error': str(error),
+        typed = {'code': error.code} if isinstance(getattr(error, 'code', None), str) else {}
+        return json.dumps({'error': str(error), **typed,
                            'execution_started': getattr(error, 'execution_started',
                                None if name in {'dispatch_project_assignment', 'delegate_project_work', 'review_project_work',
                                                 'route_to_project'} else False),

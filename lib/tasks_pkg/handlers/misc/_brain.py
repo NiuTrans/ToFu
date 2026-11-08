@@ -57,6 +57,7 @@ def _handle_conv_ref_tool(
                'create_conversation', 'dispatch_project_assignment', 'get_project_assignment', 'report_to_user',
                'update_task_progress', 'delegate_project_work', 'await_project_workers', 'review_project_work', 'get_project_workers', 'cancel_project_work', 'finish_project_request', 'request_user_decision',
                'route_to_project', 'get_router_projects', 'router_instruction_create', 'router_instruction_list', 'router_instruction_cancel',
+               'restart_server',
                'watchdog_snapshot', 'watchdog_resolve_signals', 'watchdog_schedule_recheck', 'watchdog_message',
                'watchdog_notify_router', 'watchdog_configure_review'}),
     category='coordination', description='Independent worker conversations and authorized dispatch')
@@ -122,11 +123,12 @@ def _handle_integration_tool(
             return 'Error: this execution has no automatic Project work ID.'
         call_args = dict(_fn_args)
         # Checkers/Feed address logical Project work; workspace registrations
-        # address the physical execution task under its canonical repository.
-        call_args['task_id'] = str(task['id'])
+        # address the execution's checkout work id under its canonical repository.
+        from lib.tasks_pkg.workspace_delivery import workspace_work_id
+        call_args['task_id'] = workspace_work_id(task)
         from lib import integration_state_repository
         workspace = integration_state_repository.find_workspace(
-            canonical_path, str(task['id']), user_id=owner_user_id)
+            canonical_path, call_args['task_id'], user_id=owner_user_id)
         automatic = bool(workspace and (workspace.get('origin') or {}).get('executionMode') == 'isolated-task')
         if _fn_name == 'integration_submit' and not automatic:
             results = run_all_enabled_checkers(

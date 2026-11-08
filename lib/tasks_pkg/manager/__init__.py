@@ -26,7 +26,10 @@ from lib.tasks_pkg.manager._pending_resume import (
     record_boot_interrupted_conversations,
 )
 from lib.tasks_pkg.manager._persist import build_result_meta, persist_task_result
-from lib.tasks_pkg.manager._recovery import recover_stale_tasks_on_startup
+from lib.tasks_pkg.manager._recovery import (
+    recover_stale_tasks_on_startup,
+    restart_settlement_scope_ms,
+)
 from lib.tasks_pkg.manager._registry import (
     abort_running_tasks_for_conv,
     claim_scheduled_compaction,
@@ -41,6 +44,8 @@ from lib.tasks_pkg.manager._registry import (
     plant_abort_tombstone,
     plant_abort_tombstones_for_conv,
     quiesce_running_tasks,
+    reopen_task_admission,
+    task_admission_closed,
     task_user_id,
 )
 from lib.tasks_pkg.manager._sync import checkpoint_task_partial
@@ -98,12 +103,15 @@ __all__ = [
     'plant_abort_tombstone',
     'plant_abort_tombstones_for_conv',
     'quiesce_running_tasks',
+    'reopen_task_admission',
+    'task_admission_closed',
     'read_pending_resume',
     'reap_stuck_running_tasks',
     'reaper_safe_wait_s',
     'record_boot_interrupted_conversations',
     'recover_stale_tasks_on_startup',
     'reset_task_text',
+    'restart_settlement_scope_ms',
     'shed_memory_under_pressure',
     'snapshot_task_text',
     'stamp_chat_task_terminal',

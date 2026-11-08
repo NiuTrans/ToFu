@@ -29,7 +29,7 @@ import hashlib
 import hmac
 import os
 import secrets
-import select
+import selectors
 import socket
 import threading
 import time
@@ -270,16 +270,21 @@ class LanDiscoveryResponder:
         if sock is None or wake_reader is None:
             return
         try:
-            while not self._stop.is_set():
+            # A selector has no descriptor-number ceiling; select() rejects
+            # the descriptors above 1024 that a long-lived server reaches.
+            with selectors.DefaultSelector() as selector:
                 try:
-                    readable, _, _ = select.select((sock, wake_reader), (), ())
-                    if wake_reader in readable:
-                        wake_reader.recv(1)
-                        if self._stop.is_set():
-                            return
-                    if sock in readable:
-                        data, addr = sock.recvfrom(1024)
-                        self._handle(data, addr)
+                    selector.register(sock, selectors.EVENT_READ)
+                    selector.register(wake_reader, selectors.EVENT_READ)
+                    while not self._stop.is_set():
+                        readable = {key.fileobj for key, _ in selector.select()}
+                        if wake_reader in readable:
+                            wake_reader.recv(1)
+                            if self._stop.is_set():
+                                return
+                        if sock in readable:
+                            data, addr = sock.recvfrom(1024)
+                            self._handle(data, addr)
                 except (OSError, ValueError) as exc:
                     logger.debug(
                         '[DesktopPairing] discovery wait ended: %s', exc)
@@ -402,6 +407,20 @@ def lan_ip() -> str:
 _LOOPBACK_BINDS = frozenset({'127.0.0.1', 'localhost', '::1'})
 
 
+def lan_discovery_refusal(environ, *, bind_host: str = '') -> str | None:
+    """Why LAN discovery is not allowed here, or ``None`` when it is.
+
+    ``'disabled'`` — TOFU_DESKTOP_LAN_DISCOVERY=0; ``'loopback_bind'`` — the
+    server's effective bind is loopback-only, so an advertised LAN url would
+    be unreachable. Policy only: no socket, interface or network probe.
+    """
+    if (environ.get('TOFU_DESKTOP_LAN_DISCOVERY') or '').strip() == '0':
+        return 'disabled'
+    if (bind_host or '').strip().lower() in _LOOPBACK_BINDS:
+        return 'loopback_bind'
+    return None
+
+
 def maybe_start_responder(port: int, environ=None,
                           bind: tuple | None = None,
                           bind_host: str = ''):
@@ -421,9 +440,10 @@ def maybe_start_responder(port: int, environ=None,
     port); production keeps ``_LAN_BIND``.
     """
     env = os.environ if environ is None else environ
-    if (env.get('TOFU_DESKTOP_LAN_DISCOVERY') or '').strip() == '0':
+    refusal = lan_discovery_refusal(env, bind_host=bind_host)
+    if refusal == 'disabled':
         return None
-    if (bind_host or '').strip().lower() in _LOOPBACK_BINDS:
+    if refusal == 'loopback_bind':
         logger.debug('[DesktopPairing] LAN discovery skipped — server bound '
                      'loopback-only (%s), advertising would be a lie',
                      bind_host)

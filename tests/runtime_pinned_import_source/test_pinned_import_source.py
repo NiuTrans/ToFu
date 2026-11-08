@@ -196,3 +196,55 @@ def test_tracebacks_show_the_pinned_lines_that_ran(checkout):
     with pytest.raises(ValueError) as caught:
         checkout.load('failing').fail()
     assert 'raise ValueError("pinned line")' in ''.join(traceback.format_exception(caught.value))
+
+
+def test_frozen_generation_pins_unimported_packages_and_reload(checkout):
+    checkout.write('helper.py', 'VALUE = "prepared"\n')
+    source = checkout.install()
+    identity = source.freeze()
+    assert identity['sourceFiles'] == 2
+    checkout.write('helper.py', 'VALUE = "later checkout"\n')
+    module = checkout.load('helper')
+    assert module.VALUE == 'prepared'
+    assert importlib.reload(module).VALUE == 'prepared'
+
+
+def test_frozen_generation_retains_deleted_top_level_package(checkout):
+    helper = checkout.write('helper.py', 'VALUE = "prepared"\n')
+    source = checkout.install()
+    source.freeze()
+    helper.unlink()
+    (helper.parent / '__init__.py').unlink()
+    importlib.invalidate_caches()
+    assert checkout.load('helper').VALUE == 'prepared'
+
+
+def test_frozen_generation_refuses_new_application_modules(checkout):
+    source = checkout.install()
+    source.freeze()
+    checkout.write('added.py', 'VALUE = "not prepared"\n')
+    with pytest.raises(ImportError, match='generation'):
+        checkout.load('added')
+
+
+def test_frozen_generation_requires_every_source_to_be_read(checkout, monkeypatch):
+    import lib.runtime.pinned_import_source as pins
+    checkout.write('helper.py', 'VALUE = "prepared"\n')
+    source = checkout.install()
+    source.join()
+    original = pins._read_pin
+    monkeypatch.setattr(pins, '_read_pin', lambda path: None if path.endswith('helper.py') else original(path))
+    with pytest.raises(RuntimeError, match='pin'):
+        source.freeze()
+
+
+def test_frozen_identity_describes_actual_pins_not_later_checkout(checkout):
+    from serverctl_pkg.execution_plan import prepare_plan
+    checkout.write('helper.py', 'VALUE = "before"\n')
+    checkout.load()
+    source = checkout.pin()
+    before = prepare_plan(checkout.root, {})
+    checkout.write('helper.py', 'VALUE = "after"\n')
+    identity = source.freeze()
+    assert identity['sourceSha256'] == before['sourceSha256']
+    assert identity['sourceSha256'] != prepare_plan(checkout.root, {})['sourceSha256']

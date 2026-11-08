@@ -21,6 +21,7 @@ from collections.abc import Mapping
 
 from lib.log import get_logger
 
+from lib.tools.environment_capabilities import BROWSER, DEVICES, GIT, SHELL
 from lib.tools.registry._spec import (
     ToolContext,
     ToolSpec,
@@ -366,6 +367,41 @@ def _build_project_integration(ctx: ToolContext) -> list[dict]:
     return []
 
 
+def _project_integration_tool_spec() -> ToolSpec:
+    """Project Brain contributes zero schemas.  These two tools belong to
+    the isolated execution pipeline and are bound to the automatic work
+    ID; they do not read or mutate Board/Feed/Charter state."""
+    return ToolSpec('project_integration', _build_project_integration, phase='base',
+                    provides=frozenset({
+                        'integration_checkpoint', 'integration_submit',
+                        'send_project_message', 'get_project_messages', 'consider_project_message',
+                    }),
+                    write_tools=frozenset({'send_project_message', 'consider_project_message'}),
+                    # Workspace checkpoints are Git refs of the isolated worktree.
+                    environment_requirements_by_name={
+                        'integration_checkpoint': frozenset({GIT}),
+                        'integration_submit': frozenset({GIT}),
+                    },
+                    # The mailbox belongs to the sending conversation; the
+                    # integration tools address the task's own workspace instead.
+                    saved_conversation_tools=frozenset({
+                        'send_project_message', 'get_project_messages',
+                        'consider_project_message',
+                    }),
+                    discovery_policy='searchable',
+                    search_hints={
+                        'integration_checkpoint': (
+                            'snapshot isolated worktree progress milestone '
+                            '保存隔离工作区检查点'),
+                        'integration_submit': (
+                            'submit isolated work for human review merge queue '
+                            '提交隔离任务人工审查'),
+                    },
+                    category='conversation',
+                    description='Isolated project integration execution controls',
+                    gate='项目模式')
+
+
 def canonical_human_guidance_schema() -> dict:
     """Return the registry-owned canonical ``ask_human`` wire schema.
 
@@ -418,7 +454,7 @@ def _coordinator_tool_spec() -> ToolSpec:
             'report_to_user', 'update_task_progress', 'delegate_project_work', 'await_project_workers',
             'review_project_work', 'get_project_workers', 'cancel_project_work', 'finish_project_request',
             'request_user_decision', 'route_to_project', 'get_router_projects', 'router_instruction_create',
-            'router_instruction_list', 'router_instruction_cancel',
+            'router_instruction_list', 'router_instruction_cancel', 'restart_server',
             'watchdog_snapshot', 'watchdog_resolve_signals', 'watchdog_schedule_recheck',
             'watchdog_message', 'watchdog_notify_router', 'watchdog_configure_review'}),
         write_tools=frozenset({
@@ -427,6 +463,7 @@ def _coordinator_tool_spec() -> ToolSpec:
             'delegate_project_work', 'review_project_work', 'cancel_project_work',
             'finish_project_request', 'request_user_decision',
             'route_to_project', 'router_instruction_create', 'router_instruction_cancel',
+            'restart_server',
             'watchdog_resolve_signals', 'watchdog_schedule_recheck', 'watchdog_message',
             'watchdog_notify_router', 'watchdog_configure_review'}),
         idempotent_tools=frozenset({
@@ -435,6 +472,7 @@ def _coordinator_tool_spec() -> ToolSpec:
             'await_project_workers', 'review_project_work', 'get_project_workers', 'cancel_project_work',
             'finish_project_request', 'request_user_decision', 'route_to_project', 'get_router_projects',
             'router_instruction_create', 'router_instruction_list', 'router_instruction_cancel',
+            'restart_server',
             'watchdog_snapshot', 'watchdog_resolve_signals', 'watchdog_schedule_recheck',
             'watchdog_message', 'watchdog_notify_router', 'watchdog_configure_review'}),
         cacheable_tools=frozenset())
@@ -459,19 +497,25 @@ def _build_device_wait(ctx: ToolContext) -> list[dict]:
     return [AWAIT_DEVICE_TOOL]
 
 
+_DESKTOP_TOOL_NAMES = frozenset({
+    'desktop_list_files', 'desktop_read_file',
+    'desktop_write_file',
+    'desktop_open_file', 'desktop_open_app',
+    'desktop_run_command', 'desktop_screenshot',
+    'desktop_gui_action', 'desktop_clipboard',
+    'desktop_system_info',
+})
+
+
 def _desktop_tool_spec() -> ToolSpec:
     """Connected desktop agent family (device tools gated by the desktop toggle)."""
     return ToolSpec('desktop', _build_desktop, phase='base',
                     # provides = LLM 可见的 10 个(desktop_move_file 刻意不
                     # 暴露,见 lib/desktop_tools.py;它仍列在 write_tools 里)。
-                    provides=frozenset({
-                        'desktop_list_files', 'desktop_read_file',
-                        'desktop_write_file',
-                        'desktop_open_file', 'desktop_open_app',
-                        'desktop_run_command', 'desktop_screenshot',
-                        'desktop_gui_action', 'desktop_clipboard',
-                        'desktop_system_info',
-                    }),
+                    provides=_DESKTOP_TOOL_NAMES,
+                    # A loopback-only phone kernel refuses device pairing.
+                    environment_requirements_by_name={
+                        name: frozenset({DEVICES}) for name in _DESKTOP_TOOL_NAMES},
                     # 约束③:desktop 写/执行工具进串行写分区 + Manual 批准门 ——
                     # 此前未声明,既进并行派发池(竞态)又绕过批准门。
                     # desktop_system_info 豁免(其 kill 分支由 agent 侧参数级
@@ -507,6 +551,7 @@ def _device_wait_tool_spec() -> ToolSpec:
     return ToolSpec(
         'device_wait', _build_device_wait, phase='capability',
         provides=frozenset({'await_device'}),
+        environment_requirements_by_name={'await_device': frozenset({DEVICES})},
         direct_wire_tools=frozenset({'await_device'}),
         # It persists a wait that outlives the turn and later starts one.
         write_tools=frozenset({'await_device'}),
@@ -1157,6 +1202,8 @@ def build_builtin_specs() -> list[ToolSpec]:
                          'kill stop background command process 停止后台进程'),
                      'repo_map': 'repository map symbols outline 代码地图 符号大纲',
                  },
+                 environment_requirements_by_name={
+                     'run_command': frozenset({SHELL})},
                  category='project', description='Project file tools / code exec',
                  gate='挂载项目（输入框 → 项目）或开启代码执行',
                  exposure_gate=lambda ctx: (
@@ -1168,6 +1215,8 @@ def build_builtin_specs() -> list[ToolSpec]:
         # byte-stable for the prompt cache (the produce note above).
         ToolSpec('page_preview', _build_page_preview, phase='base',
                  provides=frozenset({'browser_preview_page'}),
+                 environment_requirements_by_name={
+                     'browser_preview_page': frozenset({BROWSER})},
                  discovery_policy='searchable',
                  search_hints={
                      'browser_preview_page': (
@@ -1196,33 +1245,7 @@ def build_builtin_specs() -> list[ToolSpec]:
                  # get_conversation for the complete request.
                  category='conversation', description='Conversation reference tools',
                  gate='项目模式 或 @ 提及一个会话'),
-        # Project Brain contributes zero schemas.  These two tools belong to
-        # the isolated execution pipeline and are bound to the automatic work
-        # ID; they do not read or mutate Board/Feed/Charter state.
-        ToolSpec('project_integration', _build_project_integration, phase='base',
-                 provides=frozenset({
-                     'integration_checkpoint', 'integration_submit',
-                     'send_project_message', 'get_project_messages', 'consider_project_message',
-                 }),
-                 write_tools=frozenset({'send_project_message', 'consider_project_message'}),
-                 # The mailbox belongs to the sending conversation; the
-                 # integration tools address the task's own workspace instead.
-                 saved_conversation_tools=frozenset({
-                     'send_project_message', 'get_project_messages',
-                     'consider_project_message',
-                 }),
-                 discovery_policy='searchable',
-                 search_hints={
-                     'integration_checkpoint': (
-                         'snapshot isolated worktree progress milestone '
-                         '保存隔离工作区检查点'),
-                     'integration_submit': (
-                         'submit isolated work for human review merge queue '
-                         '提交隔离任务人工审查'),
-                 },
-                 category='conversation',
-                 description='Isolated project integration execution controls',
-                 gate='项目模式'),
+        _project_integration_tool_spec(),
         _coordinator_tool_spec(),
         _channel_tool_spec(),
         ToolSpec('human_guidance', _build_human_guidance, phase='base',

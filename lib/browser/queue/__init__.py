@@ -31,15 +31,20 @@ from ._state import (
 
 # ── Client registry / poll tracking / stale cleanup ──
 from ._registry import (
-    mark_poll, get_connected_clients, is_extension_connected, _cleanup_stale,
-    mark_locked_out, get_locked_out_clients, client_owner_user_id,
+    mark_poll, _cleanup_stale,
+    mark_locked_out, get_locked_out_clients,
     mark_incompatible_client, get_incompatible_clients,
-    get_credit_hub_quota, wait_for_connected_clients,
+)
+
+# ── Worker-facing verbs, routed to the process that owns extension polls ──
+from ._owner import (
+    get_connected_clients, is_extension_connected, client_owner_user_id,
+    get_credit_hub_quota, wait_for_connected_clients, send_browser_command,
 )
 
 # ── Command dispatch & resolution (SYNC + ASYNC) ──
 from ._dispatch import (
-    send_browser_command, get_pending_commands,
+    get_pending_commands,
     wait_for_commands, wait_for_commands_async,
     resolve_command, resolve_batch,
 )

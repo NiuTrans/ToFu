@@ -94,7 +94,8 @@ def test_visual_compaction_trigger_wording(
         assert card.locator('.activity-event__summary').inner_text() == labels['activity.compaction.succeeded']
         assert not card.locator('details').evaluate('node=>node.open')
         assert not card.locator('details .activity-event__detail').is_visible()
-        assert card.locator('button[data-conversation-action="open-compaction"]').is_visible()
+        assert header.locator('button[data-conversation-action="open-compaction"]').count() == 0
+        assert not card.locator('button[data-conversation-action="open-compaction"]').is_visible()
         assert card.locator('.activity-event__compaction-trigger').evaluate(
             'node=>node.scrollWidth<=node.clientWidth+1'), "Trigger label is clipped"
     assert len(set(rendered_causes)) == len(triggers)
@@ -112,6 +113,7 @@ def test_visual_compaction_trigger_wording(
         assert fold.locator('.activity-event__detail').inner_text() == f"Recorded trigger: {trigger}"
         assert main_label in fold.inner_text()
         assert 'summary-provider' in fold.inner_text()
+        assert fold.locator('button[data-conversation-action="open-compaction"]').is_visible()
         assert fold.locator('summary').evaluate('node=>node===document.activeElement')
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
     page.screenshot(path=str(OUT / f"{stem}-expanded.png"), full_page=True, animations="disabled")
@@ -186,8 +188,11 @@ def test_visual_superseded_compaction_reads_as_discarded(
         assert value.evaluate(style) == [tertiary, 'line-through']
     for value in kept.locator('.compaction-token-value').all():
         assert value.evaluate(style)[1] == 'none'
-    # The real work stays inspectable.
-    assert discarded.locator('button[data-conversation-action="open-compaction"]').is_visible()
+    # The real work stays inspectable after native keyboard disclosure.
+    snapshot = discarded.locator('button[data-conversation-action="open-compaction"]')
+    assert snapshot.count() == 1 and not snapshot.is_visible()
+    discarded.locator('details > summary').press('Enter')
+    assert snapshot.is_visible()
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
     OUT.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(OUT / f"compaction-superseded-{language}-{theme}-{width}.png"),

@@ -83,6 +83,15 @@ def _api_payload(path: str) -> dict:
         return {'ok': True, 'storage': {'ready': True}}
     if path.endswith('/features'):
         return {'ok': True, 'debug_mode': False, 'optimizer_enabled': False}
+    if path.endswith('/router/owner-delegation'):
+        # The runtime reads this boot-required surface while building the
+        # router controls; an object without `actions` throws before app-ready.
+        return {
+            'ok': True, 'active': False, 'grant': None,
+            'router': {'conversationId': '', 'revision': 0,
+                       'availability': 'unbound'},
+            'actions': [],
+        }
     return {'ok': True, 'items': []}
 
 

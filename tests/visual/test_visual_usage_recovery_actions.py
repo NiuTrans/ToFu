@@ -15,7 +15,8 @@ from tests.conversation import test_usage_recovery as recovery
 # Register these fixtures locally without changing the suite's shared plugin.
 _chat_sidecar_runtime = recovery._chat_sidecar_runtime
 recovery_source = recovery.recovery_source
-executor_starts = recovery.executor_starts
+worker_attempts = recovery.worker_attempts
+worker_admissions = recovery.worker_admissions
 
 pytestmark = [pytest.mark.visual, pytest.mark.auth_mode('open')]
 pytest_plugins = ('tests._chat_sidecar',)
@@ -37,7 +38,8 @@ def load_source(page, source, language):
 
 @pytest.mark.parametrize(('width', 'language'), [(1280, 'en'), (390, 'zh')])
 def test_one_click_continues_and_preserves_old_output_across_reload(
-        page, recovery_source, executor_starts, assert_no_js_errors, tmp_path, width, language):
+        page, recovery_source, worker_attempts, worker_admissions, assert_no_js_errors, tmp_path,
+        width, language):
     source = recovery_source()
     original = deepcopy(source.turn())
     page.set_viewport_size({'width': width, 'height': 1000})
@@ -50,7 +52,7 @@ def test_one_click_continues_and_preserves_old_output_across_reload(
 
     page.on('response', record)
     notice, labels = load_source(page, source, language)
-    assert executor_starts == []
+    assert worker_admissions == []
     # Everything the reader must do: one click. No number, field or setting is
     # requested; the exact server-proposed limits stay collapsed evidence.
     expect(notice.locator('input, textarea, select')).to_have_count(0)
@@ -70,22 +72,22 @@ def test_one_click_continues_and_preserves_old_output_across_reload(
     expect(notice).to_contain_text(labels['usageRecovery.accepted'])
     page.screenshot(path=str(tmp_path / f'continuation-{width}-{language}.png'), full_page=True)
     accepted = response.value.json()
-    assert len(executor_starts) == 1
+    assert len(worker_admissions) == 1
     assert source.turn() == original
     assert accepted['turn']['turnId'] != source.turn_id
-    recovery._finish_success(source, accepted, executor_starts[0]['taskId'])
+    recovery._finish_success(worker_attempts, source, accepted, worker_admissions[0]['taskId'])
     expect(page.locator('#chatInner')).to_contain_text('Fresh work completed.')
     load_source(page, source, language)
     expect(page.locator('#chatInner')).to_contain_text('Fresh work completed.')
     expect(page.locator('#chatInner')).to_contain_text(original['projection']['content'])
     assert source.turn()['projection']['usageComplete'] is False
     assert source.turn()['projection']['usage'] == original['projection']['usage']
-    assert len(executor_starts) == 1
+    assert len(worker_admissions) == 1
     assert page.locator('body').evaluate('(el) => el.scrollWidth <= innerWidth + 1')
 
 
 def test_unknown_operation_refuses_new_budget_in_the_browser(
-        page, recovery_source, executor_starts, assert_no_js_errors):
+        page, recovery_source, worker_admissions, assert_no_js_errors):
     source = recovery_source(tool_rounds=[recovery._unknown_effect()])
     original = deepcopy(source.snapshot())
     notice, labels = load_source(page, source, 'zh')
@@ -97,4 +99,4 @@ def test_unknown_operation_refuses_new_budget_in_the_browser(
     expect(notice).to_contain_text(labels['usageRecovery.operationUnconfirmed'])
     expect(notice.locator('[data-usage-recovery-budget]')).to_have_count(0)
     assert posts == []
-    assert source.snapshot() == original and executor_starts == []
+    assert source.snapshot() == original and worker_admissions == []

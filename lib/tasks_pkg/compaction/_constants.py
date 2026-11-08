@@ -15,6 +15,7 @@ import os
 import threading
 
 from lib.log import get_logger
+from runtime_path_policy import get_runtime_base
 
 logger = get_logger(__name__)
 
@@ -561,11 +562,7 @@ _DEFAULT_TOOL_RESULT_MAX = 60_000
 # write the full content to a temp file and return a preview + file path.
 # The model can later use read_files to access the full content.
 
-_PERSIST_DIR_BASE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))))),
-    'data', 'tool-results',
-)
+_PERSIST_DIR_BASE = os.path.join(get_runtime_base(), 'data', 'tool-results')
 _PERSIST_PREVIEW_CHARS = 2000
 """Preview size for persisted results (truncated at newline boundary)."""
 

@@ -303,6 +303,41 @@ def test_clean_stop_exit_is_logged_at_info(caplog):
     assert not any('exited unexpectedly' in m for m in messages), messages
 
 
+def test_unreapable_stop_is_reported_and_leaves_cleanup_to_the_os(
+        monkeypatch, caplog):
+    """SIGKILL cannot interrupt uninterruptible I/O; stop must still return.
+
+    2026-11-06: on a saturated FUSE authority the daemon ignored SIGKILL for
+    longer than the confirm window. ``process.wait`` raised out of the
+    resident host's finalizer, the host died without writing its terminal
+    record, and the manager latched the explicit restart as a crash loop with
+    the application down. A kernel-state child no software recycle can help
+    is a reported bounded outcome, never a new exception.
+    """
+    monkeypatch.setattr(supervisor_mod, '_LIVENESS_KILL_GRACE_SECONDS', 0.05)
+    supervisor = _wired_supervisor()
+    child = _FakeChild(die_on_eof=False, die_on_term=False)
+
+    def ignore_kill():
+        child.kill_calls += 1
+
+    child.kill = ignore_kill
+    supervisor._process = child
+    supervisor._client = None
+    supervisor._intentional_stop = True
+
+    with caplog.at_level(logging.INFO, logger='tofu.storage.supervisor'):
+        supervisor.stop(timeout=0.05)
+
+    assert child.terminate_calls == 1
+    assert child.kill_calls == 1
+    messages = [r.getMessage() for r in caplog.records]
+    assert any('state=unreapable' in m for m in messages), messages
+    assert any(r.levelno == logging.CRITICAL and 'unreapable' in r.getMessage()
+               for r in caplog.records), messages
+    assert supervisor._process is None
+
+
 # ── Restart scheduling/attempt evidence ──────────────────────────────────
 
 

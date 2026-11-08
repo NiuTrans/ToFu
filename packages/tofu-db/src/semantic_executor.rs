@@ -74,6 +74,10 @@ pub enum SemanticExecutionError {
     DeadlineElapsed,
     UnsupportedOperation,
     Conflict,
+    /// Ownership conflict raised through [`conflict_fence`]. Its compile-time
+    /// literal travels as the response `error_message` (same wire code as
+    /// `Conflict`), so clients log which fence refused them, as SQL does.
+    ConflictFence(&'static str),
     TurnInProgress,
     TurnLaneAdvanced,
     TurnParentInvalid,
@@ -111,7 +115,7 @@ impl SemanticExecutionError {
             Self::AuthorityScopeMismatch => "authority_scope_mismatch",
             Self::DeadlineElapsed => "deadline_elapsed",
             Self::UnsupportedOperation => "operation_not_implemented",
-            Self::Conflict => "database_conflict",
+            Self::Conflict | Self::ConflictFence(_) => "database_conflict",
             Self::TurnInProgress => "turn_in_progress",
             Self::TurnLaneAdvanced => "turn_lane_advanced",
             Self::TurnParentInvalid => "turn_parent_invalid",
@@ -169,6 +173,24 @@ impl std::error::Error for ValidationFence {}
 /// keep the bare code; only this typed literal is forwarded.
 pub(crate) fn validation_fence(reason: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, ValidationFence(reason))
+}
+
+/// Literal reason of a deterministic ownership conflict.
+#[derive(Debug)]
+struct ConflictReason(&'static str);
+
+impl fmt::Display for ConflictReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for ConflictReason {}
+
+/// `AlreadyExists` storage error whose literal reason reaches the client.
+/// Other conflicts keep the bare code; only this typed literal is forwarded.
+pub(crate) fn conflict_fence(reason: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::AlreadyExists, ConflictReason(reason))
 }
 
 /// Build the integrity variant with a bounded diagnostic message.
@@ -230,9 +252,13 @@ pub(crate) fn map_storage_error(error: io::Error) -> SemanticExecutionError {
         io::ErrorKind::NotFound => SemanticExecutionError::NotFound,
         io::ErrorKind::InvalidData => integrity_failure(error.to_string()),
         io::ErrorKind::PermissionDenied => SemanticExecutionError::AuthorityScopeMismatch,
-        io::ErrorKind::WouldBlock | io::ErrorKind::AlreadyExists => {
-            SemanticExecutionError::Conflict
-        }
+        io::ErrorKind::WouldBlock | io::ErrorKind::AlreadyExists => match error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<ConflictReason>())
+        {
+            Some(reason) => SemanticExecutionError::ConflictFence(reason.0),
+            None => SemanticExecutionError::Conflict,
+        },
         io::ErrorKind::TimedOut => SemanticExecutionError::DeadlineElapsed,
         _ => SemanticExecutionError::StorageUnavailable,
     }

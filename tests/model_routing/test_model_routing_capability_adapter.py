@@ -77,6 +77,7 @@ def test_capability_listing_is_owner_scoped_and_secret_free() -> None:
         "provider_id": "owner_41_images",
         "provider_name": "Owner 41 Images",
         "offering_id": alice_routes[0].offering_id,
+        "creator_id": "local",
     }]
     assert list_capability_routes(repository, bob, "image_gen") == []
     assert len(list_capability_routes(
@@ -86,6 +87,22 @@ def test_capability_listing_is_owner_scoped_and_secret_free() -> None:
         required_protocols=OPENAI_COMPATIBLE_PROTOCOLS,
     )) == 1
     assert "secret" not in repr(alice_routes[0].public_dict()).lower()
+
+
+def test_capability_routes_carry_the_models_registered_media_profile() -> None:
+    """Media pickers read documented constraints from the routed Model."""
+    repository, boundary = _owner_with_image_route(41)
+    authority = repository.get(boundary)
+    document = authority.document
+    profile = {"output_modalities": ["image"], "aspect_ratios": ["1:1", "16:9"],
+               "max_outputs": 4}
+    document["models"][0]["media_profile"] = profile
+    repository.compare_and_swap(
+        boundary, document, expected_revision=authority.revision)
+
+    [route] = list_capability_routes(repository, boundary, "image_gen")
+
+    assert route.public_dict()["media_profile"] == profile
 
 
 def test_capability_listing_ignores_legacy_switch_and_probe_diagnostic() -> None:

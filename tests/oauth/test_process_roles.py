@@ -63,6 +63,7 @@ def test_unknown_role_or_capability_is_rejected():
 def test_route_background_owners_are_role_scoped(monkeypatch):
     from types import SimpleNamespace
 
+    import lib.database_panel.maintenance as database_maintenance
     import lib.knowledge.enrichment as enrichment
     import lib.oauth.codex_catalog as codex_catalog
     import lib.oauth.outbound as oauth_outbound
@@ -84,6 +85,9 @@ def test_route_background_owners_are_role_scoped(monkeypatch):
             scheduler_principals.append(principal),
             calls.append('scheduler'),
         )[-1])
+    monkeypatch.setattr(
+        database_maintenance, 'start_maintenance',
+        lambda: calls.append('database-maintenance') or True)
     monkeypatch.setattr(
         oauth_outbound, 'reconcile_oauth_providers',
         lambda: calls.append('oauth-reconcile'))
@@ -109,8 +113,8 @@ def test_route_background_owners_are_role_scoped(monkeypatch):
     calls.clear()
     scheduler_app = App()
     assert background_services.start_registered_background_services(
-        scheduler_app, process_role='scheduler') == 1
-    assert calls == ['scheduler']
+        scheduler_app, process_role='scheduler') == 2
+    assert calls == ['scheduler', 'database-maintenance']
     assert len(scheduler_principals) == 1
     assert scheduler_principals[0].kind == 'system'
     assert scheduler_principals[0].owner_user_id == 1
@@ -126,6 +130,7 @@ def test_route_background_owners_are_role_scoped(monkeypatch):
 def test_distributed_role_does_not_invent_a_daily_report_owner(monkeypatch):
     from types import SimpleNamespace
 
+    import lib.database_panel.maintenance as database_maintenance
     import lib.scheduler.manager as scheduler_manager
     import routes
     import runtime_guards
@@ -141,13 +146,16 @@ def test_distributed_role_does_not_invent_a_daily_report_owner(monkeypatch):
             scheduler_principals.append(principal),
             calls.append('scheduler'),
         )[-1])
+    monkeypatch.setattr(
+        database_maintenance, 'start_maintenance',
+        lambda: calls.append('database-maintenance') or True)
 
     class App:
         extensions = {}
 
     assert background_services.start_registered_background_services(
-        App(), process_role='scheduler') == 1
-    assert calls == ['scheduler']
+        App(), process_role='scheduler') == 2
+    assert calls == ['scheduler', 'database-maintenance']
     assert len(scheduler_principals) == 1
     assert scheduler_principals[0].kind == 'system'
     assert scheduler_principals[0].owner_user_id is None

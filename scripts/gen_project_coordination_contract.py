@@ -79,7 +79,9 @@ def main():
                              ('RouterInstructionResumeRequest', 'instructionResumeRequest'),
                              ('RouterWorkerModelQuery', 'workerModelQuery'),
                              ('RouterWatchdogState', 'watchdogState'),
-                             ('RouterWatchdogReviewRequest', 'watchdogReviewRequest')]:
+                             ('RouterWatchdogReviewRequest', 'watchdogReviewRequest'),
+                             ('RouterOwnerDelegationState', 'ownerDelegationState'),
+                             ('RouterOwnerDelegationRequest', 'ownerDelegationRequest')]:
         router += f'export type {name} = ' + ts(router_schema['$defs'][definition], router_schema) + ';\n'
     for output, generated in ((OUTPUT, content), (ROUTER_OUTPUT, router)):
         if args.check:

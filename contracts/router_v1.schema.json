@@ -364,6 +364,168 @@
         "resolvedAt": {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
         "resolution": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 2000}, {"type": "null"}]}
       }
+    },
+    "ownerDelegationReason": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S",
+      "description": "Why you act for the owner, naming what they asked for; it is kept in the owner's audit log."},
+    "ownerDelegationAuthority": {
+      "description": "Act under the owner's delegation (docs/ROUTER.md R9). Name exactly one trigger: source_turn_id (the owner's own message of your current request), source_steer_id (an owner message sent while you were replying) or instruction_id with event_id or source_turn_id (an active standing instruction and what triggered it).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": {"$ref": "#/$defs/ownerDelegationReason"},
+        "source_turn_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S",
+          "description": "Without instruction_id: the Turn ID of the owner's own message in your current request that asks for this. With instruction_id: the Turn that carried the triggering event."},
+        "source_steer_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S",
+          "description": "The steer_id of an owner message sent while you were replying that asks for this."},
+        "instruction_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S",
+          "description": "An active standing instruction of the owner that covers this."},
+        "event_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S",
+          "description": "With instruction_id: the event that triggered it."}
+      }
+    },
+    "restartServer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "idempotency_key"],
+      "properties": {
+        "reason": {"$ref": "#/$defs/ownerDelegationReason"},
+        "source_turn_id": {"$ref": "#/$defs/ownerDelegationAuthority/properties/source_turn_id"},
+        "source_steer_id": {"$ref": "#/$defs/ownerDelegationAuthority/properties/source_steer_id"},
+        "instruction_id": {"$ref": "#/$defs/ownerDelegationAuthority/properties/instruction_id"},
+        "event_id": {"$ref": "#/$defs/ownerDelegationAuthority/properties/event_id"},
+        "interrupt_running_conversations": {"type": "boolean", "default": false,
+          "description": "The Settings restart's force: true interrupts other running conversations (they resume with Continue afterwards). Set it only when the owner asked to restart even though work is running. Protected steps (a git_land landing or an export) refuse the restart either way."},
+        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S",
+          "description": "One restart per key: a retry with the same key returns the recorded restart and never restarts again. A new owner request needs a new key."}
+      }
+    },
+    "ownerDelegationProvenance": {
+      "description": "Who made an owner decision (lib/lifecycle_approval.py). human-ui comes only from the owner's same-origin browser request; authenticated-request is any other authenticated owner request (revocation only).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["human-ui", "authenticated-request"]},
+        "ownerUserId": {"type": "integer", "minimum": 1},
+        "subject": {"type": "string"},
+        "credential": {"type": "string"},
+        "browser": {"type": "string", "description": "Same-origin browser evidence: fetch-metadata or origin; empty when absent."},
+        "userAgent": {"type": "string"},
+        "remoteAddr": {"type": "string"}
+      }
+    },
+    "ownerDelegationRouter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conversationId", "bindingRevision", "tenant"],
+      "properties": {
+        "kind": {"const": "global_router"},
+        "conversationId": {"$ref": "#/$defs/id"},
+        "bindingRevision": {"type": "integer", "minimum": 1},
+        "tenant": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "turnId": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "attemptId": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+      }
+    },
+    "ownerDelegationGrant": {
+      "description": "The owner's delegation to their Global Router, held by the lifecycle approval gate. A grant names its grantee and never carries over to a replaced router. assurance is authenticated for a UI session and advisory in open mode, which has no authentication.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "owner", "state", "revision", "scopes", "grantee", "grantedAt", "grantedBy",
+                   "assurance", "revokedAt", "revokedBy", "updatedAt"],
+      "properties": {
+        "version": {"const": 1},
+        "owner": {"type": "integer", "minimum": 1},
+        "state": {"enum": ["granted", "revoked"]},
+        "revision": {"type": "integer", "minimum": 0},
+        "scopes": {"type": "array", "items": {"enum": ["restart", "conversation_control"]}},
+        "grantee": {"anyOf": [{"$ref": "#/$defs/ownerDelegationRouter"}, {"type": "null"}]},
+        "grantedAt": {"anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}]},
+        "grantedBy": {"anyOf": [{"$ref": "#/$defs/ownerDelegationProvenance"}, {"type": "null"}]},
+        "assurance": {"anyOf": [{"enum": ["authenticated", "advisory"]}, {"type": "null"}]},
+        "revokedAt": {"anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}]},
+        "revokedBy": {"anyOf": [{"$ref": "#/$defs/ownerDelegationProvenance"}, {"type": "null"}]},
+        "updatedAt": {"anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}]}
+      }
+    },
+    "ownerDelegatedAction": {
+      "description": "One audit record of an action the Global Router took, or tried, under the owner's delegation: who (requester), why (reason, trigger), when and the outcome (status, code, detail).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "owner", "scope", "requester", "reason", "trigger", "target", "grantRevision",
+                   "grantedBy", "requestedAt", "status", "code", "detail", "updatedAt"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "owner": {"type": "integer", "minimum": 1},
+        "scope": {"enum": ["restart", "conversation_control"]},
+        "requester": {"$ref": "#/$defs/ownerDelegationRouter"},
+        "reason": {"type": "string"},
+        "trigger": {"anyOf": [{
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "turnId", "text"],
+          "properties": {
+            "kind": {"enum": ["owner_message", "owner_steer", "standing_instruction"]},
+            "turnId": {"$ref": "#/$defs/id"},
+            "steerId": {"$ref": "#/$defs/id"},
+            "instructionId": {"$ref": "#/$defs/id"},
+            "eventId": {"$ref": "#/$defs/id"},
+            "triggerTurnId": {"$ref": "#/$defs/id"},
+            "text": {"type": "string", "minLength": 1, "description": "The owner's own words that ask for this."}
+          }}, {"type": "null"}]},
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": {"enum": ["server", "conversation"]},
+            "conversationId": {"$ref": "#/$defs/id"},
+            "turnId": {"$ref": "#/$defs/id"},
+            "attemptId": {"$ref": "#/$defs/id"},
+            "action": {"enum": ["continue", "checkpoint_resume", "stop"]}
+          }
+        },
+        "grantRevision": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+        "grantedBy": {"anyOf": [{"$ref": "#/$defs/ownerDelegationProvenance"}, {"type": "null"}]},
+        "requestedAt": {"type": "number", "minimum": 0},
+        "acceptedAt": {"type": "number", "minimum": 0},
+        "interrupted": {"type": "array", "items": {"type": "string"},
+                        "description": "Conversations a restart interrupted because the owner asked for it."},
+        "status": {"enum": ["accepted", "restarting", "completed", "refused", "failed"]},
+        "code": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "detail": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "updatedAt": {"type": "number", "minimum": 0}
+      }
+    },
+    "ownerDelegationState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grant", "active", "router", "actions"],
+      "properties": {
+        "grant": {"$ref": "#/$defs/ownerDelegationGrant"},
+        "active": {"type": "boolean", "description": "Granted to the owner's current Global Router."},
+        "router": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["conversationId", "revision", "availability"],
+          "properties": {
+            "conversationId": {"type": "string"},
+            "revision": {"type": "integer", "minimum": 0},
+            "availability": {"enum": ["unbound", "available", "unavailable"]}
+          }
+        },
+        "actions": {"type": "array", "items": {"$ref": "#/$defs/ownerDelegatedAction"},
+                    "description": "Retained delegated actions, newest first; audit.log keeps every event."}
+      }
+    },
+    "ownerDelegationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["granted"],
+      "properties": {
+        "granted": {"type": "boolean", "description": "true grants (only the owner acting in the Tofu UI); false revokes at once."}
+      }
     }
   }
 }

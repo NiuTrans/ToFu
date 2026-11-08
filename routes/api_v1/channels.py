@@ -11,8 +11,10 @@ Routes (projected onto ``/api/v4`` with the v4 envelope):
   GET  /api/v1/channels/github/threads            — GitHub issue/PR thread page
   PUT  /api/v1/channels/github/threads/<path:key> — set a GitHub thread's mode / reply policy
   GET  /api/v1/channels/outbox[?channel=dx|github] — active outbox items (drafts, queue, failures)
+  GET  /api/v1/channels/outbox/<item_id>/attachments/<index> — an attached original image (thumbnail)
   POST /api/v1/channels/outbox/<item_id>/approve  — approve a draft
   POST /api/v1/channels/outbox/<item_id>/discard  — discard a draft/queued/failed item
+  GET  /api/v1/channels/audit?channel=dx|github[&before=] — everything recorded for other people
 
 Wire schemas: ``contracts/channels_v1.schema.json``. Handlers are stateless:
 the owner comes from the authenticated principal and every operation goes
@@ -30,8 +32,9 @@ from quart import Blueprint, request
 from lib.api_response import (
     api_bad_request, api_conflict, api_not_found, api_ok, api_service_unavailable,
 )
+from lib.api_v4 import raw_success_response
 from lib.log import get_logger
-from lib.openapi import api_meta, schema_definition
+from lib.openapi import api_meta, media_responses, schema_definition
 from lib.request_parser import async_parse_body
 
 from .auth import request_user_id, require_scope
@@ -46,7 +49,7 @@ from lib.channels import autoreply  # noqa: E402
 
 autoreply.install()
 
-_BAD_REQUEST_CODES = frozenset({'invalid_update', 'invalid_thread', 'invalid_mode',
+_BAD_REQUEST_CODES = frozenset({'invalid_update', 'invalid_thread', 'invalid_mode', 'invalid_note',
                                 'invalid_reply_policy', 'invalid_decision', 'invalid_event_id',
                                 'invalid_cursor', 'invalid_channel', 'auth_failed',
                                 'token_unsupported', 'credential_missing'})
@@ -69,6 +72,11 @@ def _responses(name: str, description: str) -> dict:
 def _body(name: str) -> dict:
     return {'required': True, 'content': {'application/json': {
         'schema': schema_definition(_contract(), name)}}}
+
+
+def _fields(name: str) -> tuple[str, ...]:
+    """A strict request body admits exactly the properties of its contract DTO."""
+    return tuple(_contract()['$defs'][name]['properties'])
 
 
 def _channel_error(error):
@@ -107,7 +115,7 @@ async def get_dx_account_v1():
           responses=_responses('ChannelAccountView', 'Updated 大象 account'))
 async def update_dx_account_v1():
     from lib.channels import service
-    body = await async_parse_body(strict=True, exact=('enabled', 'commandChat', 'mis'))
+    body = await async_parse_body(strict=True, exact=_fields('ChannelAccountUpdate'))
     return await _call(service.update_account, request_user_id(), body)
 
 
@@ -118,7 +126,7 @@ async def update_dx_account_v1():
           responses=_responses('ChannelAccountView', 'Account with its command chat'))
 async def create_dx_command_chat_v1():
     from lib.channels import service
-    await async_parse_body(strict=True, exact=())
+    await async_parse_body(strict=True, exact=_fields('CommandChatCreateRequest'))
     return await _call(service.create_command_chat, request_user_id())
 
 
@@ -143,7 +151,7 @@ async def _thread_page(channel: str):
 async def _configure_thread(channel: str, thread_key: str):
     from lib.channels import service
     from lib.channels.model import ChannelError, ThreadKey
-    body = await async_parse_body(strict=True, exact=('mode', 'replyPolicy'))
+    body = await async_parse_body(strict=True, exact=_fields('ChannelThreadUpdate'))
     try:
         if ThreadKey.parse(thread_key).channel != channel:
             raise ChannelError('invalid_thread', f'Not a {channel} thread key')
@@ -154,12 +162,14 @@ async def _configure_thread(channel: str, thread_key: str):
         kwargs['mode'] = body['mode']
     if 'replyPolicy' in body:
         kwargs['reply_policy'] = body['replyPolicy']
+    if 'note' in body:
+        kwargs['note'] = body['note']
     return await _call(service.configure_thread, request_user_id(), thread_key, **kwargs)
 
 
 @api_v1_channels_bp.route('/api/v1/channels/dx/threads/<thread_key>', methods=['PUT'])
 @require_scope('conversations')
-@api_meta(summary="Set a 大象 thread's ingress mode or reply policy (null restores the default)",
+@api_meta(summary="Set a 大象 thread's ingress mode, reply policy (null restores the default) or owner note",
           tags=['channels'], scope='conversations', request_body=_body('ChannelThreadUpdate'),
           responses=_responses('ChannelThreadView', 'Updated thread'))
 async def update_dx_thread_v1(thread_key):
@@ -184,7 +194,7 @@ async def get_github_account_v1():
           responses=_responses('GitHubAccountView', 'Updated GitHub account'))
 async def update_github_account_v1():
     from lib.channels.github import account
-    body = await async_parse_body(strict=True, exact=('enabled', 'token', 'credentialName', 'apiBaseUrl'))
+    body = await async_parse_body(strict=True, exact=_fields('GitHubAccountUpdate'))
     return await _call(account.update_account, request_user_id(), body)
 
 
@@ -200,7 +210,7 @@ async def list_github_threads_v1():
 
 @api_v1_channels_bp.route('/api/v1/channels/github/threads/<path:thread_key>', methods=['PUT'])
 @require_scope('conversations')
-@api_meta(summary="Set a GitHub thread's ingress mode or reply policy (null restores the default)",
+@api_meta(summary="Set a GitHub thread's ingress mode, reply policy (null restores the default) or owner note",
           tags=['channels'], scope='conversations', request_body=_body('ChannelThreadUpdate'),
           responses=_responses('ChannelThreadView', 'Updated thread'))
 async def update_github_thread_v1(thread_key):
@@ -217,6 +227,41 @@ async def list_channel_outbox_v1():
     from lib.channels import service
     channel = request.args.get('channel') or None
     return await _call(service.outbox_page, request_user_id(), channel=channel)
+
+
+@api_v1_channels_bp.route('/api/v1/channels/audit', methods=['GET'])
+@require_scope('conversations')
+@api_meta(summary="List what Tofu recorded for other people on the owner's behalf, newest first",
+          tags=['channels'], scope='conversations', responses=_responses('AuditPage', 'Audit page'),
+          parameters=[{'name': 'channel', 'in': 'query', 'required': True,
+                       'schema': schema_definition(_contract(), 'Channel')},
+                      {'name': 'before', 'in': 'query', 'required': False,
+                       'schema': {'type': 'string', 'maxLength': 512}}])
+async def list_channel_audit_v1():
+    from lib.channels import service
+    return await _call(service.audit_page, request_user_id(), channel=str(request.args.get('channel') or ''),
+                       before=str(request.args.get('before') or ''))
+
+
+@api_v1_channels_bp.route('/api/v1/channels/outbox/<item_id>/attachments/<int:index>', methods=['GET'])
+@require_scope('conversations')
+@api_meta(summary="Read an original image attached to an outbox item (a draft's thumbnail)",
+          tags=['channels'], scope='conversations',
+          responses=media_responses('image/png', 'image/jpeg', 'image/gif', 'image/bmp'))
+@raw_success_response
+async def channel_outbox_attachment_v1(item_id, index):
+    from quart import Response
+    from quart.utils import run_sync
+    from lib.channels import service
+    from lib.channels.model import ChannelError
+    try:
+        data, mime = await run_sync(service.outbox_attachment)(request_user_id(), item_id, index)
+    except ChannelError as error:
+        return _channel_error(error)
+    response = Response(data, content_type=mime)
+    response.headers.update({'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store',
+                             'Content-Disposition': 'inline', 'Referrer-Policy': 'no-referrer'})
+    return response
 
 
 @api_v1_channels_bp.route('/api/v1/channels/outbox/<item_id>/approve', methods=['POST'])

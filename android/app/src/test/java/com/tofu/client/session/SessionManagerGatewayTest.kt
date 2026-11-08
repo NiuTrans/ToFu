@@ -65,6 +65,7 @@ class SessionManagerGatewayTest {
         }
         override suspend fun touchLastUsed(id: Long, timestamp: Long) = 1
         override suspend fun setAuthType(id: Long, authType: AuthType): Int { row = row?.copy(authType = authType); return 1 }
+        override suspend fun pinSshHostKey(id: Long, host: String, port: Int, sha256: String): Int = 0
     }
     private class Cookies : CookieSink {
         val jar = mutableListOf<Cookie>()

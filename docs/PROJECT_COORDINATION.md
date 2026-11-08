@@ -131,13 +131,15 @@ would duplicate admission, Stop, settlement and publication authority.
 
 Problem: delegated Workers, watchers and unstarted shells crowded the owner’s ordinary conversation rows and date-group counts. Decision: each Coordinator owns one collapsed-by-default sidebar group directly beneath its own entry, outside the owner’s date groups. It contains every conversation created by `create_conversation`, `delegate_project_work` or `dispatch_project_assignment`, including empty shells, historical workers and terminal/cancelled work. A short localized header carries the total, the aggregate running count and the date groups' down chevron, turned to point right while collapsed. A reply awaiting review is marked only on its own row, visible once the group is expanded (owner decision 2026-11-04: a header dot repeated the rows' marks and made every collapsed group read as awaiting acceptance). Expanded compact rows show title, status and relative time, newest first. The body scrolls independently without a row cap, and expansion is remembered per Coordinator in browser storage. Keyboard activation, `aria-expanded`, visible focus and reduced motion are required.
 
-A known Coordinator mounts its group even when the initial catalog contains no local Worker; the paged inventory supplies cold history on demand. Only a member joining or leaving the local catalog invalidates that inventory: the inventory can only add members the catalog lacks, while revisions, counts and timestamps of known members already arrive through the catalog. Invalidating on every member revision was rejected because it re-scanned the owner catalog several times per second while Workers ran; members a read adopts re-baseline membership so they never trigger a second read. The existing presence refresh also refreshes it when the Coordinator is selected. Every list refresh reaches the group, so an expanded body is rebuilt only when its rendered rows, active row, status or relative time change; otherwise hover and focus would reset on each stream tick. Adopting each page refreshes the catalog projection before the group paints, so the expanded body contains its Workers rather than an empty shell. Opening a grouped Worker also refreshes the shared active-row projection: the ordinary flat-list fast path cannot find a row owned by the group. The current selection therefore survives subsequent catalog and stream updates without changing grouping policy. A group first placed beneath an interim history row moves beneath the Coordinator's card once the catalog names that Coordinator, so one Coordinator never shows two groups.
+A known Coordinator mounts its group even when the initial catalog contains no local Worker; the paged inventory supplies cold history on demand. Only a member joining or leaving the local catalog invalidates that inventory: the inventory can only add members the catalog lacks, while revisions, counts and timestamps of known members already arrive through the catalog. An added member becomes an ordinary catalog shell, so it keeps the stored folder its roster row carries (below). Invalidating on every member revision was rejected because it re-scanned the owner catalog several times per second while Workers ran; members a read adopts re-baseline membership so they never trigger a second read. The existing presence refresh also refreshes it when the Coordinator is selected. Every list refresh reaches the group, so an expanded body is rebuilt only when its rendered rows, active row, status or relative time change; otherwise hover and focus would reset on each stream tick. Adopting each page refreshes the catalog projection before the group paints, so the expanded body contains its Workers rather than an empty shell. Opening a grouped Worker also refreshes the shared active-row projection: the ordinary flat-list fast path cannot find a row owned by the group. The current selection therefore survives subsequent catalog and stream updates without changing grouping policy. A group first placed beneath an interim history row moves beneath the Coordinator's card once the catalog names that Coordinator, so one Coordinator never shows two groups.
 
 Server-issued `_coordinatorSource` at creation is the only direct origin evidence. The project-inventory projection additively backfills older conversations from the same paged durable assignment records used by Manage work; it never infers origin from titles or ID prefixes and does not rewrite stored settings. The global catalog projects only stored metadata: reconstructing every project's complete assignment history there made each sidebar refresh contend with active dispatch writes and could fail the whole list. A shown Coordinator group reads that project's paged roster even when no child carries provenance locally, adopts the returned rows, and retries a failed discovery on the next catalog/push refresh. Ordinary catalog reads therefore never depend on dispatch-history availability. Ordinary owner chats, swarms and sub-agents are unchanged. Search still opens workers and marks their Coordinator provenance. Grouping never deletes, archives or changes direct links, and Manage work retains the complete project inventory. A replaced Coordinator keeps a separate historical group beneath its own clickable row; its workers never rejoin the owner’s date groups. When that Coordinator is not present in the current catalog, the sidebar does not fabricate an empty historical row; the Worker remains available through search, direct navigation and Manage work.
 
 Each sidebar view decides which entry anchors a group. Pinned entries anchor their own groups: the shown project’s bound Coordinator, and the main coordinator’s card (the Global Router) in a view with no project. The Global Router and the Watchdog stay reserved in every view, so neither is ever listed as a row or classified as a replaced Coordinator; the Watchdog never delegates and has no group. Any other conversation of the view, under the list’s own folder filter, that started conversations is a replaced Coordinator: it gets one clickable row directly above the list, and the list omits it. While the shown project’s binding is loading nothing is classified as replaced, because its current Coordinator cannot be told apart yet; a pre-painted cached binding still anchors its group at once. Every group owns the nodes it inserted (row, host, body), is rebuilt when its anchor changes and is removed when it leaves the view, so a late binding or a folder switch never leaves a second Coordinator row behind. A view whose conversations all sit in Coordinator groups is not empty, so the list shows no folder-empty notice beneath them.
 
 Alternatives rejected: global rather than per-Coordinator folds lose ownership; title/prefix heuristics misclassify owner chats; hiding or archiving Workers destroys evidence; rendering one long expanded group buries the owner’s own conversations; classifying replaced Coordinators before the binding settles, or across folders, painted the current Coordinator and other projects’ Coordinators as extra rows. Specifications: `tests/project_mod/test_coordinator_conversations.py`, `frontend/src/features/coordinator-conversation-group.test.ts` and the real Coordinator Chromium journeys in `tests/frontend/test_project_coordinator_browser.py`.
+
+Problem: a row's status derives from client-side Turn state, which the page holds only for hydrated conversations, so every running Worker that had not been opened read “Done” until clicked. Decision: the inventory page stamps `busy: true` from the same owner-scoped live-task projection as sidebar catalog rows (`list_running_tasks`), and every catalog merge path (full list, folder, older page, inventory page) wakes exactly the busy shells the client does not already know are running, deduplicated per conversation. A shell with no hydrated Turns shows no status rather than “Done”. Alternatives rejected: hydrating every grouped Worker on paint loads transcripts the owner never opens; a group-only status read would add a second liveness authority beside the catalog projection. Specifications: `tests/project_mod/test_coordinator_conversations.py`, `tests/api/test_api_v1_project_coordination.py` and `tests/frontend/test_frontend_folder_members_load.py`.
 
 Problem: every provenance backfill re-read the project's complete assignment history, so each project-roster read grew with lifetime delegation (106 storage RPCs, about 70 ms per project at 94 admissions on native TofuDB) and a concurrent admission could make the snapshot page retry. Decision: `RecipientOrigins` in `lib/project_dispatch/history.py` reads each admission once per process. Requests are immutable after admission and their order index commits with them, so the mapping per owner/project and storage client stays exact; the project head’s assignment count is the freshness witness. An equal count costs one head query, a larger one reads only the newer admissions, and a smaller count or another client starts over. Retention is one mapping per owned project read, holding each delegated recipient once (about 10 KB at 94 Workers). Alternatives rejected: a time-based cache adds a staleness knob; copying origins into conversation settings migrates non-authoritative data; a durable provenance index would duplicate the assignment authority. Specifications: `tests/project_mod/test_coordinator_conversations.py`, `tests/storage/test_project_dispatch_repository_segments.py` and `benchmarks/catalog_origin_reads.py`.
 
@@ -403,6 +405,67 @@ workspace lookups mismatched; bypassing isolation weakens the delivery contract.
 The alias variants of the preparation, workspace refusal, Coordinator delegation
 and file lifecycle tests verify this path through isolated write and publication.
 
+### Project-grant publication fence (2026-11 decision)
+
+Problem: publication (`lib/project_dispatch/publication.py`) applied the
+file-grant path rule of `lib/project_dispatch/scope.py` to `project` checkpoints.
+That rule refuses a path when any segment is `data`, `logs` or `uploads`. A
+project grant pins `writePaths: ["."]`, and publication checks every old and new
+path, so 43 tracked source files could never be added, changed, renamed or deleted
+by a Worker. They are the model catalog in `lib/model_info/data/`,
+`lib/site_packs/data/` and the Android `com/tofu/client/data` package. Delivery
+stopped at `project_publication_write_scope_exceeded`.
+
+Decision: the fence depends on the grant mode.
+
+- Root `data/`, `logs/` and `uploads/` are refused for every grant, in any letter
+  case.
+- Publication passes `project_grant` for `mode: project`. A project checkpoint may
+  then change a nested package with one of those names. This is the project-mode
+  intent that `lib/git_checkpoint_policy.py` states for `FORBIDDEN_CHECKPOINT_ROOTS`:
+  "Root-owned runtime/reconstructible trees. A nested source package stays legal."
+- Build-output names (`build`, `dist`, `target`) follow the same split. A project
+  checkpoint is a commit already filtered by the project's own `.gitignore` and
+  `git_checkpoint_policy`, so tracked content there (for example a rendered
+  `docs/report/build/` deck) is source; refusing it held whole paper/merge
+  deliveries at `project_publication_write_scope_exceeded` despite `writePaths: ["."]`.
+- File grants keep refusing these names at any depth. This covers descriptor I/O,
+  profile prefixes, shared files and file-grant publication.
+- Both modes refuse the following at any depth: checkout control, undo evidence,
+  Tofu artifacts, dependency caches (`node_modules`, `.venv`, `__pycache__`), and
+  `.env`/`.env.*`. The `.env.*`
+  rule includes `.env.example`, because the fence cannot tell a template from a
+  filled-in credential file.
+- Refusals stay `ValueError` and name the refused root tree or segment. A held
+  publication logs the first refused path once (`[ProjectPublication]` warning).
+
+Measured over every tracked file under `.`: in project mode, 43 files become
+publishable and two stay refused (`.env.example` and `uploads/images/.gitkeep`).
+File mode is unchanged.
+
+Alternatives rejected:
+
+- Root-anchoring `data`, `logs` and `uploads` for all grants. This weakens
+  file-grant confinement, whose specification refuses `src/data/secrets` and
+  `src/logs/app.log`.
+- Allowlisting the affected files. Every new nested `data` package would repeat
+  the incident.
+- Reusing `FORBIDDEN_CHECKPOINT_ROOTS` wholesale. That would add refusals for
+  `output/` and the evaluation trees, which is a separate decision.
+
+Known residue: the any-depth names still refuse Bazel `BUILD` files, Nx
+`project.json` files and committed `dist/` trees in other projects. None is
+tracked here.
+
+Specifications:
+
+- `test_project_dispatch_scope.py`: file grants refuse nested names and project
+  grants accept them. Both modes refuse root runtime trees, credentials and
+  metadata.
+- `test_project_publication.py`: project grants deliver nested `data` packages,
+  including renames. Root runtime trees and `.env*` files that a Worker commits
+  stay blocked. File-grant publication still refuses nested names.
+
 ### No spending ceiling (2026-10 decision)
 
 Problem: each request used to share 2,000,000 tokens, 128 model requests, 4,096
@@ -649,6 +712,21 @@ accepted attempt config already is the durable authority). Cost: one source
 attempt read per continuation admission. Spec:
 `tests/project_mod/test_coordinator_replay_policy.py`.
 
+A continuation keeps its grant's tool settings through tool assembly. Problem:
+assembly re-applied `coordinator_tool_settings` to every Coordinator Turn, which
+re-normalizes the `tools` block. Once a build retired `toolSearch: auto`, every
+continuation whose grant recorded `auto` drifted from that grant, so the
+admission fence ("programmatic policy changed after admission") stopped it
+before its first model call (`dispatch_authority_lost`) and its request could
+neither continue nor finish. Decision: assembly applies the role's settings
+only to human Coordinator Turns, as executor ingress already does; admission
+fixed a continuation's settings, including `programmaticCalling=off`, and
+readers normalize retired values themselves. The fence stays exact.
+Alternatives rejected: comparing normalized forms in the fence (weakens an
+authority check to excuse a writer), and rewriting stored grants (immutable
+evidence). Spec: `tests/project_mod/test_coordinator_continuation.py::
+test_continuation_admitted_before_a_tool_flag_retirement_keeps_its_grant`.
+
 Background completion resumes read both predecessor and successor attempts
 through the repository's owner-scoped `get_attempt` port. Its default resolves
 the selected lifecycle store lazily, just as an injected test reader does.
@@ -681,6 +759,19 @@ recommendation and say so in the next report, and marks the decision
 `default_applied` in the same CAS. `finish_project_request(outcome=needs_user)`
 remains for cases without a sensible default.
 
+Problem: the continuation brief still told every continuation to follow a
+decision report with `request_user_decision`, which session-free coordination
+removed from the Coordinator ceiling, so a continuation that needed the human
+was refused with advice to delegate. Decision: the brief names only tools its
+grant froze. When `admission.asks_human` admits the continuation profile, the
+brief says to ask with `ask_human(blocking=false)` and state the default applied
+meanwhile. An older grant without `ask_human` proceeds on its recommended default
+and says so in its next report, or, without a sensible default, reports
+`kind=decision` and finishes with `needs_user`. Alternatives rejected: returning
+`request_user_decision` to the ceiling (restores the report-then-wait flow that
+session-free coordination removed) and always naming `ask_human` (older grants
+cannot call it). Spec: `test_continuation_brief_names_only_tools_its_grant_holds`.
+
 Timed wakes (backoff and due decisions) are a process-local `threading.Timer`,
 one per owner/project keeping the earliest due time. They only call the same
 idempotent recovery pass; the due time itself is derived from durable records,
@@ -688,11 +779,14 @@ so a lost timer is recovered by startup or any later settlement. Rejected: a
 durable scheduler job per request (a second authority over the same state) and
 indefinite waiting for the human (contradicts unattended completion).
 
-Code delivery is automatic: the Coordinator's review with a checkpoint publishes
-through the existing isolated validation and fast-forward adoption onto the
-current branch, with no human step. Adoption still waits (and retries in the
-integration worker) while the canonical checkout is dirty or another
-conversation is active there.
+Code delivery is automatic: the Coordinator's review with a checkpoint authorizes
+publication, the delivery receiver merges the task delta into the canonical
+checkout and, in a repository that opted into automatic commits, commits exactly
+that delta onto the current branch, with no human step
+([project integration](modules/project_integration.md#task-owned-canonical-delivery),
+"Reviewed project deliveries become commits"). A delta that built on uncommitted
+canonical bytes stays delivered as working-tree bytes; its `entangled`
+acknowledgement names the paths.
 
 Alternatives rejected: treating a notification as human authority, adding a
 second scheduler/task state, and reusing a generic queued message with mutable
@@ -1059,7 +1153,24 @@ they add no human message, answer, approval or enlarged tool grant. Dispatch
 attempts retain their exact `TrustedDispatch` admission; an automatic Coordinator
 continuation may control only its original request's dispatched Workers.
 Ordinary session resumes retain their existing human-authorized execution.
-Nonhuman notifications without an authorized request cannot issue controls.
+Nonhuman notifications without an authorized request cannot issue controls,
+with one exception: the Global Router acting under the owner's delegation
+(owner decision 2026-11-06, [ROUTER.md R9](ROUTER.md#r9-the-owners-delegation-the-global-router-acts-for-the-owner-owner-decision-2026-11-06)).
+When its request has no owner message of its own (a standing instruction, a
+nonhuman notice), `control_conversation(owner_delegation={reason, trigger})`
+checks the owner's grant in the lifecycle approval gate, resolves the owner
+trigger, records one audit action before the command and settles it with the
+outcome (a refused trigger is recorded too). The command is the unchanged
+`control_session`: the delegation stands in only for the current request's
+source principal (`acting_principal`), so every Attempt, revision, tenant and
+replay check still applies and the resumed Attempt keeps the target's own
+accepted execution identity. It allows only `continue`, `checkpoint_resume` and
+`stop` of the pinned Attempt, in any project of the owner, never `regenerate`; a
+dispatched Worker keeps its exact grant. Passing `owner_delegation` always uses
+the grant; without it the owner's own message keeps the unchanged path. This is
+how the Router resumes the exact Attempts a
+restart interrupted (`tests/conversation/test_coordinator_session_control.py`
+covers it on SQL and native storage after boot recovery settled them).
 
 Callers pin the source Attempt, Turn revision and idempotency key. A retry uses
 the same command identity and stored source config; conflicts require a fresh
@@ -1102,6 +1213,17 @@ headers through the selected authority, filters owner/project/archive scope,
 and returns a scope-bound keyset cursor and explicit coverage. Empty matching
 pages may still have `nextCursor`; they are not evidence of no workers. No
 transcripts, new worker store, grants, model calls or execution are created.
+Each row also carries the stored `folderId` (null when unfiled) from the same
+catalog header. Problem: the roster lists every conversation of the project,
+owner chats included, and the sidebar adopts rows its catalog lacks as catalog
+shells; without the folder those shells projected as uncategorized although
+storage filed them. That happened whenever the global sidebar catalog had not
+loaded the row, past its 500-row window or while that read failed. Decision:
+the row carries the stored membership and adoption applies it through the
+ordinary catalog merge, whose freshness guard keeps a newer local move.
+Alternatives rejected: adopting only group members still leaves Worker shells
+folderless and miscounted; deriving a folder from the project path invents
+membership storage does not hold, because folders may share project roots.
 Problem: this bounded roster read unconditionally walked all assignment history,
 even for an empty/nonmatching page or conversations with creation provenance.
 Decision: first apply visibility/project filters and use explicit creation source;
@@ -1546,6 +1668,22 @@ A scoped idempotent command maps to one assignment and the existing deterministi
 conversation command, then an immutable turn/attempt association; task identity
 and result status come from that attempt. Binding precedes executor birth.
 
+Problem: the delegation binds (or, for a restart-paused continuation, advances)
+the association only after its create/resume command returns. Under slow storage
+the accepted-attempt recovery scan claimed such an attempt first and started it
+unbound, so the executor refused it as not matching its "immutable birth
+association"; the delegation's own claim then lost and the attempt stayed failed.
+Decision: an attempt started by that recovery performs the same idempotent bind
+or exact continuation from its accepted config's server-captured carrier, under
+its exclusive start claim and before birth. A successor reserved only by its own
+start claim (`@dispatching:<attemptId>[:<owner>]`) is unbound evidence for that
+continuation; any other task binding still refuses. A refusal settles the attempt
+with that cause. Alternatives rejected: a longer recovery grace (a tuned delay that
+only moves the race), skipping unbound dispatch attempts (strands them pending),
+and binding before the claim (a refusal could then neither settle nor stop retrying).
+Guards: `test_recovery_scan_between_birth_commit_and_bind_starts_under_the_grant_association`
+and `test_continuation_accepts_a_successor_reserved_only_by_its_own_start_claim`.
+
 ### Restart-paused Worker continuation
 
 Problem: startup recovery skipped every assignment that already had an execution
@@ -1558,14 +1696,54 @@ startup recovery pass and the ordinary Continue command, in its own conversation
 under the same grant. A new assignment records one deterministic workspace task
 identity (`project-worker:<assignmentId>`) in accepted config and its association;
 an older assignment without that field inherits its interrupted attempt's actual
-workspace task. Every physical attempt uses that identity, so the existing
-isolated checkout, its uncommitted bytes,
+workspace task. Every physical attempt works under that identity (its work id),
+so the existing isolated checkout, its uncommitted bytes,
 checkpoint lineage and delivery receipt continue instead of being recreated.
 Its task event stream likewise continues after the predecessor's durable cursor
 ([Task event delivery](TASK_EVENT_DELIVERY.md#reused-task-identities-continue-their-durable-stream)),
 and the resumed attempt, as its Turn's current bound Attempt, takes over the task
 result recovery left `interrupted` while the predecessor stays fenced
 ([Storage](STORAGE.md#restart-readiness-and-recovery)).
+
+Durable-worker attempts. Problem: `turn.attempt.dispatch_worker` binds every
+Attempt to its own task `conversation-attempt:<attemptId>`, while task
+registration adopted the accepted config's workspace task id as the physical
+id. The two never match, so after the durable admission cutover every
+Coordinator continuation and Worker failed at registration (`prepared task
+identity differs from conversation worker`), and no failed or restart-paused
+Worker could continue. Decision: the physical task and the work id are separate
+identities. A worker claim alone names the physical task, which owns the task
+result, event stream and Turn binding of that one attempt; only an unclaimed
+start adopts the captured id as its task. The work id is the association's
+`taskId`: `bind_account` stamps it on every physical attempt
+(`workspace_delivery.workspace_work_id`). The checkout registration, binding,
+delivery settlement, publication, review, shared-file candidates and the
+Coordinator's integration tools all key by it, and the occurrence ledger uses it
+as its single root. A successor therefore binds the predecessor's checkout and
+resumes the model, tool and reservation sequences instead of colliding with
+them. That holds whether the predecessor was interrupted by a restart or failed
+before entry. The workspace origin records the physical attempt in it as
+`executorTaskId`, and delivery recovery reads that attempt's verdict while
+settling the work id. Alternatives rejected:
+- Keeping the work id as the physical task: storage fences worker writes by the
+  `conversation-attempt:` root and enqueues one job per Attempt.
+- Executing project dispatch in the API process again: this reverses the durable
+  execution admission decision in [Architecture](ARCHITECTURE.md).
+- Refusing such successors: no Worker could continue after any failure or
+  restart.
+- Re-keying the checkout to each new task: this needs a storage handoff
+  operation and moves Git refs on every attempt.
+
+The view's `execution.taskId` stays the attempt's physical task, and
+`delivery.taskId` names the work id. Restoring ordinals still needs an uncapped
+tool account, as before.
+
+Specs:
+- `tests/project_mod/test_project_dispatch_file_lifecycle.py::test_successor_continues_the_assignment_checkout_as_its_own_task`
+- `tests/conversation/test_durable_attempt_execution.py::test_accepted_workspace_task_id_never_renames_the_claimed_task`
+- `tests/tasks_pkg/test_conversation_worker_binding.py::test_project_grant_workspace_id_never_renames_the_claimed_task`
+- `tests/project_mod/test_delivery_resume_demand.py::test_working_recovery_reads_the_executing_attempt_and_settles_the_work_id`
+
 A trusted continuation revalidates the live grant, requires an exact settled,
 unreviewed predecessor and its accepted successor, then advances the association
 to that successor. The accepted `_resumeSource` of a restart Continue also restores
@@ -1586,9 +1764,15 @@ not `interrupted` still refuses. Alternatives rejected: resetting the counter
 erases the request's recorded tool usage and is the replenishment the fence
 exists to stop; a fresh nonce per generation forks the one durable account; and
 accepting reservation ordinals beyond `count + 1` would hide lost or forged
-reservations. Specs: `tests/project_mod/test_coordinator_request_budget.py::test_restart_resumed_worker_continues_its_tool_reservation_counter`,
-`::test_resumed_worker_cannot_replenish_or_adopt_another_tool_reservation_counter`
-and `tests/agent_core/test_tool_account_restore.py`.
+reservations; adopting the stored count only as an offset over budget ordinals
+that restart at one still collides the first resumed tool with occurrence ordinal
+one, and stacking that offset on the restore counts every stored reservation twice.
+Specs: `tests/project_mod/test_coordinator_request_budget.py::test_restart_resumed_worker_continues_its_tool_reservation_counter`,
+`::test_resumed_worker_cannot_replenish_or_adopt_another_tool_reservation_counter`,
+`tests/agent_core/test_tool_account_restore.py` and
+`tests/project_mod/test_coordinator_workers.py::test_restart_continue_keeps_counting_the_worker_tool_reservations`,
+`::test_a_new_physical_account_still_cannot_replenish_worker_tool_reservations`
+and `::test_each_restart_generation_continues_the_one_worker_tool_account_once`.
 A background-command completion for an eligible unfinished execution uses this
 same Continue path; its receipts stay durable and are replayed into the resumed
 Worker turn. The
@@ -1641,12 +1825,12 @@ linked to the cancelled assignment. The same wake could already be leased when t
 grant was withdrawn.
 
 Decision: the existing background-batch owner checks the frozen assignment binding
-before either Continue or queued-turn dispatch. When its exact grant is revoked and
-its bound Turn and Attempt have settled, it attaches the complete durable command
+before either Continue or the collective wake turn. When its exact grant is revoked
+and its bound Turn and Attempt have settled, it attaches the complete durable command
 receipts as one deterministic `_bgCommandInjects` evidence block on that cancelled
-Turn and retires only the synthetic wake. No model attempt, replacement Worker or
-new evidence store is created, and no still-running command is killed. The
-projection CAS precedes wake retirement; replay of the same block is idempotent.
+Turn and starts no wake. No model attempt, replacement Worker or new evidence store
+is created, and no still-running command is killed. Replay of the same block is
+idempotent, and a wake row stored by an earlier release is retired without a turn.
 A revoked grant whose execution is still settling, lacks evidence, or loses the
 projection race also starts no model turn; its durable receipts remain available
 for a later evidence-settlement pass. Exact assignment reads expose the evidence
@@ -1813,6 +1997,67 @@ another retry count/deadline would kill work during longer storage outages.
 Specifications: `tests/project_mod/test_project_dispatch_persistence.py`,
 `tests/storage/test_project_dispatch_persistence.py` and the existing dispatch
 runtime, occurrence accounting and stop-cause contracts.
+
+### Dispatch contention is not an authority verdict
+
+Problem: every dispatch write commits through one head per owner/project: each
+Worker and Coordinator model or tool occurrence, reservation, delegation,
+binding, review and revocation. Every segmented snapshot read is fenced by the
+same head. A write retries its CAS `casAttempts` times back to back and then
+raises `DispatchContention`; a read raises it when the head advanced under each
+snapshot. The storage waits above classified only transient storage codes. So a
+Worker whose own model settlement lost to concurrent writers (a Coordinator
+burst, or the herd a storage stall releases at once) stopped as
+`dispatch_authority_lost`. The same verdict failed a Worker's tool intent as a
+tool error, ended a Coordinator request as `ModelAdmissionRefused`, and reached
+the Coordinator as `get_project_workers` "retry reading".
+
+Decision: contention proves only that another writer committed.
+`repository.transient_dispatch_failure` classifies it by the nearest dispatch
+verdict in the cause chain: `DispatchContention` is transient, and every other
+`ProjectDispatchError` (revocation, a changed source or binding, malformed
+evidence) is final. Without one, the transient storage codes decide.
+`admission.wait_for_dispatch` runs the persistence wait with that classifier.
+Sites that never had a persistence fence use `admission.reread_on_contention`:
+the first attempt runs as before, so an uncontended call keeps its existing
+Stop handling, and only a transient failure enters the wait. Together they
+cover every dispatch call site that runs inside a task:
+- Worker validation (`validated_dispatch`), its account read and reservation
+  counter, and its model, tool and reservation occurrences;
+- the Coordinator request account (`bind_source_account`): source read, account
+  registration, dispatch admission, occurrences and tool reservations;
+- the Coordinator reads `get_project_workers`, `get_project_assignment`, the
+  polls and snapshots of `await_project_workers`, and the pre-dispatch read of
+  `dispatch_project_assignment`;
+- `delegate_project_work`, whose documented recovery is to replay unchanged
+  arguments.
+Each repeat reads and validates the live grant again. A revocation or Stop that
+committed meanwhile is met on the next read and stops at once with its own
+cause.
+
+Bound: the persistence-wait liveness contract, not a count: ACK, owner Stop
+(reads and intents) or server shutdown (settlement debt returns to the recovery
+owner). Its existing backoff spreads a herd's retries, and every CAS round has
+a winner, so a burst drains. No retry count, interval or timeout was added.
+
+Alternatives rejected:
+- raising `casAttempts` or adding jitter: a tuned knob, and a longer burst still
+  kills;
+- per-assignment heads or head-free ledger commits: they remove most contention
+  structurally, but change the storage contract implemented by the SQL and
+  native authorities, so they are a separate proposal;
+- re-running a whole `await_project_workers`: it would lose a settled Worker's
+  progress result.
+
+Specifications: `tests/project_mod/test_project_dispatch_contention.py`. It
+races Coordinator delegations and foreign commits against a Worker's model and
+tool occurrences, tears authority snapshots, revokes and Stops during
+contention, and covers the Coordinator request account, delegation and read
+tools. Not covered: `cancel_project_work`, `review_project_work`,
+`finish_project_request`, `request_user_decision` and the dispatch itself of
+`dispatch_project_assignment` still return contention as an uncertain outcome
+with their existing recovery. A contended `wake_project_dependents` is still
+retained for the next settlement or startup recovery.
 
 ### Dispatch authority stop causes
 
@@ -2074,6 +2319,23 @@ Alternatives rejected: tolerating any later revision (late output may report
 failures the reviewer never saw), and requiring a new repair assignment (re-runs
 work whose bytes are already accepted). Spec:
 `tests/project_mod/test_coordinator_publication_recovery.py`.
+
+Problem (stale hold): the receiver evaluates held rows serially, so a hold
+written before the pin kept reading `project_publication_authority_missing`,
+and `await_project_workers(wait_for=delivery)` returned at once as held, for as
+long as the receiver was busy elsewhere (2026-11-06: 7509d68d behind another
+project's multi-hour checkpoint capture). The underlying refusal was logged at
+DEBUG only. Decision: under the publication lock, after `validate_publication`,
+the service asks `release_publication_hold` to rerun the same live fence for
+that exact receipt; a cleared hold becomes `pending`, which views and waits
+report as delivery in progress. The receiver still publishes and rechecks every
+fence, and a failed release leaves the hold to its next pass. A hold that starts
+or changes reason logs its cause once at WARNING. Alternatives rejected:
+reading the pin's time against the receipt in the view (an unchanged later
+refusal never rewrites the receipt, so it would read as pending forever) and
+logging every retry (one line per held row per pass). Specs:
+`test_publication_pin_retires_the_stale_hold_without_publishing` and the pin
+and cause cases in `test_coordinator_publication_recovery.py`.
 
 Problem (duplicated content): overlapping Worker chains re-carry commits already
 delivered under other SHAs. `git apply --3way` cannot merge a creation patch
@@ -2359,3 +2621,83 @@ symlink/reparent, hard-link, pending recovery and publication-failure neighbors
 remain required.
 
 <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->
+
+### Cross-process steer delivery (owner report 2026-11-06)
+
+**Problem.** The personal deployment runs an API process (browser commands and
+every Global Router reply they start) beside an execution process (channel
+ingestion, relays, queue drains and project continuations); a Coordinator Turn
+runs in whichever process started it. `lib.agent_inbox` is process-local, so
+`route_to_project` reported `disposition="steered"` while its wakeup waited in
+the wrong process's inbox. `await_project_workers` and the round-boundary
+injector both read only that inbox, and the finalizer salvaged only it, so the
+Coordinator kept waiting and never saw the owner's words.
+
+Live evidence, `coordinator-1a390889aa954da2b18551d1b4a32625` Turn
+`ef0c4900-ae96-492c-ae29-e37a33a92196` (execution process): the owner's decision
+(`router-forward:a6355e6697a915186b913805e2008ad660eb565bd6dabcce0498bec45f000baf`,
+Router Turn `00b4444e…`, 09:19:41) and bug report
+(`router-forward:4e7a7198e140402fff4b7f2858d926bae6bde15e476301b495b4490189c60f0a`,
+09:29:23) were accepted by API-process Router tasks `e40a9f26` / `71e57b88` and
+stayed `pending` through the 09:05:46–09:32:12 await (1,586.6 s), across the
+`ask_human` question `hg_bf52fce334c5` the decision had already answered. Two
+other forwards in the same window arrived, because their Router tasks ran in the
+execution process. The same happened to owner messages typed directly into the
+Coordinator (`tmp_*` command ids). All ten items reached the model only at
+10:24:26, when a later Coordinator Turn happened to start in the API process
+(the compaction mentioned in the report was that Turn's first step). A second
+defect shared the lane: a replayed forward (same command id) re-published the
+inbox item, so owner text `router-forward:c5631617548708c3165ce65af7880…`
+reached the model twice (11:09:24 round 2 and 11:15:10 round 4).
+
+**Decision.** The pending steer record on the live Turn is the cross-process
+delivery; the inbox item is the same-process fast path.
+
+- Acceptance (`_deliver_while_running`) publishes a local wakeup only when this
+  process's task registry executes the attempt. Otherwise it commits the steer
+  record alone and logs the executing-process split.
+- `lib.tasks_pkg.committed_steers` reads those records at the existing delivery
+  points: the round-boundary injector (`take_steers`), the durable recheck of
+  `await_project_workers`, and the finalizer. The finalizer re-queues an undelivered
+  steer as the next turn through the same turn command. No new timer, cadence or
+  knob: it rides the round boundary and the existing 0.5/5 s recheck.
+- One owner-bound Turn metadata read per boundary/recheck; the body is read
+  only after a foreign write (the executor's last written view answers the
+  unchanged case). Delivery follows the record's commit order and a block is
+  taken at most once, which also closes the replay double delivery.
+- Await results add `waiting`: each pending input's kind (`human`, `nonhuman`,
+  `background_command`, `project_message`), source (Global Router forward,
+  channel, typed here, message id) and preview, bounded by the injection preview
+  the records already store (1,200 characters).
+- Authority is unchanged: an owner's message carries its committed `steerAuthor`
+  (actor, text, origin) exactly like a same-process steer, and is verified again
+  when it authorizes; a steer with no author was nonhuman and stays nonhuman,
+  including when it is re-queued.
+
+**Alternatives considered.** Queuing the steer instead (either unconditionally or
+when the executor is not local) preserves full fidelity but the text arrives only
+after the model chooses to end its turn — not the next round, and not guaranteed
+at all; it also splits a forwarded request and its Router note into two turns.
+A cross-process wake port is a new transport, plus a subscription owner, for no
+benefit over records that already exist. Storing the full steered text on every
+record changes the native TofuDB engine and the SQL authority together, outside a
+small fix. Skipping the record read whenever the process role is `all` would
+hide foreign steers in a multi-replica layout, so the read always happens and
+its cheap path covers the common no-steer case.
+
+**Residual limits.** A nonhuman text longer than the stored preview (the Router
+note always exceeds it) reaches a cross-process executor as that preview plus an
+explicit truncation note; the owner's own words arrive complete from their
+author record. A steer committed after the finalizer's last read but before the
+attempt closes can still miss the turn; closing that needs a settlement-side
+hand-off and is not changed here. `pending` records left on already settled
+Turns are display evidence, not a delivery queue, and stay `pending`.
+
+**Verification.** `tests/conversation/test_conversation_command_inject_mode.py`
+(typed, Router-forwarded and 大象 owner input for a remote executor; commit
+order, exactly once, authority, full owner text, next-turn salvage; the cheap
+read; the replayed forward), `tests/project_mod/test_coordinator_workers.py`
+(cross-process steer ending an await on all three sources, naming its source and
+arriving at the next boundary once; a project message naming its id). Nine specs
+failed before the fix; the whole file passes with `take_steers` neutered again
+(seven failures).

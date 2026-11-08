@@ -384,7 +384,9 @@ def test_restart_resumed_worker_continues_its_tool_reservation_counter(runtime):
     for number in range(3):
         _run_tool(worker, f'before-restart-{number}')
     counter = r.c.repo.read(assignment['id'])['toolReservations']
-    assert counter['rootTaskId'] == worker['id'] and counter['count'] == 3
+    # The ledger's root is the assignment's work id, shared by every physical attempt.
+    assert counter['rootTaskId'] == assignment['execution']['taskId'] != worker['id']
+    assert counter['count'] == 3
 
     resumed = _restart_continuation(r, worker, assignment)
     admission.bind_account(resumed)

@@ -70,6 +70,36 @@ def test_no_model_at_all_is_an_explicit_refusal(task, monkeypatch):
         resolve_worker_model(task.value)
 
 
+
+def test_router_without_a_model_choice_runs_forwarded_requests_on_the_owner_default(task, monkeypatch):
+    """A Project Router made by create/provision stores no model until the owner sends
+    from its composer. A request the Global Router forwarded there ran with model '':
+    any free slot answered, tool assembly issued no Coordinator model and every
+    delegation was refused. It runs on the owner's default model, like its Workers."""
+    from lib.scheduler import conversation_dispatch
+    from lib.tasks_pkg.model_config import _resolve_model_config
+    created = []
+    settings = {'projectPath': '/work/project', 'folderId': 'folder'}
+    monkeypatch.setattr(conversation_dispatch, 'get_storage_client', lambda: SimpleNamespace(
+        query=lambda operation, payload: {'metadata': {'settings': dict(settings)}}))
+
+    def create_turn(conversation, owner, payload, **kwargs):
+        created.append(payload)
+        return SimpleNamespace(value={'attempt': {'taskId': 'coordinator-task'}})
+    monkeypatch.setattr(conversation_dispatch, 'conversation_turn_commands',
+                        SimpleNamespace(create_turn=create_turn))
+    outcome = conversation_dispatch.dispatch_scheduled_turn(
+        'coordinator', {'role': 'user', 'content': 'Forwarded owner request'}, {}, user_id=OWNER,
+        command_id='router-forward:spec', log_prefix='[Router]', input_actor='human',
+        inject_mode='steer')
+    assert outcome.disposition == 'started'
+    config = created[0]['config']
+    assert config['model'] == config['preset'] == 'owner-default-model'
+    capture_worker_policy(task.value, config, CATALOG,
+                          _resolve_model_config(config, 'coordinator-task')['model'])
+    continuation = policy_for_task(SimpleNamespace(), task.value, None)['continuation']
+    assert continuation['model'] == continuation['workerModel'] == 'owner-default-model'
+
 @pytest.mark.parametrize('controls, expected', [
     ({'model': 'coordinator-model'}, 'coordinator-model'),
     ({'model': 'coordinator-model', 'workerModel': 'worker-model'}, 'worker-model'),

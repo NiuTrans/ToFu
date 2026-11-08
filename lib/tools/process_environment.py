@@ -2,14 +2,18 @@
 
 Entry points validate_environment, apply_tool_paths, resolve_executable and
 environment_report operate on explicit mappings, never process-global state.
-Package caches and installed uv tools are persistent; no package is installed
-or deleted here. Credential selection stays with each execution authority.
+tool_cache_root names the persistent cache root both share: the process's
+TOFU_MCP_CACHE_DIR, else data/mcp-cache in the runtime base. Package caches
+and installed uv tools are persistent; no package is installed or deleted
+here. Credential selection stays with each execution authority.
 """
 from __future__ import annotations
 
 import os
 import shutil
 import sys
+
+from runtime_path_policy import get_runtime_base
 
 
 def validate_environment(environment: dict[str, str]) -> dict[str, str]:
@@ -19,6 +23,13 @@ def validate_environment(environment: dict[str, str]) -> dict[str, str]:
         if not isinstance(value, str) or '\0' in value:
             raise ValueError('Subprocess environment values must be strings without NUL')
     return environment
+
+
+def tool_cache_root() -> str:
+    # A process read, not a caller's mapping: scripts/check_config_knobs.py
+    # inventories only process-environment reads.
+    return os.environ.get('TOFU_MCP_CACHE_DIR') or os.path.join(
+        get_runtime_base(), 'data', 'mcp-cache')
 
 
 def tool_cache_defaults(cache_root: str) -> dict[str, str]:

@@ -1,2 +1,0 @@
-import{I as d,Q as i}from"./application-B_fNhrwW.js";function u(e){document.dispatchEvent(new CustomEvent("tofu:feature-domain-loaded",{detail:{domain:e,source:"vite"}}))}function s(e,t,a,o){u(e);const r=d(t),n=r===o?i(t):r??i(t);if(typeof n!="function"||n===o)throw new Error(`${t} was not defined by the required ${e} module`);return n(...a)}export{u as a,s as i};
-//# sourceMappingURL=runtime-bridge-ENj8TeFq.js.map

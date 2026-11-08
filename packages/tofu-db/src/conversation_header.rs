@@ -9,8 +9,9 @@ pub(crate) mod recency;
 pub(crate) mod trash_migration;
 
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::io;
+use std::ops::ControlFlow;
 
 use serde_json::{json, Map, Value};
 
@@ -701,26 +702,6 @@ fn project_header(
     }
     header.insert("search_text".to_owned(), Value::String(String::new()));
     Ok(json!({"metadata": header, "messages": [], "source": "sidecar"}))
-}
-
-fn cursor_allows(
-    header: &serde_json::Map<String, Value>,
-    before_updated_at_ms: Option<u64>,
-    before_id: &str,
-) -> io::Result<bool> {
-    let Some(before_updated_at_ms) = before_updated_at_ms else {
-        return Ok(true);
-    };
-    let updated_at_ms = header
-        .get("updated_at")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| invalid_data("conversation update timestamp is malformed"))?;
-    let id = header
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid_data("conversation ID is malformed"))?;
-    Ok(updated_at_ms < before_updated_at_ms
-        || updated_at_ms == before_updated_at_ms && id < before_id)
 }
 
 fn load_header(
@@ -2847,62 +2828,284 @@ pub(crate) fn update_metadata(
         .map_err(|_| invalid_data("conversation result cannot be encoded"))
 }
 
-// Small catalogs use the primary headers. The updated-time index retains OCC
-// tombstones from every historical update; its physical size need not track
-// current owner cardinality. Keep both row and byte budgets on this plan.
-fn primary_catalog_page(
+// Ordered reads past the recency directory select their rows from stable-keyed
+// catalogs: the compact activity candidates once complete, otherwise the
+// conversation documents. The `(updated_at DESC, id DESC)` index is rekeyed by
+// every header update and keeps an OCC tombstone at each vacated key, so a scan
+// of it costs update history instead of live cardinality; one sidebar page
+// could outlive every caller deadline. No owner size selects that index
+// (docs/STORAGE_TOFUDB.md, "Stable recency selection").
+
+/// The `capacity` newest rows by `(updated_at, id)`, both descending.
+struct NewestRows<T> {
+    capacity: usize,
+    rows: BTreeMap<(u64, String), T>,
+}
+
+impl<T> NewestRows<T> {
+    fn new(capacity: usize) -> Self {
+        Self { capacity, rows: BTreeMap::new() }
+    }
+
+    fn offer(&mut self, updated_at_ms: u64, conversation_id: String, row: T) {
+        if self.rows.len() == self.capacity {
+            let Some((oldest_at, oldest_id)) = self.rows.keys().next() else {
+                return;
+            };
+            if (updated_at_ms, conversation_id.as_str()) <= (*oldest_at, oldest_id.as_str()) {
+                return;
+            }
+            self.rows.pop_first();
+        }
+        self.rows.insert((updated_at_ms, conversation_id), row);
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn newest_first(self) -> impl Iterator<Item = ((u64, String), T)> {
+        self.rows.into_iter().rev()
+    }
+}
+
+/// A live header with the fields every ordered plan validates per row.
+struct CatalogRow {
+    conversation_id: String,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+    header: Map<String, Value>,
+}
+
+fn catalog_row(conversation_id: String, header: Map<String, Value>) -> io::Result<CatalogRow> {
+    header
+        .get("settings")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid_data("conversation settings are malformed"))?;
+    header
+        .get("title")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("conversation title is malformed"))?;
+    let updated_at_ms = header
+        .get("updated_at")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("conversation update timestamp is malformed"))?;
+    let created_at_ms = header
+        .get("created_at")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("conversation create timestamp is malformed"))?;
+    Ok(CatalogRow { conversation_id, created_at_ms, updated_at_ms, header })
+}
+
+/// Visit one stable-keyed owner namespace in key order, one bounded page at a
+/// time. Returns the visited row count, or `Break` once the visitor stops.
+fn scan_stable_catalog(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    namespace: &str,
+    deadline_elapsed: &mut dyn FnMut() -> bool,
+    visit: &mut dyn FnMut(&EntityKey, &[u8]) -> io::Result<ControlFlow<()>>,
+) -> io::Result<ControlFlow<(), u64>> {
+    let tenant_id = transaction.tenant_id();
+    let owner_user_id = transaction.owner_user_id();
+    let (mut start, end) = EntityKey::prefix_range(tenant_id, owner_user_id, namespace, b"")?;
+    let mut visited = 0_u64;
+    for page_number in 0..MAX_INDEX_SCAN_PAGES {
+        if deadline_elapsed() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "conversation catalog deadline elapsed",
+            ));
+        }
+        let rows = database.entity_scan(transaction, &start, &end, INDEX_SCAN_PAGE_ROWS)?;
+        for (key, stored) in &rows {
+            if visit(key, stored)?.is_break() {
+                return Ok(ControlFlow::Break(()));
+            }
+        }
+        visited += rows.len() as u64;
+        let Some((last, _)) = rows.last() else {
+            break;
+        };
+        if rows.len() < INDEX_SCAN_PAGE_ROWS {
+            break;
+        }
+        if page_number + 1 == MAX_INDEX_SCAN_PAGES {
+            return Err(crate::resource_exhaustion::domain_bound(
+                "conversation catalog scan exceeds its bounded page budget",
+            ));
+        }
+        start = after_index_key(last, tenant_id, owner_user_id, namespace)?;
+    }
+    Ok(ControlFlow::Continue(visited))
+}
+
+/// Visit every compact candidate when that index is complete, well formed and
+/// agrees with the owner count. `None` sends the caller to the exact document
+/// plan, which never depends on this derived index.
+fn scan_complete_candidates(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    deadline_elapsed: &mut dyn FnMut() -> bool,
+    visit: &mut dyn FnMut(String, u64, u64),
+) -> io::Result<Option<u64>> {
+    if !activity_candidate_index_is_complete(database, transaction)? {
+        return Ok(None);
+    }
+    let tenant_id = transaction.tenant_id();
+    let owner_user_id = transaction.owner_user_id();
+    let scanned = scan_stable_catalog(
+        database,
+        transaction,
+        CONVERSATION_ACTIVITY_CANDIDATE_INDEX_NAMESPACE,
+        deadline_elapsed,
+        &mut |key, stored| {
+            let Ok((conversation_id, created_at_ms, updated_at_ms)) =
+                decode_activity_candidate(stored)
+            else {
+                return Ok(ControlFlow::Break(()));
+            };
+            if activity_candidate_key(tenant_id, owner_user_id, updated_at_ms, &conversation_id)?
+                != *key
+            {
+                return Ok(ControlFlow::Break(()));
+            }
+            visit(conversation_id, created_at_ms, updated_at_ms);
+            Ok(ControlFlow::Continue(()))
+        },
+    )?;
+    let count_key = key(tenant_id, owner_user_id, CONVERSATION_COUNT_NAMESPACE, COUNT_KEY)?;
+    let owner_count = read_count(database, transaction, &count_key)?;
+    Ok((scanned == ControlFlow::Continue(owner_count)).then_some(owner_count))
+}
+
+/// Hydrate one selected candidate, or `None` when its header disagrees.
+fn hydrate_candidate(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: String,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+) -> io::Result<Option<CatalogRow>> {
+    let Some((header, _)) = load_header(database, transaction, &conversation_id)? else {
+        return Ok(None);
+    };
+    if header.get("id").and_then(Value::as_str) != Some(conversation_id.as_str()) {
+        return Ok(None);
+    }
+    let row = catalog_row(conversation_id, header)?;
+    Ok((row.created_at_ms == created_at_ms && row.updated_at_ms == updated_at_ms).then_some(row))
+}
+
+fn follows_cursor(
+    updated_at_ms: u64,
+    conversation_id: &str,
+    before_updated_at_ms: Option<u64>,
+    before_id: &str,
+) -> bool {
+    before_updated_at_ms.is_none_or(|before_updated_at_ms| {
+        updated_at_ms < before_updated_at_ms
+            || updated_at_ms == before_updated_at_ms && conversation_id < before_id
+    })
+}
+
+/// Unfolded pages choose their rows among the compact candidates and hydrate
+/// only those headers; any disagreement keeps the exact document plan.
+fn candidate_catalog_page(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
     request: &CatalogPageRequest,
-    owner_count: u64,
-) -> io::Result<Vec<u8>> {
-    let mut settings_keys = request.settings_keys.clone();
+    deadline_elapsed: &mut dyn FnMut() -> bool,
+) -> io::Result<Option<Vec<u8>>> {
     if request.folder_id.is_some() {
-        if let Some(keys) = &mut settings_keys {
-            if !keys.iter().any(|key| key == "folderId") {
-                keys.push("folderId".to_owned());
-            }
-        }
+        return Ok(None);
     }
-    let encoded = list(
+    let mut newest = NewestRows::new(request.limit.saturating_add(1));
+    let Some(owner_count) = scan_complete_candidates(
         database,
         transaction,
-        &ListRequest {
-            project_path: None, title_contains: None, ids: None,
-            updated_at_gte: None, updated_at_gt: None, created_at_lt: None,
-            order: ListOrder::IdAscending, settings_keys, include_messages: false,
-            limit: owner_count as usize + 1,
+        deadline_elapsed,
+        &mut |conversation_id, created_at_ms, updated_at_ms| {
+            if follows_cursor(
+                updated_at_ms,
+                &conversation_id,
+                request.before_updated_at_ms,
+                &request.before_id,
+            ) {
+                newest.offer(updated_at_ms, conversation_id, created_at_ms);
+            }
         },
-        // Headers-only catalog: no payload materialization, so the deadline
-        // check inside `list` can never fire here.
-        &mut || false,
+    )?
+    else {
+        return Ok(None);
+    };
+    let has_more = newest.len() > request.limit;
+    let mut items = Vec::with_capacity(newest.len().min(request.limit));
+    for ((updated_at_ms, conversation_id), created_at_ms) in
+        newest.newest_first().take(request.limit)
+    {
+        let Some(row) =
+            hydrate_candidate(database, transaction, conversation_id, created_at_ms, updated_at_ms)?
+        else {
+            return Ok(None);
+        };
+        items.push(project_header(row.header, request.settings_keys.as_deref())?);
+    }
+    encode_catalog_page(items, owner_count, has_more).map(Some)
+}
+
+/// The exact plan: every live header in stable key order. Folder pages count
+/// their matches here, and the owner count must equal the documents read.
+fn document_catalog_page(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &CatalogPageRequest,
+    deadline_elapsed: &mut dyn FnMut() -> bool,
+) -> io::Result<Vec<u8>> {
+    let tenant_id = transaction.tenant_id();
+    let owner_user_id = transaction.owner_user_id();
+    let count_key = key(tenant_id, owner_user_id, CONVERSATION_COUNT_NAMESPACE, COUNT_KEY)?;
+    let owner_count = read_count(database, transaction, &count_key)?;
+    let mut total_count = 0_u64;
+    let mut newest = NewestRows::new(request.limit.saturating_add(1));
+    let scanned = scan_stable_catalog(
+        database,
+        transaction,
+        CONVERSATION_DOCUMENT_NAMESPACE,
+        deadline_elapsed,
+        &mut |_, stored| {
+            let (conversation_id, header) =
+                header_from_index_value(database, tenant_id, owner_user_id, stored)?;
+            let row = catalog_row(conversation_id, header)?;
+            let in_folder = request.folder_id.as_ref().is_none_or(|folder_id| {
+                row.header
+                    .get("settings")
+                    .and_then(|settings| settings.get("folderId"))
+                    .and_then(Value::as_str)
+                    == Some(folder_id.as_str())
+            });
+            if in_folder {
+                total_count += 1;
+                if follows_cursor(
+                    row.updated_at_ms,
+                    &row.conversation_id,
+                    request.before_updated_at_ms,
+                    &request.before_id,
+                ) {
+                    newest.offer(row.updated_at_ms, row.conversation_id, row.header);
+                }
+            }
+            Ok(ControlFlow::Continue(()))
+        },
     )?;
-    let documents: Vec<Value> = serde_json::from_slice(&encoded)
-        .map_err(|_| invalid_data("conversation primary catalog is malformed"))?;
-    if documents.len() as u64 != owner_count {
+    if scanned != ControlFlow::Continue(owner_count) {
         return Err(invalid_data("conversation primary catalog count mismatch"));
     }
-    let mut headers = Vec::with_capacity(documents.len());
-    let mut total_count = 0_u64;
-    for mut document in documents {
-        let header = document.get_mut("metadata").and_then(Value::as_object_mut)
-            .ok_or_else(|| invalid_data("conversation catalog metadata is malformed"))?;
-        if request.folder_id.as_ref().is_some_and(|folder| {
-            header.get("settings").and_then(|settings| settings.get("folderId"))
-                .and_then(Value::as_str) != Some(folder.as_str())
-        }) { continue; }
-        total_count += 1;
-        if !cursor_allows(header, request.before_updated_at_ms, &request.before_id)? { continue; }
-        let updated = header.get("updated_at").and_then(Value::as_u64)
-            .ok_or_else(|| invalid_data("conversation update timestamp is malformed"))?;
-        let id = header.get("id").and_then(Value::as_str)
-            .ok_or_else(|| invalid_data("conversation ID is malformed"))?.to_owned();
-        headers.push((updated, id, std::mem::take(header)));
-    }
-    headers.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    let has_more = headers.len() > request.limit;
-    let items = headers.into_iter().take(request.limit)
-        .map(|(_, _, header)| project_header(header, request.settings_keys.as_deref()))
+    let has_more = newest.len() > request.limit;
+    let items = newest
+        .newest_first()
+        .take(request.limit)
+        .map(|(_, header)| project_header(header, request.settings_keys.as_deref()))
         .collect::<io::Result<Vec<_>>>()?;
     encode_catalog_page(items, total_count, has_more)
 }
@@ -2974,151 +3177,158 @@ pub(crate) fn catalog_page(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
     request: &CatalogPageRequest,
+    deadline_elapsed: &mut dyn FnMut() -> bool,
 ) -> io::Result<Vec<u8>> {
     if let Some(page) = directory_catalog_page(database, transaction, request)? {
         return Ok(page);
     }
-    let tenant_id = transaction.tenant_id();
-    let owner_user_id = transaction.owner_user_id();
-    let count_key = key(tenant_id, owner_user_id, CONVERSATION_COUNT_NAMESPACE, COUNT_KEY)?;
-    let owner_count = read_count(database, transaction, &count_key)?;
-    if owner_count <= INDEX_SCAN_PAGE_ROWS as u64 {
-        return primary_catalog_page(database, transaction, request, owner_count);
+    if let Some(page) = candidate_catalog_page(database, transaction, request, deadline_elapsed)? {
+        return Ok(page);
     }
-    let (namespace_start, namespace_end) = EntityKey::prefix_range(
-        tenant_id,
-        owner_user_id,
-        CONVERSATION_UPDATED_INDEX_NAMESPACE,
-        b"",
-    )?;
-    let mut start = if request.folder_id.is_none() {
-        request
-            .before_updated_at_ms
-            .map(|updated_at_ms| {
-                updated_index_key(tenant_id, owner_user_id, updated_at_ms, &request.before_id)
-                    .and_then(|key| {
-                        after_index_key(
-                            &key,
-                            tenant_id,
-                            owner_user_id,
-                            CONVERSATION_UPDATED_INDEX_NAMESPACE,
-                        )
-                    })
-            })
-            .transpose()?
-            .unwrap_or(namespace_start)
-    } else {
-        namespace_start
-    };
-    let mut total_count = if request.folder_id.is_none() {
-        let count_key = key(
-            tenant_id,
-            owner_user_id,
-            CONVERSATION_COUNT_NAMESPACE,
-            COUNT_KEY,
-        )?;
-        read_count(database, transaction, &count_key)?
-    } else {
-        0
-    };
-    let mut items = Vec::with_capacity(request.limit.saturating_add(1));
-
-    'pages: for page_number in 0..MAX_INDEX_SCAN_PAGES {
-        // The unfiltered cursor already seeks to the first eligible index
-        // key. One extra result is sufficient to establish has_more. Folder
-        // queries still scan their full bounded pages to compute total_count.
-        let page_rows = if request.folder_id.is_none() {
-            (request.limit.saturating_add(1) - items.len()).min(INDEX_SCAN_PAGE_ROWS)
-        } else {
-            INDEX_SCAN_PAGE_ROWS
-        };
-        let rows = database.entity_scan(transaction, &start, &namespace_end, page_rows)?;
-        if rows.is_empty() {
-            break;
-        }
-        let row_count = rows.len();
-        let continuation = after_index_key(
-            &rows.last().expect("nonempty index page").0,
-            tenant_id,
-            owner_user_id,
-            CONVERSATION_UPDATED_INDEX_NAMESPACE,
-        )?;
-        for (_, stored) in rows {
-            let (_, header) = header_from_index_value(database, tenant_id, owner_user_id, &stored)?;
-            let folder_matches = request.folder_id.as_ref().is_none_or(|folder_id| {
-                header
-                    .get("settings")
-                    .and_then(Value::as_object)
-                    .and_then(|settings| settings.get("folderId"))
-                    .and_then(Value::as_str)
-                    == Some(folder_id)
-            });
-            if !folder_matches {
-                continue;
-            }
-            if request.folder_id.is_some() {
-                total_count = total_count
-                    .checked_add(1)
-                    .ok_or_else(|| invalid_data("conversation catalog count overflow"))?;
-            }
-            if cursor_allows(&header, request.before_updated_at_ms, &request.before_id)?
-                && items.len() <= request.limit
-            {
-                items.push(project_header(header, request.settings_keys.as_deref())?);
-                if request.folder_id.is_none() && items.len() > request.limit {
-                    break 'pages;
-                }
-            }
-        }
-        if row_count < page_rows {
-            break;
-        }
-        if page_number + 1 == MAX_INDEX_SCAN_PAGES {
-            return Err(crate::resource_exhaustion::domain_bound(
-                "conversation catalog scan exceeds its bounded page budget",
-            ));
-        }
-        start = continuation;
-    }
-    let has_more = items.len() > request.limit;
-    items.truncate(request.limit);
-    encode_catalog_page(items, total_count, has_more)
+    document_catalog_page(database, transaction, request, deadline_elapsed)
 }
 
-// Updated-time indexes retain historical OCC tombstones. For small owners,
-// read bounded primary headers, apply filters, sort, then hydrate only selected
-// transcripts. Query cost follows live owner cardinality, not update history.
-fn primary_ordered_list(
+/// Row filters decidable from a candidate's identity and timestamps alone.
+fn list_identity_and_times_match(
+    request: &ListRequest,
+    conversation_id: &str,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+) -> bool {
+    request.ids.as_ref().is_none_or(|ids| ids.contains(conversation_id))
+        && request
+            .updated_at_gte
+            .is_none_or(|bound| i128::from(updated_at_ms) >= i128::from(bound))
+        && request
+            .updated_at_gt
+            .is_none_or(|bound| i128::from(updated_at_ms) > i128::from(bound))
+        && request
+            .created_at_lt
+            .is_none_or(|bound| i128::from(created_at_ms) < i128::from(bound))
+}
+
+fn list_header_matches(
+    request: &ListRequest,
+    title_needle: Option<&str>,
+    header: &Map<String, Value>,
+) -> bool {
+    request.project_path.as_ref().is_none_or(|project_path| {
+        header
+            .get("settings")
+            .and_then(|settings| settings.get("projectPath"))
+            .and_then(Value::as_str)
+            == Some(project_path.as_str())
+    }) && title_needle.is_none_or(|needle| {
+        header
+            .get("title")
+            .and_then(Value::as_str)
+            .is_some_and(|title| title.to_lowercase().contains(needle))
+    })
+}
+
+/// Updated-descending lists the directory does not cover: compact candidates
+/// when every filter is decidable from them, otherwise the document plan.
+fn newest_list(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
     request: &ListRequest,
-    owner_count: u64,
     deadline_elapsed: &mut dyn FnMut() -> bool,
 ) -> io::Result<Vec<u8>> {
-    let mut primary = request.clone();
-    primary.order = ListOrder::IdAscending;
-    primary.settings_keys = None;
-    primary.include_messages = false;
-    primary.limit = owner_count as usize + 1;
-    let encoded = list(database, transaction, &primary, deadline_elapsed)?;
-    let documents: Vec<Value> = serde_json::from_slice(&encoded)
-        .map_err(|_| invalid_data("conversation primary list is malformed"))?;
-    let mut headers = Vec::with_capacity(documents.len());
-    for document in documents {
-        let header = document.get("metadata").and_then(Value::as_object)
-            .ok_or_else(|| invalid_data("conversation list metadata is malformed"))?.clone();
-        let updated = header.get("updated_at").and_then(Value::as_u64)
-            .ok_or_else(|| invalid_data("conversation update timestamp is malformed"))?;
-        let id = header.get("id").and_then(Value::as_str)
-            .ok_or_else(|| invalid_data("conversation ID is malformed"))?.to_owned();
-        headers.push((updated, id, header));
+    if let Some(rows) = candidate_list_rows(database, transaction, request, deadline_elapsed)? {
+        return encode_newest_list(database, transaction, request, rows, deadline_elapsed);
     }
-    headers.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    document_list(database, transaction, request, deadline_elapsed)
+}
+
+fn candidate_list_rows(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &ListRequest,
+    deadline_elapsed: &mut dyn FnMut() -> bool,
+) -> io::Result<Option<Vec<(String, Map<String, Value>)>>> {
+    if request.project_path.is_some() || request.title_contains.is_some() {
+        return Ok(None);
+    }
+    let mut newest = NewestRows::new(request.limit);
+    let complete = scan_complete_candidates(
+        database,
+        transaction,
+        deadline_elapsed,
+        &mut |conversation_id, created_at_ms, updated_at_ms| {
+            if list_identity_and_times_match(request, &conversation_id, created_at_ms, updated_at_ms)
+            {
+                newest.offer(updated_at_ms, conversation_id, created_at_ms);
+            }
+        },
+    )?;
+    if complete.is_none() {
+        return Ok(None);
+    }
+    let mut rows = Vec::with_capacity(newest.len());
+    for ((updated_at_ms, conversation_id), created_at_ms) in newest.newest_first() {
+        let Some(row) =
+            hydrate_candidate(database, transaction, conversation_id, created_at_ms, updated_at_ms)?
+        else {
+            return Ok(None);
+        };
+        rows.push((row.conversation_id, row.header));
+    }
+    Ok(Some(rows))
+}
+
+/// The exact plan: every live header in stable key order, filtered, newest
+/// first.
+fn document_list(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &ListRequest,
+    deadline_elapsed: &mut dyn FnMut() -> bool,
+) -> io::Result<Vec<u8>> {
+    let tenant_id = transaction.tenant_id();
+    let owner_user_id = transaction.owner_user_id();
+    let title_needle = request.title_contains.as_ref().map(|value| value.to_lowercase());
+    let mut newest = NewestRows::new(request.limit);
+    // The visitor never breaks, so the visited count is the only result.
+    let _visited = scan_stable_catalog(
+        database,
+        transaction,
+        CONVERSATION_DOCUMENT_NAMESPACE,
+        deadline_elapsed,
+        &mut |_, stored| {
+            let (conversation_id, header) =
+                header_from_index_value(database, tenant_id, owner_user_id, stored)?;
+            let row = catalog_row(conversation_id, header)?;
+            if list_identity_and_times_match(
+                request,
+                &row.conversation_id,
+                row.created_at_ms,
+                row.updated_at_ms,
+            ) && list_header_matches(request, title_needle.as_deref(), &row.header)
+            {
+                newest.offer(row.updated_at_ms, row.conversation_id, row.header);
+            }
+            Ok(ControlFlow::Continue(()))
+        },
+    )?;
+    let rows = newest
+        .newest_first()
+        .map(|((_, conversation_id), header)| (conversation_id, header))
+        .collect();
+    encode_newest_list(database, transaction, request, rows, deadline_elapsed)
+}
+
+fn encode_newest_list(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &ListRequest,
+    rows: Vec<(String, Map<String, Value>)>,
+    deadline_elapsed: &mut dyn FnMut() -> bool,
+) -> io::Result<Vec<u8>> {
     let maximum_bytes = if request.include_messages {
         crate::generated_tofudb_ir::MAX_FROZEN_TRANSCRIPT_PAGE_BYTES
     } else { crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES };
     let mut response = vec![b'['];
-    for (_, id, header) in headers.into_iter().take(request.limit) {
+    for (id, header) in rows {
         let mut document = project_header(header, request.settings_keys.as_deref())?;
         if request.include_messages {
             if deadline_elapsed() {
@@ -3168,27 +3378,20 @@ pub(crate) fn list(
     if request.limit == 0 {
         return Ok(b"[]".to_vec());
     }
-    let tenant_id = transaction.tenant_id();
-    let owner_user_id = transaction.owner_user_id();
     if matches!(request.order, ListOrder::UpdatedDescending) {
         // Covered requests are served from the per-owner recency directory
-        // (docs/TOFUDB_RECENCY_DIRECTORY.md); every gate failure returns the
-        // exact legacy answer through the paths below.
+        // (docs/TOFUDB_RECENCY_DIRECTORY.md); every other one selects its rows
+        // from the stable-keyed catalogs.
         if let Some(encoded) =
             recency::try_directory_list(database, transaction, request, deadline_elapsed)?
         {
             return Ok(encoded);
         }
-        let count_key = key(tenant_id, owner_user_id, CONVERSATION_COUNT_NAMESPACE, COUNT_KEY)?;
-        let owner_count = read_count(database, transaction, &count_key)?;
-        if owner_count <= INDEX_SCAN_PAGE_ROWS as u64 {
-            return primary_ordered_list(database, transaction, request, owner_count, deadline_elapsed);
-        }
+        return newest_list(database, transaction, request, deadline_elapsed);
     }
-    let namespace = match request.order {
-        ListOrder::UpdatedDescending => CONVERSATION_UPDATED_INDEX_NAMESPACE,
-        ListOrder::IdAscending => CONVERSATION_DOCUMENT_NAMESPACE,
-    };
+    let tenant_id = transaction.tenant_id();
+    let owner_user_id = transaction.owner_user_id();
+    let namespace = CONVERSATION_DOCUMENT_NAMESPACE;
     let (mut start, end) = EntityKey::prefix_range(tenant_id, owner_user_id, namespace, b"")?;
     let needle = request
         .title_contains

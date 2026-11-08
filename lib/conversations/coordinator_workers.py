@@ -4,7 +4,8 @@ Authority is the current accepted human Coordinator request, frozen tool policy
 and ProjectDispatchRepository grant. This module has no executor, task state,
 transcript store or polling model loop. It observes existing task notifications,
 and a wait yields to input already waiting for the Coordinator's next round
-(``lib.agent_inbox`` lanes and the ``project_messages`` mailbox).
+(``lib.agent_inbox`` lanes, steers another server process committed to the
+Coordinator's live Turn, and the ``project_messages`` mailbox).
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import threading
 import time
 from copy import deepcopy
 
-from lib.project_dispatch.admission import require_isolated_worker_root
+from lib.project_dispatch.admission import require_isolated_worker_root, reread_on_contention
 from lib.project_dispatch.repository import ProjectDispatchRepository, _validate_schema
 from lib.project_dispatch.delegation import source_for_task, policy_for_task, validate_delegation_policy, issued_worker_policy
 from lib.project_dispatch.service import ProjectDispatchService
@@ -46,8 +47,60 @@ def _input_waiting(task) -> bool:
     return has_pending(conversation_id, modes=_PENDING_INPUT_MODES)
 
 
+def _committed_input(task) -> list:
+    """Steers another server process committed to this Coordinator's live Turn.
+
+    The inbox above is process-local; these reach the next round boundary from
+    their durable record (``lib.tasks_pkg.committed_steers``).
+    """
+    from lib.tasks_pkg.committed_steers import committed_steers
+    from lib.storage.errors import StorageError
+    from lib.turn_lifecycle import LifecycleNotFound
+    try:
+        return committed_steers(task)
+    except (StorageError, LifecycleNotFound):
+        logger.warning('Coordinator wait could not read its live Turn task=%s', task.get('id'), exc_info=True)
+        return []
+
+
+def _waiting_input(task, messages) -> list[dict]:
+    """What waits for the next round: kind, source and the bounded injection preview."""
+    from lib.agent_inbox import pending_items
+    from lib.tasks_pkg.committed_steers import INJECTION_PREVIEW_CHARS
+    from lib.tasks_pkg.conversation_delivery import completion_conversation_id
+    conversation_id = completion_conversation_id(task)
+    items = pending_items(conversation_id, modes=_PENDING_INPUT_MODES) if conversation_id else []
+    blocks = {item.get('blockId') for item in items}
+    items += [item for item in _committed_input(task) if item['blockId'] not in blocks]
+    waiting = []
+    for item in items:
+        preview = str(item.get('value') or '')[:INJECTION_PREVIEW_CHARS]
+        if item.get('mode') == 'background-command':
+            waiting.append({'kind': 'background_command', 'source': item.get('command') or 'run_command',
+                            'id': item.get('commandId'), 'preview': preview})
+            continue
+        author = item.get('steerAuthor')
+        if isinstance(author, dict):
+            origin = author.get('origin') if isinstance(author.get('origin'), dict) else {}
+            channel = origin.get('channel') if isinstance(origin.get('channel'), dict) else None
+            source = ('Global Router forward' if origin.get('forwardedFrom')
+                      else f"{channel.get('channel') or 'external'} channel" if channel
+                      else 'typed in this conversation')
+            waiting.append({'kind': 'human', 'source': source, 'preview': preview})
+            continue
+        message = item.get('_user_msg') if isinstance(item.get('_user_msg'), dict) else {}
+        origin = message.get('origin') if isinstance(message.get('origin'), dict) else {}
+        initiator = origin.get('initiator') or message.get('_initiator') or 'unattributed'
+        sender = origin.get('sourceConversationId')
+        waiting.append({'kind': 'nonhuman', 'source': f'{initiator} {sender}' if sender else initiator,
+                        'preview': preview})
+    waiting += [{'kind': 'project_message', 'source': message['sender'], 'id': message['id'],
+                 'preview': message['content'][:INJECTION_PREVIEW_CHARS]} for message in messages]
+    return waiting
+
+
 def _incoming_project_messages(task):
-    """IDs of incoming project messages still awaiting input, or None without a mailbox."""
+    """Incoming project messages still awaiting input by ID, or None without a mailbox."""
     from lib.conversations.project_messages import ProjectMessageError, execute
     from lib.storage.errors import StorageError
     try:
@@ -58,7 +111,7 @@ def _incoming_project_messages(task):
         logger.warning('Coordinator wait could not read its project mailbox task=%s', task.get('id'), exc_info=True)
         return None
     # A new submission is always on the newest page.
-    return {message['id'] for message in page['messages'] if message['state'] == 'submitted'}
+    return {message['id']: message for message in page['messages'] if message['state'] == 'submitted'}
 
 
 def get_workers(task, scope, arguments, *, repository=None):
@@ -171,10 +224,11 @@ def await_workers(task, scope, arguments, *, repository=None, service=None, runt
     Returns when any Worker unsettled at call start settles (wait=progress names
     the pending rest), at once when all already settled, on timeout, on Stop, or
     when input waits for the Coordinator's next round (wait=pending_input names
-    the pending Workers): a human message or other queued steer, another
-    background completion, or a project message submitted after the call
-    started. Polls read settlement evidence only; returned rows carry excerpts
-    and causes.
+    the pending Workers and lists what waits): a human message or other queued
+    steer (including one another server process committed to the live Turn,
+    observed at each settlement recheck), another background completion, or a
+    project message submitted after the call started. Polls read settlement
+    evidence only; returned rows carry excerpts and causes.
     """
     _validate_schema(arguments, 'awaitWorkersRequest')
     repository = repository or ProjectDispatchRepository(scope['user_id'], scope['project_path'])
@@ -182,7 +236,7 @@ def await_workers(task, scope, arguments, *, repository=None, service=None, runt
     ids = arguments['assignment_ids']
     if len(set(ids)) != len(ids):
         raise ValueError('Worker assignment IDs must be distinct')
-    def snapshots():
+    def read_snapshots():
         rows = []
         for identity in ids:
             assignment = repository.read(identity)
@@ -206,7 +260,9 @@ def await_workers(task, scope, arguments, *, repository=None, service=None, runt
                     row['error'] = failure
             rows.append(row)
         return rows
-    def poll(identities):
+    def snapshots():
+        return reread_on_contention(task, read_snapshots, label='coordinator worker results', effect_free=True)
+    def read_settlements(identities):
         """Execution status and delivery receipt; no projection, excerpt or dependency reads."""
         rows = []
         for identity in identities:
@@ -221,6 +277,9 @@ def await_workers(task, scope, arguments, *, repository=None, service=None, runt
         # must not refresh liveness or exempt a genuinely wedged handler.
         task['_dispatch_heartbeat'] = time.time()
         return rows
+    def poll(identities):
+        return reread_on_contention(task, lambda: read_settlements(identities),
+                                    label='coordinator worker settlements', effect_free=True)
     def settled(row):
         if arguments.get('wait_for') == 'delivery':
             return (row['canonical_delivery'] or (row['delivery'] or {}).get('status') in _HELD_DELIVERY
@@ -231,6 +290,7 @@ def await_workers(task, scope, arguments, *, repository=None, service=None, runt
     rows = [row for row in poll(ids) if not settled(row)]
     opened = [row['assignment_id'] for row in rows]
     outcome = 'settled'
+    arrived = []
     if opened:
         from lib.agent_core.admission import on_terminal
         changed, subscriptions = threading.Event(), {}
@@ -243,7 +303,8 @@ def await_workers(task, scope, arguments, *, repository=None, service=None, runt
         known_messages = _incoming_project_messages(task)
         def message_arrived():
             current = _incoming_project_messages(task) if known_messages is not None else None
-            return bool(current and current - known_messages)
+            arrived[:] = [message for key, message in (current or {}).items() if key not in known_messages]
+            return bool(arrived)
         try:
             while True:
                 if any(settled(row) for row in rows):
@@ -256,7 +317,7 @@ def await_workers(task, scope, arguments, *, repository=None, service=None, runt
                         and runtime_context.resource_cancel_event.is_set()):
                     outcome = 'timeout'
                     break
-                if _input_waiting(task) or message_arrived():
+                if _input_waiting(task) or message_arrived() or _committed_input(task):
                     outcome = 'pending_input'
                     break
                 remaining = deadline - time.monotonic()
@@ -300,9 +361,10 @@ def await_workers(task, scope, arguments, *, repository=None, service=None, runt
                 'Awaiting only held deliveries returns at once.') if held else ''
     # Workers that all settled meanwhile return as settled; the input still follows.
     if outcome == 'pending_input' and pending:
-        return {'workers': rows, 'wait': 'pending_input',
+        return {'workers': rows, 'wait': 'pending_input', 'waiting': _waiting_input(task, arrived),
                 'instruction': 'New input is waiting for you and arrives right after this result: a human '
-                               'message or steer, a project message, or a background completion. Workers keep '
+                               'message or steer, a project message, or a background completion. The waiting '
+                               'list names its kind, source and preview. Workers keep '
                                'running; still pending: ' + ', '.join(pending) + '. Answer or act on that input '
                                'first, then call await_project_workers again with only the pending assignment IDs '
                                'and the same wait_for. Ending a wait for input is not failure.' + delivery}

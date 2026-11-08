@@ -377,6 +377,7 @@ def note_file_signal(
     paths = changed_paths_from_tool(fn_name, fn_args, meta, project_path)
     if not paths or not _tool_succeeded(tool_content):
         return ''
+    _note_integration_radar(task, project_path, paths)
     work_id = ensure_work_item(
         task, project_path, trigger=WORK_TRIGGER_FILE, first_path=paths[0])
     if not work_id:
@@ -400,19 +401,9 @@ def note_file_signal(
         command_id=f'project-work-change:{work_id}:{digest}',
         work_id=work_id, changed_paths=paths, artifacts=artifacts,
     )
-    _send_overlap_advisories(task, project_path, paths)
+    task['_projectChangedPaths'] = list(dict.fromkeys(
+        [*(task.get('_projectChangedPaths') or ()), *paths]))
     return work_id
-
-
-def _paths_overlap(left: str, right: str) -> str:
-    left_parts = tuple(part for part in left.strip('/').split('/') if part)
-    right_parts = tuple(part for part in right.strip('/').split('/') if part)
-    if not left_parts or not right_parts:
-        return ''
-    shorter = min(len(left_parts), len(right_parts))
-    if left_parts[:shorter] != right_parts[:shorter]:
-        return ''
-    return '/'.join(left_parts[:shorter])
 
 
 def _queue_transient_advisory(task: dict, key: str, text: str) -> bool:
@@ -426,53 +417,53 @@ def _queue_transient_advisory(task: dict, key: str, text: str) -> bool:
     return True
 
 
-def _send_overlap_advisories(
-    task: dict,
-    project_path: str,
-    changed_paths: list[str],
-) -> None:
+def _note_integration_radar(task: dict, bound_root: str, changed_paths: list[str]) -> None:
+    """Queue integration-radar advice about other unlanded work on these files.
+
+    BOUND_ROOT is the root the write resolved against (an isolated task's own
+    checkout), so each path is attributed to the checkout it was written in.
+    """
+    if task.get('_transientRuntime'):
+        return
     try:
-        from lib.tasks_pkg.manager import task_user_id
-        from lib.tasks_pkg.manager.runtime import chat_task_runtime
-        owner_user_id = _owner(task)
-        project_key = normalize_project_path(project_path)
-        this_task_id = str(task.get('id') or '')
-        peers = chat_task_runtime.snapshot()
-        with _overlap_lock:
-            for peer in peers:
-                if peer is task or peer.get('status') not in {'pending', 'running'}:
-                    continue
-                if task_user_id(peer) != owner_user_id:
-                    continue
-                if normalize_project_path(
-                        (peer.get('config') or {}).get('projectPath') or '') != project_key:
-                    continue
-                peer_paths = list(peer.get('_projectChangedPaths') or ())
-                for left in changed_paths:
-                    for right in peer_paths:
-                        overlap = _paths_overlap(left, right)
-                        if not overlap:
-                            continue
-                        pair = ':'.join(sorted((this_task_id, str(peer.get('id') or ''))))
-                        key = hashlib.sha256(
-                            f'{pair}\0{overlap}'.encode('utf-8')).hexdigest()[:24]
-                        text = (
-                            '[Project overlap advisory] Another active conversation '
-                            f'is editing an overlapping path: {overlap}. Re-read the '
-                            'current file before the next write and coordinate within '
-                            'this execution if needed.'
-                        )
-                        sent_left = _queue_transient_advisory(task, key, text)
-                        sent_right = _queue_transient_advisory(peer, key, text)
-                        if sent_left or sent_right:
-                            _push_project_hint(project_key, owner_user_id, {
-                                'type': 'path_overlap', 'path': overlap,
-                                'taskIds': [this_task_id, str(peer.get('id') or '')],
-                            })
-        task['_projectChangedPaths'] = list(dict.fromkeys(
-            [*(task.get('_projectChangedPaths') or ()), *changed_paths]))
+        from lib.project_mod.integration_radar import note_writes
+        advice = note_writes(task, bound_root, changed_paths)
     except Exception as exc:
-        logger.debug('[ProjectBrain] overlap detection failed soft: %s', exc)
+        logger.debug('[ProjectBrain] integration radar failed soft: %s', exc)
+        return
+    _queue_radar_advice(task, task.get('_projectWorkPath') or bound_root,
+                        advice, changed_paths[0])
+
+
+def queue_radar_notices(task: dict) -> None:
+    """Move notices other writers and landings left for this conversation into its advice."""
+    if task.get('_transientRuntime'):
+        return
+    project_path = str((task.get('config') or {}).get('projectPath') or '')
+    if not project_path and not task.get('_radarCommonDirs'):
+        return
+    try:
+        from lib.project_mod.integration_radar import take_notices
+        notices = take_notices(task, project_path)
+    except Exception as exc:
+        logger.debug('[ProjectBrain] radar notices failed soft: %s', exc)
+        return
+    _queue_radar_advice(task, project_path, [
+        (hashlib.sha256(text.encode('utf-8')).hexdigest()[:24], text)
+        for text in notices], '')
+
+
+def _queue_radar_advice(task: dict, project_path: str,
+                        advice: list[tuple[str, str]], path: str) -> None:
+    if not advice:
+        return
+    with _overlap_lock:
+        queued = [_queue_transient_advisory(task, key, text) for key, text in advice]
+    if any(queued) and project_path:
+        _push_project_hint(normalize_project_path(project_path), _owner(task), {
+            'type': 'path_overlap', 'path': path,
+            'taskIds': [str(task.get('id') or '')],
+        })
 
 
 def _compose_work_result_summary(task: dict, *, result_summary: str = '') -> str:
@@ -1170,6 +1161,7 @@ __all__ = [
     'delete_watch_item', 'deterministic_work_id', 'ensure_work_item',
     'feed_projection', 'note_file_signal', 'note_isolated_workspace_signal',
     'note_todo_signal', 'prepare_project_context', 'promote_decision',
+    'queue_radar_notices',
     'read_projection',
     'record_integration_failure', 'record_integration_success',
     'register_checker',

@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 
 from lib.log import get_logger
 from lib.mcp.client._state import _pkg
+from lib.tools.process_environment import tool_cache_root
 
 logger = get_logger(__name__)
 
@@ -165,17 +166,9 @@ def _reconcile_npx_cache(npm_cache: str, cutoff: str) -> int:
     return evicted
 
 
-def _mcp_cache_root() -> str:
-    """Writable project-local root for launcher caches + pre-warm bookkeeping."""
-    return os.environ.get('TOFU_MCP_CACHE_DIR') or os.path.join(
-        os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')),
-        'data', 'mcp-cache',
-    )
-
-
 def _ensure_writable_caches(env: dict[str, str], *, prepare_directories=True) -> None:
-    """Redirect launcher caches AND data dirs to a project-local dir when
-    ``$HOME`` is read-only.
+    """Redirect launcher caches AND data dirs to the shared tool cache root
+    when ``$HOME`` is read-only.
 
     On locked-down / shared deployments the home dir (and hence
     ``$HOME/.cache`` and ``$HOME/.local/share``) is often not writable —
@@ -190,14 +183,14 @@ def _ensure_writable_caches(env: dict[str, str], *, prepare_directories=True) ->
          ``UV_*_DIR`` vars below (redirecting the managed-Python + tool dirs).
 
     Every cache/data-controlling env var is pointed (only when the caller
-    has not set it already) at a writable directory under the repo's
-    ``data/`` tree, which is guaranteed writable by the rest of Tofu. Because
-    that tree usually lives on a different filesystem than ``$HOME``,
-    ``UV_LINK_MODE=copy`` is also set so uv does not abort/warn when it cannot
-    hardlink across filesystems. No-op when the chosen directory cannot be
-    created.
+    has not set it already) at ``tool_cache_root``: ``data/mcp-cache`` in the
+    runtime data root, which the rest of Tofu already writes, never the
+    source tree. Because that root usually lives on a different filesystem
+    than ``$HOME``, ``UV_LINK_MODE=copy`` is also set so uv does not
+    abort/warn when it cannot hardlink across filesystems. No-op when the
+    chosen directory cannot be created.
     """
-    cache_root = _mcp_cache_root()
+    cache_root = tool_cache_root()
     share_root = os.path.join(cache_root, 'share')
     try:
         if prepare_directories:
@@ -331,7 +324,7 @@ def _prewarm_negative_cache_hours() -> float:
 
 
 def _prewarm_unreachable_marker_path() -> str:
-    return os.path.join(_mcp_cache_root(), _PREWARM_UNREACHABLE_MARKER)
+    return os.path.join(tool_cache_root(), _PREWARM_UNREACHABLE_MARKER)
 
 
 def _egress_identity() -> str:
@@ -419,7 +412,7 @@ def _prewarm_note_unreachable(reason: str) -> None:
 
 
 def _prewarm_warm_marker_path(command: str) -> str:
-    return os.path.join(_mcp_cache_root(), f'{command}{_PREWARM_WARM_MARKER}')
+    return os.path.join(tool_cache_root(), f'{command}{_PREWARM_WARM_MARKER}')
 
 
 def vendored_needs_cold_budget(command: str) -> bool:

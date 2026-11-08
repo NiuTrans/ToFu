@@ -246,12 +246,10 @@ def compose_context(messages: list[dict], request: ComposeRequest) -> ComposeRes
         if isinstance(message, dict) and isinstance(message.get('_contextInjection'), dict)
     ])
     blocks = collect_context_blocks(messages, request)
-    # Providers may yield while owner Stop arrives; neither new context nor
-    # withdrawal of stale checklist carriers may commit after cancellation.
+    # Providers may yield while owner Stop arrives; no new context may commit
+    # after cancellation.
     if request.task and request.task.get('aborted'):
         return ComposeResult(messages=messages, manifest=[])
-    from .checklist import reconcile_checklist_context
-    reconcile_checklist_context(messages, request.task)
     result = render_context(messages, blocks, request)
 
     if request.task is not None:
@@ -295,8 +293,6 @@ def append_context_blocks(messages: list[dict], blocks: list[ContextBlock],
 
     if request.task and request.task.get('aborted'):
         return ComposeResult(messages=messages, manifest=[])
-    from .checklist import reconcile_checklist_context
-    reconcile_checklist_context(messages, request.task)
     request = _with_context_policy(request)
     result = render_context(messages, blocks, request, replace_managed=False)
 

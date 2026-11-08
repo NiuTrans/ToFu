@@ -8,6 +8,7 @@ import os
 import platform
 import signal
 import sys
+import time
 
 import pytest
 
@@ -107,6 +108,78 @@ class TestProcessAlive:
 class TestPipeIO:
     def test_safe_select_pipes_returns_list(self):
         assert isinstance(safe_select_pipes([], timeout=0.01), list)
+
+
+@pytest.fixture
+def descriptor_room():
+    """A soft descriptor limit that admits numbers above select()'s ceiling."""
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    wanted = 4096
+    if hard != resource.RLIM_INFINITY and hard < wanted:
+        pytest.skip(f'descriptor hard limit {hard} is below {wanted}')
+    raised = soft != resource.RLIM_INFINITY and soft < wanted
+    if raised:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+    yield
+    if raised:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def _pipe_above_select_ceiling():
+    """A pipe whose read end is numbered above FD_SETSIZE (1024)."""
+    import fcntl
+    read_fd, write_fd = os.pipe()
+    high = fcntl.fcntl(read_fd, fcntl.F_DUPFD_CLOEXEC, 1500)
+    os.close(read_fd)
+    return os.fdopen(high, 'rb', buffering=0), write_fd
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(IS_WINDOWS, reason='POSIX pipe descriptors')
+class TestPipeWaitAboveSelectCeiling:
+    """Long-lived servers reach descriptor numbers that select() rejects
+    (live 2026-11-07: a command's pipes were fds 1817 and 4009). The wait
+    still reports readiness, and a quiet or closed pipe still waits."""
+
+    def test_readable_pipe_above_the_ceiling_is_reported(self, descriptor_room):
+        stream, write_fd = _pipe_above_select_ceiling()
+        try:
+            os.write(write_fd, b'x')
+            assert safe_select_pipes([stream], timeout=5) == [stream]
+        finally:
+            stream.close()
+            os.close(write_fd)
+
+    def test_quiet_pipe_above_the_ceiling_waits_for_the_timeout(self, descriptor_room):
+        stream, write_fd = _pipe_above_select_ceiling()
+        try:
+            started = time.monotonic()
+            assert safe_select_pipes([stream], timeout=0.3) == []
+            assert time.monotonic() - started >= 0.25
+        finally:
+            stream.close()
+            os.close(write_fd)
+
+    def test_end_of_file_is_reported_so_the_reader_sees_it(self, descriptor_room):
+        stream, write_fd = _pipe_above_select_ceiling()
+        try:
+            os.close(write_fd)
+            assert safe_select_pipes([stream], timeout=5) == [stream]
+            assert stream.read() == b''
+        finally:
+            stream.close()
+
+    def test_closed_stream_waits_instead_of_returning_at_once(self):
+        read_fd, write_fd = os.pipe()
+        stream = os.fdopen(read_fd, 'rb', buffering=0)
+        stream.close()
+        try:
+            started = time.monotonic()
+            assert safe_select_pipes([stream], timeout=0.3) == []
+            assert time.monotonic() - started >= 0.25
+        finally:
+            os.close(write_fd)
 
     def test_set_pipe_nonblocking_on_windows(self):
         if IS_WINDOWS:

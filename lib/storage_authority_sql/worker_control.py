@@ -1,85 +1,41 @@
-"""Commit-owned, content-free worker wakeups; no storage transaction or journal.
+"""Commit-owned worker and conversation hints, without notification history.
 
-The SQL adapter publishes staged hints after COMMIT. Transport waits hold only
-this condition, never a database connection. Queue and cancellation generations
-are distinct so ordinary queue traffic never fans out to running handlers.
+Adapters publish their transaction-local hints after COMMIT. The common wait
+primitive holds no database connection; independent channels avoid cross-noise.
 """
 from collections.abc import Callable
 from dataclasses import dataclass, field
-import threading
-import time
-import uuid
 
-from lib.storage.errors import StorageError
-from lib.storage.generated_worker_control import FORMAT
+from lib.storage.generated_worker_control import FORMAT, CONVERSATION_FORMAT
+from lib.storage_authority_sql.commit_watch import CommitWatch
 
 
 @dataclass
 class WorkerCommitHints:
     queue_changed: bool = False
     cancelled_tasks: set[str] = field(default_factory=set)
-    publisher: Callable[[bool, set[str]], None] | None = None
+    conversation_changes: set[tuple[int, str]] = field(default_factory=set)
+    publisher: Callable[[bool, set[str], set[tuple[int, str]]], None] | None = None
 
     def publish(self):
-        if self.publisher is not None and (self.queue_changed or self.cancelled_tasks):
-            self.publisher(self.queue_changed, self.cancelled_tasks)
+        if self.publisher is not None:
+            self.publisher(self.queue_changed, self.cancelled_tasks, self.conversation_changes)
 
 
-class WorkerControl:
+class WorkerControl(CommitWatch):
     def __init__(self):
-        self._condition = threading.Condition()
-        self._epoch = str(uuid.uuid4())
-        self._queue = self._cancel = 0
-        self._waiters = {}
-        self._closed = False
+        super().__init__(('queue', 'cancel'), format=FORMAT,
+                         hint_key='cancelTasks', hint_generation='cancel')
+        self.conversations = CommitWatch(('change',), format=CONVERSATION_FORMAT,
+            hint_key='conversations', hint_generation='change',
+            encode_hints=lambda scopes: [dict(userId=owner, conversationId=conversation)
+                                        for owner, conversation in sorted(scopes)])
 
-    def _cursor(self):
-        return dict(epoch=self._epoch, queue=self._queue, cancel=self._cancel)
-
-    def publish(self, queue_changed, cancelled_tasks):
-        with self._condition:
-            if self._closed:
-                return
-            if max(self._queue, self._cancel) == (1 << 64) - 1:
-                self._epoch, self._queue, self._cancel = str(uuid.uuid4()), 0, 0
-            self._queue += bool(queue_changed)
-            self._cancel += bool(cancelled_tasks)
-            for tasks in self._waiters.values():
-                tasks.update(cancelled_tasks)
-            self._condition.notify_all()
+    def publish(self, queue_changed, cancelled_tasks, conversation_changes=()):
+        changed = ({'queue'} if queue_changed else set()) | ({'cancel'} if cancelled_tasks else set())
+        self.publish_changes(changed, cancelled_tasks)
+        self.conversations.publish_changes({'change'} if conversation_changes else set(), conversation_changes)
 
     def close(self):
-        with self._condition:
-            self._closed = True
-            self._condition.notify_all()
-
-    def watch(self, payload, deadline_at):
-        if not isinstance(payload, dict) or set(payload) != {'cursor'}:
-            raise StorageError('database_protocol_error', 'Invalid worker watch request')
-        cursor = payload['cursor']
-        if cursor is not None and (
-            not isinstance(cursor, dict) or set(cursor) != {'epoch', 'queue', 'cancel'}
-            or not isinstance(cursor['epoch'], str)
-            or any(type(cursor[k]) is not int or not 0 <= cursor[k] < 1 << 64
-                   for k in ('queue', 'cancel'))
-        ):
-            raise StorageError('database_protocol_error', 'Invalid worker watch cursor')
-        with self._condition:
-            current = self._cursor()
-            cancelled = None
-            waiter = object()
-            if cursor == current and not self._closed:
-                tasks = set()
-                self._waiters[waiter] = tasks
-                try:
-                    self._condition.wait_for(
-                        lambda: self._closed or cursor != self._cursor(),
-                        max(0, deadline_at - time.monotonic()))
-                    cancelled = sorted(tasks)
-                finally:
-                    del self._waiters[waiter]
-            elif cursor is not None and cursor['epoch'] == current['epoch'] and cursor['cancel'] == current['cancel']:
-                cancelled = []
-            if self._closed:
-                raise StorageError('database_unavailable', 'Worker control closed')
-            return dict(format=FORMAT, cursor=self._cursor(), cancelTasks=cancelled)
+        super().close()
+        self.conversations.close()

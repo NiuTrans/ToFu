@@ -131,7 +131,9 @@ function comparePlotCandidates(left: PlotCandidate, right: PlotCandidate): numbe
   return left.model.modelId.localeCompare(right.model.modelId);
 }
 
-/** Scored Models, one per AA-tested identity, best registration kept. */
+/** Scored chat Models, one per AA-tested identity, best registration kept.
+ *  The AA Intelligence Index and per-token prices describe conversation
+ *  models only; media and retrieval kinds have no position on this chart. */
 function collectPlotCandidates(
   groups: VendorGroup[],
   toUsd: (value: number, currency: string) => number,
@@ -139,6 +141,7 @@ function collectPlotCandidates(
   const best = new Map<string, PlotCandidate>();
   for (const group of groups) {
     for (const model of group.models) {
+      if (model.kind && model.kind !== 'chat') continue;
       const intelligence = model.aa?.intelligence;
       if (intelligence === null || intelligence === undefined) continue;
       const candidate: PlotCandidate = {

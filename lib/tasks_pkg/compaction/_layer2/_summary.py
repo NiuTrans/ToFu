@@ -10,7 +10,6 @@ import hashlib
 import json
 import re
 
-import sys
 from contextlib import ExitStack
 
 from lib.log import audit_log, get_logger
@@ -226,6 +225,8 @@ def _summary_authority_evidence(task: dict | None) -> str:
     fields.append({key: config.get(key) for key in (
         'model', 'preset', '_pinned_provider_id', 'providerId',
         'provider_id', 'disableModelFallback', 'compaction')})
+    from lib.llm_dispatch.native_context_scope import native_compaction_route_evidence
+    fields.append(native_compaction_route_evidence(view))
     return json.dumps(fields, sort_keys=True)
 
 
@@ -256,7 +257,13 @@ def _summary_route_matches_quote(summary_route: dict, expected_route: dict) -> b
     expected_cost = expected_route.get('projectedCostUsd')
     actual_cost = summary_route.get('projectedCostUsd')
     same_route = all(summary_route.get(key) == expected_route.get(key)
-                     for key in ('modelId', 'providerId', 'policy', 'routeIdentity'))
+                     for key in ('modelId', 'providerId', 'policy', 'requestOwned',
+                                 'routeIdentity', '_parentRouteIdentities'))
+    if any(isinstance(route.get('routeIdentity'), dict)
+           and 'owner_user_id' in route['routeIdentity']
+           and not route.get('_parentRouteIdentities')
+           for route in (summary_route, expected_route)):
+        same_route = False
     subscription_quote = (
         summary_route.get('requestOwned') and expected_cost is None
         and actual_cost is None and summary_route.get('costBasis')
@@ -279,8 +286,9 @@ def _summary_route_matches_quote(summary_route: dict, expected_route: dict) -> b
 def _summary_request_key(
     messages: list, *, owner_user_id: int | None, summary_route: dict,
     model: str | None, pinned_provider: str | None, codex_provider: str, config: dict,
+    expected_route: dict | None = None, output_tokens: int | None = None,
 ) -> str:
-    """Digest the evidence, authority and original qualified route for deduplication."""
+    """Digest evidence, full issued authority and the current spending constraints."""
     # Retain only a digest, never a second transcript. Identical requests
     # share both successful elapsed time and failure across admission stages.
     # Learned route health may move the plan off a cooled credential;
@@ -293,6 +301,11 @@ def _summary_request_key(
         identity.extend([key_route.get('routeIdentity'),
                          key_route.get('declaredPricing'),
                          key_route.get('capacityOutputTokens')])
+    quote_constraints = ({key: expected_route.get(key) for key in (
+        'modelId', 'providerId', 'policy', 'requestOwned', 'projectedCostUsd',
+        'routeIdentity', 'declaredPricing', 'capacityOutputTokens', '_parentRouteIdentities')}
+        if expected_route is not None else None)
+    identity.extend([key_route.get('_parentRouteIdentities'), quote_constraints, output_tokens])
     digest = hashlib.sha256()
     for chunk in json.JSONEncoder(sort_keys=True).iterencode(identity):
         digest.update(chunk.encode('utf-8'))
@@ -370,9 +383,9 @@ def _generate_query_aware_summary(messages: list, current_query: str,
                                    planned_pass: bool = False) -> str | None:
     """Generate a complete query-aware summary on an authorized route.
 
-    The main-model policy is the default. Opt-in qualified policies require
-    verified capability, capacity and route pricing before selecting a cheaper
-    model; strict qualification refuses dispatch rather than crossing the pin.
+    The existing selector owns summary policy, capability, capacity and route
+    pricing. Selection requires verified authority before using another model;
+    strict qualification refuses dispatch rather than crossing the pin.
     Transport completion and critical-evidence validation precede adoption.
     Only the explicit legacy utility path can retry a text-capable slot.
 
@@ -488,6 +501,7 @@ def _generate_query_aware_summary(messages: list, current_query: str,
                 _summary_messages, owner_user_id=owner_user_id, summary_route=summary_route,
                 model=model, pinned_provider=get_pinned_provider(),
                 codex_provider=codex_provider, config=cfg,
+                expected_route=expected_route, output_tokens=dispatch_output_tokens,
             )
         if bounded_summary_task(task) or 'aborted' in task:
             budget = SummaryBudget(task, abort_check, request_key=request_key)
@@ -510,11 +524,13 @@ def _generate_query_aware_summary(messages: list, current_query: str,
                 if budget is not None:
                     budget.finish(
                         False, failure_reason='summary_route_revalidation_failed')
+                    budget.project_usage(usage_out)
                 logger.info('%s Summary route/quote changed since preflight; '
                             'preserving source without dispatch', tag)
                 return None
         if summary_route.get('reason') in {
-                'conflicting_provider_pins', 'conflicting_tenant_identity'}:
+                'conflicting_provider_pins', 'conflicting_tenant_identity',
+                'native_parent_route_unready', 'parent_route_changed'}:
             if budget is not None:
                 budget.finish(False, failure_reason='summary_route_revalidation_failed')
                 budget.project_usage(usage_out)
@@ -576,6 +592,7 @@ def _generate_query_aware_summary(messages: list, current_query: str,
     eligible_checks = max(1, int((initial_route.get('selectionBasis') or {}).get('eligibleRoutes') or 1))
     checked_groups = 0
     cleanup_failed = False
+    primary_error_active = False  # This invocation is propagating, not its caller.
 
     def _close_route():
         nonlocal auxiliary_lifecycle, auxiliary_pin, cleanup_failed
@@ -746,6 +763,8 @@ def _generate_query_aware_summary(messages: list, current_query: str,
                     logger.info('%s Summary credential unavailable; using authorized main route', tag)
                     continue
                 if sign_in_required:
+                    failure_reason = 'summary_permission_denied'
+                    failure_evidence = {'code': failure_reason}
                     logger.warning('%s Summary route requires subscription sign-in and no '
                                    'independent route qualified (will keep messages intact)', tag)
                 return None
@@ -785,6 +804,9 @@ def _generate_query_aware_summary(messages: list, current_query: str,
                 _record_postprocess_degradation(
                     conv_id=conv_id, stage='analysis_strip', exc=exc)
         dispatch_succeeded = isinstance(content, str) and bool(content.strip())
+        if not dispatch_succeeded:
+            failure_reason = 'summary_empty'
+            failure_evidence = {'code': failure_reason}
         if budget is not None and budget.is_set():
             dispatch_succeeded = False
             return None  # User cancellation wins a race with completion.
@@ -796,14 +818,17 @@ def _generate_query_aware_summary(messages: list, current_query: str,
         return None
     except Exception as e:
         if cleanup_failed:
+            primary_error_active = True
             raise  # Teardown failure is not credential recovery authority.
-        failure_evidence = None
-        failure_reason = ('summary_incomplete' if isinstance(
-            e, (IncompleteSummaryError, UnverifiedProviderStreamError)) else 'summary_dispatch_failed')
+        from lib.tasks_pkg.compaction._summary_failure import classify_summary_failure
+        failure_evidence = classify_summary_failure(
+            e, provider_completed=transport.transport_completed)
+        failure_reason = failure_evidence['code']
         logger.warning('%s Summary dispatch failed (will keep messages intact): %s',
                        tag, type(e).__name__)
         return None
     except BaseException:
+        primary_error_active = True
         # Cancellation/fatal exits need not be reflected in task.aborted.
         # Never settle an earlier unsent cause over unknown or observed work.
         failure_evidence = None
@@ -812,14 +837,13 @@ def _generate_query_aware_summary(messages: list, current_query: str,
         raise
 
     finally:
-        primary_error_active = sys.exc_info()[0] is not None
         try:
             auxiliary_lifecycle.close()
         except BaseException as cleanup_error:
             # Cleanup is part of adoption. It cannot publish a succeeded budget
             # or leave a credential cause masking an internal teardown defect.
             dispatch_succeeded = False
-            failure_evidence = None
+            failure_evidence = {'code': 'summary_dispatch_failed'}
             failure_reason = 'summary_dispatch_failed'
             logger.warning('%s Auxiliary route teardown failed: %s',
                            tag, type(cleanup_error).__name__)

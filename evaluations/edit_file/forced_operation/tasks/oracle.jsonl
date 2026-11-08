@@ -1,0 +1,240 @@
+{"task": "A01", "arm": "A1", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 39, "n_calls": 1}
+{"task": "A01", "arm": "A2", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 38, "n_calls": 1}
+{"task": "A01", "arm": "A3", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 34, "n_calls": 1}
+{"task": "A01", "arm": "A4", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 50, "n_calls": 1, "patch_o200k": 43, "patch1_o200k": 30}
+{"task": "A02", "arm": "A1", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 38, "n_calls": 1}
+{"task": "A02", "arm": "A2", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 37, "n_calls": 1}
+{"task": "A02", "arm": "A3", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 33, "n_calls": 1}
+{"task": "A02", "arm": "A4", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 63, "n_calls": 1, "patch_o200k": 58, "patch1_o200k": 29}
+{"task": "A03", "arm": "A1", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 81, "n_calls": 1}
+{"task": "A03", "arm": "A2", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 65, "n_calls": 1}
+{"task": "A03", "arm": "A3", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 76, "n_calls": 1}
+{"task": "A03", "arm": "A4", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 87, "n_calls": 1, "patch_o200k": 73, "patch1_o200k": 55}
+{"task": "A04", "arm": "A1", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 78, "n_calls": 1}
+{"task": "A04", "arm": "A2", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 60, "n_calls": 1}
+{"task": "A04", "arm": "A3", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 73, "n_calls": 1}
+{"task": "A04", "arm": "A4", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 83, "n_calls": 1, "patch_o200k": 72, "patch1_o200k": 35}
+{"task": "A05", "arm": "A1", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 47, "n_calls": 1}
+{"task": "A05", "arm": "A2", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 47, "n_calls": 1}
+{"task": "A05", "arm": "A3", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 42, "n_calls": 1}
+{"task": "A05", "arm": "A4", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 87, "n_calls": 1, "patch_o200k": 75, "patch1_o200k": 47}
+{"task": "A06", "arm": "A1", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 59, "n_calls": 1}
+{"task": "A06", "arm": "A2", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 59, "n_calls": 1}
+{"task": "A06", "arm": "A3", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 54, "n_calls": 1}
+{"task": "A06", "arm": "A4", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 106, "n_calls": 1, "patch_o200k": 84, "patch1_o200k": 65}
+{"task": "A07", "arm": "A1", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 48, "n_calls": 1}
+{"task": "A07", "arm": "A2", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 48, "n_calls": 1}
+{"task": "A07", "arm": "A3", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 43, "n_calls": 1}
+{"task": "A07", "arm": "A4", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 94, "n_calls": 1, "patch_o200k": 84, "patch1_o200k": 64}
+{"task": "A08", "arm": "A1", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 81, "n_calls": 1}
+{"task": "A08", "arm": "A2", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 81, "n_calls": 1}
+{"task": "A08", "arm": "A3", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 76, "n_calls": 1}
+{"task": "A08", "arm": "A4", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 145, "n_calls": 1, "patch_o200k": 134, "patch1_o200k": 84}
+{"task": "A09", "arm": "A1", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 62, "n_calls": 1}
+{"task": "A09", "arm": "A2", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 61, "n_calls": 1}
+{"task": "A09", "arm": "A3", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 67, "n_calls": 2}
+{"task": "A09", "arm": "A4", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 114, "n_calls": 1, "patch_o200k": 102, "patch1_o200k": 60}
+{"task": "A10", "arm": "A1", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 121, "n_calls": 1}
+{"task": "A10", "arm": "A2", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 106, "n_calls": 1}
+{"task": "A10", "arm": "A3", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 126, "n_calls": 2}
+{"task": "A10", "arm": "A4", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 179, "n_calls": 1, "patch_o200k": 161, "patch1_o200k": 111}
+{"task": "F01", "arm": "A1", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 43, "n_calls": 1}
+{"task": "F01", "arm": "A2", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 41, "n_calls": 1}
+{"task": "F01", "arm": "A3", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 38, "n_calls": 1}
+{"task": "F01", "arm": "A4", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 65, "n_calls": 1, "patch_o200k": 56, "patch1_o200k": 30}
+{"task": "F02", "arm": "A1", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 49, "n_calls": 1}
+{"task": "F02", "arm": "A2", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 48, "n_calls": 1}
+{"task": "F02", "arm": "A3", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 44, "n_calls": 1}
+{"task": "F02", "arm": "A4", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 105, "n_calls": 1, "patch_o200k": 89, "patch1_o200k": 42}
+{"task": "F03", "arm": "A1", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 55, "n_calls": 1}
+{"task": "F03", "arm": "A2", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 49, "n_calls": 1}
+{"task": "F03", "arm": "A3", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 50, "n_calls": 1}
+{"task": "F03", "arm": "A4", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 84, "n_calls": 1, "patch_o200k": 69, "patch1_o200k": 48}
+{"task": "F04", "arm": "A1", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 73, "n_calls": 1}
+{"task": "F04", "arm": "A2", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 60, "n_calls": 1}
+{"task": "F04", "arm": "A3", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 68, "n_calls": 1}
+{"task": "F04", "arm": "A4", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 92, "n_calls": 1, "patch_o200k": 77, "patch1_o200k": 42}
+{"task": "F05", "arm": "A1", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 45, "n_calls": 1}
+{"task": "F05", "arm": "A2", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 45, "n_calls": 1}
+{"task": "F05", "arm": "A3", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 40, "n_calls": 1}
+{"task": "F05", "arm": "A4", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 78, "n_calls": 1, "patch_o200k": 68, "patch1_o200k": 50}
+{"task": "F06", "arm": "A1", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 63, "n_calls": 1}
+{"task": "F06", "arm": "A2", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 63, "n_calls": 1}
+{"task": "F06", "arm": "A3", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 58, "n_calls": 1}
+{"task": "F06", "arm": "A4", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 116, "n_calls": 1, "patch_o200k": 94, "patch1_o200k": 56}
+{"task": "F07", "arm": "A1", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 47, "n_calls": 1}
+{"task": "F07", "arm": "A2", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 47, "n_calls": 1}
+{"task": "F07", "arm": "A3", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 42, "n_calls": 1}
+{"task": "F07", "arm": "A4", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 74, "n_calls": 1, "patch_o200k": 64, "patch1_o200k": 48}
+{"task": "F08", "arm": "A1", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 73, "n_calls": 1}
+{"task": "F08", "arm": "A2", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 73, "n_calls": 1}
+{"task": "F08", "arm": "A3", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 68, "n_calls": 1}
+{"task": "F08", "arm": "A4", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 112, "n_calls": 1, "patch_o200k": 97, "patch1_o200k": 77}
+{"task": "F09", "arm": "A1", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 78, "n_calls": 1}
+{"task": "F09", "arm": "A2", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 76, "n_calls": 1}
+{"task": "F09", "arm": "A3", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 85, "n_calls": 2}
+{"task": "F09", "arm": "A4", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 161, "n_calls": 1, "patch_o200k": 138, "patch1_o200k": 82}
+{"task": "F10", "arm": "A1", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 105, "n_calls": 1}
+{"task": "F10", "arm": "A2", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 95, "n_calls": 1}
+{"task": "F10", "arm": "A3", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 112, "n_calls": 2}
+{"task": "F10", "arm": "A4", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 140, "n_calls": 1, "patch_o200k": 109, "patch1_o200k": 70}
+{"task": "V01", "arm": "A1", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 44, "n_calls": 1}
+{"task": "V01", "arm": "A2", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 42, "n_calls": 1}
+{"task": "V01", "arm": "A3", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 39, "n_calls": 1}
+{"task": "V01", "arm": "A4", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 72, "n_calls": 1, "patch_o200k": 59, "patch1_o200k": 30}
+{"task": "V02", "arm": "A1", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 52, "n_calls": 1}
+{"task": "V02", "arm": "A2", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 46, "n_calls": 1}
+{"task": "V02", "arm": "A3", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 47, "n_calls": 1}
+{"task": "V02", "arm": "A4", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 91, "n_calls": 1, "patch_o200k": 77, "patch1_o200k": 35}
+{"task": "V03", "arm": "A1", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 56, "n_calls": 1}
+{"task": "V03", "arm": "A2", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 49, "n_calls": 1}
+{"task": "V03", "arm": "A3", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 51, "n_calls": 1}
+{"task": "V03", "arm": "A4", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 63, "n_calls": 1, "patch_o200k": 51, "patch1_o200k": 39}
+{"task": "V04", "arm": "A1", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 94, "n_calls": 1}
+{"task": "V04", "arm": "A2", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 68, "n_calls": 1}
+{"task": "V04", "arm": "A3", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 89, "n_calls": 1}
+{"task": "V04", "arm": "A4", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 61, "n_calls": 1, "patch_o200k": 46, "patch1_o200k": 30}
+{"task": "V05", "arm": "A1", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 75, "n_calls": 1}
+{"task": "V05", "arm": "A2", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 75, "n_calls": 1}
+{"task": "V05", "arm": "A3", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 70, "n_calls": 1}
+{"task": "V05", "arm": "A4", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 111, "n_calls": 1, "patch_o200k": 93, "patch1_o200k": 73}
+{"task": "V06", "arm": "A1", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 96, "n_calls": 1}
+{"task": "V06", "arm": "A2", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 96, "n_calls": 1}
+{"task": "V06", "arm": "A3", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 91, "n_calls": 1}
+{"task": "V06", "arm": "A4", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 120, "n_calls": 1, "patch_o200k": 103, "patch1_o200k": 82}
+{"task": "V07", "arm": "A1", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 44, "n_calls": 1}
+{"task": "V07", "arm": "A2", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 44, "n_calls": 1}
+{"task": "V07", "arm": "A3", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 39, "n_calls": 1}
+{"task": "V07", "arm": "A4", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 77, "n_calls": 1, "patch_o200k": 58, "patch1_o200k": 53}
+{"task": "V08", "arm": "A1", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 67, "n_calls": 1}
+{"task": "V08", "arm": "A2", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 67, "n_calls": 1}
+{"task": "V08", "arm": "A3", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 62, "n_calls": 1}
+{"task": "V08", "arm": "A4", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 95, "n_calls": 1, "patch_o200k": 74, "patch1_o200k": 56}
+{"task": "V09", "arm": "A1", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 74, "n_calls": 1}
+{"task": "V09", "arm": "A2", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 73, "n_calls": 1}
+{"task": "V09", "arm": "A3", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 77, "n_calls": 2}
+{"task": "V09", "arm": "A4", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 146, "n_calls": 1, "patch_o200k": 125, "patch1_o200k": 77}
+{"task": "V10", "arm": "A1", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 106, "n_calls": 1}
+{"task": "V10", "arm": "A2", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 98, "n_calls": 1}
+{"task": "V10", "arm": "A3", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 109, "n_calls": 2}
+{"task": "V10", "arm": "A4", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 173, "n_calls": 1, "patch_o200k": 149, "patch1_o200k": 73}
+{"task": "G01", "arm": "A1", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 41, "n_calls": 1}
+{"task": "G01", "arm": "A2", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 38, "n_calls": 1}
+{"task": "G01", "arm": "A3", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 37, "n_calls": 1}
+{"task": "G01", "arm": "A4", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 54, "n_calls": 1, "patch_o200k": 39, "patch1_o200k": 27}
+{"task": "G02", "arm": "A1", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 41, "n_calls": 1}
+{"task": "G02", "arm": "A2", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 38, "n_calls": 1}
+{"task": "G02", "arm": "A3", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 37, "n_calls": 1}
+{"task": "G02", "arm": "A4", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 64, "n_calls": 1, "patch_o200k": 47, "patch1_o200k": 26}
+{"task": "G03", "arm": "A1", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 72, "n_calls": 1}
+{"task": "G03", "arm": "A2", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 60, "n_calls": 1}
+{"task": "G03", "arm": "A3", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 68, "n_calls": 1}
+{"task": "G03", "arm": "A4", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 124, "n_calls": 1, "patch_o200k": 102, "patch1_o200k": 51}
+{"task": "G04", "arm": "A1", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 102, "n_calls": 1}
+{"task": "G04", "arm": "A2", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 78, "n_calls": 1}
+{"task": "G04", "arm": "A3", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 98, "n_calls": 1}
+{"task": "G04", "arm": "A4", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 87, "n_calls": 1, "patch_o200k": 70, "patch1_o200k": 46}
+{"task": "G05", "arm": "A1", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 41, "n_calls": 1}
+{"task": "G05", "arm": "A2", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 41, "n_calls": 1}
+{"task": "G05", "arm": "A3", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 37, "n_calls": 1}
+{"task": "G05", "arm": "A4", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 111, "n_calls": 1, "patch_o200k": 77, "patch1_o200k": 41}
+{"task": "G06", "arm": "A1", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 213, "n_calls": 1}
+{"task": "G06", "arm": "A2", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 213, "n_calls": 1}
+{"task": "G06", "arm": "A3", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 209, "n_calls": 1}
+{"task": "G06", "arm": "A4", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 256, "n_calls": 1, "patch_o200k": 222, "patch1_o200k": 175}
+{"task": "G07", "arm": "A1", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 57, "n_calls": 1}
+{"task": "G07", "arm": "A2", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 57, "n_calls": 1}
+{"task": "G07", "arm": "A3", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 53, "n_calls": 1}
+{"task": "G07", "arm": "A4", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 148, "n_calls": 1, "patch_o200k": 123, "patch1_o200k": 85}
+{"task": "G08", "arm": "A1", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 49, "n_calls": 1}
+{"task": "G08", "arm": "A2", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 49, "n_calls": 1}
+{"task": "G08", "arm": "A3", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 45, "n_calls": 1}
+{"task": "G08", "arm": "A4", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 69, "n_calls": 1, "patch_o200k": 52, "patch1_o200k": 40}
+{"task": "G09", "arm": "A1", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 87, "n_calls": 1}
+{"task": "G09", "arm": "A2", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 80, "n_calls": 1}
+{"task": "G09", "arm": "A3", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 92, "n_calls": 2}
+{"task": "G09", "arm": "A4", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 157, "n_calls": 1, "patch_o200k": 131, "patch1_o200k": 65}
+{"task": "G10", "arm": "A1", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 100, "n_calls": 1}
+{"task": "G10", "arm": "A2", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 90, "n_calls": 1}
+{"task": "G10", "arm": "A3", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 105, "n_calls": 2}
+{"task": "G10", "arm": "A4", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 171, "n_calls": 1, "patch_o200k": 126, "patch1_o200k": 86}
+{"task": "K01", "arm": "A1", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 51, "n_calls": 1}
+{"task": "K01", "arm": "A2", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 48, "n_calls": 1}
+{"task": "K01", "arm": "A3", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 45, "n_calls": 1}
+{"task": "K01", "arm": "A4", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 84, "n_calls": 1, "patch_o200k": 71, "patch1_o200k": 36}
+{"task": "K02", "arm": "A1", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 94, "n_calls": 1}
+{"task": "K02", "arm": "A2", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 82, "n_calls": 1}
+{"task": "K02", "arm": "A3", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 88, "n_calls": 1}
+{"task": "K02", "arm": "A4", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 117, "n_calls": 1, "patch_o200k": 97, "patch1_o200k": 67}
+{"task": "K03", "arm": "A1", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 117, "n_calls": 1}
+{"task": "K03", "arm": "A2", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 94, "n_calls": 1}
+{"task": "K03", "arm": "A3", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 111, "n_calls": 1}
+{"task": "K03", "arm": "A4", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 117, "n_calls": 1, "patch_o200k": 95, "patch1_o200k": 67}
+{"task": "K04", "arm": "A1", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 91, "n_calls": 1}
+{"task": "K04", "arm": "A2", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 66, "n_calls": 1}
+{"task": "K04", "arm": "A3", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 85, "n_calls": 1}
+{"task": "K04", "arm": "A4", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 74, "n_calls": 1, "patch_o200k": 62, "patch1_o200k": 43}
+{"task": "K05", "arm": "A1", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 67, "n_calls": 1}
+{"task": "K05", "arm": "A2", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 67, "n_calls": 1}
+{"task": "K05", "arm": "A3", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 61, "n_calls": 1}
+{"task": "K05", "arm": "A4", "edit_type": "replace", "stratum": "M", "ok": true, "args_o200k": 120, "n_calls": 1, "patch_o200k": 106, "patch1_o200k": 82}
+{"task": "K06", "arm": "A1", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 95, "n_calls": 1}
+{"task": "K06", "arm": "A2", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 95, "n_calls": 1}
+{"task": "K06", "arm": "A3", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 89, "n_calls": 1}
+{"task": "K06", "arm": "A4", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 132, "n_calls": 1, "patch_o200k": 114, "patch1_o200k": 98}
+{"task": "K07", "arm": "A1", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 40, "n_calls": 1}
+{"task": "K07", "arm": "A2", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 40, "n_calls": 1}
+{"task": "K07", "arm": "A3", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 34, "n_calls": 1}
+{"task": "K07", "arm": "A4", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 85, "n_calls": 1, "patch_o200k": 71, "patch1_o200k": 52}
+{"task": "K08", "arm": "A1", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 69, "n_calls": 1}
+{"task": "K08", "arm": "A2", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 69, "n_calls": 1}
+{"task": "K08", "arm": "A3", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 63, "n_calls": 1}
+{"task": "K08", "arm": "A4", "edit_type": "delete", "stratum": "L", "ok": true, "args_o200k": 139, "n_calls": 1, "patch_o200k": 125, "patch1_o200k": 85}
+{"task": "K09", "arm": "A1", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 109, "n_calls": 1}
+{"task": "K09", "arm": "A2", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 109, "n_calls": 1}
+{"task": "K09", "arm": "A3", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 112, "n_calls": 2}
+{"task": "K09", "arm": "A4", "edit_type": "multi", "stratum": "S", "ok": true, "args_o200k": 182, "n_calls": 1, "patch_o200k": 158, "patch1_o200k": 117}
+{"task": "K10", "arm": "A1", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 85, "n_calls": 1}
+{"task": "K10", "arm": "A2", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 81, "n_calls": 1}
+{"task": "K10", "arm": "A3", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 88, "n_calls": 2}
+{"task": "K10", "arm": "A4", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 166, "n_calls": 1, "patch_o200k": 146, "patch1_o200k": 66}
+{"task": "T01", "arm": "A1", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 55, "n_calls": 1}
+{"task": "T01", "arm": "A2", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 50, "n_calls": 1}
+{"task": "T01", "arm": "A3", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 50, "n_calls": 1}
+{"task": "T01", "arm": "A4", "edit_type": "insert", "stratum": "S", "ok": true, "args_o200k": 112, "n_calls": 1, "patch_o200k": 86, "patch1_o200k": 45}
+{"task": "T02", "arm": "A1", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 53, "n_calls": 1}
+{"task": "T02", "arm": "A2", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 47, "n_calls": 1}
+{"task": "T02", "arm": "A3", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 48, "n_calls": 1}
+{"task": "T02", "arm": "A4", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 179, "n_calls": 1, "patch_o200k": 162, "patch1_o200k": 53}
+{"task": "T03", "arm": "A1", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 103, "n_calls": 1}
+{"task": "T03", "arm": "A2", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 76, "n_calls": 1}
+{"task": "T03", "arm": "A3", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 98, "n_calls": 1}
+{"task": "T03", "arm": "A4", "edit_type": "insert", "stratum": "M", "ok": true, "args_o200k": 115, "n_calls": 1, "patch_o200k": 102, "patch1_o200k": 65}
+{"task": "T04", "arm": "A1", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 69, "n_calls": 1}
+{"task": "T04", "arm": "A2", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 68, "n_calls": 1}
+{"task": "T04", "arm": "A3", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 64, "n_calls": 1}
+{"task": "T04", "arm": "A4", "edit_type": "insert", "stratum": "L", "ok": true, "args_o200k": 102, "n_calls": 1, "patch_o200k": 83, "patch1_o200k": 49}
+{"task": "T05", "arm": "A1", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 46, "n_calls": 1}
+{"task": "T05", "arm": "A2", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 46, "n_calls": 1}
+{"task": "T05", "arm": "A3", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 41, "n_calls": 1}
+{"task": "T05", "arm": "A4", "edit_type": "replace", "stratum": "S", "ok": true, "args_o200k": 131, "n_calls": 1, "patch_o200k": 107, "patch1_o200k": 64}
+{"task": "T06", "arm": "A1", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 124, "n_calls": 1}
+{"task": "T06", "arm": "A2", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 124, "n_calls": 1}
+{"task": "T06", "arm": "A3", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 119, "n_calls": 1}
+{"task": "T06", "arm": "A4", "edit_type": "replace", "stratum": "L", "ok": true, "args_o200k": 279, "n_calls": 1, "patch_o200k": 259, "patch1_o200k": 212}
+{"task": "T07", "arm": "A1", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 51, "n_calls": 1}
+{"task": "T07", "arm": "A2", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 51, "n_calls": 1}
+{"task": "T07", "arm": "A3", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 46, "n_calls": 1}
+{"task": "T07", "arm": "A4", "edit_type": "delete", "stratum": "S", "ok": true, "args_o200k": 105, "n_calls": 1, "patch_o200k": 87, "patch1_o200k": 54}
+{"task": "T08", "arm": "A1", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 52, "n_calls": 1}
+{"task": "T08", "arm": "A2", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 52, "n_calls": 1}
+{"task": "T08", "arm": "A3", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 47, "n_calls": 1}
+{"task": "T08", "arm": "A4", "edit_type": "delete", "stratum": "M", "ok": true, "args_o200k": 106, "n_calls": 1, "patch_o200k": 83, "patch1_o200k": 57}
+{"task": "T09", "arm": "A1", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 111, "n_calls": 1}
+{"task": "T09", "arm": "A2", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 104, "n_calls": 1}
+{"task": "T09", "arm": "A3", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 115, "n_calls": 2}
+{"task": "T09", "arm": "A4", "edit_type": "multi", "stratum": "M", "ok": true, "args_o200k": 222, "n_calls": 1, "patch_o200k": 202, "patch1_o200k": 79}
+{"task": "T10", "arm": "A1", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 120, "n_calls": 1}
+{"task": "T10", "arm": "A2", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 110, "n_calls": 1}
+{"task": "T10", "arm": "A3", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 124, "n_calls": 2}
+{"task": "T10", "arm": "A4", "edit_type": "multi", "stratum": "L", "ok": true, "args_o200k": 253, "n_calls": 1, "patch_o200k": 192, "patch1_o200k": 117}

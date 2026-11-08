@@ -9,6 +9,8 @@ import { captureMcpSettingsReads, refreshMcpSettingsAfterWrite } from '../featur
 import { captureOAuthPanel } from '../features/settings/oauth-panel-lifetime';
 import { renderCodexSharedLogin } from '../features/settings/codex-shared-login';
 import { catpawSettings } from '../features/settings/catpaw-settings';
+import { kimiCodeLogin } from '../features/settings/kimi-code-login';
+import { subscriptionPlans } from '../features/settings/subscription-plans';
 import { runModelRoutingMutation } from '../features/settings/model-routing-authority';
 import { createProviderMutations } from '../features/settings/provider-mutations';
 import { createProviderKeyEditor } from '../features/settings/provider-key-editor';
@@ -527,11 +529,6 @@ function _modelRoutingPriceLabel(pricing) {
   return (pricing.currency || 'USD') + ' ' + Number(pricing.input || 0) + ' / ' +
     Number(pricing.output || 0) + ' · 每百万 tokens';
 }
-
-var _MODEL_CAP_LABELS = {
-  text: '文本', thinking: '思考', vision: '视觉',
-  cheap: '低价', image_gen: '图像', embedding: '向量',
-};
 
 // 上下文窗口按惯例缩写：1000000 → 1M，128000 → 128K，8192 → 8.2K。
 function _modelRoutingContextLabel(tokens) {
@@ -1750,7 +1747,7 @@ function _renderProvidersTab() {
 /* ═══════════════════════════════════════════════════════════════════
    settings/access matrix — per-(credential × wire id) capability grid.
 
-   Some gateways (e.g. Meituan AIGC) give each credential a *different*
+   Some gateways (e.g. YourProvider AIGC) give each credential a *different*
    quota and a *different* set of accessible models. The flat model list
    can't express that: the v2 authority stores the grant as
    ``credential.authorization.models`` (an allow-list of ModelRefs), which
@@ -1769,7 +1766,7 @@ function _renderProvidersTab() {
    keys from the owner-scoped secret store — the browser never sees them —
    and sends a tiny request to EVERY (credential × wire id) pair, granted
    or not: discovering reachable pairs the allow-list does not grant yet
-   is the matrix's whole point on gateways like Meituan. Progress is
+   is the matrix's whole point on gateways like YourProvider. Progress is
    persisted server-side under data/config/probe_cache/, so closing
    Settings (or restarting the server) never loses it — the UI re-attaches
    by provider id and keeps polling. Only "Retest" (force) discards the
@@ -2087,13 +2084,18 @@ function _mxStateChips(entry) {
  *  Pending rows render nothing — there is no catalog identity to describe. */
 function _mxMetaHtml(entry) {
   if (entry.pending) return '';
-  var capLabels = (typeof _MODEL_CAP_LABELS === 'object' && _MODEL_CAP_LABELS) || {};
+  var capLabel = typeof runtimeScope.modelCapabilityLabel === 'function'
+    ? runtimeScope.modelCapabilityLabel : function(cap) { return cap; };
   var caps = entry.capabilities.map(function(cap) {
     return '<span class="stg-cap ' + escapeHtml(cap) + '" title="' + escapeHtml(cap) + '">' +
-      escapeHtml(capLabels[cap] || cap) + '</span>';
+      escapeHtml(capLabel(cap)) + '</span>';
   }).join('');
+  // Media kinds (image/video/audio/speech) are described by media facts; a
+  // token context window says nothing about them.
+  var media = typeof runtimeScope.isMediaKind === 'function' && typeof runtimeScope.modelKind === 'function'
+    && runtimeScope.isMediaKind(runtimeScope.modelKind(entry.capabilities));
   var bits = '';
-  if (entry.offering.context_window) {
+  if (entry.offering.context_window && !media) {
     var ctxLabel = (typeof _modelRoutingContextLabel === 'function')
       ? _modelRoutingContextLabel(entry.offering.context_window)
       : String(entry.offering.context_window);
@@ -2118,6 +2120,14 @@ function _mxMetaHtml(entry) {
       (entry.catalogPrice
         ? '<span class="stg-v2-price-tag">' + escapeHtml(t('settings.matrixCatalogPrice')) + '</span>'
         : '') +
+    '</span>';
+  }
+  var mediaPrice = media && entry.mediaPricing && typeof runtimeScope.modelMediaPriceSummary === 'function'
+    ? runtimeScope.modelMediaPriceSummary(entry.mediaPricing) : '';
+  if (mediaPrice) {
+    bits += '<span class="stg-mx-meta-bit stg-mx-price" title="' + escapeHtml(t('settings.matrixMediaReferencePriceHint')) + '">' +
+      escapeHtml(mediaPrice) +
+      '<span class="stg-v2-price-tag">' + escapeHtml(t('settings.matrixCatalogPrice')) + '</span>' +
     '</span>';
   }
   if (!caps && !bits) return '';
@@ -2585,19 +2595,12 @@ function _rerenderMatrix(providerId) {
 
 // ── Background probe: start / poll / resume / apply ───────────────────────
 
-/** True when the offering has no chat surface (image_gen / embedding /
- *  transcription). Reads the shared taxonomy helper when available, else
- *  the same hardcoded fallback set it ships with. */
+/** True when the offering has no chat surface (image/video/audio generation,
+ *  speech, embedding, reranking). The shared taxonomy port is the only
+ *  classification; a harness without it fails open (treated as chat). */
 function _matrixModelIsNonChat(entry) {
-  if (!entry) return false;
-  if (typeof runtimeScope.isChatModel === 'function') {
-    return !runtimeScope.isChatModel({ capabilities: entry.capabilities });
-  }
-  var nonChat = ['image_gen', 'embedding', 'transcription', 'tts'];
-  for (var i = 0; i < entry.capabilities.length; i++) {
-    if (nonChat.indexOf(entry.capabilities[i]) >= 0) return true;
-  }
-  return false;
+  if (!entry || typeof runtimeScope.isChatModel !== 'function') return false;
+  return !runtimeScope.isChatModel({ capabilities: entry.capabilities });
 }
 
 /** True when the cell carries a verdict from the model's OWN modality
@@ -4438,11 +4441,13 @@ function _loadOAuthStatus(fromRepoll) {
   }, function(result) {
     _autoConfigureOAuthProvider('codex', result, view);
   });
+  if (!fromRepoll) subscriptionPlans.refresh(_planPorts());
   return view.loadStatus({
     read: function(options) { return Api.oauth.status(options); },
     publish: function(data) {
       _updateOAuthCard('claude', data.claude);
       if (view.isCurrent()) _updateOAuthCard('codex', data.codex);
+      if (view.isCurrent()) kimiCodeLogin.render(data.kimi, _kimiPorts());
     },
   }, !!fromRepoll);
 }
@@ -4682,7 +4687,7 @@ function _updateOAuthCard(provider, status) {
       _startDeviceStatusPoll(provider);
     } else if (status.authenticated || !devWaiting) {
       _hideDevicePanel();
-      _stopDeviceStatusPoll();
+      _stopDeviceStatusPoll(provider);
     }
     if (deviceBtn) {
       deviceBtn.style.display = status.authenticated ? 'none' : '';
@@ -4781,7 +4786,7 @@ function _oauthCancelAndRetry(provider) {
   if (manualDiv) manualDiv.style.display = 'none';
   // Hide device panel + stop its status poll (codex)
   if (provider === 'codex') {
-    _stopDeviceStatusPoll();
+    _stopDeviceStatusPoll(provider);
     _hideDevicePanel();
     var deviceBtn = document.getElementById('oauthCodexDeviceBtn');
     if (deviceBtn) {
@@ -5115,9 +5120,9 @@ function _startDeviceStatusPoll(provider) {
   });
 }
 
-function _stopDeviceStatusPoll() {
+function _stopDeviceStatusPoll(provider) {
   var view = captureOAuthPanel();
-  if (view) view.stopDevicePoll();
+  if (view) view.stopDevicePoll(provider);
 }
 
 async function _oauthLogout(provider) {
@@ -5287,6 +5292,28 @@ function _autoConfigureOAuthProvider(provider, status, view) {
 // status, connection intent and teardown are owned by the typed Settings module.
 function _catpawImport() { return catpawSettings.connect(); }
 function _catpawDisconnect() { return catpawSettings.disconnect(); }
+
+// ── Kimi Code device sign-in and domestic coding-plan cards ──
+// Action bridges into the typed owners (kimi-code-login.ts,
+// subscription-plans.ts); remove with the retained subscription presenter.
+function _kimiPorts() {
+  return {
+    loadStatus: function(fromRepoll) { return _loadOAuthStatus(fromRepoll); },
+    refreshCatalog: function(session) {
+      return typeof _refreshSubscriptionModelCatalog === 'function'
+        ? _refreshSubscriptionModelCatalog(session) : null;
+    },
+  };
+}
+// The Provider add command lives in provider_render.js; resolve it at Connect.
+function _planPorts() {
+  return {
+    stage: function(bundle, apiKey) { return _stageModelRoutingProviderBundle(bundle, apiKey); },
+  };
+}
+function _kimiDeviceLogin() { return kimiCodeLogin.start(_kimiPorts()); }
+function _kimiLogout() { return kimiCodeLogin.logout(_kimiPorts()); }
+function _kimiCopyDeviceCode(button) { return kimiCodeLogin.copyCode(button); }
 /* ===== migrated source: settings/mcp.js ===== */
 /* ═══════════════════════════════════════════════════════════════════
    settings/mcp — extracted from settings.js (split 2026-05-28)
@@ -5988,7 +6015,7 @@ function _mcpOpenInstallModal(serverId, isReinstall) {
   if (!_mcpCommands.views.open('install', entry)) return;
 
   // Icon may be either an emoji (e.g. '🐙') OR an inline SVG string (e.g.
-  // '<svg viewBox="0 0 24 24">…</svg>' for brand logos like Meituan/Hope).
+  // '<svg viewBox="0 0 24 24">…</svg>' for brand logos like YourProvider/Hope).
   // Using .textContent would render the SVG source as literal text, which
   // is the "path d=…" garble users saw when opening brand-icon apps.
   // Catalog icons are server-owned (lib/mcp/registry.py), not user input,
@@ -6318,6 +6345,9 @@ runtimeScope._deleteV2Credential = _deleteV2Credential;
 runtimeScope._deleteV2HeaderRow = _deleteV2HeaderRow;
 runtimeScope._filterProviderModelPicker = _filterProviderModelPicker;
 runtimeScope._importListedProviderModels = _importListedProviderModels;
+runtimeScope._kimiCopyDeviceCode = _kimiCopyDeviceCode;
+runtimeScope._kimiDeviceLogin = _kimiDeviceLogin;
+runtimeScope._kimiLogout = _kimiLogout;
 runtimeScope._mcpApplyUpdate = _mcpApplyUpdate;
 runtimeScope._mcpCloseAddModal = _mcpCloseAddModal;
 runtimeScope._mcpCloseInstallModal = _mcpCloseInstallModal;
@@ -6361,6 +6391,7 @@ runtimeScope._proxyPoolTest = _proxyPoolTest;
 runtimeScope._proxyPoolToggleEditor = _proxyPoolToggleEditor;
 runtimeScope._proxyPoolToggleUrlVisibility = _proxyPoolToggleUrlVisibility;
 runtimeScope._proxyPoolUrlChanged = _proxyPoolUrlChanged;
+runtimeScope._refreshCostExperimentReport = _refreshCostExperimentReport;
 runtimeScope._removeV2Alias = _removeV2Alias;
 runtimeScope._removeV2Offering = _removeV2Offering;
 runtimeScope._runMatrixProbe = _runMatrixProbe;
@@ -6373,6 +6404,7 @@ runtimeScope._stageV2CheckedCatalogModels = _stageV2CheckedCatalogModels;
 runtimeScope._stageV2CustomModelFromPicker = _stageV2CustomModelFromPicker;
 runtimeScope._startNewV2ApiKey = _startNewV2ApiKey;
 runtimeScope._switchMtProvider = _switchMtProvider;
+runtimeScope._syncCostExperimentUi = _syncCostExperimentUi;
 runtimeScope._testMtProvider = _testMtProvider;
 runtimeScope._testSearchBrowser = _testSearchBrowser;
 runtimeScope._toggleMatrixAccess = _toggleMatrixAccess;

@@ -19,9 +19,21 @@ from lib.llm.llm_errors import AbortedError, ToolAdmissionRefused
 FILE_TOOLS = frozenset({'read_files', 'write_file', 'edit_file'})
 _CONSULT = {'mode': 'consult', 'tools': [], 'readPaths': [], 'writePaths': [], 'maxToolCalls': 0}
 _current = ContextVar('project_dispatch_file_scope', default=None)
+# The project root's runtime trees. File grants refuse these names at any depth;
+# a whole-project checkpoint may carry a nested source package of the same name,
+# as git_checkpoint_policy.FORBIDDEN_CHECKPOINT_ROOTS already admits.
+_RUNTIME_TREES = frozenset({'data', 'logs', 'uploads'})
+# Conventional build-output names. File grants refuse them; a project grant's
+# checkpoint is a commit already filtered by the project's own .gitignore and
+# git_checkpoint_policy, so tracked content under these names is project source.
+_BUILD_OUTPUT_PARTS = frozenset({'target', 'dist', 'build'})
+_METADATA_PARTS = frozenset({'.git', '.worktrees', 'write-intents-v1', 'modifications.json',
+                             'modifications.journal', 'modifications.journal.fold', 'project.json',
+                             '.env', '.venv', 'node_modules', '__pycache__', '.native'})
+_METADATA_PREFIXES = ('.tofu', '.env.')
 
 
-def _relative(path):
+def _relative(path, *, project_grant=False):
     if (not isinstance(path, str) or not path or len(path) > 1024
             or path != path.strip() or any(ord(char) < 32 for char in path)
             or '\\' in path or ':' in path or '~' in path or '%' in path
@@ -29,20 +41,20 @@ def _relative(path):
         raise ValueError('File scope requires an unaliased canonical project-relative path')
     parts = path.split('/')
     # Runtime authority, checkout control and undo evidence are never model files.
-    if any(part.lower() in {'.git', '.worktrees', 'data', 'logs', 'uploads',
-                           'write-intents-v1', 'modifications.json',
-                           'modifications.journal', 'modifications.journal.fold',
-                           'project.json',
-                           '.env', '.venv', 'node_modules', '__pycache__', 'target', 'dist', 'build'}
-           or part.lower().startswith(('.tofu', '.env.')) or part.lower() == '.native' for part in parts):
-        raise ValueError('File scope cannot access runtime or checkout metadata')
+    if parts[0].lower() in _RUNTIME_TREES:
+        raise ValueError(f"File scope cannot access root runtime tree {parts[0] + '/'!r}")
+    for part in parts:
+        name = part.lower()
+        if (name in _METADATA_PARTS or name.startswith(_METADATA_PREFIXES)
+                or (name in _RUNTIME_TREES or name in _BUILD_OUTPUT_PARTS) and not project_grant):
+            raise ValueError(f'File scope cannot access runtime or checkout metadata segment {part!r}')
     return path
 
 
-def relative_path_allowed(path, prefixes):
+def relative_path_allowed(path, prefixes, *, project_grant=False):
     """Segment-prefix membership shared with checkpoint publication admission."""
     try:
-        path = _relative(path)
+        path = _relative(path, project_grant=project_grant)
         return any(prefix == '.' or path == _relative(prefix) or path.startswith(_relative(prefix) + '/')
                    for prefix in prefixes)
     except (TypeError, ValueError):

@@ -262,12 +262,17 @@ function _getModelPickerUi(list = document.getElementById('presetDropdownList') 
 }
 function _modelRoutingDropdownModels(documentValue) { return projectModelPickerCatalog(documentValue); }
 function _refreshModelPickerSelection() { _modelPickerUi?.refreshSelection(); }
-function _populateModelDropdown(models) {
+/* `authoritative`: the list comes from accepted routing (current or last-good).
+ * The config phase can populate before any routing has arrived; that
+ * placeholder is not an authoritative absence of image models. Availability is
+ * re-applied on every population so a later authority re-shows the entry. */
+function _populateModelDropdown(models, authoritative = true) {
   const dropdown = document.getElementById('presetDropdownList') || document.getElementById('presetDropdown');
   if (!dropdown || !Array.isArray(models)) return;
-  _registeredModels = models; _registeredModelsLoaded = true;
+  _registeredModels = models;
+  if (authoritative) _registeredModelsLoaded = true;
   _getModelPickerUi(dropdown).populate(models);
-  if (!models.length && typeof _applyImageGenAvailability === 'function') _applyImageGenAvailability();
+  if (typeof _applyImageGenAvailability === 'function') _applyImageGenAvailability();
 }
 
 /* Validate config.model against the provider list, falling back when the
@@ -394,7 +399,7 @@ const _modelPickerStartup = createModelPickerStartup({
       // Re-filter last-good authority under the new policy during refresh.
       // The retired dropdown_models shim is never selectable authority.
       _populateModelDropdown(_modelPickerLastRouting
-        ? _modelRoutingDropdownModels(_modelPickerLastRouting) : []);
+        ? _modelRoutingDropdownModels(_modelPickerLastRouting) : [], !!_modelPickerLastRouting);
 
       /* The routing GET was launched in parallel; the coordinator applies
        * it only after hidden-model and capability policies above are ready. */
@@ -463,7 +468,7 @@ const _modelPickerStartup = createModelPickerStartup({
       retry.dataset.i18n = 'toolbar.retryLoadingModels';
       retry.textContent = t('toolbar.retryLoadingModels');
       retry.addEventListener('click', () => {
-        if (!_modelPickerLastRouting) _populateModelDropdown([]);
+        if (!_modelPickerLastRouting) _populateModelDropdown([], false);
         void _modelPickerStartup.load();
       }, { once: true });
       dropdown.appendChild(retry);

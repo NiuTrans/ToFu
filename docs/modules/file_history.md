@@ -47,7 +47,15 @@ whenever delta JSON would not save 128 bytes.
   backups/<hash>@v<n>    authoritative bytes needed by retained undo points
   snapshot-tail.json     reconstructible latest-map/reverse-delta cache
   snapshots.jsonl.lock   advisory cross-process append/rewrite lock
+  .gitignore             nested ignore rule: this directory is never committed
 ```
+
+`ensure_store` writes that nested `.gitignore` (`*` plus `!.gitignore`) so a
+`git add -A` cannot commit the pre-edit backups into the user's repository.
+It scopes only `.tofu/file-history/` — sibling `.tofu/memories` and
+`.tofu/skills` packages are unaffected — and never appends to the repository's
+own `.gitignore`, which would be an unrequested edit to a tracked file. A
+pre-existing store gains the rule the next time it is opened.
 
 `snapshot-tail.json` is trusted only when device, inode, size, and nanosecond
 mtime match the log. Deleting it changes only the next-read cost. The in-process

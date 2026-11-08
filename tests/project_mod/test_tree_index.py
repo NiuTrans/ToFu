@@ -920,8 +920,10 @@ class TestSearchCoverage:
         ('rg', {'pattern': 'needle('}, {'pattern': r'needle\('}),
         ('rg', {'pattern': 'needle', 'include': '[ab'},
          {'pattern': 'needle', 'include': '[ab]'}),
-        # The GNU grep fallback speaks basic regex: the reverse.
-        ('gnu', {'pattern': r'needle\('}, {'pattern': 'needle('}),
+        # The GNU grep fallback now uses -E (extended regex), so an escaped
+        # literal paren is a literal paren there too; an unclosed group is the
+        # invalid pattern. Before -E the two spellings were reversed.
+        ('gnu', {'pattern': 'needle('}, {'pattern': r'needle\('}),
     ])
     def test_rejected_request_is_an_error_not_an_empty_result(
             self, covered, monkeypatch, backend, rejected, accepted):

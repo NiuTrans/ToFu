@@ -129,7 +129,8 @@ def _with_quota_state(status: dict, provider: str,
         'Returns ``{<provider>: {logged_in, expires_at, ...}}`` for all '
         'providers, or just the requested one when ``?provider=`` is set. '
         '"Provider" here refers to the *upstream subscription provider* '
-        '(Claude Pro, ChatGPT Codex), NOT the v1 LLM provider config. '
+        '(Claude Pro, ChatGPT Codex, Kimi Code), NOT the v1 LLM provider '
+        'config. '
         'Authenticated Codex status also carries a non-blocking '
         '``reset_offer`` state (available, none, or unknown); unknown is '
         'never inferred as zero.'
@@ -149,7 +150,8 @@ def oauth_status():
             reconciled = _reconcile_oauth_throttled(owner_user_id)
             provider = request.args.get('provider', '')
             if provider:
-                if provider not in ('claude', 'codex'):
+                from lib.oauth.outbound import OAUTH_PROVIDERS
+                if provider not in OAUTH_PROVIDERS:
                     return api_bad_request('Invalid provider', field='provider')
                 return api_ok(_with_quota_state(_with_egress_state(
                     get_oauth_status(
@@ -224,9 +226,10 @@ def oauth_test():
 @api_v1_oauth_bp.route('/api/v1/oauth/device-login', methods=['POST', 'GET'])
 @require_auth
 @api_meta(
-    summary='Start a device-authorization login flow (Codex)',
+    summary='Start a device-authorization login flow (Codex, Kimi Code)',
     description=(
-        'Mints a user code from OpenAI\'s deviceauth API and starts the '
+        'Mints a user code (OpenAI deviceauth for ``codex``; the RFC 8628 '
+        'Kimi Code device grant for ``kimi``) and starts the '
         'server-side poll thread. This path never touches the localhost:1455 '
         'redirect: the user '
         'enters the displayed code at the verification URL in ANY browser. '
@@ -245,9 +248,9 @@ def oauth_device_login():
         from lib.request_parser import optional_str, parse_body
         body = parse_body(force=True, strict=True)
         provider = optional_str(body, 'provider', default='', max_len=16)
-    if provider != 'codex':
+    if provider not in ('codex', 'kimi'):
         return api_bad_request(
-            'Device login is only available for provider=codex',
+            'Device login is only available for provider=codex or kimi',
             field='provider')
 
     owner_user_id = request_principal().require_owner(

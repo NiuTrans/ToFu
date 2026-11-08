@@ -9,9 +9,10 @@ Endpoints:
   * ``GET /api/v1/mobile/android/apk``  — the APK attachment itself.
   * ``GET /api/v1/mobile/android/link`` — JSON: absolute URL (with the
     caller's credential embedded via the ``?token=`` first-link transport
-    when one was presented) + a QR ``data:`` URI of that URL.
-  * ``GET /api/v1/mobile/android``      — minimal scan-me page rendering
-    the QR in the operator's browser.
+    when one was presented) + a QR ``data:`` URI of that URL. ``?base=``
+    carries the caller's own server root when a reverse proxy hides it.
+  * ``GET /api/v1/mobile/android``      — minimal scan-me page; it asks
+    ``link`` for the QR with its own root, computed from ``location``.
   * ``GET /api/v1/mobile/connect/link`` — JSON: a ``tofu://connect`` deep link
     (and its QR ``data:`` URI) for THIS server's address, so the phone's
     built-in scanner adds the server without typing a UUID URL.
@@ -49,7 +50,19 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_APK = (_REPO_ROOT / 'android' / 'app' / 'build' / 'outputs' /
                 'apk' / 'release' / 'app-release.apk')
 _APK_MIME = 'application/vnd.android.package-archive'
-_APK_URL_PATH = '/api/v1/mobile/android/apk'
+#: Where phones fetch the APK, relative to the server root: the mounted v4
+#: projection of ``mobile_android_apk_v1`` (``/api/v1/*`` answers 426).
+_APK_DOWNLOAD_PATH = 'api/v4/mobile/android/apk'
+
+#: Both scan pages are served at ``<tofu-root>/api/v4/mobile/...``. The
+#: browser's address up to the first ``/api/`` is the root a phone must dial:
+#: it keeps the reverse-proxy prefix (code-server ``/proxy/<port>/``, cloud
+#: IDEs) and the edge's https, both lost before the request reaches us.
+_PAGE_ROOT_JS = """\
+  var path = location.pathname;
+  var at = path.indexOf('/api/');
+  var root = location.origin + (at >= 0 ? path.slice(0, at + 1) : '/');
+"""
 
 
 def _apk_path() -> Path:
@@ -67,15 +80,33 @@ def _presented_token() -> str:
     return presented_credential().token
 
 
-def _download_url() -> str:
-    url = f'{request.scheme}://{request.host}{_APK_URL_PATH}'
+def _caller_root(base: str) -> str | None:
+    """The server root this caller reaches, ending in ``/``; None if invalid.
+
+    Without ``base`` it is this request's root, right on a direct connection.
+    The APK URL embeds the caller's credential, so ``base`` must name the Host
+    this request arrived on (the pin ``/api/browser/download?base=`` uses).
+    """
+    if not base:
+        return request.url_root
+    if not _is_absolute_http_url(base):
+        return None
+    parsed = urlparse(base)
+    if (parsed.netloc.lower() != (request.host or '').lower()
+            or parsed.query or parsed.fragment):
+        return None
+    return base.rstrip('/') + '/'
+
+
+def _download_url(root: str) -> str:
+    url = root + _APK_DOWNLOAD_PATH
     token = _presented_token()
     if token:
         url = f'{url}?token={token}'
     return url
 
 
-@api_v1_mobile_bp.route(_APK_URL_PATH, methods=['GET'])
+@api_v1_mobile_bp.route('/api/v1/mobile/android/apk', methods=['GET'])
 @require_auth
 @api_meta(
     responses=media_responses('application/vnd.android.package-archive', conditional=True),
@@ -97,12 +128,32 @@ def mobile_android_apk_v1():
 
 @api_v1_mobile_bp.route('/api/v1/mobile/android/link', methods=['GET'])
 @require_auth
-@api_meta(summary='Absolute download URL + QR for the local Android APK',
-          tags=['mobile'])
+@api_meta(
+    summary='Absolute download URL + QR for the local Android APK',
+    description=(
+        'By default the URL is built on this request\'s own root, which is '
+        'right on a direct connection. Behind a reverse-proxy prefix, pass the '
+        'root the client actually reaches as `base` (the scan page sends its '
+        'own `location`). Because the URL carries the caller\'s credential, '
+        '`base` must name this request\'s Host.'),
+    tags=['mobile'],
+    request_body=False,
+    parameters=[
+        {'name': 'base', 'in': 'query', 'required': False,
+         'schema': {'type': 'string'},
+         'description': 'Absolute http(s) root of this server as the client '
+                        'reaches it, e.g. https://host/proxy/15000/.'},
+    ],
+)
 def mobile_android_link_v1():
     from lib.qr import qr_png_data_uri
 
-    url = _download_url()
+    root = _caller_root((request.args.get('base') or '').strip())
+    if root is None:
+        return api_bad_request(
+            'base must be this server\'s own absolute http(s) root, '
+            'without query or fragment')
+    url = _download_url(root)
     payload = {
         'available': _apk_path().is_file(),
         'url': url,
@@ -117,6 +168,40 @@ def mobile_android_link_v1():
     return api_ok(payload)
 
 
+_ANDROID_PAGE_SCRIPT = '<script>\n(function () {\n' + _PAGE_ROOT_JS + """\
+  var err = document.getElementById('err');
+  fetch(root + 'api/v4/mobile/android/link?base=' + encodeURIComponent(root),
+        {headers: {'Accept': 'application/json'}})
+    .then(function (r) {
+      return r.json().then(function (body) {
+        if (!r.ok) {
+          throw new Error((body && (body.detail || body.title)) ||
+                          ('HTTP ' + r.status));
+        }
+        return body && body.data ? body.data : body;
+      });
+    })
+    .then(function (d) {
+      var link = document.getElementById('link');
+      link.href = d.url;
+      link.textContent = d.url;
+      if (d.qr) {
+        var qr = document.getElementById('qr');
+        qr.src = d.qr;
+        qr.hidden = false;
+      } else {
+        err.textContent =
+          'QR unavailable (qrcode package missing) — use the link below.';
+      }
+    })
+    .catch(function (e) {
+      err.textContent = 'Could not build the download link: ' + e.message;
+    });
+})();
+</script>
+"""
+
+
 @api_v1_mobile_bp.route('/api/v1/mobile/android', methods=['GET'])
 @require_auth
 @api_meta(
@@ -125,12 +210,6 @@ def mobile_android_link_v1():
           tags=['mobile'])
 @raw_success_response
 def mobile_android_page_v1():
-    from html import escape
-
-    from lib.qr import qr_png_data_uri
-
-    url = _download_url()
-    qr = qr_png_data_uri(url)
     path = _apk_path()
     if path.is_file():
         stat = path.stat()
@@ -142,10 +221,6 @@ def mobile_android_page_v1():
     else:
         status = ('No local build yet — run '
                   '<code>./gradlew assembleRelease</code> in android/.')
-    img = (f'<img src="{qr}" width="264" height="264" alt="APK download QR">'
-           if qr else
-           '<p><em>QR unavailable (qrcode package missing) — use the link '
-           'below.</em></p>')
     html = (
         '<!doctype html><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -156,9 +231,12 @@ def mobile_android_page_v1():
         'border-radius:3px;word-break:break-all}'
         'p.hint{color:#666;font-size:.85rem}</style>'
         '<h1>Tofu Android — local build</h1>'
-        f'<p>{status}</p>{img}'
-        f'<p class="hint">Same Wi-Fi as this server, scan to download.<br>'
-        f'<a href="{escape(url, quote=True)}">{escape(url)}</a></p>')
+        f'<p>{status}</p>'
+        '<img id="qr" width="264" height="264" alt="APK download QR" hidden>'
+        '<p id="err" class="hint"></p>'
+        '<p class="hint">Same Wi-Fi as this server, scan to download.<br>'
+        '<a id="link"></a></p>'
+        + _ANDROID_PAGE_SCRIPT)
     return Response(html, content_type='text/html; charset=utf-8')
 
 
@@ -175,7 +253,10 @@ _MAX_CONNECT_NAME = 64
 def _is_absolute_http_url(value: str) -> bool:
     if not value or len(value) > _MAX_CONNECT_URL:
         return False
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError:  # e.g. an unbalanced IPv6 bracket in the host
+        return False
     return parsed.scheme in ('http', 'https') and bool(parsed.netloc)
 
 
@@ -252,12 +333,8 @@ _CONNECT_PAGE_HTML = """<!doctype html>
 <p class="hint">Link: <code id="d">…</code></p>
 <script>
 (function () {
-  // This page's path is `<tofu-root>/api/v1/mobile/connect`; strip at `/api/`
-  // to recover the address the PHONE should dial.
-  var path = location.pathname;
-  var at = path.indexOf('/api/');
-  var root = location.origin + (at >= 0 ? path.slice(0, at + 1) : '/');
-  var q = '/api/v1/mobile/connect/link?url=' + encodeURIComponent(root);
+""" + _PAGE_ROOT_JS + """\
+  var q = root + 'api/v4/mobile/connect/link?url=' + encodeURIComponent(root);
   fetch(q, {headers: {'Accept': 'application/json'}})
     .then(function (r) { return r.json(); })
     .then(function (body) {

@@ -176,20 +176,33 @@ def recipes_from_catalog(rows: list, *, template_key='openrouter') -> dict[str, 
         architecture = row.get('architecture')
         architecture = architecture if isinstance(architecture, dict) else {}
         outputs = architecture.get('output_modalities') or ['text']
-        if not isinstance(outputs, list) or 'text' not in outputs:
-            continue  # This feed only seeds chat-capable routes.
-        inputs = architecture.get('input_modalities') or []
-        parameters = row.get('supported_parameters') or []
-        caps = ['text']
-        if isinstance(inputs, list) and 'image' in inputs:
-            caps.append('vision')
-        if isinstance(parameters, list) and 'reasoning' in parameters:
-            caps.append('thinking')
+        if not isinstance(outputs, list):
+            continue
+        # A generated medium decides the kind. An image or video producer
+        # that also emits text is not a chat route: tagging it 'text' put it
+        # in chat pickers and release review. Image generation executes on
+        # this chat endpoint with an image output modality (lib/image_gen);
+        # no executor consumes a video route here, so video producers are
+        # never seeded.
+        if 'video' in outputs:
+            continue
+        if 'image' in outputs:
+            caps = ['image_gen']
+        elif 'text' not in outputs:
+            continue  # Neither a chat nor an image-generation route.
+        else:
+            inputs = architecture.get('input_modalities') or []
+            parameters = row.get('supported_parameters') or []
+            caps = ['text']
+            if isinstance(inputs, list) and 'image' in inputs:
+                caps.append('vision')
+            if isinstance(parameters, list) and 'reasoning' in parameters:
+                caps.append('thinking')
         recipe = {'model_id': model_id, 'capabilities': caps}
         context = row.get('context_length')
         if template_key == 'cerebras':
             declared = row.get('capabilities') or {}
-            if isinstance(declared, dict):
+            if isinstance(declared, dict) and 'text' in caps:
                 if declared.get('vision') is True:
                     caps.append('vision')
                 if declared.get('reasoning') is True:

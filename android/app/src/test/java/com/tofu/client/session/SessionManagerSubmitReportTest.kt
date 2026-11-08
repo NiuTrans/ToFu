@@ -54,6 +54,7 @@ class SessionManagerSubmitReportTest {
         }
         override suspend fun touchLastUsed(id: Long, timestamp: Long): Int = 1
         override suspend fun setAuthType(id: Long, authType: AuthType): Int = 1
+        override suspend fun pinSshHostKey(id: Long, host: String, port: Int, sha256: String): Int = 0
     }
 
     /** Captures the request and answers with a fixed status. */

@@ -35,7 +35,16 @@ def set_serving_loop(loop) -> None:
 def _finalize_rejected_submission(task: dict, error: Exception) -> None:
     """Settle a bound task when scheduling or worker entry failed."""
     from lib.error_envelope import make_envelope, task_start_failure_cause
-    from lib.tasks_pkg.manager import finalize_chat_task_error
+    from lib.tasks_pkg.manager import finalize_chat_task_aborted, finalize_chat_task_error
+
+    if task.get('_abort_reason') == 'server_shutdown' and task.get('aborted'):
+        # A tearing-down executor refuses work this process already quiesced.
+        # Settling it as a start failure would forfeit its restart resume.
+        try:
+            finalize_chat_task_aborted(task)
+        finally:
+            _settle_unscheduled_workspace(task)
+        return
 
     config = task.get('config') or {}
     # The fixed title only says THAT the executor did not start; carry

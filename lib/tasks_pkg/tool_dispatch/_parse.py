@@ -65,6 +65,41 @@ def _invalid_caller_rejection(
     }
 
 
+def _unavailable_tool_rejection(
+    fn_name: str | None, known: set[str], declared_mcp: set[str],
+) -> tuple[str, dict[str, Any]] | None:
+    """Receipt for a real tool this task cannot run; it is not a hallucination.
+
+    A registered tool can need an environment capability this kernel lacks,
+    and the receipt says how to make it available. A retained MCP declaration
+    is not an execution grant.
+    """
+    if not isinstance(fn_name, str) or not fn_name or fn_name in known:
+        return None
+    from lib.tools.environment_capabilities import environment_unavailable_tool
+    refusal = environment_unavailable_tool(fn_name)
+    if refusal is not None:
+        return (
+            'Error: ' + refusal['message'] + ' ' + refusal['recovery_hint'],
+            {'kind': 'tool_unavailable', 'attempted': fn_name,
+             'suggestions': [], 'reason': 'environment_capability_missing',
+             'missing_capabilities': refusal['missing_capabilities'],
+             'declared': False, 'executable': False})
+    if fn_name not in declared_mcp:
+        return None
+    return (
+        f'Error: `{fn_name}` was declared to the model but is not '
+        'currently available in this task\'s live tool catalog and '
+        'was NOT executed. The retained MCP declaration is not an '
+        'execution grant. Connection, discovery, or permission state '
+        'may have changed; restore availability before retrying, or '
+        'use a currently available tool. This is not a fabricated '
+        'tool name.',
+        {'kind': 'tool_unavailable', 'attempted': fn_name,
+         'suggestions': [], 'reason': 'declared_without_live_authority',
+         'declared': True, 'executable': False})
+
+
 def _reject_undispatched(tc, display_name, tc_id, receipt_msg, rejected_meta,
                          task, tool_round_num, round_num, project_enabled,
                          early_entry=None):
@@ -376,20 +411,11 @@ def parse_tool_calls(
         # The chat-specific PRESENTATION layered on the result below (UI
         # auto-fixed badge, autopilot loop-break, raw-
         # args diagnostic log) stays here — it's not shared behaviour.
-        if fn_name in _declared_mcp and fn_name not in _known:
-            _unavailable_msg = (
-                f'Error: `{fn_name}` was declared to the model but is not '
-                'currently available in this task\'s live tool catalog and '
-                'was NOT executed. The retained MCP declaration is not an '
-                'execution grant. Connection, discovery, or permission state '
-                'may have changed; restore availability before retrying, or '
-                'use a currently available tool. This is not a fabricated '
-                'tool name.')
+        _unavailable = _unavailable_tool_rejection(fn_name, _known, _declared_mcp)
+        if _unavailable is not None:
+            _unavailable_msg, _unavailable_meta = _unavailable
             _receipt, tool_round_num = _reject_undispatched(
-                tc, fn_name, tc_id, _unavailable_msg,
-                {'kind': 'tool_unavailable', 'attempted': fn_name,
-                 'suggestions': [], 'reason': 'declared_without_live_authority',
-                 'declared': True, 'executable': False},
+                tc, fn_name, tc_id, _unavailable_msg, _unavailable_meta,
                 task, tool_round_num, round_num, project_enabled,
                 early_entry=_take_early(tc_id))
             parsed_tcs.append(_receipt)

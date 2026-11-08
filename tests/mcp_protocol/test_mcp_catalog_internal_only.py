@@ -1,7 +1,7 @@
 """tests/mcp_protocol/test_mcp_catalog_internal_only.py — opensource catalog filtering.
 
 Pins the contract that ``internal_only`` catalog entries (hope / llm /
-xuecheng — Meituan-internal MCP servers whose launchers aren't shipped to
+xuecheng — YourProvider-internal MCP servers whose launchers aren't shipped to
 opensource) are:
 
   * present in the full internal/personal build, and

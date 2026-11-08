@@ -1,16 +1,23 @@
-"""lib/oauth/manager/_device.py — device-authorization login flow (Codex).
+"""lib/oauth/manager/_device.py — device-authorization login flows (Codex, Kimi).
 
 The loopback callback (localhost:1455) only works when the browser and the
-Tofu server share a machine. For every other deployment — remote server,
-container, SSH box — OpenAI's deviceauth API is the only first-party login
-path that never touches a localhost redirect: the server mints a user code,
-the user enters it at https://auth.openai.com/codex/device in ANY browser
-(phone included), and a background poll thread here collects the resulting
-authorization code and exchanges it.
+Tofu server share a machine. A device grant never touches a localhost
+redirect: the server mints a user code, the user enters it at the provider's
+verification page in ANY browser (phone included), and a background poll
+thread here collects the result.
 
-Flow state lives in ``_active_flows[provider]`` like every other flow, with
-``flow_type='device'`` and a ``cancel_event`` so logout / re-login stops the
-poll thread. CLIProxyAPI parity: sdk/auth/codex_device.go.
+* Codex: OpenAI's deviceauth API yields an authorization code plus a
+  server-issued PKCE verifier, redeemed at the token endpoint
+  (CLIProxyAPI parity: sdk/auth/codex_device.go).
+* Kimi Code: the RFC 8628 device grant at auth.kimi.com returns the tokens
+  directly from the poll (KLIP-14; CLIProxyAPI internal/auth/kimi).
+
+Both share one poll loop: a provider protocol supplies ``request``, ``poll``
+and ``redeem``. Flow state lives in ``_active_flows[provider]`` like every
+other flow, with ``flow_type='device'`` and a ``cancel_event`` so logout /
+re-login stops the poll thread. Device codes and device identifiers never
+leave the server; the status projection exposes only the user code and the
+verification URL.
 """
 
 import threading
@@ -28,16 +35,105 @@ from lib.oauth.manager._state import (
 
 logger = get_logger(__name__)
 
+#: Poll outcome that asks the loop to back off (RFC 8628 §3.5 slow_down).
+_SLOW_DOWN = 'slow_down'
+
+
+class _CodexDevice:
+    """OpenAI deviceauth: user code → authorization code → token exchange."""
+
+    @staticmethod
+    def request(*, user_id: str, device_id: str) -> dict:
+        from lib.oauth.codex import (
+            CODEX_OAUTH_CONFIG, codex_device_request_user_code)
+        req = codex_device_request_user_code(user_id=user_id)
+        return {
+            'device_auth_id': req['device_auth_id'],
+            'user_code': req['user_code'],
+            'verification_url': CODEX_OAUTH_CONFIG['device_verification_url'],
+            'interval': req['interval'],
+            'expires_in': CODEX_OAUTH_CONFIG['device_flow_timeout'],
+        }
+
+    @staticmethod
+    def poll(device_auth_id: str, user_code: str, *, user_id: str,
+             device_id: str):
+        from lib.oauth.codex import codex_device_poll_token
+        return codex_device_poll_token(device_auth_id, user_code,
+                                       user_id=user_id)
+
+    @staticmethod
+    def redeem(result: dict, *, user_id: str):
+        # The device flow's PKCE verifier is issued BY the server in the poll
+        # response, and the exchange must echo the deviceauth redirect, not
+        # the localhost one.
+        from lib.oauth.codex import CODEX_OAUTH_CONFIG, codex_exchange_code
+        return codex_exchange_code(
+            result['authorization_code'], result['code_verifier'],
+            user_id=user_id,
+            redirect_uri=CODEX_OAUTH_CONFIG['device_redirect_uri'])
+
+    @staticmethod
+    def timeout() -> int:
+        from lib.oauth.codex import CODEX_OAUTH_CONFIG
+        return CODEX_OAUTH_CONFIG['device_flow_timeout']
+
+
+class _KimiDevice:
+    """Kimi Code RFC 8628 grant: the poll itself returns the tokens."""
+
+    @staticmethod
+    def request(*, user_id: str, device_id: str) -> dict:
+        from lib.oauth.kimi import kimi_device_request_code
+        req = kimi_device_request_code(device_id=device_id)
+        return {
+            'device_auth_id': req['device_code'],
+            'user_code': req['user_code'],
+            'verification_url': req['verification_url'],
+            'interval': req['interval'],
+            'expires_in': req['expires_in'],
+        }
+
+    @staticmethod
+    def poll(device_auth_id: str, user_code: str, *, user_id: str,
+             device_id: str):
+        from lib.oauth.kimi import DEVICE_PENDING, kimi_device_poll_token
+        result = kimi_device_poll_token(device_auth_id, device_id=device_id)
+        if result == DEVICE_PENDING:
+            return None
+        return result
+
+    @staticmethod
+    def redeem(result: dict, *, user_id: str):
+        from lib.oauth.kimi import kimi_save_login_token
+        return kimi_save_login_token(result)
+
+    @staticmethod
+    def timeout() -> int:
+        from lib.oauth.kimi import KIMI_OAUTH_CONFIG
+        return KIMI_OAUTH_CONFIG['device_flow_timeout']
+
+
+_DEVICE_PROTOCOLS = {'codex': _CodexDevice, 'kimi': _KimiDevice}
+
+
+def _device_id_for(provider: str) -> str:
+    """Kimi keeps one device identity per installed login; Codex has none."""
+    if provider != 'kimi':
+        return ''
+    from lib.oauth.kimi import kimi_new_device_id
+    from lib.oauth.token_store import load_token
+    return str((load_token('kimi') or {}).get('device_id') or kimi_new_device_id())
+
 
 def start_device_flow(provider: str, *, owner_user_id: int) -> dict:
     """Start a device-authorization login flow.
 
-    Mints a user code from OpenAI and spawns the background poll thread;
-    the frontend displays the code and polls the regular status endpoint.
+    Mints a user code and spawns the background poll thread; the frontend
+    displays the code and polls the regular status endpoint.
 
     Args:
-        provider: Only 'codex' — OpenAI is the only supported provider with
-            a deviceauth API.
+        provider: 'codex' or 'kimi' — the subscriptions with a device grant.
         owner_user_id: Authenticated repository owner. The worker captures
             this value once and never infers identity in its background thread.
 
@@ -45,7 +141,8 @@ def start_device_flow(provider: str, *, owner_user_id: int) -> dict:
         dict with 'user_code', 'verification_url', 'interval',
         'expires_in' — or {'error': ...} when the code could not be minted.
     """
-    if provider != 'codex':
+    protocol = _DEVICE_PROTOCOLS.get(provider)
+    if protocol is None:
         return {'error': f'Device login is not available for {provider}'}
 
     from lib.identity import require_user_id
@@ -53,39 +150,36 @@ def start_device_flow(provider: str, *, owner_user_id: int) -> dict:
         owner_user_id, context='OAuth device flow owner')
     user_id = str(owner_user_id)
 
-    from lib.oauth.codex import (
-        CODEX_OAUTH_CONFIG,
-        codex_device_request_user_code,
-    )
     from lib.oauth.manager._relay import _close_previous
 
     # A device flow and a loopback flow cannot coexist for one provider —
     # they share _active_flows[provider]. Stop a previous poll thread and
     # release any relay still bound to the callback port.
     stop_device_flow(provider)
-    from lib.oauth.manager._flow import try_reuse_codex_login
-    reused = try_reuse_codex_login(owner_user_id=owner_user_id)
-    if reused is not None:
-        return reused
+    if provider == 'codex':
+        from lib.oauth.manager._flow import try_reuse_codex_login
+        reused = try_reuse_codex_login(owner_user_id=owner_user_id)
+        if reused is not None:
+            return reused
     _close_previous(provider)
 
     from lib.oauth.token_store import OAuthExchangeError
+    device_id = _device_id_for(provider)
     try:
-        req = codex_device_request_user_code(user_id=user_id)
+        req = protocol.request(user_id=user_id, device_id=device_id)
     except OAuthExchangeError as e:
         return {'error': str(e), 'status_code': e.status_code,
                 'detail': e.detail}
 
-    timeout = CODEX_OAUTH_CONFIG['device_flow_timeout']
+    timeout = min(int(req['expires_in']), protocol.timeout())
     cancel = threading.Event()
     flow_id = uuid.uuid4().hex
-    verification_url = CODEX_OAUTH_CONFIG['device_verification_url']
     with _flows_lock:
         _active_flows[provider] = {
             'flow_id': flow_id,
             'status': 'started',
             'flow_type': 'device',
-            'auth_url': verification_url,
+            'auth_url': req['verification_url'],
             'state': '',
             'pkce': {},
             'started_at': time.time(),
@@ -99,7 +193,7 @@ def start_device_flow(provider: str, *, owner_user_id: int) -> dict:
             'device': {
                 'device_auth_id': req['device_auth_id'],
                 'user_code': req['user_code'],
-                'verification_url': verification_url,
+                'verification_url': req['verification_url'],
                 'interval': req['interval'],
             },
             'cancel_event': cancel,
@@ -109,7 +203,8 @@ def start_device_flow(provider: str, *, owner_user_id: int) -> dict:
         target=_device_poll_loop,
         args=(provider, req['device_auth_id'], req['user_code'],
               req['interval'], cancel, flow_id),
-        kwargs={'user_id': user_id},
+        kwargs={'user_id': user_id, 'device_id': device_id,
+                'timeout_s': timeout},
         daemon=True,
         name=f'oauth-device-{provider}',
     )
@@ -120,7 +215,7 @@ def start_device_flow(provider: str, *, owner_user_id: int) -> dict:
         'status': 'started',
         'provider': provider,
         'user_code': req['user_code'],
-        'verification_url': verification_url,
+        'verification_url': req['verification_url'],
         'interval': req['interval'],
         'expires_in': timeout,
     }
@@ -144,22 +239,19 @@ def _mark(provider: str, flow_id: str, status: str,
 
 def _device_poll_loop(provider: str, device_auth_id: str, user_code: str,
                       interval: int, cancel: threading.Event, flow_id: str, *,
-                      user_id: str = '') -> None:
+                      user_id: str = '', device_id: str = '',
+                      timeout_s: int = 0) -> None:
     """Poll the device-token endpoint until authorized / timeout / cancel."""
-    from lib.oauth.codex import (
-        CODEX_OAUTH_CONFIG,
-        codex_device_poll_token,
-        codex_exchange_code,
-    )
     from lib.oauth.token_store import OAuthExchangeError
 
-    deadline = time.time() + CODEX_OAUTH_CONFIG['device_flow_timeout']
+    protocol = _DEVICE_PROTOCOLS[provider]
+    deadline = time.time() + (timeout_s or protocol.timeout())
     _mark(provider, flow_id, 'waiting_callback')
     try:
         while time.time() < deadline and not cancel.is_set():
             try:
-                result = codex_device_poll_token(
-                    device_auth_id, user_code, user_id=user_id)
+                result = protocol.poll(device_auth_id, user_code,
+                                       user_id=user_id, device_id=device_id)
             except OAuthExchangeError as e:
                 # A network wobble (status 0) must not kill a 15-minute flow
                 # on the first failure; a real upstream rejection must.
@@ -175,24 +267,22 @@ def _device_poll_loop(provider: str, device_auth_id: str, user_code: str,
             if result is None:
                 cancel.wait(interval)
                 continue
+            if result == _SLOW_DOWN:
+                # RFC 8628 §3.5: this and every later poll waits 5s longer.
+                interval += 5
+                cancel.wait(interval)
+                continue
 
             # A new login may have replaced this flow while the network poll
-            # was in flight. Never redeem its authorization code into the
-            # process-global credential after ownership/generation changed.
+            # was in flight. Never redeem its result into the process-global
+            # credential after ownership/generation changed.
             if cancel.is_set() or not _flow_is_current(provider, flow_id):
                 return
 
-            # Authorized — the device flow's PKCE verifier is issued BY the
-            # server in the poll response, and the exchange must echo the
-            # deviceauth redirect, not the localhost one.
             try:
-                token = codex_exchange_code(
-                    result['authorization_code'],
-                    result['code_verifier'],
-                    user_id=user_id,
-                    redirect_uri=CODEX_OAUTH_CONFIG['device_redirect_uri'])
+                token = protocol.redeem(result, user_id=user_id)
             except OAuthExchangeError as e:
-                logger.error('[OAuth] %s device exchange failed: %s',
+                logger.error('[OAuth] %s device redemption failed: %s',
                              provider, e)
                 _mark(provider, flow_id, 'error', str(e))
                 return

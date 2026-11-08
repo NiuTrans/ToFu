@@ -39,14 +39,43 @@ def test_empty_worker_is_discoverable_without_assignment_or_folder():
     result = conversation_page(7, '/project/', repository=repo)
     assert result == {'conversations': [
         {'conversationId': 'worker-empty', 'title': 'worker-empty', 'turnCount': 0,
-         'createdAt': 0, 'updatedAt': 20, 'coordinatorId': 'coordinator-root'},
+         'createdAt': 0, 'updatedAt': 20, 'coordinatorId': 'coordinator-root', 'folderId': None},
         {'conversationId': 'ordinary', 'title': 'ordinary', 'turnCount': 2,
-         'createdAt': 0, 'updatedAt': 20, 'coordinatorId': None}],
+         'createdAt': 0, 'updatedAt': 20, 'coordinatorId': None, 'folderId': None}],
         'nextCursor': None, 'coverage': 'complete'}
     args = repo.list_catalog_page.call_args.kwargs
     assert args['user_id'] == 7 and args['limit'] == PAGE_SIZE
     assert 'include_messages' not in args
-    assert set(args['settings_keys']) == {'projectPath', '_coordinatorSource', 'archived', 'readOnly'}
+    assert set(args['settings_keys']) == {'projectPath', '_coordinatorSource', 'archived', 'readOnly',
+                                          'folderId'}
+    schema = json.loads((Path(__file__).resolve().parents[2] / 'contracts/project_coordination_v1.schema.json').read_text())
+    jsonschema.validate(result, {'$ref': '#/$defs/conversationPage', '$defs': schema['$defs']})
+
+
+def test_rows_carry_their_sidebar_folder_so_adopted_shells_keep_membership():
+    """The sidebar adopts roster rows its catalog lacks as catalog shells. A row
+    without its folder projects as uncategorized although storage files it."""
+    repo = repository(([row('filed', folderId='f_project'), row('unfiled'),
+                        row('malformed', folderId=42), row('overlong', folderId='f' * 513)], False))
+    result = conversation_page(7, '/project', repository=repo)
+    assert [(item['conversationId'], item['folderId']) for item in result['conversations']] == [
+        ('filed', 'f_project'), ('unfiled', None), ('malformed', None), ('overlong', None)]
+    schema = json.loads((Path(__file__).resolve().parents[2] / 'contracts/project_coordination_v1.schema.json').read_text())
+    jsonschema.validate(result, {'$ref': '#/$defs/conversationPage', '$defs': schema['$defs']})
+
+
+def test_live_worker_is_stamped_busy_and_idle_rows_carry_no_flag():
+    """An unopened running worker must not be presented as finished: the page
+    carries the owner's live-task projection exactly like sidebar catalog rows."""
+    repo = repository(([row('worker-live', _coordinatorSource='root'),
+                        row('worker-idle', _coordinatorSource='root'),
+                        row('other-live', '/other')], False))
+    result = conversation_page(7, '/project', repository=repo,
+                               busy_conversation_ids=frozenset({'worker-live', 'other-live'}))
+    entries = {item['conversationId']: item for item in result['conversations']}
+    assert set(entries) == {'worker-live', 'worker-idle'}
+    assert entries['worker-live']['busy'] is True
+    assert 'busy' not in entries['worker-idle']
     schema = json.loads((Path(__file__).resolve().parents[2] / 'contracts/project_coordination_v1.schema.json').read_text())
     jsonschema.validate(result, {'$ref': '#/$defs/conversationPage', '$defs': schema['$defs']})
 

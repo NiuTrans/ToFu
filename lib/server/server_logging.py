@@ -36,6 +36,7 @@ from lib.logging_pkg.log_policy import (
 from lib.logging_pkg.log_rate_limit import DuplicateCoalescingFilter
 from lib.logging_pkg.log_record_values import BoundedFormatter
 from lib.logging_pkg.log_retention import log_removal
+from lib.logging_pkg.log_shared_rotation import SharedRotationMixin
 from lib.logging_pkg.log_signals import LogBudgetFilter
 
 _LOG_FMT = ('%(asctime)s [%(levelname)s] %(name)s [%(threadName)s]: '
@@ -176,12 +177,13 @@ class _PrivateLogFileMixin:
         return stream
 
 
-class _PrivateRotatingFileHandler(_PrivateLogFileMixin, RotatingFileHandler):
+class _PrivateRotatingFileHandler(
+        SharedRotationMixin, _PrivateLogFileMixin, RotatingFileHandler):
     pass
 
 
 class _SizeAndTimeRotatingFileHandler(
-        _PrivateLogFileMixin, TimedRotatingFileHandler):
+        SharedRotationMixin, _PrivateLogFileMixin, TimedRotatingFileHandler):
     """Daily rotation with a per-file ceiling and a whole-family budget.
 
     ``TimedRotatingFileHandler`` alone lets one runaway day create an

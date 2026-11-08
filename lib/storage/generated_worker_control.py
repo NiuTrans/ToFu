@@ -2,3 +2,5 @@
 
 FORMAT = 'tofu.worker-control/v1'
 WATCH_OPERATION = 'worker_control.watch'
+CONVERSATION_FORMAT = 'tofu.conversation-control/v1'
+CONVERSATION_WATCH_OPERATION = 'conversation_control.watch'

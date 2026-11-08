@@ -295,6 +295,11 @@
       "owner": "lib/oauth/codex_shared_login.py",
       "description": "Personal deployments borrow an owner-bound local/desktop Codex login without importing refresh tokens; 0 disables sharing."
     },
+    "ANDROID_HOME": {
+      "status": "documented",
+      "owner": "android/native/check_proot.py",
+      "description": "External tooling location, not a tuning knob: the Android SDK root that Android's own tooling defines. android/native/check_proot.py, like build-proot.sh, runs llvm-readelf from the NDK pinned in android/native/pins.env at $ANDROID_HOME/ndk/<NDK_VERSION> and refuses to run while it is unset; there is no default. Build-time only: the server never reads it."
+    },
     "BAR_SCREENSHOTS": {
       "status": "legacy",
       "owner": "",
@@ -4399,6 +4404,16 @@
       "status": "documented",
       "owner": "tests/evaluations/test_pi_native_contract.py",
       "description": "Absolute path to an extracted runtime tree produced by python -m evaluations.pi_contract build-runtime. When set, the native Pi relay-stub test executes that pinned runtime; when unset, the offline helper and contract tests still run and the live-runtime test skips."
+    },
+    "TOFU_TEST_IMPACT_ROOT": {
+      "status": "documented",
+      "owner": "lib/project_mod/impact_recorder.py",
+      "description": "Checkout whose files the impact recorder attributes code execution, reads and directory listings to (defaults to the test process working directory). Internal instrumentation, not a product setting."
+    },
+    "TOFU_TEST_IMPACT_OUT": {
+      "status": "documented",
+      "owner": "lib/project_mod/impact_recorder.py",
+      "description": "Directory for impact-recorder JSON-lines output. Unset leaves the pytest plugin inert; landing verification sets it per test run. Internal instrumentation, not a product setting."
     }
   },
   "legacy_count": 595

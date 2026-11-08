@@ -36,9 +36,14 @@ def _service():
 
 def _running_reply(conversation, owner, command, task_id):
     from lib.turn_lifecycle import bind_task, create_turn_pair
+    from tests.support.chat_tasks import register_local_executor
     pair = create_turn_pair(conversation, command_id=command, input_projection={'content': 'Status?'},
                             config={}, user_id=owner, conversation_defaults={'allowCreate': True})
     bind_task(pair['attempt']['attemptId'], task_id, user_id=owner)
+    # The bound executor is live in this process, so the steer wakes this inbox.
+    register_local_executor(task_id, conv_id=conversation,
+                            attempt_id=pair['attempt']['attemptId'],
+                            turn_id=pair['turn']['turnId'], user_id=owner)
     return pair
 
 
@@ -81,6 +86,8 @@ def steered(semantic_authority, monkeypatch, tmp_path):
     state.scope = {'user_id': owner, 'project_path': router_home_location(owner),
                    'conversation_id': conversation, 'binding_revision': router['revision']}
     yield state
+    from tests.support.chat_tasks import chat_task_registry
+    chat_task_registry.pop('router-task', None)
     agent_inbox.reset_for_test(conversation)
 
 

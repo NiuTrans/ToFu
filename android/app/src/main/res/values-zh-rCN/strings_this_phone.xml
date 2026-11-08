@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- “本机”：本机内核的适配层、卡片与开源许可页面 -->
+    <string name="kernel_state_stopping">停止中…</string>
+    <string name="this_phone_not_arm64">本机无法自己运行 Tofu：本机内核需要 64 位 ARM（arm64-v8a）设备。</string>
+    <string name="this_phone_not_in_build">此版本的应用不包含本机内核。</string>
+    <string name="this_phone_not_in_foreground">只有应用显示在屏幕上时才能在本机启动 Tofu。请打开应用后重试。</string>
+    <string name="this_phone_stopped_before_ready">本机的 Tofu 在就绪前已停止。</string>
+    <string name="this_phone_health_check_failed">本机的 Tofu 未通过健康检查（%1$s）。</string>
+    <string name="this_phone_keep_running">在后台保持运行</string>
+    <string name="this_phone_keep_running_desc">否则在你离开、且没有运行中的任务和已启用的定时任务时停止。</string>
+    <string name="this_phone_stop">停止</string>
+    <string name="this_phone_notifications_denied">通知已关闭：Tofu 仍在本机运行，但通知栏中不会显示它的状态和“停止”按钮。请在这里停止它。</string>
+    <string name="licences_open">开源许可</string>
+    <string name="licences_title">开源许可</string>
+    <string name="licences_close">关闭</string>
+    <string name="licences_intro">本机内核在 proot 下运行；本应用包含 proot 及 talloc。</string>
+    <string name="licences_proot">proot：GPL-2.0-or-later；因为 libproot.so 静态链接了 talloc，本应用按 GPL-3.0-or-later 分发它。版权所有：STMicroelectronics 以及 PRoot 和 Termux 的贡献者。</string>
+    <string name="licences_talloc">talloc（含其 lib/replace 目标文件）：LGPL-3.0-or-later。版权所有：Andrew Tridgell、Stefan Metzmacher、Jelmer Vernooij、Volker Lendecke 以及其他 Samba 贡献者。</string>
+    <string name="licences_gpl3">GNU 通用公共许可证第 3 版：LGPL-3.0 第 4(b) 节要求随附此文本。</string>
+    <string name="licences_source_offer">源代码提供声明。libproot.so 和 libproot-loader.so 的完整对应源代码为：android/native/pins.env 中按 SHA-256 固定的 proot 与 talloc 源码包，以及构建本应用的 Tofu %1$s 源码中的 android/native/（build-proot.sh、pins.env、talloc-cross-answers.txt 和 patches/）。包含这些文件的每个应用版本发布时都会一并发布它们。</string>
+</resources>

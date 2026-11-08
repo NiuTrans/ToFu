@@ -1,7 +1,8 @@
 """Final Chat Completions projection shared by all HTTP entry points.
 
 Canonical histories retain private replay carriers for other protocols. This
-adapter removes those envelope fields and applies the existing gateway text
+adapter removes those envelope fields, respells tool-call IDs the destination
+would reject (``lib.llm.tool_call_ids``) and applies the existing gateway text
 shape policy without modifying caller state or nested user/tool JSON.
 Dependencies: common request projection and the cache-marker model policy.
 """
@@ -21,6 +22,11 @@ def openai_body_to_chat(body):
     messages = []
     if not isinstance(body.get('messages', []), list):
         raise ProtocolConversionError('request_list_required')
+    from lib.llm.tool_call_ids import (
+        respell_chat_message, tool_call_id_contract, wire_tool_call_ids,
+    )
+    wire_ids = wire_tool_call_ids(
+        body.get('messages') or (), tool_call_id_contract('openai', model))
     for message in body.get('messages') or ():
         if not isinstance(message, dict):
             raise ProtocolConversionError('message_object_required')
@@ -35,6 +41,8 @@ def openai_body_to_chat(body):
                         and isinstance(part.get('text'), str)
                         and set(part) <= {'type', 'text'} for part in content)):
             clean = {**clean, 'content': ''.join(part['text'] for part in content)}
+        if wire_ids:
+            clean = respell_chat_message(clean, wire_ids)
         messages.append(clean)
     projected['messages'] = messages
     report = conversion_report(body, 'openai')

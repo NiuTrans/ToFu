@@ -27,7 +27,9 @@ export class OAuthPanelLifetime {
   private repollTimer = 0;
   private repollAttempts = 0;
   private deviceTimer = 0;
-  private device: {provider: string; connected(status: ProviderStatus): void} | null = null;
+  private deviceRefresh: (() => void) | null = null;
+  // Each subscription provider owns its device flow; one interval serves them all.
+  private readonly devices = new Map<string, (status: ProviderStatus) => void>();
 
   constructor(readonly session: SettingsReadSession) {
     this.scope = session.scope;
@@ -64,15 +66,15 @@ export class OAuthPanelLifetime {
 
   private publishStatus(status: Status): void {
     // The renderer may itself stop device polling or close/reopen Settings.
-    const device = this.device;
+    const devices = [...this.devices];
     this.ports?.publish(status);
     if (!this.isCurrent()) return;
-    if (device) {
-      const result = status[device.provider];
+    for (const [provider, connected] of devices) {
+      const result = status[provider];
       if (!result || result.authenticated || !result.device
           || ['error', 'timeout', 'not_started'].includes(result.status || '')) {
-        this.stopDevicePoll();
-        if (result?.authenticated) device.connected(result);
+        this.stopDevicePoll(provider);
+        if (result?.authenticated) connected(result);
       }
     }
     if (!this.isCurrent()) return;
@@ -96,17 +98,20 @@ export class OAuthPanelLifetime {
   }
 
   startDevicePoll(provider: string, refresh: () => void, connected: (status: ProviderStatus) => void): void {
-    if (this.device?.provider === provider && this.deviceTimer) return;
-    this.stopDevicePoll();
-    if (!this.isCurrent()) return;
-    this.device = {provider, connected};
-    this.deviceTimer = this.scope.interval(refresh, 3000);
+    if (!this.isCurrent() || (this.devices.has(provider) && this.deviceTimer)) return;
+    this.devices.set(provider, connected);
+    this.deviceRefresh = refresh;
+    if (!this.deviceTimer) this.deviceTimer = this.scope.interval(() => this.deviceRefresh?.(), 3000);
   }
 
-  stopDevicePoll(): void {
+  /** Stop one provider's device observation; without a provider, stop all. */
+  stopDevicePoll(provider?: string): void {
+    if (provider === undefined) this.devices.clear();
+    else this.devices.delete(provider);
+    if (this.devices.size) return;
     this.scope.cancelInterval(this.deviceTimer);
     this.deviceTimer = 0;
-    this.device = null;
+    this.deviceRefresh = null;
   }
 }
 

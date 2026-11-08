@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lib.storage.generated_worker_control import WATCH_OPERATION
+from lib.storage.generated_worker_control import WATCH_OPERATION, CONVERSATION_WATCH_OPERATION
 
 import ctypes
 import hashlib
@@ -480,10 +480,13 @@ class _StorageHandler(socketserver.BaseRequestHandler):
                 1000,
             )
 
-        if operation == WATCH_OPERATION:
+        if operation in {WATCH_OPERATION, CONVERSATION_WATCH_OPERATION}:
             if kind != 'query' or request.get('command_id') is not None:
                 raise StorageError('database_protocol_error', 'Worker watch requires a query without a receipt')
-            result = self.server.worker_control.watch(request.get('payload'), deadline_at)
+            control = self.server.worker_control
+            if operation == CONVERSATION_WATCH_OPERATION:
+                control = control.conversations
+            result = control.watch(request.get('payload'), deadline_at)
         elif operation.startswith('native_checkpoint.'):
             if request.get('command_id') is not None:
                 raise StorageError('database_protocol_error', 'Native checkpoint controls cannot use command receipts')

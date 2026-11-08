@@ -98,6 +98,14 @@ def start_background_services(
     process_role = normalize_process_role(process_role)
     from runtime_guards import distributed_preview_is_read_only
 
+    # The local-kernel launch fact (app.extensions['tofu_local_kernel']) must
+    # precede any turn's tool exposure; recording it probes nothing. The
+    # environment probe itself runs after readiness (deferred services).
+    from lib.tools.environment_capabilities import (
+        record_environment_launch_facts)
+
+    record_environment_launch_facts(app)
+
     if distributed_preview_is_read_only(env):
         log.info(
             '[Server] background services disabled by distributed read-only '
@@ -129,6 +137,10 @@ def start_background_services(
         load_saved_proxy_config()
     if owns_request_services:
         bootstrap_personal_key()
+        from lib.tasks_pkg.command_control_runtime import configure
+        configure(app, process_role=process_role, environ=env)
+        from lib.conversation_sync.delivery_runtime import ensure_started
+        _timed(log, 'conversation-delivery', lambda: ensure_started(app))
 
     if owns_task_workers:
         try:
@@ -158,11 +170,12 @@ def start_deferred_background_services(
     """Run best-effort sweeps/probes AFTER the readiness gate opens.
 
     Every step here is idempotent, fail-soft and invisible to the user within
-    the first seconds after ready: resuming interrupted productions, marking
-    interrupted podcasts, the network-path prober and the LAN discovery
-    responder. They were moved off the readiness path because none of them
-    gates a request, and each storage-touching sweep re-pays the full
-    authority round trip while the authority is starved.
+    the first seconds after ready: the environment-capability probe, resuming
+    interrupted productions, marking interrupted podcasts, the network-path
+    prober and the LAN discovery responder. They were moved off the readiness
+    path because none of them gates a request, and each storage-touching
+    sweep re-pays the full authority round trip while the authority is
+    starved.
     """
     from lib.process_roles import (
         CAPABILITY_REQUEST_SERVICES,
@@ -185,6 +198,16 @@ def start_deferred_background_services(
         process_role, CAPABILITY_REQUEST_SERVICES)
     owns_task_workers = process_role_has(
         process_role, CAPABILITY_TASK_WORKERS)
+
+    # This boot's environment-capability probe (presence checks only: PATH
+    # lookups, a browser on disk). A turn that starts first takes it instead;
+    # either way it runs once until a refresh event.
+    try:
+        from lib.tools.environment_capabilities import environment_snapshot
+
+        _timed(log, 'environment-snapshot', environment_snapshot)
+    except Exception as exc:
+        log.warning('[Server] environment-capability probe failed: %s', exc)
 
     if owns_request_services:
         try:
@@ -298,6 +321,15 @@ def start_registered_background_services(app, *, process_role='all'):
     extensions['tofu_registered_background_services_role'] = process_role
     started = 0
 
+    # The split API/execution hosts share one browser bridge: the API owns
+    # extension polls, the execution host relays its queue verbs there.
+    try:
+        from lib.browser.bridge_relay import configure_bridge_owner
+        if configure_bridge_owner(process_role=process_role, environ=os.environ) == 'owner':
+            started += 1
+    except Exception as e:
+        _log.warning('Browser bridge relay unavailable for role %s: %s', process_role, e)
+
     if process_role_has(process_role, CAPABILITY_TASK_WORKERS):
         from lib.evolution.automation import start_terminal_checks
         start_terminal_checks()  # Lazy: no thread until a committed bound task.
@@ -326,6 +358,15 @@ def start_registered_background_services(app, *, process_role='all'):
         except Exception as e:
             _log.warning(
                 'Scheduler worker start deferred (DB unavailable): %s', e)
+
+        # Settings → 数据库 daily dual-path backup.
+        try:
+            from lib.database_panel.maintenance import start_maintenance
+
+            if start_maintenance():
+                started += 1
+        except Exception as e:
+            _log.warning('Database panel maintenance start failed: %s', e)
 
     # ── Catalogue projections (OAuth reconcile + world model catalogue) ──
     # Both syncs are idempotent, insert-or-prune projections consumed only by
@@ -552,7 +593,19 @@ def stop_registered_background_services(app, *, timeout: float = 2.0) -> int:
         ('GitHub channel sessions',
          'lib.channels.github.supervisor', 'stop_github_sessions',
          CAPABILITY_SCHEDULED_JOBS),
+        ('database panel maintenance',
+         'lib.database_panel.maintenance', 'stop_maintenance',
+         CAPABILITY_SCHEDULED_JOBS),
     )
+    try:
+        from lib.browser.bridge_relay import stop_bridge_owner
+        if not stop_bridge_owner(timeout=timeout):
+            all_stopped = False
+            log.warning('browser bridge relay did not stop within %.1fs', timeout)
+    except Exception as exc:
+        all_stopped = False
+        log.warning('browser bridge relay shutdown failed: %s', exc)
+
     import importlib
     for label, module_name, stop_name, capability in owners:
         if not process_role_has(process_role, capability):

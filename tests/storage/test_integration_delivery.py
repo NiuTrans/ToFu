@@ -466,13 +466,11 @@ def test_automatic_task_workspace_freezes_input_without_mutating_canonical(repo,
     assert git(root, 'status', '--porcelain') == status
 
 
-def test_clean_source_workspace_reuses_selected_commit_without_repeated_capture(
-        repo, tmp_path, monkeypatch):
+def test_clean_source_workspace_reuses_selected_commit(repo, tmp_path, monkeypatch):
     root, _work, owner = repo
     monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(tmp_path / 'managed'))
     before = git(root, 'rev-parse', 'HEAD')
     assert git(root, 'status', '--porcelain') == ''
-    assert ic._clean_input_tree(root, before, cancel=None) == git(root, 'rev-parse', 'HEAD^{tree}')
 
     original = ic._alternate_index_tree
     captures = []
@@ -488,7 +486,8 @@ def test_clean_source_workspace_reuses_selected_commit_without_repeated_capture(
     assert created['workId'] == 'clean-source'
     assert row['origin']['inputBaseSha'] == before
     assert row['origin']['inputHeadSha'] == before
-    assert len(captures) == 1
+    # Walk cost is specified in test_integration_snapshot_index.py.
+    assert captures == [git(root, 'rev-parse', 'HEAD^{tree}')] * 2
     assert git(created['workspacePath'], 'rev-parse', 'HEAD') == before
     assert git(created['workspacePath'], 'status', '--porcelain') == ''
 
@@ -1097,6 +1096,39 @@ def test_lazy_workspace_runtime_keeps_python_prefix_private_and_reuses_node_pack
     assert not work.exists()
     assert (package / 'package.json').exists()
     assert (packages / 'borrowed_package.py').exists()
+
+
+def test_lazy_workspace_runtime_keeps_frontend_tool_caches_in_the_task_checkout(repo, monkeypatch):
+    # Vite's dependency cache and config bundles and Vitest's module cache are
+    # written by every build or test run; linked like packages, a task's run
+    # wrote them into the source checkout.
+    from lib.tasks_pkg import workspace_delivery
+    root, _work, owner = repo
+    (root / '.gitignore').write_text('node_modules/\n')
+    dependencies = root / 'node_modules'
+    (dependencies / 'sample').mkdir(parents=True)
+    (dependencies / 'sample' / 'package.json').write_text('{"name":"sample"}\n')
+    caches = ('.vite', '.vite-temp', '.vitest-cache')
+    for name in caches:
+        (dependencies / name).mkdir()
+        (dependencies / name / 'source-entry').write_text('source checkout cache\n')
+    work = automatic_workspace(repo, monkeypatch)
+    task = {'id': 'automatic', '_userId': owner, 'convId': 'conv', '_workspaceDelivery': {
+        'repositories': [{'canonicalRoot': str(root), 'workspacePath': str(work), 'workId': 'automatic'}]}}
+    workspace_delivery.prepare_worker_command_runtime(task)
+    assert (work / 'node_modules/sample').is_symlink()
+    for name in caches:
+        cache = work / 'node_modules' / name
+        assert not cache.is_symlink(), f'{name} links into the source checkout'
+        # What the toolchain does on first use in this checkout.
+        cache.mkdir(exist_ok=True)
+        (cache / 'task-entry').write_text('task checkout cache\n')
+        assert [entry.name for entry in (dependencies / name).iterdir()] == ['source-entry']
+    assert git(work, 'status', '--porcelain') == ''
+    assert automatic_settle(repo)['state'] == 'delivered'
+    # The local caches are reconstructible and do not retain the checkout.
+    assert not work.exists()
+    assert (dependencies / 'sample' / 'package.json').exists()
 
 
 

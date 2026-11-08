@@ -210,3 +210,32 @@ def test_child_tool_entry_requires_exact_effect_acknowledgement(monkeypatch, ech
         assert writes[0]['worker_claim'] == {'worker_id': 'worker', 'fencing_token': 3}
     finally:
         discard_task(child['id'])
+
+
+def test_project_grant_workspace_id_never_renames_the_claimed_task(monkeypatch):
+    """Project grants capture a workspace task id; only the claim names the task."""
+    from lib.tasks_pkg.manager import create_task
+    from lib.tasks_pkg.manager._registry import _create_chat_task
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    owned = context()
+    registered = []
+
+    class Registered(Exception):
+        pass
+
+    def stop_at_registration(**kwargs):
+        registered.append(kwargs['task_id'])
+        raise Registered
+
+    monkeypatch.setattr(chat_task_runtime, 'create', stop_at_registration)
+    config = {'_attemptId': 'attempt', '_turnId': 'turn',
+              '_projectDispatchWorkspaceTaskId': 'project-worker:assignment'}
+    with pytest.raises(Registered):
+        create_task('conv', [], dict(config), user_id=7, principal=owned.principal,
+                    worker_context=owned)
+    assert registered == [owned.claim.task_id]
+    # An explicitly prepared identity is a caller's claim, so a mismatch still refuses.
+    with pytest.raises(ValueError, match='prepared task identity'):
+        _create_chat_task('conv', [], dict(config), user_id=7, principal=owned.principal,
+                          prepared_task_id='project-worker:assignment', worker_context=owned)
+    assert registered == [owned.claim.task_id]

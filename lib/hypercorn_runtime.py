@@ -476,15 +476,24 @@ async def serve(
     *,
     shutdown_trigger: Callable[..., Awaitable] | None = None,
     mode: Literal["asgi", "wsgi"] | None = None,
+    sockets: Sockets | None = None,
+    on_listening: Callable[[Sockets], Any] | None = None,
 ) -> None:
-    """Serve using the caller's loop and the application's lifecycle owner."""
+    """Serve using the caller's loop and the application's lifecycle owner.
+
+    ``sockets`` are listeners the caller bound in advance (an ephemeral port is
+    known only after binding); ``on_listening`` receives them once they accept
+    connections.
+    """
     if config.debug:
         warnings.warn("The config `debug` has no effect when using serve", Warning, stacklevel=2)
     if config.workers != 1:
         warnings.warn("The config `workers` has no effect when using serve", Warning, stacklevel=2)
     await worker_serve(
         wrap_app(app, config.wsgi_max_body_size, mode), config,
+        sockets=sockets,
         shutdown_trigger=shutdown_trigger,
+        on_listening=on_listening,
     )
 
 
@@ -494,6 +503,7 @@ async def worker_serve(
     *,
     sockets: Sockets | None = None,
     shutdown_trigger: Callable[..., Awaitable] | None = None,
+    on_listening: Callable[[Sockets], Any] | None = None,
 ) -> None:
     config.set_statsd_logger_class(StatsdLogger)
 
@@ -595,6 +605,10 @@ async def worker_serve(
         await config.log.info("Running on https://%s (QUIC) (CTRL + C to quit)", bind)
 
     try:
+        if on_listening is not None:
+            # Every listener accepts connections now. A failing report still
+            # takes the drain and lifespan-shutdown path below.
+            on_listening(sockets)
         async with TaskGroup() as task_group:
             task_group.create_task(raise_shutdown(shutdown_trigger))
             task_group.create_task(raise_shutdown(context.terminate.wait))

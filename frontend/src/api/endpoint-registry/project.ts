@@ -5,8 +5,8 @@ import { createProjectPathWrite } from './project-path-singleflight';
 import { buildProjectContinuityEndpoints } from './project-continuity';
 
 import type { CoordinatorConversationPage, CoordinatorReportState, CoordinatorReportReadRequest, CoordinationBinding, CoordinatorProgressState, ProjectMessagePage } from '../project-coordination.generated';
-import type { RouterInstruction, RouterInstructionPage, RouterState, RouterWatchdogReviewRequest,
-  RouterWatchdogState } from '../router.generated';
+import type { RouterInstruction, RouterInstructionPage, RouterOwnerDelegationState, RouterState,
+  RouterWatchdogReviewRequest, RouterWatchdogState } from '../router.generated';
 
 import type { ProjectDispatchRequest, ProjectDispatchRetry, ProjectDispatchRevoke,
   ProjectDispatchReviewRequest, ProjectDispatchPublishRequest, ProjectDispatchView,
@@ -148,6 +148,14 @@ export function createProjectEndpoints(ports: EndpointPorts) {
         { headers: { 'Idempotency-Key': ports.newIdempotencyKey() }, onError: 'throw' }),
     configureRouterWatchdogReview: (body: RouterWatchdogReviewRequest) =>
       post<RouterWatchdogState>('/api/v4/router/watchdog/review', body,
+        { headers: { 'Idempotency-Key': ports.newIdempotencyKey() }, onError: 'throw' }),
+    // The owner's delegation to the main coordinator (docs/ROUTER.md R9): only the
+    // owner's own browser session grants it; any owner request revokes it.
+    routerOwnerDelegation: (signal?: AbortSignal) =>
+      get<RouterOwnerDelegationState>('/api/v4/router/owner-delegation',
+        { signal, timeout: COORDINATION_READ_TIMEOUT_MS, onError: 'throw' }),
+    setRouterOwnerDelegation: (granted: boolean) =>
+      post<RouterOwnerDelegationState>('/api/v4/router/owner-delegation', { granted },
         { headers: { 'Idempotency-Key': ports.newIdempotencyKey() }, onError: 'throw' }),
     newAssignmentCommandId: () => ports.newIdempotencyKey(),
     coordinationAssignments: (path: string, commandId?: string, options?: Pick<ProjectDispatchListQuery, 'cursor' | 'assignmentId'>, signal?: AbortSignal) =>

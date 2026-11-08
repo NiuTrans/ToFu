@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.conversation_workers import worker_attempts as worker_attempts
+
 
 pytestmark = [pytest.mark.api, pytest.mark.auth_mode("open")]
 pytest_plugins = ("tests._chat_sidecar",)
@@ -995,19 +997,13 @@ def test_conversation_delete_is_hidden_and_restore_rebuilds_settled_authority(
 
 
 def test_v3_create_retry_and_snapshot_share_one_authority(
-    flask_client, conversation_sync_db, monkeypatch,
+    worker_attempts,    flask_client, conversation_sync_db, monkeypatch,
 ):
     import lib.conversation_sync.task_start as task_start_runtime
     from routes import conversation_sync_v3 as sync_routes
 
-    starts: list[str] = []
-
-    def fake_start(*args, **kwargs):
-        starts.append("task-sync-a")
-        kwargs["on_task_registered"]("task-sync-a")
-        return "task-sync-a", None
-
-    monkeypatch.setattr(task_start_runtime, "start_conversation_attempt_executor", fake_start)
+    from tests.support.conversation_workers import observe_admissions
+    admissions = observe_admissions(monkeypatch)
     body = {
         "commandId": "sync-command-a",
         "inputTurn": {"content": "hello"},
@@ -1026,7 +1022,7 @@ def test_v3_create_retry_and_snapshot_share_one_authority(
     assert retry["idempotentReplay"] is True
     assert retry["turn"]["turnId"] == first["turn"]["turnId"]
     assert retry["attempt"]["attemptId"] == first["attempt"]["attemptId"]
-    assert starts == ["task-sync-a"]
+    assert [row['taskId'] for row in admissions] == [first['attempt']['taskId']]
 
     response = flask_client.get("/api/v4/conversations/conv-sync-a/sync")
     assert response.status_code == 200
@@ -1405,7 +1401,7 @@ def test_v3_catch_up_beyond_the_window_re_anchors_from_the_stored_head(
 
 
 def test_v3_start_failure_persists_and_returns_complete_actionable_error(
-    flask_client, conversation_sync_db, monkeypatch,
+    worker_attempts,    flask_client, conversation_sync_db, monkeypatch,
 ):
     import lib.conversation_sync.task_start as task_start_runtime
 
@@ -1423,18 +1419,18 @@ def test_v3_start_failure_persists_and_returns_complete_actionable_error(
     }
     response = flask_client.post(
         "/api/v4/conversations/conv-sync-a/turns", json=body)
-    assert response.status_code == 500
-    payload = response.get_json()
-    error = payload["error"]
+    assert response.status_code == 200
+    latest = worker_attempts.run(response.get_json()["attempt"]["attemptId"])
+    error = latest["settlement"]["error"]
     required = {
         "kind", "severity", "retryable", "message", "hint", "detail",
         "model", "context", "source", "raw",
     }
     assert required <= error.keys()
     assert error["kind"] == "task_start_failed"
-    assert error["retryable"] is True
+    assert error["retryable"] is False
+    assert error["retryPolicy"]["automatic"] is False
 
-    latest = payload["latestTurn"]
     persisted_error = latest["settlement"]["error"]
     assert required <= persisted_error.keys()
     assert persisted_error["kind"] == "task_start_failed"
@@ -1610,7 +1606,7 @@ def test_browser_does_not_consume_server_only_snapshot_evidence_fields():
 
 
 def test_v3_route_start_failure_preserves_actionable_cause(
-    flask_client, conversation_sync_db, monkeypatch,
+    worker_attempts,    flask_client, conversation_sync_db, monkeypatch,
 ):
     from lib.model_routing.domain import ModelRoutingError
     import lib.conversation_sync.task_start as task_start_runtime
@@ -1626,34 +1622,34 @@ def test_v3_route_start_failure_preserves_actionable_cause(
             "config": {"model": "legacy-model", "modelRef": {
                 "creator_id": "openai", "model_id": "selected-model"}},
         })
-    assert response.status_code == 500
-    payload = response.get_json()
-    error = payload["error"]
+    assert response.status_code == 200
+    latest = worker_attempts.run(response.get_json()["attempt"]["attemptId"])
+    error = latest["settlement"]["error"]
     assert error["kind"] == "task_start_failed"
     assert error["model"] == "selected-model"
     assert "model_route_unavailable" in error["detail"]
     assert "credential authorization" in error["hint"]
     assert "hintKey" not in error
     assert "private diagnostic" not in str(error)
-    assert payload["latestTurn"]["status"] == "failed"
+    assert latest["status"] == "failed"
     # The durable settlement attaches failure attribution on top of the wire
     # envelope (the response error itself is a strict subset).
-    latest_error = dict(payload["latestTurn"]["settlement"]["error"])
-    assert latest_error.pop("failureAttribution", None) is not None
+    latest_error = dict(latest["settlement"]["error"])
+    assert latest_error.get("failureAttribution") is not None
     assert latest_error == error
     snapshot = flask_client.get(
         "/api/v4/conversations/conv-sync-a/sync").get_json()
     stored = next(turn for turn in snapshot["turns"]
-                  if turn["turnId"] == payload["latestTurn"]["turnId"])
+                  if turn["turnId"] == latest["turnId"])
     # The durable settlement attaches failure attribution on top of the wire
     # envelope (the response error itself is a strict subset).
     settlement_error = stored["settlement"]["error"]
-    assert settlement_error.pop("failureAttribution", None) is not None
+    assert settlement_error.get("failureAttribution") is not None
     assert settlement_error == error
 
 
 def test_v3_route_start_registration_incomplete_names_model_and_cause(
-    flask_client, conversation_sync_db, monkeypatch,
+    worker_attempts,    flask_client, conversation_sync_db, monkeypatch,
 ):
     """A deployment with incomplete inference metadata previously surfaced a
     model-less, cause-less task_start_failed envelope. Pin that the selected
@@ -1675,8 +1671,9 @@ def test_v3_route_start_registration_incomplete_names_model_and_cause(
             "inputTurn": {"content": "hello"},
             "config": {"modelRef": {"creator_id": "openai", "model_id": "gpt-6-sol"}},
         })
-    assert response.status_code == 500
-    error = response.get_json()["error"]
+    assert response.status_code == 200
+    latest = worker_attempts.run(response.get_json()["attempt"]["attemptId"])
+    error = latest["settlement"]["error"]
     assert error["kind"] == "task_start_failed"
     assert error["model"] == "gpt-6-sol"
     assert "model_registration_incomplete" in error["detail"]
@@ -1685,7 +1682,7 @@ def test_v3_route_start_registration_incomplete_names_model_and_cause(
 
 
 def test_v3_route_start_identity_pending_names_model_and_cause(
-    flask_client, conversation_sync_db, monkeypatch,
+    worker_attempts,    flask_client, conversation_sync_db, monkeypatch,
 ):
     from lib.model_routing.domain import ModelRoutingError
     import lib.conversation_sync.task_start as task_start_runtime
@@ -1701,8 +1698,9 @@ def test_v3_route_start_identity_pending_names_model_and_cause(
             "inputTurn": {"content": "hello"},
             "config": {"modelRef": {"creator_id": "openai", "model_id": "gpt-6-sol"}},
         })
-    assert response.status_code == 500
-    error = response.get_json()["error"]
+    assert response.status_code == 200
+    latest = worker_attempts.run(response.get_json()["attempt"]["attemptId"])
+    error = latest["settlement"]["error"]
     assert error["kind"] == "task_start_failed"
     assert error["model"] == "gpt-6-sol"
     assert "model_identity_pending" in error["detail"]
@@ -1710,7 +1708,7 @@ def test_v3_route_start_identity_pending_names_model_and_cause(
 
 
 def test_v3_route_start_provider_scoped_selection_names_its_request_name(
-    flask_client, conversation_sync_db, monkeypatch,
+    worker_attempts,    flask_client, conversation_sync_db, monkeypatch,
 ):
     """A pending provider model is selected as {provider_id, offering_id}, which
     carries no model_id; the envelope must still name what the user picked."""
@@ -1728,8 +1726,9 @@ def test_v3_route_start_provider_scoped_selection_names_its_request_name(
             "config": {"model": "gpt-future-test", "modelRef": {
                 "provider_id": "oauth_codex", "offering_id": "off_pending"}},
         })
-    assert response.status_code == 500
-    error = response.get_json()["error"]
+    assert response.status_code == 200
+    latest = worker_attempts.run(response.get_json()["attempt"]["attemptId"])
+    error = latest["settlement"]["error"]
     assert error["model"] == "gpt-future-test"
     assert "model_identity_pending" in error["detail"]
 

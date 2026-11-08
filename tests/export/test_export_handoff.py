@@ -268,10 +268,11 @@ class TestHandoffArtifacts:
             handoff.run_handoff('personal', tmp_path / 'handoff', _GIT_URL, push=True)
         assert not (tmp_path / 'handoff').exists()
 
-    def test_snapshot_push_preserves_history(self, tmp_path):
+    def test_snapshot_push_preserves_history(self, tmp_path, monkeypatch):
         """Real-git check: snapshot-push lands the export tree as ONE commit
         on top of the existing remote history (fast-forward, never force)."""
         import subprocess
+        import export_pkg._publish as publish
 
         def git(args, cwd):
             proc = subprocess.run(['git', *args], cwd=str(cwd),
@@ -292,6 +293,9 @@ class TestHandoffArtifacts:
         git(['init', '--bare', str(remote)], tmp_path)
         git(['remote', 'add', 'origin', str(remote)], seed)
         git(['push', 'origin', 'master'], seed)
+        # Internal snapshots push only to configured internal targets.
+        monkeypatch.setitem(publish._GIT_REPOS, 'internal', {
+            'remotes': [{'name': 'origin', 'url': str(remote)}], 'branch': 'master'})
 
         dest = tmp_path / 'export'
         dest.mkdir()

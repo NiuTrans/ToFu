@@ -21,7 +21,7 @@ def recover_missing_tool_payload(*, task, result, usage, last_finish_reason,
                                  round_num, phase_retry_count, tid, model,
                                  trace_id):
     """Retry an announced but absent payload; exhaustion remains a failure."""
-    # ── Tool-calls finish WITHOUT payload (2026-08-06 kimi-k3/sankuai
+    # ── Tool-calls finish WITHOUT payload (2026-08-06 kimi-k3/example-corp
     #    incident, conv msh3qeplzneph5 R3) ──
     # The wire reported finish_reason=tool_calls yet zero tool calls
     # were assembled: the gateway lost the model's tool-call deltas

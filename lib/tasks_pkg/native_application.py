@@ -244,12 +244,19 @@ def register_native_application(app,*,configuration):
     return binding
 
 
-def bind_application_native_task(task,*,flow=False):
-    """Resolve the current application port; CLI/transient composition stays explicit."""
-    from quart import current_app,has_app_context
-    if not has_app_context():
-        return
-    binding=current_app.extensions.get('tofu_native_application')
+def bind_application_native_task(task,*,flow=False,application=None):
+    """Borrow the issued application port without inheriting HTTP authorization.
+
+    Durable workers receive their owning application explicitly at composition.
+    Request callers retain the same application-context port; detached workers
+    never need to copy a human request or guess a process-global application.
+    """
+    if application is None:
+        from quart import current_app,has_app_context
+        if not has_app_context():
+            return
+        application = current_app
+    binding=application.extensions.get('tofu_native_application')
     if binding is not None:
         if not isinstance(binding,NativeApplicationBinding):
             raise NativeConfigurationError('native application port is not issued')

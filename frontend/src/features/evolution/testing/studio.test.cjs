@@ -110,7 +110,7 @@ test('closing a route-opened briefing hands focus to the world, so hotkeys keep 
 
 test('a stalled status read says where it is stuck, and the dialogue hands the fault to the Watchdog',async()=>{
  const error="ModuleNotFoundError: No module named 'tofu_environments.capacity'";
- const origin='tofu_meituan_environments/hope_catalog.py:3 in <module>';
+ const origin='tofu_yourprovider_environments/hope_catalog.py:3 in <module>';
  let current=run({compute_wait:{operation_id:'job-9ec7',task_id:'task-a',parked:true,next_poll_at:0,last_error:error,
   last_error_origin:origin,failed_since:1700000000},result:'Compute dependency pending; no completion or scientific acceptance.'});
  let pending;const handoffs=[];

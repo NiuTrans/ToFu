@@ -68,10 +68,49 @@ Deliberate boundaries
     restart impossible BY DEFAULT, loudly audited at every transition, and
     forces any forgery into the open (an agent caught calling the decide
     endpoint is unambiguously malicious, not careless).
+
+Human provenance and the owner's delegation (owner decision 2026-11-06)
+------------------------------------------------------------------------
+The 2026-07-28 ruling ("a human approves every live-server restart") is
+narrowed to: a human approves every restart, OR the owner has granted their
+Global Router a revocable delegation (docs/ROUTER.md R9). Every decision this
+gate accepts names its provenance:
+
+  * :func:`decide` requires ``human-ui`` provenance, which only the HTTP
+    boundary derives from an owner's browser session
+    (``routes/api_v1/auth.human_ui_provenance``). A direct call with a
+    free-text ``decided_by`` (11-05: "explicit-user-instruction-via-codex-chat")
+    is refused and audited: agents never approve.
+  * :func:`set_delegation` grants only with ``human-ui`` provenance; the grant
+    names its grantee (the owner's current Global Router conversation and
+    binding revision) and covers ``DELEGATION_SCOPES``. Revocation is
+    immediate: every delegated action re-checks the grant in the same
+    transaction that commits it.
+  * :func:`begin_delegated_action` / :func:`accept_delegated_restart` are the
+    delegation branch of this gate: the grant check, the cooldown stamp and
+    the audit record commit together. There is no token, environment
+    variable or pending request on this path, and no grant means a typed
+    :class:`DelegationRefused` (audited, nothing pending).
+  * ``serverctl.py`` keeps the operator paths (an interactive terminal's
+    typed confirmation, and the ``TOFU_LIFECYCLE_GATE_PASSED`` /
+    ``TOFU_RESTART_GATE_PASSED`` handoff of a caller that already passed
+    this gate), but :func:`record_operator_pass` writes each as a distinct,
+    audited ``interactive-terminal`` / ``environment-override`` record.
+
+Residual risks (stated, not solved): open mode has no authentication, so a
+local process can forge a loopback request with browser Fetch Metadata; such
+provenance is recorded as ``assurance: advisory`` (a UI session cookie is
+``authenticated``). An agent driving the owner's real browser acts through the
+owner's session and is indistinguishable here; the browser access policy
+(page mutation needs the owner's per-domain approval, the Tofu client tab is
+never an automation target) and the durable tool rounds of that agent are the
+existing controls and evidence, and every decision keeps its user agent and
+peer in the record and in audit.log.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -113,6 +152,28 @@ _APPROVALS_FILE = os.path.join(data_root(), 'lifecycle_approvals.json')
 _STATE_FILE = os.path.join(data_root(), 'lifecycle_state.json')
 
 _TERMINAL = ('consumed', 'denied', 'expired')
+
+# What the owner's delegation to their Global Router covers. One grant covers
+# all of them: the owner turns one authorization on or off (AGENTS.md #5).
+DELEGATION_SCOPES = ('restart', 'conversation_control')
+PROVENANCE_HUMAN_UI = 'human-ui'
+PROVENANCE_TERMINAL = 'interactive-terminal'
+PROVENANCE_ENVIRONMENT = 'environment-override'
+PROVENANCE_DELEGATION = 'owner-delegation'
+_HUMAN_CREDENTIALS = ('session', 'open-mode')
+# A same-origin browser request: Fetch Metadata where the browser sends it
+# (trustworthy origins), else an Origin header naming this host.
+_BROWSER_EVIDENCE = ('fetch-metadata', 'origin')
+
+
+class DelegationRefused(PermissionError):
+    """A typed refusal of an action under the owner's delegation; nothing ran."""
+
+    execution_started = False
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 # ── internals ─────────────────────────────────────────────────────────
@@ -253,18 +314,62 @@ def create_request(action: str, origin: dict | None = None) -> dict:
     return _public(rec)
 
 
-def decide(approval_id: str, approved: bool, *, decided_by: str = 'ui',
-           decide_ua: str = '') -> dict | None:
+def require_human_provenance(provenance) -> dict:
+    """Return the validated ``human-ui`` provenance or raise PermissionError.
+
+    Only the HTTP boundary mints it from an owner's same-origin browser
+    request (``routes/api_v1/auth.human_ui_provenance``): a user principal
+    over the UI session (or the loopback open-mode UI), never an API key.
+    In-process callers cannot turn a chat instruction into this shape by
+    accident; forging it is deliberate and lands in the audit trail. In open
+    mode it is only a claim (see :func:`provenance_assurance`).
+    """
+    fields = ('kind', 'ownerUserId', 'subject', 'credential', 'browser', 'userAgent',
+              'remoteAddr')
+    if (not isinstance(provenance, dict) or set(provenance) != set(fields)
+            or provenance['kind'] != PROVENANCE_HUMAN_UI
+            or type(provenance['ownerUserId']) is not int or provenance['ownerUserId'] < 1
+            or provenance['credential'] not in _HUMAN_CREDENTIALS
+            or provenance['browser'] not in _BROWSER_EVIDENCE
+            or not all(isinstance(provenance[name], str)
+                       for name in ('subject', 'userAgent', 'remoteAddr'))):
+        raise PermissionError(
+            'human_approval_required: only the owner, acting in the Tofu UI, can approve '
+            'this; agents never approve lifecycle actions or grant delegations')
+    return dict(provenance)
+
+
+def provenance_assurance(provenance: dict) -> str:
+    """How much a ``human-ui`` provenance proves: ``authenticated`` or ``advisory``.
+
+    A UI session cookie is a real credential. Open mode has no
+    authentication: any local process can send a loopback request with
+    browser Fetch Metadata, so its provenance only records a claim.
+    """
+    return 'authenticated' if provenance.get('credential') == 'session' else 'advisory'
+
+
+def decide(approval_id: str, approved: bool, *, provenance) -> dict | None:
     """Human decision. Approve → one-time token (short TTL); deny → terminal.
 
-    ``decide_ua`` records the decider's user-agent: in open-auth mode a
-    forged approval dance is possible in principle, but a curl-flavoured
-    decider UA is then a smoking gun sitting in the audit trail —
-    deliberateness is forced into the open ().
+    ``provenance`` must be the ``human-ui`` provenance of the owner's browser
+    request; anything else (an agent acting on a chat instruction) raises
+    PermissionError before the store changes. The decider's user-agent stays
+    on the record (``decide_ua``), so a forged approval dance in open-auth
+    mode remains a smoking gun in the audit trail.
 
     Returns the updated record, or None when the id is unknown / already
     terminal / expired (fail-closed — a stale pending cannot be approved).
     """
+    try:
+        human = require_human_provenance(provenance)
+    except PermissionError:
+        audit_log('lifecycle_approval_decide_refused', approval_id=approval_id,
+                  approved=approved, provenance=str(provenance)[:300])
+        logger.warning('[Lifecycle] decide(%s) REFUSED: no human UI provenance',
+                       str(approval_id)[:8])
+        raise
+    decided_by, decide_ua = 'ui', human['userAgent']
     now = _now()
     outcome: dict = {}
 
@@ -282,6 +387,8 @@ def decide(approval_id: str, approved: bool, *, decided_by: str = 'ui',
             rec['decided_at'] = now
             rec['decided_by'] = decided_by
             rec['decide_ua'] = decide_ua
+            rec['decided_via'] = human
+            rec['decided_assurance'] = provenance_assurance(human)
             if approved:
                 rec['expires_at'] = now + APPROVED_TTL_SEC
             outcome['record'] = dict(rec)
@@ -303,7 +410,8 @@ def decide(approval_id: str, approved: bool, *, decided_by: str = 'ui',
                    approval_id[:8], decide_ua or '-')
     audit_log('lifecycle_approval_decided', approval_id=approval_id,
               action=rec['action'], approved=approved, decided_by=decided_by,
-              decide_ua=decide_ua)
+              decide_ua=decide_ua, credential=human['credential'],
+              remote=human['remoteAddr'])
     return _public(rec)
 
 
@@ -681,6 +789,420 @@ def consume_restart(approval_id: str, *, now: float | None = None) -> tuple:
     return ok, why, remaining
 
 
+# ── operator passes recorded by serverctl (distinct, audited provenance) ──
+
+def record_operator_pass(action: str, provenance: dict) -> dict:
+    """Record a lifecycle action an operator path let through, before it runs.
+
+    ``serverctl.py`` keeps two operator paths: the typed confirmation of an
+    interactive terminal, and the handoff variable of a caller that already
+    passed this gate (``restart_15000.sh``, the TofuDB cutover). Each pass is
+    a consumed record with its own provenance kind, so a restart through them
+    is never again invisible in the approval history.
+    """
+    if action not in ACTIONS:
+        raise ValueError(f'unknown lifecycle action: {action!r}')
+    kind = provenance.get('kind') if isinstance(provenance, dict) else None
+    if kind not in (PROVENANCE_TERMINAL, PROVENANCE_ENVIRONMENT):
+        raise ValueError('operator pass provenance must be interactive-terminal or environment-override')
+    now = _now()
+    rec = {
+        'id': secrets.token_urlsafe(16), 'action': action, 'status': 'consumed',
+        'requested_at': now, 'decided_at': now, 'consumed_at': now, 'expires_at': None,
+        'decided_by': kind, 'origin': dict(provenance),
+    }
+
+    def _mut(cur):
+        document = _document(cur)
+        records = document['records']
+        _sweep_expired(records, now)
+        records.append(rec)
+        document['records'] = _prune(records)
+        return document
+
+    update_json_atomic(_APPROVALS_FILE, _mut, default=None, strict=True)
+    audit_log('lifecycle_operator_pass', approval_id=rec['id'], action=action, provenance=kind,
+              **{key: provenance.get(key) for key in ('variable', 'pid', 'ppid', 'user', 'tty')
+                 if provenance.get(key) is not None})
+    return _public(rec)
+
+
+# ── the owner's delegation to their Global Router (owner decision 2026-11-06) ──
+
+_GRANTEE_FIELDS = frozenset({'kind', 'conversationId', 'bindingRevision', 'tenant'})
+_REQUESTER_FIELDS = _GRANTEE_FIELDS | {'turnId', 'attemptId'}
+_ACTION_STATUSES = ('accepted', 'restarting', 'completed', 'refused', 'failed')
+
+
+def _owner_key(owner) -> str:
+    from lib.identity import require_user_id
+    return str(require_user_id(owner, context='owner delegation'))
+
+
+def _revoked(owner: int) -> dict:
+    return {'version': 1, 'owner': owner, 'state': 'revoked', 'revision': 0,
+            'scopes': list(DELEGATION_SCOPES), 'grantee': None, 'grantedAt': None,
+            'grantedBy': None, 'assurance': None, 'revokedAt': None, 'revokedBy': None,
+            'updatedAt': None}
+
+
+def _router_identity(value, fields: frozenset, what: str) -> dict:
+    if (not isinstance(value, dict) or set(value) != fields or value['kind'] != 'global_router'
+            or not isinstance(value['conversationId'], str) or not value['conversationId'].strip()
+            or type(value['bindingRevision']) is not int or value['bindingRevision'] < 1
+            or value['tenant'] is not None and not isinstance(value['tenant'], str)
+            or any(value.get(name) is not None and not isinstance(value[name], str)
+                   for name in ('turnId', 'attemptId'))):
+        raise ValueError(f'The delegation {what} must be the owner\'s Global Router conversation')
+    return dict(value)
+
+
+def _delegation_of(document: dict, owner_key: str) -> dict | None:
+    delegations = document.get('delegations') or {}
+    if not isinstance(delegations, dict):
+        raise JsonStoreReadError('lifecycle delegation store has invalid shape')
+    record = delegations.get(owner_key)
+    if record is not None and not isinstance(record, dict):
+        raise JsonStoreReadError('lifecycle delegation record has invalid shape')
+    return record
+
+
+def _actions(document: dict) -> list:
+    actions = document.setdefault('delegatedActions', [])
+    if not isinstance(actions, list) or any(not isinstance(item, dict) for item in actions):
+        raise JsonStoreReadError('lifecycle delegated action store has invalid shape')
+    return actions
+
+
+def _prune_actions(actions: list) -> list:
+    """The approval records' retention bound; audit.log keeps every event."""
+    if len(actions) <= _KEEP_RECORDS:
+        return actions
+    return sorted(actions, key=lambda item: item.get('requestedAt', 0), reverse=True)[:_KEEP_RECORDS]
+
+
+def _check_grant(document: dict, owner_key: str, requester: dict, scope: str) -> dict:
+    record = _delegation_of(document, owner_key)
+    if not record or record.get('state') != 'granted':
+        raise DelegationRefused(
+            'owner_delegation_not_granted',
+            'The owner has not granted the main coordinator their delegation. Ask the owner to turn on '
+            '"Act for me" in the main coordinator\'s header in Tofu, or to do this themselves (a restart: '
+            'Settings → Update). No approval request was created.')
+    if scope not in (record.get('scopes') or ()):
+        raise DelegationRefused('owner_delegation_scope', f'The owner\'s delegation does not cover {scope}')
+    try:
+        require_human_provenance(record.get('grantedBy'))
+    except PermissionError as error:
+        raise DelegationRefused('owner_delegation_not_granted',
+                                'The delegation record carries no human grant; it authorizes nothing') from error
+    grantee = record.get('grantee') or {}
+    from lib.identity import tenant_scope
+    if (grantee.get('conversationId') != requester['conversationId']
+            or grantee.get('bindingRevision') != requester['bindingRevision']
+            or tenant_scope(grantee.get('tenant')) != tenant_scope(requester['tenant'])):
+        raise DelegationRefused(
+            'owner_delegation_router_changed',
+            'The owner granted their delegation to an earlier main coordinator; it does not carry over. '
+            'Ask the owner to grant it again.')
+    return record
+
+
+def _read_document() -> dict:
+    try:
+        return _document(read_json(_APPROVALS_FILE, default=None, strict=True))
+    except JsonStoreReadError as error:
+        logger.warning('[Lifecycle] delegation store read failed: %s', error)
+        raise DelegationRefused('owner_delegation_unavailable',
+                                'The approval store could not be read; nothing ran') from error
+
+
+def delegation(owner) -> dict:
+    """The owner's delegation record; a revoked default when it was never granted."""
+    key = _owner_key(owner)
+    record = _delegation_of(_read_document(), key)
+    return dict(record) if record else _revoked(int(key))
+
+
+def set_delegation(owner, granted: bool, *, grantee: dict | None, provenance) -> dict:
+    """Grant (``human-ui`` provenance only) or revoke the owner's Global Router delegation.
+
+    A grant names its grantee, the owner's current Global Router conversation
+    and binding revision, so it never carries over to a replaced router.
+    Revocation needs only an authenticated owner request and is recorded with
+    whatever provenance it had. Setting the current state again is a no-op.
+    """
+    key = _owner_key(owner)
+    if granted:
+        try:
+            actor = require_human_provenance(provenance)
+            if actor['ownerUserId'] != int(key):
+                raise PermissionError('human_approval_required: only the owner can grant their delegation')
+        except PermissionError:
+            audit_log('owner_delegation_grant_refused', owner=int(key), provenance=str(provenance)[:300])
+            raise
+        grantee = _router_identity(grantee, _GRANTEE_FIELDS, 'grantee')
+    else:
+        if not isinstance(provenance, dict) or not isinstance(provenance.get('kind'), str):
+            raise ValueError('Revocation records who revoked it')
+        actor, grantee = dict(provenance), None
+    now = _now()
+    outcome: dict = {}
+
+    def _mut(cur):
+        document = _document(cur)
+        current = _delegation_of(document, key) or _revoked(int(key))
+        if (current['state'] == ('granted' if granted else 'revoked')
+                and (not granted or current.get('grantee') == grantee)):
+            outcome['record'], outcome['changed'] = dict(current), False
+            return None
+        record = {**current, 'state': 'granted' if granted else 'revoked',
+                  'revision': int(current.get('revision') or 0) + 1,
+                  'scopes': list(DELEGATION_SCOPES), 'updatedAt': now}
+        if granted:
+            record.update(grantee=grantee, grantedAt=now, grantedBy=actor,
+                          assurance=provenance_assurance(actor), revokedAt=None, revokedBy=None)
+        else:
+            record.update(revokedAt=now, revokedBy=actor)
+        document['delegations'] = {**(document.get('delegations') or {}), key: record}
+        outcome['record'], outcome['changed'] = dict(record), True
+        return document
+
+    update_json_atomic(_APPROVALS_FILE, _mut, default=None, strict=True)
+    record = outcome['record']
+    if outcome['changed']:
+        audit_log('owner_delegation_granted' if granted else 'owner_delegation_revoked',
+                  owner=int(key), revision=record['revision'],
+                  router=(record.get('grantee') or {}).get('conversationId') or '',
+                  provenance=actor.get('kind'), credential=actor.get('credential') or '',
+                  assurance=record.get('assurance') or '',
+                  ua=actor.get('userAgent') or '', remote=actor.get('remoteAddr') or '')
+        logger.warning('[Lifecycle] owner delegation %s (owner=%s, revision=%s)',
+                       'GRANTED' if granted else 'REVOKED', key, record['revision'])
+    return record
+
+
+def check_delegation(owner, requester: dict, scope: str) -> dict:
+    """The live grant covering ``scope`` for this Global Router, or DelegationRefused."""
+    key = _owner_key(owner)
+    requester = _router_identity(requester, _REQUESTER_FIELDS, 'requester')
+    try:
+        return dict(_check_grant(_read_document(), key, requester, scope))
+    except DelegationRefused as refusal:
+        audit_log('owner_delegation_refused', owner=int(key), scope=scope, code=refusal.code,
+                  router=requester['conversationId'], turn=requester.get('turnId') or '')
+        raise
+
+
+def delegated_action_id(owner, requester: dict, scope: str, key: str) -> str:
+    """One action per (owner, Global Router, scope, idempotency key)."""
+    return 'od-' + hashlib.sha256(json.dumps(
+        [int(_owner_key(owner)), requester['conversationId'], scope, key],
+        ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
+
+
+def _observed(record: dict) -> dict:
+    """A restart handed to the server manager reads as completed once a newer server answers.
+
+    The manager reports no outcome back. Every accepted restart replaces the
+    serving worker, so a process that booted after the handover proves the
+    restart; until then the record stays ``restarting`` (handed over). A
+    refusal inside the manager (logs/server-manager.log) leaves it there.
+    """
+    from lib import boot_identity
+    accepted = record.get('acceptedAt')
+    if (record.get('status') != 'restarting' or not _valid_timestamp(accepted)
+            or boot_identity.BOOT_TS <= accepted):
+        return record
+    return {**record, 'status': 'completed',
+            'detail': f'The server restarted: generation {boot_identity.BOOT_ID} booted after the handover.'}
+
+
+def delegated_action(owner, action_id: str) -> dict | None:
+    key = int(_owner_key(owner))
+    for record in _actions(_read_document()):
+        if record.get('id') == action_id and record.get('owner') == key:
+            return _observed(dict(record))
+    return None
+
+
+def delegated_actions(owner) -> list:
+    """The owner's retained delegated actions, newest first."""
+    key = int(_owner_key(owner))
+    records = [_observed(dict(record)) for record in _actions(_read_document()) if record.get('owner') == key]
+    return sorted(records, key=lambda item: item.get('requestedAt', 0), reverse=True)
+
+
+def _action_record(action_id, key, requester, scope, *, reason, trigger, target, grant, now, status,
+                   code=None, detail=None) -> dict:
+    return {'id': action_id, 'owner': int(key), 'scope': scope, 'requester': requester,
+            'reason': reason, 'trigger': trigger, 'target': target,
+            'grantRevision': grant['revision'] if grant else None,
+            'grantedBy': (grant or {}).get('grantedBy'), 'requestedAt': now, 'status': status,
+            'code': code, 'detail': detail, 'updatedAt': now}
+
+
+def begin_delegated_action(owner, requester: dict, *, scope: str, key: str, reason: str,
+                           trigger: dict, target: dict) -> tuple[dict, bool]:
+    """Check the grant and record the accepted action in one transaction.
+
+    Returns ``(record, replayed)``; a replay of the same key returns the
+    original record and changes nothing, so retrying never acts twice.
+    """
+    owner_key = _owner_key(owner)
+    requester = _router_identity(requester, _REQUESTER_FIELDS, 'requester')
+    action_id = delegated_action_id(owner, requester, scope, key)
+    now = _now()
+    outcome: dict = {}
+
+    def _mut(cur):
+        document = _document(cur)
+        actions = _actions(document)
+        for record in actions:
+            if record.get('id') == action_id:
+                outcome.update(record=dict(record), replayed=True)
+                return None
+        try:
+            grant = _check_grant(document, owner_key, requester, scope)
+        except DelegationRefused as refusal:
+            outcome['refusal'] = refusal
+            return None
+        record = _action_record(action_id, owner_key, requester, scope, reason=reason, trigger=trigger,
+                                target=target, grant=grant, now=now, status='accepted')
+        actions.append(record)
+        document['delegatedActions'] = _prune_actions(actions)
+        outcome.update(record=dict(record), replayed=False)
+        return document
+
+    update_json_atomic(_APPROVALS_FILE, _mut, default=None, strict=True)
+    if 'refusal' in outcome:
+        audit_log('owner_delegation_refused', owner=int(owner_key), scope=scope,
+                  code=outcome['refusal'].code, router=requester['conversationId'],
+                  turn=requester.get('turnId') or '')
+        raise outcome['refusal']
+    record = outcome['record']
+    if not outcome['replayed']:
+        audit_log('owner_delegation_action', action_id=action_id, owner=int(owner_key), scope=scope,
+                  router=requester['conversationId'], turn=requester.get('turnId') or '',
+                  trigger=(trigger or {}).get('kind') or '', target=json.dumps(target)[:300],
+                  reason=reason[:300], grant_revision=record['grantRevision'])
+    return record, outcome['replayed']
+
+
+def record_delegated_refusal(owner, requester: dict, *, scope: str, reason: str, trigger: dict | None,
+                             target: dict, code: str, detail: str) -> dict | None:
+    """Record an attempt refused while a grant covered it; without one, audit.log only."""
+    owner_key = _owner_key(owner)
+    requester = _router_identity(requester, _REQUESTER_FIELDS, 'requester')
+    now = _now()
+    outcome: dict = {}
+
+    def _mut(cur):
+        document = _document(cur)
+        try:
+            grant = _check_grant(document, owner_key, requester, scope)
+        except DelegationRefused:
+            return None
+        record = _action_record('od-' + secrets.token_hex(16), owner_key, requester, scope,
+                                reason=reason, trigger=trigger, target=target, grant=grant, now=now,
+                                status='refused', code=code, detail=detail[:2000])
+        actions = _actions(document)
+        actions.append(record)
+        document['delegatedActions'] = _prune_actions(actions)
+        outcome['record'] = dict(record)
+        return document
+
+    update_json_atomic(_APPROVALS_FILE, _mut, default=None, strict=True)
+    audit_log('owner_delegation_refused', owner=int(owner_key), scope=scope, code=code,
+              router=requester['conversationId'], turn=requester.get('turnId') or '',
+              detail=detail[:300])
+    return outcome.get('record')
+
+
+def _update_action(owner, action_id: str, change) -> dict | None:
+    key = int(_owner_key(owner))
+    outcome: dict = {}
+
+    def _mut(cur):
+        document = _document(cur)
+        for record in _actions(document):
+            if record.get('id') == action_id and record.get('owner') == key:
+                result = change(document, record)
+                outcome['record'] = dict(record)
+                return document if result is not False else None
+        return None
+
+    update_json_atomic(_APPROVALS_FILE, _mut, default=None, strict=True)
+    return outcome.get('record')
+
+
+def settle_delegated_action(owner, action_id: str, *, status: str, code: str | None = None,
+                            detail: str | None = None) -> dict | None:
+    """Record the outcome of an accepted delegated action."""
+    if status not in _ACTION_STATUSES:
+        raise ValueError(f'unknown delegated action status: {status!r}')
+    now = _now()
+
+    def change(_document, record):
+        record.update(status=status, code=code, detail=(detail or None) and detail[:2000], updatedAt=now)
+
+    record = _update_action(owner, action_id, change)
+    audit_log('owner_delegation_action_settled', action_id=action_id, status=status, code=code or '',
+              detail=(detail or '')[:300])
+    return record
+
+
+def accept_delegated_restart(owner, action_id: str, requester: dict, *,
+                             interrupted: list | tuple = ()) -> dict:
+    """The delegation branch of restart acceptance: the grant, cooldown and stamp commit together.
+
+    Called after preparation succeeded and immediately before the old server
+    is handed to its lifecycle owner. A grant revoked meanwhile, or another
+    accepted restart inside the cooldown, refuses here. ``interrupted`` names
+    the conversations the owner accepted interrupting. Returns the action
+    record; ``status == 'restarting'`` is the only acceptance.
+    """
+    owner_key = _owner_key(owner)
+    requester = _router_identity(requester, _REQUESTER_FIELDS, 'requester')
+    legacy_last = _read_legacy_restart_stamp()
+    now = _now()
+    accepted: dict = {}
+
+    def change(document, record):
+        if record.get('status') != 'accepted' or record.get('scope') != 'restart':
+            return False
+        try:
+            _check_grant(document, owner_key, requester, 'restart')
+        except DelegationRefused as refusal:
+            record.update(status='refused', code=refusal.code, detail=str(refusal), updatedAt=now)
+            return True
+        remaining = max(_cooldown_remaining(document.get('last_restart_at'), now),
+                        _cooldown_remaining(legacy_last, now))
+        if remaining > 0:
+            record.update(status='refused', code='restart_cooldown',
+                          detail=f'Another restart was accepted; retry in {remaining}s', updatedAt=now)
+            return True
+        _apply_restart_stamp(document, now)
+        record.update(status='restarting', acceptedAt=now, updatedAt=now,
+                      interrupted=[str(item) for item in interrupted])
+        accepted['ok'] = True
+        return True
+
+    record = _update_action(owner, action_id, change)
+    if record is None:
+        raise DelegationRefused('owner_delegation_action_unknown', 'Unknown delegated restart')
+    if accepted:
+        _mirror_restart_stamp(now)
+        audit_log('owner_delegation_restart_accepted', action_id=action_id, owner=int(owner_key),
+                  router=requester['conversationId'], turn=requester.get('turnId') or '',
+                  grant_revision=record.get('grantRevision'), cooldown_started=True,
+                  interrupted=len(record.get('interrupted') or ()))
+    else:
+        audit_log('owner_delegation_restart_refused', action_id=action_id, owner=int(owner_key),
+                  code=record.get('code') or '', status=record.get('status'))
+    return record
+
+
 # ── restart-class call detector (recovery no-refire note) ─────────────
 
 # Substrings that mark a tool call as a server-lifecycle side effect. Kept
@@ -693,6 +1215,7 @@ _LIFECYCLE_PATTERNS = (
     'serverctl.py restart',
     'supervisorctl restart',
     'perform_server_reexec',
+    'restart_server',
 )
 
 
@@ -759,8 +1282,14 @@ if __name__ == '__main__':
 
 __all__ = [
     'ACTIONS', 'APPROVED_TTL_SEC', 'PENDING_TTL_SEC', 'RESTART_COOLDOWN_SEC',
+    'DELEGATION_SCOPES', 'DelegationRefused', 'PROVENANCE_DELEGATION', 'PROVENANCE_ENVIRONMENT',
+    'PROVENANCE_HUMAN_UI', 'PROVENANCE_TERMINAL',
     'create_request', 'decide', 'get', 'list_records', 'validate', 'consume',
     'restart_cooldown_remaining', 'restart_pending_on_this_process',
     'stamp_restart', 'rollback_restart_stamp', 'consume_restart',
-    'detect_lifecycle_calls', 'consume_any',
+    'detect_lifecycle_calls', 'consume_any', 'record_operator_pass', 'require_human_provenance',
+    'provenance_assurance',
+    'delegation', 'set_delegation', 'check_delegation', 'delegated_action_id', 'delegated_action',
+    'delegated_actions', 'begin_delegated_action', 'record_delegated_refusal',
+    'settle_delegated_action', 'accept_delegated_restart',
 ]

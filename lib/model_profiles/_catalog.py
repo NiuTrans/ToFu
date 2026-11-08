@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from lib.log import get_logger
+from lib.model_info.capability_taxonomy import is_chat_model
 from lib.model_profiles._profile import build_model_profile
 
 logger = get_logger(__name__)
@@ -225,7 +226,7 @@ def configured_model_profiles(
         caps = {str(x) for x in (entry.get('capabilities') or ()) if x}
         if 'text' not in caps:
             continue
-        if caps & {'embedding', 'image_gen', 'transcription', 'tts'}:
+        if not is_chat_model(caps):
             continue
         profile = build_model_profile(
             model_id, provider_id=pid, model_entry=entry)

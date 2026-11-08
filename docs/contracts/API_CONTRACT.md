@@ -739,7 +739,10 @@ endpoints require an OpenAI-compatible cloud or managed-local Connection.
 Long TTS jobs share one bounded route group across their worker fan-out.
 `/api/v4/images/models` and
 `/api/v4/audio/capabilities` are therefore owner projections, not views of a
-process-global dispatcher.
+process-global dispatcher. Image route rows also carry the confirmed Model's
+`creator_id` and, when documented, its effective `media_profile` (registered,
+else maintained official facts; see
+[`MODEL_REGISTRATION.md`](../MODEL_REGISTRATION.md#model-kinds-and-media-facts)).
 
 The stdlib repair launcher stages first-run provider facts as a bounded,
 secret-free `tofu.bootstrap-provider-stage/v1` document. After the Sidecar is
@@ -756,6 +759,23 @@ catalog or infer owner-only voice availability. Authenticated clients use
 rejects `providers`, `models`, and
 `model_catalog` with `legacy_model_routing_state_removed`. The former
 `/api/v4/model-catalog` surface is not registered.
+
+The same response carries `environment`, this kernel's environment-capability
+snapshot (owner `lib/tools/environment_capabilities.py`; schema
+`ENVIRONMENT_SECTION_SCHEMA`, the handler's declared response):
+`{revision, local_kernel, capabilities}`, where `capabilities` has one
+`{available, reason}` entry for each of `shell`, `git`, `python`, `uv`,
+`node`, `browser`, `devices` and `lan_discovery`. `reason` is null when
+available, otherwise `not_installed`, `local_kernel`, `loopback_bind` or
+`disabled`. The section holds booleans and reason codes only, never host
+paths. The snapshot is probed once per boot (right after readiness, or by an
+earlier first turn), again after a model shell command finishes, and on the
+authenticated re-scan `POST /api/v4/capabilities/environment/refresh`, which
+returns `{environment}`. `revision` increases only when a probe observes a
+different result, and equal revisions mean equal tool exposure: tools whose
+declared capability is unavailable are not exposed to the model, and a changed
+result applies from the next turn's tool assembly. A local kernel reports
+`devices` and `lan_discovery` unavailable with reason `local_kernel`.
 
 Artificial Analysis is an external, read-only Model enrichment, not a catalog authority. Authenticated owners read `GET /api/v4/model-intelligence/aa`, explicitly refresh with `POST /api/v4/model-intelligence/aa/refresh`, and save or clear their encrypted owner-scoped key with `PUT /api/v4/model-intelligence/aa/key` (`{api_key}`, maximum 256 characters). Responses expose only status, redacted key source/hint, attribution, fetch time, the AA Intelligence Index version every score belongs to (`index_version`, major.minor as AA reports it, null while unknown), and published scores keyed by exact `creator_id::model_id` (a Model AA lists without a current-version score has no entry); they never include the plaintext key or any ProviderAccess, Offering, Deployment, alias, or Route. Ordinary reads never wait on the external network: a bounded 24-hour public dataset cache is served while one background refresh refills stale data. OpenRouter pricing is a second external Model enrichment with an explicit write policy. `GET /api/v4/model-intelligence/openrouter-pricing` returns a read-only report that buckets each canonical Model as priced, fillable, official-covered, openrouter-free, unmatched, or drift (a priced Model whose USD list price disagrees with the OpenRouter row by more than 25% blended — a cross-check signal, never an auto-rewrite). `POST /api/v4/model-intelligence/openrouter-pricing/refresh` force-fetches the public keyless catalog and CAS-writes `list_pricing` only onto unpriced Models whose Creator has no official-direct coverage in the maintained pricing tables; officially priced Models are never rewritten, and all-zero OpenRouter rows never become a $0 list price (unknown stays unknown instead of impersonating an official free tier). The dataset shares the same bounded 24-hour cache/background-refresh budget as the AA enrichment.
 
@@ -1359,14 +1379,25 @@ distinguishable from a handler/transport error, and any retained partial output
 is owner-scoped and explicitly incomplete.
 
 The authenticated per-command `POST /api/v4/chat/background-command/<task_id>`
-requests **handoff**, not cancellation, of the currently executing local
+requests **handoff**, not cancellation, of the currently executing
 `run_command`/`code_exec` process. Its command-scoped identity must match the
 active subprocess, so a delayed request cannot detach a subsequent tool call
-on the same task. Acknowledgement means only that handoff was requested; the
-command card and model receive the background handle after the runner accepts
-and settles the original tool round. No active or matching subprocess, a
-terminal task, stdin wait, Stop/interrupt, or exhausted handoff capacity leaves
+on the same task. Only the command owner can acknowledge successful handoff;
+the command card and model receive its background handle through the original
+tool round. A pending acknowledgement is explicitly `handoff_pending`. No active
+or matching subprocess, a terminal task, stdin wait or Stop/interrupt leaves
 the original command foreground-owned; the response never invents success.
+
+Managed API and execution processes share these semantics through
+[`command_control_v1.json`](../../contracts/command_control_v1.json).
+The private loopback endpoint is authenticated and bound to the resident
+execution incarnation; it is never exposed in manager status. Requests retain
+their explicit owner and exact command identity. Interrupt stamps the current
+PID, while background handoff uses the existing command control owner.
+Unconfirmed delivery returns 503 and is never replayed automatically. The
+existing two-second handoff confirmation budget bounds the entire exchange.
+The execution lifespan withdraws admission and joins entered callbacks before
+worker cleanup, including when the network observer disconnects or cancels.
 
 ## 6. Adding a new endpoint — checklist
 
@@ -1424,6 +1455,17 @@ instructions are listed by default) and `POST
 (`Idempotency-Key` required) manage standing instructions: pause and resume are
 idempotent, cancellation is final and a cancelled instruction cannot be paused
 or resumed (400); unknown query or body fields are 400.
+`GET /api/v4/router/owner-delegation` reads the owner's delegation to the main
+coordinator (`ownerDelegationState`: the grant, whether it covers the current
+router, and the retained audit records newest first); `POST` (scope `admin`,
+`Idempotency-Key` required) `{granted}` grants only for the owner acting in the
+Tofu UI (UI session cookie or loopback open-mode UI plus same-origin browser
+evidence; otherwise 403, 401 for a cross-site open-mode write, and 403 while
+the router is unbound) and revokes for any authenticated owner request
+([ROUTER.md R9](../ROUTER.md#r9-the-owners-delegation-the-global-router-acts-for-the-owner-owner-decision-2026-11-06)).
+The same human-UI rule now applies to `POST
+/api/v4/update/lifecycle-approvals/{id}/decide`: an API key, script or agent
+gets 403 and the request stays pending.
 
 The bootstrap `contracts/api_v4.yaml` deliberately carries only the API-major
 negotiation operations (its generator rejects other paths); product routes such

@@ -261,6 +261,12 @@ async def push_ws():
         logger.debug('[Push] rid resolve failed (minted %s): %s', _rid, _e)
 
     # ── Resolve WS handshake auth (HTTP before_request does not run) ────
+    from routes.api_v1.auth import local_kernel_authority_refused
+    if local_kernel_authority_refused(websocket.headers.get('Host')):
+        from quart import abort
+        logger.warning('[Push] WS rejected (reason=local_kernel_host, rid=%s)',
+                       _rid)
+        abort(403)
     try:
         # Snapshot transport data before dispatch; preserve case-insensitive
         # header lookup and do not let a worker touch connection-owned values.

@@ -1213,11 +1213,21 @@ def _build_rg_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, c
 
 def _build_grep_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
     """Build GNU grep command, or None when GNU ``--include`` cannot select
-    exactly the files *include* selects."""
+    exactly the files *include* selects.
+
+    ``-E`` is required: rg (the preferred backend) and the pure-Python
+    fallback both read the pattern as a regex, but GNU grep's default is a
+    BASIC regex. Without it a pattern such as ``AKIA|ASIA`` is matched as the
+    literal text ``AKIA|ASIA`` and the tool reports "No matches found" for
+    matches that exist — a false negative the model then acts on. GNU ERE
+    supports the documented alternation/grouping/quantifier subset; rg-only
+    constructs (look-around, non-greedy) still fail loudly through
+    ``_backend_rejected_request`` rather than returning an empty result.
+    """
     if count_only:
-        cmd = ['grep', '-rci', '--color=never', '-I']
+        cmd = ['grep', '-rciE', '--color=never', '-I']
     else:
-        cmd = ['grep', '-rni', '--null', '--color=never', '-I']
+        cmd = ['grep', '-rniE', '--null', '--color=never', '-I']
     cmd.append('--no-messages')  # same stderr contract as _build_rg_cmd
     # See _build_rg_cmd: complete, deterministic exclusions (no [:30] cap).
     # GNU grep searches hidden files by default and also applies

@@ -13,6 +13,14 @@ Both command entry points reuse `code_exec.finalize_command_output`, including
 failed execution. Verify project freshness/refusal, working-file witnesses,
 background handoff, image/artifact and command-output suites when moving phases.
 
+Read tools streamed during the model response are pre-executed by
+`../streaming_tool_executor.StreamingToolAccumulator._execute_one` and served
+as prefetch hits, so `_handle_project_tool` never runs for them. Mirror every
+new pre-execution side effect of read tools (freshness tokens, guidance
+acquisition, timing anchors) there, in the same order and with the same
+exemptions; `tests/tasks_pkg/test_project_guidance_streamed_reads.py` drives
+both paths.
+
 ## Editing rules
 
 - Parse the registered schema once, recover explicit owner/task/project context,

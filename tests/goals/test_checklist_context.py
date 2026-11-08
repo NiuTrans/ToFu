@@ -150,8 +150,8 @@ def test_surviving_marker_does_not_prove_a_complete_current_carrier(damage):
 
     _restore(messages, task)
 
-    assert messages[0] == prefix[0]
-    assert len(messages) == len(prefix)
+    assert messages[:len(prefix)] == prefix
+    assert len(messages) == len(prefix) + 1
     _assert_current(messages[-1:], task)
 
 
@@ -300,21 +300,21 @@ def test_maximum_active_list_is_complete_even_under_tiny_optional_context_budget
     assert len(_text(messages).encode('utf-8')) < 80 * 1024
 
 
-def test_progress_refresh_replaces_only_managed_snapshot():
+def test_progress_refresh_appends_current_snapshot_after_sent_history():
     task = _task()
     messages = [{'role': 'user', 'content': 'Continue.'}]
     _restore(messages, task)
-    frozen = copy.deepcopy(messages)
+    sent = copy.deepcopy(messages)
     updated = copy.deepcopy(task['_todos'])
     updated[1]['status'] = 'completed'
     updated[2]['status'] = 'in_progress'
     todo.apply_todo_write_to_task(task, {'todos': updated})
     _restore(messages, task)
     _assert_current(messages[-1:], task)
-    assert messages[0] == frozen[0]
-    assert len(messages) == len(frozen)
+    assert messages[:len(sent)] == sent
+    assert len(messages) == len(sent) + 1
     _restore(messages, task)
-    assert len(messages) == len(frozen)
+    assert len(messages) == len(sent) + 1
 
 
 @pytest.mark.parametrize('mode', ['append', 'replace'])
@@ -426,19 +426,20 @@ def test_reactive_restoration_failure_never_builds_an_incomplete_body(monkeypatc
         _task(), {}, 'test-model', [], [], 'medium', False, cause, 'test') is None
 
 
-def test_cleared_versioned_state_replaces_stale_active_carrier_without_rewriting_history():
+def test_cleared_versioned_state_supersedes_stale_carrier_without_rewriting_history():
     task = _task()
     messages = [{'role': 'user', 'content': 'Change the plan.'}]
     _restore(messages, task)
-    frozen = copy.deepcopy(messages)
+    sent = copy.deepcopy(messages)
     _, _, outcome = todo.apply_todo_write_to_task(task, {
         'explanation': 'The user cancelled this scope.', 'todos': []})
     assert not outcome['rejected']
     _restore(messages, task)
+    # The explicitly empty snapshot is the newest state, so the stale list that
+    # a previous request already carried stays history and cannot resurrect.
     assert 'The accepted todo list is empty.' in _text(messages[-1:])
-    assert messages[0] == frozen[0]
-    assert len(messages) == len(frozen)
-    assert 'Repair the context boundary' not in _text(messages)
+    assert messages[:len(sent)] == sent
+    assert len(messages) == len(sent) + 1
 
 
 @pytest.mark.parametrize('profile', ['default', 'codex'])
@@ -513,6 +514,7 @@ def test_gateway_accepted_receipt_avoids_restore_across_rounds(mode):
     task = _task()
     messages = [{'role': 'user', 'content': 'Continue.'}]
     _restore(messages, task)
+    sent = copy.deepcopy(messages)
     _, output, _ = todo.apply_todo_write_to_task(task, {
         'todos': task['_todos'], 'explanation': 'Updated evidence only.'})
     receipt = {'name': 'todo_write', 'status': 'done',
@@ -530,7 +532,7 @@ def test_gateway_accepted_receipt_avoids_restore_across_rounds(mode):
     for round_num in (2, 3, 17):
         task['_activeRoundNum'] = round_num
         _restore(messages, task)
-    assert messages == [{'role': 'user', 'content': 'Continue.'}] + tool_pair
+    assert messages == sent + tool_pair
     assert task.get(INJECTED_NOTES_FIELD) == notes
 
 
@@ -575,7 +577,7 @@ def test_recycled_call_id_does_not_make_foreign_quote_authoritative():
     _assert_current(messages[-1:], task)
 
 
-def test_mixed_carrier_removes_only_obsolete_checklist_section():
+def test_mixed_carrier_in_sent_history_stays_byte_identical():
     from lib.tasks_pkg.context_composer import ComposeRequest, render_context, context_block
     from lib.tasks_pkg.context_composer.checklist import build_checklist_context_block
     task = _task()
@@ -590,13 +592,79 @@ def test_mixed_carrier_removes_only_obsolete_checklist_section():
     carrier['_contextBlocks'] = [b for m in managed for b in m['_contextBlocks']]
     messages = [messages[0], carrier]
     _write_and_settle(task, messages, [], tc_id='clear')
-    history = copy.deepcopy(messages[2:])
+    sent = copy.deepcopy(messages)
     _restore(messages, task)
-    assert 'Sibling file evidence' in _text(messages)
+    # The settled empty-list receipt proves the current state; the obsolete
+    # section is history the provider already cached, so nothing is rewritten
+    # or appended. Compaction, which rewrites the prefix anyway, removes it
+    # (test_compaction_candidate_cleanup_is_copy_on_write_for_mixed_carriers).
+    assert messages == sent
+
+
+def _previous_request_carried(monkeypatch, count):
+    """Cache tracking's sent-prefix answer: messages[:count] were dispatched."""
+    from lib.tasks_pkg.cache_tracking import _prefix
+    monkeypatch.setattr(_prefix, 'get_cache_prefix_count', lambda *a, **k: count)
+
+
+def _recovered_then_updated(mixed):
+    """A recovery carrier is sent, then the model updates the list.
+
+    ``mixed`` reproduces the Coordinator request of 2026-11-06 09:39 (R47 to
+    R48): human text followed the carrier, so both shared one wire message.
+    """
+    task = _task()
+    task['convId'] = 'conv-checklist-prefix'
+    messages = [{'role': 'user', 'content': 'Continue.'}]
+    _restore(messages, task)
+    if mixed:
+        messages.append({'role': 'user', 'content': 'Forwarded owner request: export again.'})
+    sent = copy.deepcopy(messages)
+    updated = copy.deepcopy(task['_todos'])
+    updated[1]['status'] = 'completed'
+    updated[2]['status'] = 'in_progress'
+    _write_and_settle(task, messages, updated)
+    return task, messages, sent
+
+
+@pytest.mark.parametrize('mixed', [False, True])
+def test_todo_update_after_recovery_keeps_every_sent_byte(monkeypatch, mixed):
+    from lib.tasks_pkg.compaction._layer1 import micro_compact
+    from lib.tasks_pkg.context_composer import (
+        ComposeRequest, append_context_blocks, context_block)
+    task, messages, sent = _recovered_then_updated(mixed)
+    _previous_request_carried(monkeypatch, len(sent))
+    for round_num in (5, 6):
+        task['_activeRoundNum'] = round_num
+        # Every live preparation step of the next rounds: L1, a round-scoped
+        # append and final dispatch admission.
+        micro_compact(messages, task=task, steps=[])
+        append_context_blocks(messages, [context_block(
+            'modified_files', f'Round {round_num} file evidence')], ComposeRequest(task=task))
+        _restore(messages, task)
+        assert messages[:len(sent)] == sent
+    # The settled receipt is the current evidence: no recovery is re-injected.
+    assert _text(messages[len(sent):]).count(CHECKLIST_HEADING) == 0
+    _assert_current(messages[len(sent):], task)
+
+
+@pytest.mark.parametrize('mixed', [False, True])
+def test_prefix_rewrites_still_withdraw_the_stale_carrier(monkeypatch, mixed):
+    from lib.tasks_pkg.compaction._layer1 import micro_compact
+    from lib.tasks_pkg.context_composer.checklist import carry_checklist_through_compaction
+    task, messages, _sent = _recovered_then_updated(mixed)
+    candidate = copy.deepcopy(messages)
+    carry_checklist_through_compaction(candidate, task)
+    assert CHECKLIST_HEADING not in _text(candidate)
+    _assert_current(candidate, task)
+    # L1 owns no cached prefix here (first request, or its prefix is ignored),
+    # so the stale section goes as part of that rewrite.
+    _previous_request_carried(monkeypatch, 0)
+    micro_compact(messages, task=task, steps=[])
     assert CHECKLIST_HEADING not in _text(messages)
-    assert messages[0]['content'] == 'Keep the real user text.'
-    assert messages[2:] == history
-    assert all(b['id'] != 'active_checklist' for b in messages[1]['_contextBlocks'])
+    _assert_current(messages, task)
+    if mixed:
+        assert 'Forwarded owner request: export again.' in _text(messages)
 
 
 def test_compaction_carries_state_without_emitting_another_intervention():

@@ -252,3 +252,28 @@ def test_frozen_checkpoint_still_waits_for_live_descendants(repo, monkeypatch, k
         assert result['reason'] == ('task_background_commands_running' if kind == 'commands'
                                     else 'task_child_agents_running'), result
     assert not (root / 'task.txt').exists()
+
+
+def test_publication_pin_retires_the_stale_hold_without_publishing(repo, monkeypatch):
+    """A hold written before the pin must not keep reading as a refusal."""
+    from lib.project_dispatch import publication
+
+    root, _, owner = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'task.txt').write_text('captured task\n')
+    allowed = [False]
+    monkeypatch.setattr(publication, 'publication_reason',
+        lambda row, receipt: '' if allowed[0] else 'project_publication_authority_missing')
+    held = automatic_settle(repo)
+    assert held['state'] == 'blocked'
+    with ic._repo_lock(str(root)):
+        assert delivery.release_publication_hold(str(root), 'automatic', user_id=owner) == held
+        allowed[0] = True
+        released = delivery.release_publication_hold(str(root), 'automatic', user_id=owner)
+    assert (released['state'], released['reason']) == ('pending', '')
+    assert released['checkpointSha'] == held['checkpointSha']
+    # Only the receiver publishes, after rechecking every fence.
+    assert not (root / 'task.txt').exists()
+    assert delivery.resume_pending_workspace_deliveries()
+    assert receipt(root)['state'] == 'delivered'
+    assert (root / 'task.txt').read_text() == 'captured task\n'

@@ -313,6 +313,12 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   capacity until the worker releases ownership, including late results.
   `contracts/storage_v2.json` records no aggregate byte admission; the
   launch-derived embedded memory hint is observation only.
+  `src/embed_commit_watch.rs` borrows the authority commit condition directly
+  through the generated ABI in `contracts/worker_control_v1.json`. Its per-wait
+  cancellation token holds no semantic transaction or worker; cancel may precede
+  enrollment and free follows joined borrowers. Preserve panic containment and
+  poisoned-handle refusal. Verify worker-control unit tests and the real embedded
+  client watch/lifecycle lane before changing this port.
   `src/protocol.rs` frame parsing fails closed with `InvalidData` on a
   1-byte read overrun (never `unreachable!`). Its frame writer submits three
   borrowed I/O slices, advances partial writes exactly and retries interruptions;
@@ -344,9 +350,11 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   completion with no wall-clock budget; epoch pacing (120 s floor, 50% duty)
   bounds the collector instead. Online marks and backup-prune marks reach
   value blocks through `backup::visit_semantic_value_references` (manifests
-  only); both marks read through `BlockStore::traversal_reader` (each
-  catalogued segment index streamed once into a per-mark location table,
-  then non-admitting located reads with the exact path as fallback), other
+  only); both marks read through `BlockStore::traversal_reader` (the
+  published catalog location table while it describes the installed
+  catalog, else each catalogued segment index streamed once into a new table
+  that is then published; non-admitting located reads with the exact path
+  as fallback), other
   whole-store passes through the non-admitting `BlockStore::get_traversal`,
   and both drivers report their own stats components. Verify the
   `tests_capture` reachability/cache and `tests_mark_cost` read-cost
@@ -364,8 +372,9 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   one short hold each, it takes catalog slots only below the pressure floor,
   and a compaction error ends compaction, never the scan; verify the backlog
   specifications in `tests` and `tests_fallback_slot`. Every scan probes each
-  live loose block's membership once (`BlockStore::catalogued_payload_segment`),
-  also while compaction is closed: a block the installed catalog holds is a
+  live loose block's membership once (`BlockStore::catalogued_payload_segment`,
+  through the published location table when it can answer), also while
+  compaction is closed: a block the installed catalog holds is a
   redundant copy that goes after its shard (one shard's IDs in memory), and a
   copy-removal error ends copy removal, never the scan; verify
   `tests_redundant_copies`.
@@ -415,6 +424,45 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   closed). Neither repairs the source; recovery from a salvage target is
   the ordinary `restore` path. Verification phase timings include authority
   close; embedded driver-stop timings use fixed names under opt-in diagnostics.
+- `src/block.rs` publishes one catalog location table per installed catalog
+  publication (`catalog_locations`): the online GC driver builds the first
+  table off the authority mutex when an epoch is due, before its capture
+  (`publish_first_catalog_locations`); whole-store passes derive a stale
+  table and reuse a current one; the maintenance worker's overlay poll starts
+  each later derivation, the authority's and the open search index's, on its
+  own thread (`advance_catalog_locations`; installs hold the owning mutex,
+  derivations never do). Cold reads, writer dedupe probes and GC membership probes
+  resolve through `resolve_in_published_catalog` before their exact paths.
+  Each install recomputes in its catalog swap which table segments the new
+  catalog still names (`live_segments`): a stale table locates blocks only
+  through those, and only the installed publication's fully indexed table
+  proves absence, so no lookup resolves through, or re-admits to the dedupe
+  payload cache, a segment the installed catalog dropped. Verify
+  `foreground_cold_packed_reads_resolve_through_the_published_location_table`,
+  `stale_location_tables_locate_kept_segments_and_never_prove_absence`,
+  `dedupe_and_membership_probes_resolve_through_the_published_table`,
+  `derived_catalog_locations_equal_a_fresh_build_of_each_publication`,
+  `a_current_location_table_sends_uncatalogued_blocks_to_their_loose_copy`,
+  `traversal_readers_share_the_current_published_location_table`,
+  `the_first_catalog_location_table_is_built_once`,
+  `driver_publishes_the_first_catalog_location_table_while_epochs_defer` and
+  `worker_derives_the_published_location_tables_of_the_authority_and_the_search_index`;
+  design and measurements: `docs/TOFUDB_BLOCK_READ_PATH.md`.
+- `src/payload_segment.rs` shares one read handle per segment
+  (`vfs::SharedReadFile`, also history sources' reader): a lookup takes the
+  cache's shared lock, clones the cached handle and stamps its own entry's
+  recency, and reads run outside the lock; misses open outside it, admissions
+  evict the least recently used handle under the exclusive lock, and every
+  handle the cache lets go is dropped after the lock is released. A
+  failed read or verification lets go of the cached handle (`read_through`);
+  a handle opened before its segment retired is never admitted. The
+  deterministic VFS serves positioned readers, so counting test VFSes must
+  count segment reads through `open_positioned_reader` as well
+  (`tests_mark_cost::CountingReader`). Verify
+  `concurrent_readers_share_one_segment_handle_and_a_failed_read_releases_it`,
+  `real_segment_files_are_read_through_one_shared_positioned_descriptor`,
+  `a_handle_opened_before_its_segment_retired_is_never_admitted` and the
+  read-handle specifications beside them.
 - `src/block.rs` trusts Bloom negative answers only for an installed catalog
   publication whose every segment the filter covers (per-segment coverage
   records). `verify_payload_segment` covers each segment a publisher adds and
@@ -495,7 +543,7 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   clocks; Turn/page imports reconstruct counts without advancing those values.
 - `src/migration.rs` owns explicit offline import entry points; domain adapters
   must preserve source state and publish their indexes in the same transaction.
-  `src/task_result/migration.rs` is the certified task-results adapter
+  `src/task_result/migration/` is the certified task-results adapter
   (`migration.task.result.*`): exact document bytes/version/timestamp plus
   atomic header, replay-projection, summary, live and cost-experiment index
   reconstruction with independent catalog enumeration.
@@ -706,6 +754,22 @@ armed fault fires. Production still generates UUIDs; never skip unexercised cell
 Run `cargo test --manifest-path packages/tofu-db/Cargo.toml`.  Filesystem or
 commit changes must add a deterministic crash/torn-write test before broader
 application integration tests.
+
+On the dolphinfs FUSE checkout an in-tree `cargo build` can fail repeatedly
+with `Device or resource busy` while renaming `target/release/deps` files.
+Build with `CARGO_TARGET_DIR` on local disk, certify the binary with
+`python3 -m serverctl_pkg.native_engine --project <checkout> --prepare-only
+<new-dir> --candidate <binary>`, and point native test lanes at the certified
+copy with `TOFU_TEST_TOFUDB_BIN`.
+
+Unit tests that open real databases fsync in `tempfile` directories under
+`/tmp`, whose spinning-disk RAID other host work can saturate (2026-11-07:
+fsync p50 85-367 ms, p90 up to 1.4 s; the 33 `maintenance::` tests then did not
+finish within 20 minutes). Before attributing such a timeout to a change, rerun
+with `TMPDIR=/dev/shm/<dir>`: the same binary ran them in 0.6 s.
+`/dev/shm` is `noexec`, so `CARGO_TARGET_DIR` must stay on `/tmp`, and the
+`fastpath::` tests refuse tmpfs by design (`memory-volume` admission), so they
+run with the default `TMPDIR`.
 
 Launch shells export `TOFU_DB_*` settings to every child, including `cargo test`.
 Specifications pin each engine knob they depend on: per-database test overrides

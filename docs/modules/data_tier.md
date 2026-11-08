@@ -15,6 +15,7 @@ owners to the existing performance gates.
 |---|---|---|
 | `lib/storage/` | Web, worker, task, plugin parent | Selected `storage.v1` / native `storage.v2` transport, process-wide response-frame admission, semantic client, structured errors, supervision, readiness/write fence, declarative manifest validation |
 | `lib/storage_authority_sql/` | Dedicated child process | Personal database paths, project lease, FUSE preflight, drivers, pools, transactions, receipts, semantic operation catalog, SQLite backup/restore/handoff |
+| `lib/storage_authority_sql/impact_cache.py` | Landing verifier | Private reconstructible test records and blob fingerprints in an explicit repository cache file; never an application authority or backend fallback |
 | `lib/storage_authority_sql/native_checkpoint_{config,service}.py`, `lib/storage/checkpoint_control.py` | Selected SQL Sidecar / application client | Explicit pinned scope, lazy joined code lifetime and one-attempt instance-bound RPC; no backend switching or generic receipts |
 | `lib/storage_authority_sql/native_checkpoint_outbox.py` | Selected SQL Sidecar | Shared Rust checkpoint transaction capture, ordered SQL prefix verification and passive replay; existing outbox owns encryption/publication |
 | `lib/storage_authority_sql/adapters/sqlite.py` | Sidecar only | One ordered writer without job-count admission, fair priority lanes, demand-created query-only connections with idle reuse, WAL/full-sync, progress watchdog, result-code retry classification |

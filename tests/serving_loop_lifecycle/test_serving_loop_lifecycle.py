@@ -83,11 +83,8 @@ def _install_fakes(monkeypatch, calls, runtime, *, fail_watchdog=False):
         lambda: calls.append(('orphan', {})) or ['task-1'])
     monkeypatch.setattr(
         lifecycle, '_turn_recovery_backstop_body',
-        lambda stop_event, gate_open_ms, _logger: calls.append((
-            'turn-recovery', {
-                'stop_event': stop_event,
-                'gate_open_ms': gate_open_ms,
-            })))
+        lambda stop_event, _logger: calls.append((
+            'turn-recovery', {'stop_event': stop_event})))
     monkeypatch.setattr(
         lifecycle, '_recover_dispatchable_attempts',
         lambda created_before_ms: calls.append((
@@ -150,7 +147,6 @@ def test_loop_owners_start_then_gate_recovery_and_shutdown_every_owner(
                 details for name, details in calls
                 if name == 'turn-recovery')
             assert recovery['stop_event'] is stop
-            assert isinstance(recovery['gate_open_ms'], int)
         assert loop.get_exception_handler() is previous
 
     asyncio.run(exercise())

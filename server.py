@@ -790,8 +790,15 @@ except Exception as _e:
     _AUTH_MODE = 'open'
 
 
-def _bootstrap_personal_key_if_needed():
+def _bootstrap_personal_key_if_needed(personal_key=''):
     global _BOOTSTRAP_TOKEN
+    if personal_key:
+        # A launcher that owns this process (local_kernel.py) supplies the
+        # install's secret: admitted as the personal admin key, never minted,
+        # and no recovery file is written.
+        from lib.api_keys import install_personal_key
+        install_personal_key(personal_key)
+        return
     if (os.environ.get('TOFU_AUTO_KEY', '1') or '1').strip() == '0':
         return
     if _AUTH_MODE == 'open':
@@ -953,6 +960,7 @@ _server_assembly.inject_runtime(
     deployment_configuration=DEPLOYMENT_CONFIGURATION,
     tofu_do_mlock=_tofu_do_mlock,
     project_root=_PROJ_DIR,
+    boot_started_at=_BOOT_T0,
     # Resolve through the LIVE server module at call time: test_restart_smoke
     # re-executes server.py into a temp module and re-runs inject_runtime, so a
     # closure over _start_log_aggregate_runtime_after_recovery would go stale.
@@ -962,7 +970,7 @@ _server_assembly.inject_runtime(
 )
 
 
-def _start_background_workers(target_app=None):
+def _start_background_workers(target_app=None, *, personal_key=''):
     """Start the extracted lifecycle-owned background services."""
     from lib.server.server_background_services import start_background_services
 
@@ -970,7 +978,8 @@ def _start_background_workers(target_app=None):
         target_app or app,
         process_role=DEPLOYMENT_CONFIGURATION.process_role,
         load_saved_proxy_config=_load_saved_proxy_config,
-        bootstrap_personal_key=_bootstrap_personal_key_if_needed,
+        bootstrap_personal_key=lambda: _bootstrap_personal_key_if_needed(
+            personal_key),
         logger=_server_log,
     )
 
@@ -1099,8 +1108,15 @@ def _prepare_frontend_runtime_assets():
 
 
 def register_server_production_lifecycle(
-        target_app, *, shutdown_requested=None, announce_ready=None):
-    """Attach the shared production bootstrap/cleanup recipe to ``target_app``."""
+        target_app, *, shutdown_requested=None, announce_ready=None,
+        personal_key=''):
+    """Attach the shared production bootstrap/cleanup recipe to ``target_app``.
+
+    ``personal_key`` is a launcher-supplied install secret admitted as the
+    personal admin key instead of minting one (``local_kernel.py``).
+    """
+    from functools import partial
+
     from lib.model_routing import bootstrap_personal_model_routing
     from lib.production_lifecycle import (
         ProductionStartupSteps,
@@ -1116,7 +1132,8 @@ def register_server_production_lifecycle(
             start_storage=_start_storage_authority_sql,
             bootstrap_model_routing=bootstrap_personal_model_routing,
             validate_imports=_validate_imports,
-            start_workers=_start_background_workers,
+            start_workers=partial(
+                _start_background_workers, personal_key=personal_key),
             post_ready=_run_post_ready_deferred_with_continuity,
         ),
         shutdown_requested=shutdown_requested,
@@ -1129,13 +1146,16 @@ def register_server_production_lifecycle(
 
 def register_server_runtime_lifecycle(
         target_app, *, shutdown_requested=None, announce_ready=None,
-        host=None, port=None):
+        host=None, port=None, personal_key=''):
     """Attach serving-loop owners before the fail-fast production bootstrap."""
+    from functools import partial
+
     from lib.server.server_runtime_lifecycle import register_runtime_lifecycle
 
     return register_runtime_lifecycle(
         target_app,
-        production_registrar=register_server_production_lifecycle,
+        production_registrar=partial(
+            register_server_production_lifecycle, personal_key=personal_key),
         shutdown_requested=shutdown_requested,
         announce_ready=announce_ready,
         host=host,
@@ -1148,9 +1168,47 @@ def register_server_runtime_lifecycle(
     )
 
 
+async def serve_until_shutdown(
+        target_app, hconfig, *, host, port, shutdown_requested,
+        announce_ready=None, sockets=None, on_listening=None,
+        personal_key=''):
+    """Attach the runtime lifecycle and serve ``target_app`` until shutdown.
+
+    The one serve path of ``python server.py`` and ``local_kernel.py``.
+    ``port`` is the bound port the lifespan owners see; ``sockets`` are
+    listeners bound in advance (port 0 resolves only when bound) and
+    ``on_listening`` receives them once they accept connections.
+    ``personal_key`` is a launcher-supplied install secret.
+    """
+    register_server_runtime_lifecycle(
+        target_app,
+        shutdown_requested=shutdown_requested,
+        announce_ready=announce_ready,
+        host=host,
+        port=port,
+        personal_key=personal_key,
+    )
+
+    # Bridge the SIGTERM threading.Event to an async trigger Hypercorn
+    # awaits. When set, Hypercorn stops accepting new connections and
+    # drains in-flight ones within graceful_timeout. Poll cheaply (the
+    # signal handler can't touch loop state directly from a thread); the
+    # interval bounds how long a requested restart/shutdown idles before
+    # the drain even begins.
+    async def _shutdown_trigger():
+        from lib.server.server_shutdown import wait_for_shutdown_trigger
+        await wait_for_shutdown_trigger(
+            shutdown_requested, logger=_server_log)
+
+    from lib.hypercorn_runtime import serve as hypercorn_serve
+    await hypercorn_serve(
+        target_app, hconfig, shutdown_trigger=_shutdown_trigger,
+        sockets=sockets, on_listening=on_listening)
+
+
 if __name__ == '__main__':
     try:
-        from lib.hypercorn_runtime import serve as hypercorn_serve
+        import lib.hypercorn_runtime  # noqa: F401 -- fail fast before any boot work
     except ImportError:
         sys.stderr.write(
             '\033[31m[server.py] ERROR: hypercorn is not installed.\n'
@@ -1414,26 +1472,13 @@ if __name__ == '__main__':
 
     # ── Run ──
     async def _serve():
-        register_server_runtime_lifecycle(
-            app,
-            shutdown_requested=_shutdown_requested,
-            announce_ready=_announce_ready,
+        await serve_until_shutdown(
+            app, hconfig,
             host=host,
             port=port,
+            shutdown_requested=_shutdown_requested,
+            announce_ready=_announce_ready,
         )
-
-        # Bridge the SIGTERM threading.Event to an async trigger Hypercorn
-        # awaits. When set, Hypercorn stops accepting new connections and
-        # drains in-flight ones within graceful_timeout. Poll cheaply (the
-        # signal handler can't touch loop state directly from a thread); the
-        # interval bounds how long a requested restart/shutdown idles before
-        # the drain even begins.
-        async def _shutdown_trigger():
-            from lib.server.server_shutdown import wait_for_shutdown_trigger
-            await wait_for_shutdown_trigger(
-                _shutdown_requested, logger=_server_log)
-
-        await hypercorn_serve(app, hconfig, shutdown_trigger=_shutdown_trigger)
 
     try:
         asyncio.run(_serve())

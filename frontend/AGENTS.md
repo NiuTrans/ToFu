@@ -46,3 +46,10 @@ the lockfile also owns standalone artifact files and report export integrity.
 Run the smallest focused frontend test, then `npm run check:frontend`. Add
 `make test-frontend`, `make test-visual`, or `make test-e2e` only when the
 change crosses serving, layout, or a user-critical browser journey.
+
+The served graph `static/vite/` is built locally and never committed. Boot
+checks only its integrity (`lib/vite_assets.validate_published_vite_artifact`);
+`serverctl start`/`restart` and the in-app restart first run
+`serverctl.prepare_source_frontend_artifact`, which in a source checkout
+rebuilds a graph that is stale against `frontend/src`. A build in the shared
+checkout also bundles other writers' uncommitted `frontend/src` edits.

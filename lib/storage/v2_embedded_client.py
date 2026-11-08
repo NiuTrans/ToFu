@@ -160,6 +160,20 @@ class EmbeddedStorageV2Client(StorageV2Client):
             session_pool_size=session_pool_size,
         )
 
+    def _commit_watch(self, operation, cursor, deadline_unix_ms, cancellation):
+        with self._pool._condition:
+            if self._pool._closed:
+                raise StorageError('database_unavailable', 'native commit watch client closed')
+        try:
+            envelope = self._embedded_runtime.commit_watch(operation, cursor,
+                deadline_unix_ms=deadline_unix_ms, cancellation=cancellation)
+        except EmbeddedTransportError as error:
+            raise StorageError('database_unavailable', 'embedded commit watch failed', True) from error
+        response = _EmbeddedResponse(envelope)
+        if response.status != 0:
+            raise self._to_storage_error(response, operation)
+        return response.json()
+
     def native_checkpoint_available(self, *, user_id: int) -> bool:
         """Read-only capability check on the selected authority; no fallback/open."""
         if type(user_id) is not int or user_id != self._owner_id:

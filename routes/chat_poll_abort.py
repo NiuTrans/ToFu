@@ -8,7 +8,8 @@ from __future__ import annotations
 import json
 import time
 
-from lib.api_response import api_not_found, api_ok
+from lib.api_response import api_not_found, api_ok, api_service_unavailable
+from quart import current_app
 from lib.log import audit_log, get_logger
 
 from lib.openapi import api_meta
@@ -178,42 +179,29 @@ def chat_interrupt_command(task_id):
       * ``{'interrupted': False, 'reason': 'task_not_running'}``
       * ``{'interrupted': False, 'reason': 'no_active_command'}`` — the task
         is not inside a run_command right now (nothing to interrupt)
-      * ``{'interrupted': True, 'pid': None, 'durable': True}`` — the task is
-        owned by ANOTHER replica; the flag was planted durably and the owner
-        delivers it at its next sweep (distributed mode only)
+    The managed API addresses the verified execution incarnation through its
+    private control port. Missing acknowledgement returns 503; no delayed flag
+    can affect a later command.
     """
     from routes.api_v1.auth import request_user_id
     owner_user_id = int(request_user_id())
-    task = chat_task_runtime.get_owned(task_id, user_id=owner_user_id)
-    if not task:
-        # Cross-replica: the request landed on a replica that does not own
-        # the task. Plant the durable interrupt flag so the owning replica
-        # delivers it to the run_command read loop at its next sweep
-        # (distributed mode only; personal mode keeps the historical 404).
-        from lib.agent_core.task_abort_signal import plant_durable_interrupt
-        if plant_durable_interrupt(
-                task_id, user_id=owner_user_id, source='interrupt_route'):
-            return api_ok({'interrupted': True, 'pid': None,
-                           'durable': True})
+    from lib.tasks_pkg.command_control_runtime import execute
+    from lib.tasks_pkg.command_control_transport import CommandControlUnavailable
+    try:
+        result = execute(current_app, 'interrupt', task_id, user_id=owner_user_id)
+    except CommandControlUnavailable:
+        return api_service_unavailable('The execution owner did not confirm the command control.')
+    if result is None:
         return api_not_found('Not found')
-    if task.get('status') != 'running' or task.get('aborted'):
-        return api_ok({'interrupted': False, 'reason': 'task_not_running'})
-    pid = task.get('_subprocess_pid')
-    if not pid:
-        return api_ok({'interrupted': False, 'reason': 'no_active_command'})
-    chat_task_runtime.update_fields(
-        task_id,
-        fields={'_cmd_interrupt': {
-            'source': 'user', 'ts': time.time(), 'note': '', 'pid': pid,
-        }},
-        only_if_status='running',
-    )
+    if not result['interrupted']:
+        return api_ok(result)
+    pid = result['pid']
     audit_log('api_chat_interrupt_command',
               key_id=(current_auth().key_id if current_auth() else ''),
               task_id=task_id)
     logger.info('[Chat] Task %s — user interrupt requested for run_command pid=%s',
                 task_id[:8], pid)
-    return api_ok({'interrupted': True, 'pid': pid})
+    return api_ok(result)
 
 
 @api_v1_chat_bp.route('/api/v1/chat/background-command/<task_id>', methods=['POST'],
@@ -248,17 +236,15 @@ def chat_background_command(task_id):
     round_num = require_int(body, 'roundNum', min=1)
     tool_call_id = require_str(body, 'toolCallId', max_len=256)
     owner_user_id = int(request_user_id())
-    task = chat_task_runtime.get_owned(task_id, user_id=owner_user_id)
-    if task is None:
+    from lib.tasks_pkg.command_control_runtime import execute
+    from lib.tasks_pkg.command_control_transport import CommandControlUnavailable
+    try:
+        result = execute(current_app, 'background', task_id, user_id=owner_user_id,
+                         round_num=round_num, tool_call_id=tool_call_id)
+    except CommandControlUnavailable:
+        return api_service_unavailable('The execution owner did not confirm the command control.')
+    if result is None:
         return api_not_found('Not found')
-    abort_event = task.get('abort_event')
-    if (task.get('status') != 'running' or task.get('aborted')
-            or (abort_event is not None and abort_event.is_set())):
-        return api_ok({'backgrounded': False, 'reason': 'task_not_running'})
-    control = task.get('_cmd_handoff_control')
-    if control is None or control.task is not task:
-        return api_ok({'backgrounded': False, 'reason': 'no_active_command'})
-    result = control.request(round_num=round_num, tool_call_id=tool_call_id)
     if result['backgrounded']:
         audit_log('api_chat_background_command',
                   key_id=(current_auth().key_id if current_auth() else ''),

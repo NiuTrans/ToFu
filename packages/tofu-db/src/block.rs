@@ -16,8 +16,10 @@ use crate::payload_manifest::{PayloadManifest, PayloadSegmentReference};
 use crate::payload_segment::{CatalogLocationTable, PayloadSegment, PayloadSegmentStore};
 use crate::vfs::{
     hyphenated_temporary_name, is_hyphenated_temporary_name, sync_all_barrier, sync_directory_barrier, FileKind,
-    OpenRequest, RealVfs, Vfs, VfsFile, VfsPositionedReader,
+    OpenRequest, RealVfs, Vfs,
 };
+#[cfg(test)]
+use crate::vfs::{VfsFile, VfsPositionedReader};
 use crate::FORMAT_VERSION;
 
 const MAGIC: &[u8; 8] = b"TDBBLK01";
@@ -739,36 +741,17 @@ impl Drop for BackgroundPackerRegistration {
 /// verifies its exact content ID. Handles share the existing cache budget at
 /// one slot per maximum-sized history block, and never retain full sources.
 struct HistorySourceHandle {
-    file: HistorySourceReader,
+    file: crate::vfs::SharedReadFile,
     source_bytes: u32,
 }
-enum HistorySourceReader {
-    Positioned(Arc<dyn VfsPositionedReader>),
-    Cursor(Mutex<Box<dyn VfsFile>>),
-}
-impl HistorySourceReader {
-    fn len(&self) -> io::Result<u64> {
-        match self {
-            Self::Positioned(file) => file.len(),
-            Self::Cursor(file) => file.lock()
-                .map_err(|_| io::Error::other("history source file lock poisoned"))?.len(),
-        }
-    }
+impl HistorySourceHandle {
     fn read_exact_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
-        match self {
-            Self::Positioned(file) => {
-                let _read = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_BLOCK_HISTORY_SOURCE_READ);
-                file.read_exact_at(offset, bytes)
-            },
-            Self::Cursor(file) => {
-                let waiting = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_BLOCK_HISTORY_SOURCE_WAIT);
-                let mut file = file.lock().map_err(|_| io::Error::other("history source file lock poisoned"))?;
-                drop(waiting);
-                let _read = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_BLOCK_HISTORY_SOURCE_READ);
-                file.read_exact_at(offset, bytes)
-            },
-        }
+        read_history_source_at(&self.file, offset, bytes)
     }
+}
+fn read_history_source_at(file: &crate::vfs::SharedReadFile, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+    file.read_exact_at_staged(offset, bytes, crate::fsync_stats::STAGE_BLOCK_HISTORY_SOURCE_WAIT,
+        crate::fsync_stats::STAGE_BLOCK_HISTORY_SOURCE_READ)
 }
 #[derive(Default)]
 struct HistorySourceHandles {
@@ -802,6 +785,13 @@ pub struct BlockStore {
     packed_filter: RwLock<PackedBlockFilter>,
     next_payload_catalog_publication: AtomicU64,
     installed_payload_catalog_publication: AtomicU64,
+    /// Exact block locations of one catalog publication, shared by foreground
+    /// reads, dedupe and membership probes and whole-store passes
+    /// (docs/TOFUDB_BLOCK_READ_PATH.md, "Published catalog location table").
+    /// Reconstructible memory: the first traversal pass publishes the table it
+    /// builds, and the maintenance worker derives each later publication's
+    /// table off the authority mutex.
+    catalog_locations: RwLock<Option<PublishedCatalogLocations>>,
     pending: Mutex<PendingBlocks>,
     background_pack: Mutex<BackgroundPackSlots>,
     background_pack_signal: Condvar,
@@ -849,7 +839,7 @@ struct PublicationWindows {
 /// report it missing.
 pub(crate) struct TraversalReader<'a> {
     blocks: &'a BlockStore,
-    locations: Option<(&'a PayloadSegmentStore, CatalogLocationTable)>,
+    locations: Option<(&'a PayloadSegmentStore, Arc<CatalogLocationTable>)>,
 }
 
 impl TraversalReader<'_> {
@@ -870,7 +860,7 @@ impl TraversalReader<'_> {
         let Some((store, locations)) = self.locations.as_ref() else {
             return blocks.get_uncached_recorded(id);
         };
-        for (reference, position) in locations.candidates(id) {
+        for (_, reference, position) in locations.candidates(id) {
             // Any verified copy is the block; a failed located read only
             // loses this fast path.
             if let Ok(Some(payload)) = store.read_located(reference, position, id) {
@@ -898,29 +888,56 @@ impl TraversalReader<'_> {
 
     #[cfg(test)]
     pub(crate) fn location_table_mut_for_test(&mut self) -> Option<&mut CatalogLocationTable> {
-        self.locations.as_mut().map(|(_, locations)| locations)
+        // A private copy: the published table stays intact.
+        self.locations.as_mut().map(|(_, locations)| Arc::make_mut(locations))
     }
+}
+
+/// The published catalog location table and which of its segments the
+/// installed catalog still names.
+#[derive(Clone)]
+struct PublishedCatalogLocations {
+    /// Catalog publication the table was built or derived for. Only while it
+    /// is the installed publication may the table prove a block absent.
+    publication: u64,
+    table: Arc<CatalogLocationTable>,
+    /// Per table ordinal, whether the catalog of `live_publication` names the
+    /// segment. Every install recomputes it with its swap, so a table a later
+    /// catalog made stale still locates the blocks of the segments it kept.
+    live_publication: u64,
+    live_segments: Arc<[bool]>,
+}
+
+/// What the published catalog location table says about one block.
+enum PublishedCatalogAnswer<T> {
+    /// A segment the installed catalog names holds the block.
+    Held(T),
+    /// No segment of the installed catalog, this publication, holds it.
+    Absent(u64),
+    /// No usable table, or it cannot decide: the exact catalog path does.
+    Unknown,
 }
 
 #[cfg(test)]
 thread_local! {
-    static TRAVERSAL_LOCATIONS_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CATALOG_LOCATIONS_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Makes this thread's traversal readers skip the location table, so a
-/// specification can compare a pass against the exact catalog path alone.
+/// Makes this thread skip catalog location tables, a traversal reader's own
+/// and the published one, so a specification can compare a pass against the
+/// exact catalog path alone.
 #[cfg(test)]
-pub(crate) fn set_traversal_locations_disabled_for_test(disabled: bool) {
-    TRAVERSAL_LOCATIONS_DISABLED.with(|flag| flag.set(disabled));
+pub(crate) fn set_catalog_locations_disabled_for_test(disabled: bool) {
+    CATALOG_LOCATIONS_DISABLED.with(|flag| flag.set(disabled));
 }
 
 #[cfg(test)]
-fn traversal_locations_disabled() -> bool {
-    TRAVERSAL_LOCATIONS_DISABLED.with(std::cell::Cell::get)
+fn catalog_locations_disabled() -> bool {
+    CATALOG_LOCATIONS_DISABLED.with(std::cell::Cell::get)
 }
 
 #[cfg(not(test))]
-fn traversal_locations_disabled() -> bool {
+fn catalog_locations_disabled() -> bool {
     false
 }
 
@@ -1065,6 +1082,7 @@ impl BlockStore {
             packed_filter: RwLock::new(PackedBlockFilter::empty()),
             next_payload_catalog_publication: AtomicU64::new(0),
             installed_payload_catalog_publication: AtomicU64::new(0),
+            catalog_locations: RwLock::new(None),
             pending: Mutex::new(PendingBlocks::default()),
             background_pack: Mutex::new(BackgroundPackSlots::default()),
             background_pack_signal: Condvar::new(),
@@ -1116,6 +1134,7 @@ impl BlockStore {
             packed_filter: RwLock::new(PackedBlockFilter::empty()),
             next_payload_catalog_publication: AtomicU64::new(0),
             installed_payload_catalog_publication: AtomicU64::new(0),
+            catalog_locations: RwLock::new(None),
             pending: Mutex::new(PendingBlocks::default()),
             background_pack: Mutex::new(BackgroundPackSlots::default()),
             background_pack_signal: Condvar::new(),
@@ -2634,15 +2653,11 @@ impl BlockStore {
         }
         // Opening and framing I/O never hold the cache mutex. Racing opens may
         // share the winner's verified handle; unused descriptors drop here.
-        let file = match self.vfs.open_positioned_reader(&self.path(source))? {
-            Some(file) => HistorySourceReader::Positioned(file),
-            None => HistorySourceReader::Cursor(Mutex::new(self.vfs.open(
-                &self.path(source), OpenRequest { read: true, ..OpenRequest::default() })?)),
-        };
+        let file = crate::vfs::SharedReadFile::open(self.vfs.as_ref(), &self.path(source))?;
         let expected = HEADER_BYTES as u64 + u64::from(source_bytes) + FOOTER_BYTES as u64;
         if file.len()? != expected { return Err(invalid_data("history payload source size mismatch")); }
-        let mut header = [0_u8; HEADER_BYTES]; file.read_exact_at(0, &mut header)?;
-        let mut source_id = [0_u8; 32]; file.read_exact_at(expected - 32, &mut source_id)?;
+        let mut header = [0_u8; HEADER_BYTES]; read_history_source_at(&file, 0, &mut header)?;
+        let mut source_id = [0_u8; 32]; read_history_source_at(&file, expected - 32, &mut source_id)?;
         if &header[..8] != MAGIC || u32::from_le_bytes(header[8..12].try_into().unwrap()) != FORMAT_VERSION
             || u32::from_le_bytes(header[12..16].try_into().unwrap()) != source_bytes || source_id != source.0 {
             return Err(invalid_data("history payload source witness mismatch"));
@@ -2672,7 +2687,7 @@ impl BlockStore {
         };
         match opened {
             Ok(handle) => {
-                let result = handle.file.read_exact_at(HEADER_BYTES as u64 + u64::from(location.offset), &mut payload);
+                let result = handle.read_exact_at(HEADER_BYTES as u64 + u64::from(location.offset), &mut payload);
                 if let Err(error) = result {
                     self.history_source_handles.lock().map_err(|_| io::Error::other("history source cache lock poisoned"))?
                         .entries.remove(&location.source);
@@ -2761,20 +2776,243 @@ impl BlockStore {
 
     /// See [`TraversalReader`]. `check` runs before each catalogued segment
     /// index is streamed and between table sort steps; its error aborts.
+    /// A stale published table is first derived to the installed catalog (one
+    /// pass over the table instead of every index), and a current one is
+    /// reused; otherwise the reader builds one and publishes it for
+    /// foreground reads.
     pub(crate) fn traversal_reader(
         &self,
         check: impl FnMut() -> io::Result<()>,
     ) -> io::Result<TraversalReader<'_>> {
-        let catalog = self.installed_payload_manifest()?;
-        let locations = match (self.payload_segments.as_ref(), catalog) {
-            (Some(store), Some(catalog))
-                if !catalog.segments.is_empty() && !traversal_locations_disabled() =>
-            {
-                Some((store, store.build_location_table(&catalog.segments, check)?))
-            }
-            _ => None,
+        let store = match self.payload_segments.as_ref() {
+            Some(store) if !catalog_locations_disabled() => store,
+            _ => return Ok(TraversalReader { blocks: self, locations: None }),
         };
-        Ok(TraversalReader { blocks: self, locations })
+        // A failed derivation leaves the build below to answer.
+        let _ = self.advance_catalog_locations();
+        if let Some(table) = self.current_catalog_locations() {
+            if table.unindexed_segments() == 0 {
+                return Ok(TraversalReader { blocks: self, locations: Some((store, table)) });
+            }
+        }
+        let table = self.build_and_publish_catalog_locations(store, check, "traversal")?;
+        Ok(TraversalReader { blocks: self, locations: table.map(|table| (store, table)) })
+    }
+
+    /// Builds and publishes the store's first catalog location table, unless
+    /// one was already published; returns whether it built one. The online GC
+    /// driver calls this off the authority mutex whenever an epoch is due, so
+    /// the first table never waits for an epoch's capture, which defers while
+    /// foreground holds contend for the mutex (docs/TOFUDB_BLOCK_READ_PATH.md,
+    /// "Published catalog location table"). Later tables are derived.
+    pub(crate) fn publish_first_catalog_locations(
+        &self,
+        check: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<bool> {
+        let Some(store) = self.payload_segments.as_ref() else {
+            return Ok(false);
+        };
+        if catalog_locations_disabled()
+            || self.catalog_locations.read()
+                .map_err(|_| io::Error::other("catalog location lock was poisoned"))?
+                .is_some()
+        {
+            return Ok(false);
+        }
+        Ok(self.build_and_publish_catalog_locations(store, check, "first")?.is_some())
+    }
+
+    /// Builds the location table of the installed catalog from every segment
+    /// index and publishes it; `None` without a nonempty catalog.
+    fn build_and_publish_catalog_locations(
+        &self,
+        store: &PayloadSegmentStore,
+        check: impl FnMut() -> io::Result<()>,
+        source: &str,
+    ) -> io::Result<Option<Arc<CatalogLocationTable>>> {
+        let (catalog, publication) = self.payload_catalog_snapshot()?;
+        let Some(catalog) = catalog.filter(|catalog| !catalog.segments.is_empty()) else {
+            return Ok(None);
+        };
+        let started = std::time::Instant::now();
+        let table = Arc::new(store.build_location_table(&catalog.segments, check)?);
+        self.publish_catalog_locations(publication, &table, source, started);
+        Ok(Some(table))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn published_catalog_locations_for_test(&self) -> Option<(u64, Arc<CatalogLocationTable>)> {
+        self.catalog_locations.read().unwrap().as_ref()
+            .map(|published| (published.publication, Arc::clone(&published.table)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn installed_catalog_publication_for_test(&self) -> u64 {
+        self.installed_payload_catalog_publication.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn published_catalog_answer_for_test(&self, id: BlockId) -> &'static str {
+        match self.locate_in_published_catalog(id) {
+            PublishedCatalogAnswer::Held(_) => "held",
+            PublishedCatalogAnswer::Absent(_) => "absent",
+            PublishedCatalogAnswer::Unknown => "unknown",
+        }
+    }
+
+    /// The published location table if it describes the installed catalog.
+    /// The table is an optimization: a poisoned lock only means no table.
+    fn current_catalog_locations(&self) -> Option<Arc<CatalogLocationTable>> {
+        let published = self.catalog_locations.read().ok()?.clone()?;
+        let installed = self.installed_payload_catalog_publication.load(Ordering::Acquire);
+        (published.publication == installed).then_some(published.table)
+    }
+
+    /// Publishes `table`, built or derived for catalog `publication`, unless
+    /// the published table already describes the installed catalog and this
+    /// one does not. Publication numbers order installs only per publisher,
+    /// so currency, not recency, decides. A poisoned lock publishes nothing.
+    fn publish_catalog_locations(
+        &self,
+        publication: u64,
+        table: &Arc<CatalogLocationTable>,
+        source: &str,
+        started: std::time::Instant,
+    ) {
+        if publication == 0 {
+            return;
+        }
+        let Ok(mut published) = self.catalog_locations.write() else {
+            return;
+        };
+        let installed = self.installed_payload_catalog_publication.load(Ordering::Acquire);
+        if publication != installed
+            && published.as_ref().is_some_and(|current| current.publication == installed)
+        {
+            return;
+        }
+        *published = Some(PublishedCatalogLocations {
+            publication,
+            table: Arc::clone(table),
+            live_publication: publication,
+            live_segments: vec![true; table.segments().len()].into(),
+        });
+        drop(published);
+        crate::engine_log::info("catalog_locations", &format!(
+            "step=published source={source} publication={publication} installed={installed} \
+             located_blocks={} unindexed_segments={} resident_bytes={} elapsed_ms={}",
+            table.located_blocks(), table.unindexed_segments(), table.resident_bytes(),
+            started.elapsed().as_millis(),
+        ));
+    }
+
+    /// Whether the published table is a catalog behind, so that
+    /// `advance_catalog_locations` has a derivation to do.
+    pub(crate) fn catalog_location_derivation_due(&self) -> bool {
+        let installed = self.installed_payload_catalog_publication.load(Ordering::Acquire);
+        self.payload_segments.is_some()
+            && installed != 0
+            && self.catalog_locations.read().ok().is_some_and(|published| {
+                published.as_ref().is_some_and(|published| published.publication != installed)
+            })
+    }
+
+    /// Derives the published location table of the installed catalog from
+    /// the table of an earlier publication: one sequential pass over the old
+    /// table plus the indexes of segments it does not hold. The maintenance
+    /// worker calls this off the authority mutex; returns whether it derived.
+    /// Without a published table there is nothing to derive from; the first
+    /// whole-store pass publishes the table it builds (`traversal_reader`).
+    pub(crate) fn advance_catalog_locations(&self) -> io::Result<bool> {
+        let Some(store) = self.payload_segments.as_ref() else {
+            return Ok(false);
+        };
+        let published = self.catalog_locations.read()
+            .map_err(|_| io::Error::other("catalog location lock was poisoned"))?
+            .clone();
+        let Some(PublishedCatalogLocations { publication, table: previous, .. }) = published else {
+            return Ok(false);
+        };
+        let installed = self.installed_payload_catalog_publication.load(Ordering::Acquire);
+        if installed == 0 || installed == publication {
+            return Ok(false);
+        }
+        let (manifest, captured) = self.payload_catalog_snapshot()?;
+        if captured == 0 {
+            return Ok(false);
+        }
+        let started = std::time::Instant::now();
+        let _timer = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_CATALOG_LOCATION_DERIVE);
+        let catalog = manifest.as_ref().map_or(&[][..], |manifest| manifest.segments.as_slice());
+        let derived = Arc::new(store.derive_location_table(&previous, catalog)?);
+        drop(previous);
+        self.publish_catalog_locations(captured, &derived, "derive", started);
+        Ok(true)
+    }
+
+    /// Resolves `id` through the published table. A located payload passes
+    /// CRC32C and its content hash.
+    fn locate_in_published_catalog(&self, id: BlockId) -> PublishedCatalogAnswer<Vec<u8>> {
+        self.resolve_in_published_catalog(id, |store, reference, position| {
+            store.read_located(reference, position, id)
+        })
+    }
+
+    /// One block lookup through the published table. `probe` answers one
+    /// candidate: `Ok(Some)` when it holds the block, `Ok(None)` when its
+    /// position names another block, and an error is no verdict. Any
+    /// published table may locate a block, through the segments the installed
+    /// catalog still names (`live_segments`); `Absent` needs the table of the
+    /// installed publication, every catalogued segment indexed, every
+    /// candidate answered and no install during the lookup. Anything else
+    /// leaves the verdict to the exact catalog path.
+    fn resolve_in_published_catalog<T>(
+        &self,
+        id: BlockId,
+        mut probe: impl FnMut(&PayloadSegmentStore, &PayloadSegmentReference, u32) -> io::Result<Option<T>>,
+    ) -> PublishedCatalogAnswer<T> {
+        use crate::fsync_stats::{
+            note_stage_elapsed, STAGE_CATALOG_LOCATION_ABSENT, STAGE_CATALOG_LOCATION_HIT,
+            STAGE_CATALOG_LOCATION_UNKNOWN,
+        };
+        let Some(store) = self.payload_segments.as_ref() else {
+            return PublishedCatalogAnswer::Unknown;
+        };
+        if catalog_locations_disabled() {
+            return PublishedCatalogAnswer::Unknown;
+        }
+        let started = std::time::Instant::now();
+        let unknown = || {
+            note_stage_elapsed(STAGE_CATALOG_LOCATION_UNKNOWN, started.elapsed().as_nanos() as u64);
+            PublishedCatalogAnswer::Unknown
+        };
+        let installed = || self.installed_payload_catalog_publication.load(Ordering::Acquire);
+        let Some(published) = self.catalog_locations.read().ok().and_then(|published| published.clone()) else {
+            return unknown();
+        };
+        let current = published.publication == installed();
+        if !current && published.live_publication != installed() {
+            return unknown();
+        }
+        let mut undecided = !current || published.table.unindexed_segments() > 0;
+        for (ordinal, reference, position) in published.table.candidates(id) {
+            if !current && !published.live_segments[ordinal] {
+                continue;
+            }
+            match probe(store, reference, position) {
+                Ok(Some(held)) => {
+                    note_stage_elapsed(STAGE_CATALOG_LOCATION_HIT, started.elapsed().as_nanos() as u64);
+                    return PublishedCatalogAnswer::Held(held);
+                }
+                Ok(None) => {}
+                Err(_) => undecided = true,
+            }
+        }
+        if undecided || published.publication != installed() {
+            return unknown();
+        }
+        note_stage_elapsed(STAGE_CATALOG_LOCATION_ABSENT, started.elapsed().as_nanos() as u64);
+        PublishedCatalogAnswer::Absent(published.publication)
     }
 
     fn get_uncached_recorded(&self, id: BlockId) -> io::Result<Vec<u8>> {
@@ -2820,6 +3058,13 @@ impl BlockStore {
 
     fn get_uncached_materialized(&self, id: BlockId) -> io::Result<Vec<u8>> {
         let _resolve = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_BLOCK_MATERIALIZED_RESOLVE);
+        match self.locate_in_published_catalog(id) {
+            PublishedCatalogAnswer::Held(payload) => return Ok(payload),
+            PublishedCatalogAnswer::Absent(publication) => {
+                return self.get_loose_after_catalog(id, Some(publication));
+            }
+            PublishedCatalogAnswer::Unknown => {}
+        }
         if let Some(payload) = self.get_from_read_hint(id) {
             return Ok(payload);
         }
@@ -2921,10 +3166,19 @@ impl BlockStore {
         // Complete new Blob bytes already supply their exact WAL recovery
         // witness. Cold history dedup is optional: keep verified warm/packed
         // reuse and carry a complete copy when history is not resident.
+        let filter_hit = self.packed_filter_definitely_contains(id)?;
+        // Writers probe under the authority mutex: a filter hit is resolved
+        // through the published table before any hint or catalog walk.
+        if filter_hit {
+            match self.locate_in_published_catalog(id) {
+                PublishedCatalogAnswer::Held(payload) => return Ok(DedupeProbe::Present(payload)),
+                PublishedCatalogAnswer::Absent(_) => return Ok(DedupeProbe::Missing),
+                PublishedCatalogAnswer::Unknown => {}
+            }
+        }
         if let Some(payload) = self.get_from_read_hint(id) {
             return Ok(DedupeProbe::Present(payload));
         }
-        let filter_hit = self.packed_filter_definitely_contains(id)?;
         let candidates = if filter_hit {
             self.payload_segment_candidates(id)?
         } else {
@@ -3287,6 +3541,13 @@ impl BlockStore {
         if !self.packed_filter_may_contain(id)? {
             return Ok(None);
         }
+        match self.resolve_in_published_catalog(id, |store, reference, position| {
+            Ok(store.located_entry_names(reference, position, id)?.then_some(reference.segment_id))
+        }) {
+            PublishedCatalogAnswer::Held(segment_id) => return Ok(Some(segment_id)),
+            PublishedCatalogAnswer::Absent(_) => return Ok(None),
+            PublishedCatalogAnswer::Unknown => {}
+        }
         let candidates = self.payload_segment_candidates(id)?;
         if candidates.is_empty() {
             return Ok(None);
@@ -3416,6 +3677,17 @@ impl BlockStore {
             *current = Some(manifest);
             *routes = routing;
             self.installed_payload_catalog_publication.store(publication, Ordering::Release);
+            // Ordered with the swap, so liveness always describes the
+            // catalog it names. A poisoned lock leaves the previous liveness,
+            // which no longer matches this publication and so answers nothing.
+            if let Ok(mut published) = self.catalog_locations.write() {
+                if let Some(published) = published.as_mut() {
+                    published.live_segments = published.table.segments().iter()
+                        .map(|reference| referenced_segments.contains(&reference.segment_id))
+                        .collect();
+                    published.live_publication = publication;
+                }
+            }
         }
         // Coverage bookkeeping only; a poisoned lock fails every later probe.
         if let Ok(mut filter) = self.packed_filter.write() {
@@ -3941,13 +4213,13 @@ mod tests {
         let mut source = vec![17; 4096]; source.extend_from_slice(&vec![29; 4096]);
         let source_id = store.put(&source).unwrap();
         let original = store.open_history_source(source_id, source.len() as u32).unwrap();
-        let HistorySourceReader::Positioned(reader) = &original.file else { panic!("plain Unix source must use positioned reads") };
+        let crate::vfs::SharedReadFile::Positioned(reader) = &original.file else { panic!("plain Unix source must use positioned reads") };
         let (entered, receive) = std::sync::mpsc::channel();
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         // Ordinary open checked framing. Pause only the real read operation;
         // cache/source witnesses and per-payload content checks still run.
         let handle = Arc::new(HistorySourceHandle { source_bytes: source.len() as u32,
-            file: HistorySourceReader::Positioned(Arc::new(PausingHistoryReader {
+            file: crate::vfs::SharedReadFile::Positioned(Arc::new(PausingHistoryReader {
                 inner: Arc::clone(reader), entered, release: Arc::clone(&release),
             })),
         });
@@ -4960,11 +5232,13 @@ mod tests {
         assert!(store.payload_segment_store().unwrap().resident_index_ids_for_test().is_empty());
         assert!(probes.iter().all(|id| !store.cache_contains_for_test(*id)));
         drop(reader);
+        set_catalog_locations_disabled_for_test(true);
         let before = reads(&vfs);
         for id in &probes {
             assert!(store.get_traversal(*id).unwrap().starts_with(b"catalog-"));
         }
         let exact_reads = reads(&vfs) - before;
+        set_catalog_locations_disabled_for_test(false);
         let (witness_checks, _) = crate::payload_segment::read_path_counters::take();
         assert!(witness_checks >= (SEGMENTS * probes.len()) as u64);
         assert!(exact_reads >= 4 * probes.len(), "a whole verified index per cold block");
@@ -4996,6 +5270,9 @@ mod tests {
         let (position, _, _) = catalog_layout(0, BLOCKS, probes[0]);
         flip_segment_byte(&vfs, catalog_segment_id(0), index_offset(0) + position * 48 + 33);
         let mut reader = store.traversal_reader(|| Ok(())).unwrap();
+        // The reader's fallbacks below must be the exact path, not the table
+        // this reader just published.
+        set_catalog_locations_disabled_for_test(true);
         assert_eq!(reader.location_table_shape().1, 1, "the unverifiable index stays out of the table");
         assert_eq!(reader.get(probes[0]).unwrap_err().kind(), io::ErrorKind::InvalidData);
 
@@ -5018,6 +5295,7 @@ mod tests {
         for (segment_number, id) in probes.iter().enumerate().skip(4) {
             assert_eq!(reader.get(*id).unwrap(), catalog_layout(segment_number, BLOCKS, *id).2);
         }
+        set_catalog_locations_disabled_for_test(false);
     }
 
     /// Blocks written or re-homed after the reader's table was built resolve
@@ -5065,6 +5343,293 @@ mod tests {
         assert!(reader.get(probes[1]).unwrap().starts_with(b"catalog-1-"));
         let missing = BlockId::for_payload(b"never written");
         assert_eq!(reader.get(missing).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    fn segment_reads(vfs: &DeterministicVfs) -> usize {
+        vfs.trace().unwrap().iter().filter(|operation| **operation == Operation::Read).count()
+    }
+
+    /// Live shape on 2026-11-06 (docs/TOFUDB_BLOCK_READ_PATH.md, "Published
+    /// catalog location table"): a foreground cold read of a packed block
+    /// copied and sorted one candidate per catalogued segment, checked every
+    /// segment witness and verified the whole index of its owner and of each
+    /// witness false positive missing from the verified-index cache. With the
+    /// published table it costs one candidate, one index-entry read and one
+    /// payload read; no witness is checked and no index is read or admitted.
+    #[test]
+    fn foreground_cold_packed_reads_resolve_through_the_published_location_table() {
+        const SEGMENTS: usize = 48;
+        const BLOCKS: usize = 512;
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        let (references, probes) = full_range_catalog(&store, SEGMENTS, BLOCKS);
+        store.set_segment_index_cache_bytes(128 * 1024).unwrap();
+        store.set_cache_capacity_bytes(0).unwrap();
+        store.install_payload_manifest(PayloadManifest::new(references).unwrap()).unwrap();
+        drop(store.traversal_reader(|| Ok(())).unwrap());
+        let (published, table) = store.published_catalog_locations_for_test().unwrap();
+        assert_eq!(published, store.installed_catalog_publication_for_test());
+        assert_eq!(table.located_blocks(), SEGMENTS * BLOCKS);
+
+        crate::payload_segment::read_path_counters::take();
+        crate::payload_segment::read_path_counters::take_index_work();
+        let before = segment_reads(&vfs);
+        for id in &probes {
+            assert!(store.get(*id).unwrap().starts_with(b"catalog-"));
+        }
+        let located_reads = segment_reads(&vfs) - before;
+        assert_eq!(located_reads, 2 * probes.len(), "one index entry and one payload read per block");
+        assert_eq!(crate::payload_segment::read_path_counters::take(), (0, probes.len() as u64));
+        assert_eq!(crate::payload_segment::read_path_counters::take_index_work(), (0, 0, 0));
+        assert!(store.payload_segment_store().unwrap().resident_index_ids_for_test().is_empty());
+
+        set_catalog_locations_disabled_for_test(true);
+        let before = segment_reads(&vfs);
+        for id in &probes {
+            assert!(store.get(*id).unwrap().starts_with(b"catalog-"));
+        }
+        let exact_reads = segment_reads(&vfs) - before;
+        set_catalog_locations_disabled_for_test(false);
+        let (witness_checks, _) = crate::payload_segment::read_path_counters::take();
+        let (index_reads, index_bytes, _) = crate::payload_segment::read_path_counters::take_index_work();
+        assert!(witness_checks >= (SEGMENTS * probes.len()) as u64);
+        assert!(index_reads >= probes.len() as u64, "a whole verified index per cold block");
+        println!("foreground located_reads={located_reads} exact_reads={exact_reads} \
+            exact_witness_checks={witness_checks} exact_index_reads={index_reads} \
+            exact_index_bytes={index_bytes} blocks={}", probes.len());
+    }
+
+    /// A current table proves a block absent from the installed catalog: the
+    /// read goes straight to the loose copy and a missing block is reported
+    /// without a witness walk or an index read, also before the packed filter
+    /// is built (a clean open).
+    #[test]
+    fn a_current_location_table_sends_uncatalogued_blocks_to_their_loose_copy() {
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        let (references, _) = full_range_catalog(&store, 8, 64);
+        let manifest = PayloadManifest::new(references).unwrap();
+        let loose = store.put_loose(b"loose beside the catalog").unwrap();
+        drop(store);
+        let reopened = BlockStore::open_with_vfs(Path::new("/data"), Arc::new(vfs.clone())).unwrap();
+        reopened.set_cache_capacity_bytes(0).unwrap();
+        reopened.install_recovery_payload_manifest(manifest).unwrap();
+        assert!(!reopened.packed_filter.read().unwrap().built, "fixture: a clean open builds no filter");
+        let missing = BlockId::for_payload(b"never written");
+        crate::payload_segment::read_path_counters::take();
+        assert_eq!(reopened.get(missing).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert!(crate::payload_segment::read_path_counters::take().0 >= 8, "without a table a miss walks every witness");
+
+        drop(reopened.traversal_reader(|| Ok(())).unwrap());
+        crate::payload_segment::read_path_counters::take_index_work();
+        assert_eq!(reopened.get(loose).unwrap(), b"loose beside the catalog");
+        assert_eq!(reopened.get(missing).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(crate::payload_segment::read_path_counters::take(), (0, 0));
+        assert_eq!(crate::payload_segment::read_path_counters::take_index_work().0, 0);
+    }
+
+    /// Each publication's table is derived from the previous one: kept
+    /// segments' entries are renumbered, a dropped segment's entries leave and
+    /// only segments the old table did not index are read. The result locates
+    /// exactly what a fresh build of the installed catalog locates. Until it
+    /// is derived the stale table answers nothing, so no read can resolve
+    /// through a segment the installed catalog no longer names.
+    #[test]
+    fn derived_catalog_locations_equal_a_fresh_build_of_each_publication() {
+        const BLOCKS: usize = 64;
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        store.set_cache_capacity_bytes(0).unwrap();
+        let (references, probes) = full_range_catalog(&store, 4, BLOCKS);
+        store.install_payload_manifest(PayloadManifest::new(references.clone()).unwrap()).unwrap();
+        assert!(!store.advance_catalog_locations().unwrap(), "nothing to derive from before a pass publishes");
+        drop(store.traversal_reader(|| Ok(())).unwrap());
+        assert!(!store.advance_catalog_locations().unwrap(), "a current table needs no derivation");
+
+        // An adoption-style merge re-homes segment 0 into segment 8, and
+        // segment 7 adds new content.
+        let segment_store = store.payload_segment_store().unwrap();
+        let added_payload = b"packed-after-the-table".to_vec();
+        let added = segment_holding(&store, 7, &added_payload);
+        let moved_payloads: BTreeMap<BlockId, Vec<u8>> = (0..BLOCKS)
+            .map(|block_number| {
+                let bytes = format!("catalog-0-{block_number}").into_bytes();
+                (BlockId::for_payload(&bytes), bytes)
+            })
+            .collect();
+        let moved = segment_store
+            .create(catalog_segment_id(8), moved_payloads.keys().copied().collect(), |id| {
+                Ok(moved_payloads[&id].clone())
+            })
+            .unwrap();
+        let moved = PayloadSegmentReference::new(moved.metadata(), moved.first_block_id(), moved.last_block_id())
+            .unwrap();
+        let mut catalog = references[1..].to_vec();
+        catalog.extend([added, moved]);
+        store.install_payload_manifest(PayloadManifest::new(catalog.clone()).unwrap()).unwrap();
+        segment_store.remove_segment(catalog_segment_id(0)).unwrap();
+
+        crate::payload_segment::read_path_counters::take();
+        assert_eq!(store.get(probes[0]).unwrap(), moved_payloads[&probes[0]]);
+        let (witness_checks, candidates) = crate::payload_segment::read_path_counters::take();
+        assert!(witness_checks > 0 && candidates == 0, "a segment the installed catalog dropped never answers");
+
+        crate::payload_segment::read_path_counters::take_index_work();
+        assert!(store.advance_catalog_locations().unwrap());
+        let (index_reads, _, _) = crate::payload_segment::read_path_counters::take_index_work();
+        assert!(index_reads <= 2, "only the two added segments' indexes may be read, not {index_reads}");
+        let (derived_publication, derived) = store.published_catalog_locations_for_test().unwrap();
+        assert_eq!(derived_publication, store.installed_catalog_publication_for_test());
+        let fresh = segment_store.build_location_table(&catalog, || Ok(())).unwrap();
+        assert_eq!(derived.located_entries_for_test(), fresh.located_entries_for_test());
+        assert_eq!((derived.located_blocks(), derived.unindexed_segments()), (4 * BLOCKS + 1, 0));
+
+        crate::payload_segment::read_path_counters::take();
+        assert_eq!(store.get(probes[0]).unwrap(), moved_payloads[&probes[0]]);
+        assert_eq!(store.get(BlockId::for_payload(&added_payload)).unwrap(), added_payload);
+        assert!(store.get(probes[1]).unwrap().starts_with(b"catalog-1-"));
+        assert_eq!(crate::payload_segment::read_path_counters::take(), (0, 3));
+
+        // Dropping the rest derives an empty table that still proves absence.
+        store.install_payload_manifest(PayloadManifest::new(Vec::new()).unwrap()).unwrap();
+        assert!(store.advance_catalog_locations().unwrap());
+        let (_, empty) = store.published_catalog_locations_for_test().unwrap();
+        assert_eq!((empty.located_blocks(), empty.unindexed_segments()), (0, 0));
+    }
+
+    /// A table a later catalog made stale still locates the blocks of the
+    /// segments that catalog kept, through reads and membership probes. The
+    /// segment it dropped never answers, so dedupe restages content whose only
+    /// copy it held, and only the derived table proves a block absent.
+    #[test]
+    fn stale_location_tables_locate_kept_segments_and_never_prove_absence() {
+        const BLOCKS: usize = 32;
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        store.set_cache_capacity_bytes(0).unwrap();
+        let (references, probes) = full_range_catalog(&store, 3, BLOCKS);
+        store.install_payload_manifest(PayloadManifest::new(references.clone()).unwrap()).unwrap();
+        drop(store.traversal_reader(|| Ok(())).unwrap());
+        let (built_for, _) = store.published_catalog_locations_for_test().unwrap();
+        let added_payload = b"added-after-the-table".to_vec();
+        let added_id = BlockId::for_payload(&added_payload);
+        let added = segment_holding(&store, 7, &added_payload);
+        store.install_payload_manifest(PayloadManifest::new(vec![references[1], references[2], added]).unwrap()).unwrap();
+        assert_ne!(built_for, store.installed_catalog_publication_for_test(), "fixture: the table is stale");
+
+        assert_eq!(store.published_catalog_answer_for_test(probes[1]), "held");
+        crate::payload_segment::read_path_counters::take();
+        assert!(store.get(probes[1]).unwrap().starts_with(b"catalog-1-"));
+        assert_eq!(store.catalogued_payload_segment(probes[2]).unwrap(), Some(catalog_segment_id(2)));
+        assert_eq!(crate::payload_segment::read_path_counters::take(), (0, 2), "no catalog walk");
+        let missing = BlockId::for_payload(b"never written");
+        for id in [probes[0], added_id, missing] {
+            assert_eq!(store.published_catalog_answer_for_test(id), "unknown");
+        }
+        assert_eq!(store.get(added_id).unwrap(), added_payload);
+        assert_eq!(store.get(probes[0]).unwrap_err().kind(), io::ErrorKind::NotFound);
+        let (_, _, dropped_only_copy) = catalog_layout(0, BLOCKS, probes[0]);
+        assert_eq!(store.put_deferred(&dropped_only_copy).unwrap(), (probes[0], true),
+            "dedupe restages content whose only segment the installed catalog dropped");
+
+        assert!(store.advance_catalog_locations().unwrap());
+        assert_eq!(store.published_catalog_answer_for_test(added_id), "held");
+        for id in [probes[0], missing] {
+            assert_eq!(store.published_catalog_answer_for_test(id), "absent");
+        }
+    }
+
+    /// Writers probe dedupe under the authority mutex, and every online-GC
+    /// scan probes the membership of each live loose block. Both resolve a
+    /// catalogued block through the published table: one candidate each, no
+    /// witness walk, no whole-index read. The exact catalog path, the control
+    /// below, walks every witness per probe and verifies whole indexes.
+    #[test]
+    fn dedupe_and_membership_probes_resolve_through_the_published_table() {
+        const SEGMENTS: usize = 16;
+        const BLOCKS: usize = 64;
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        store.set_cache_capacity_bytes(0).unwrap();
+        let (references, probes) = full_range_catalog(&store, SEGMENTS, BLOCKS);
+        store.set_segment_index_cache_bytes(16 * 1024).unwrap();
+        store.install_payload_manifest(PayloadManifest::new(references).unwrap()).unwrap();
+        drop(store.traversal_reader(|| Ok(())).unwrap());
+        let probe_all = |store: &BlockStore| {
+            for (segment_number, id) in probes.iter().enumerate() {
+                assert_eq!(store.catalogued_payload_segment(*id).unwrap(), Some(catalog_segment_id(segment_number)));
+                let (_, _, bytes) = catalog_layout(segment_number, BLOCKS, *id);
+                assert_eq!(store.put_deferred(&bytes).unwrap(), (*id, false), "a packed copy dedupes");
+            }
+        };
+        crate::payload_segment::read_path_counters::take();
+        crate::payload_segment::read_path_counters::take_index_work();
+        probe_all(&store);
+        assert_eq!(crate::payload_segment::read_path_counters::take(), (0, 2 * SEGMENTS as u64));
+        assert_eq!(crate::payload_segment::read_path_counters::take_index_work(), (0, 0, 0));
+        let fresh = b"content no segment holds".to_vec();
+        assert_eq!(store.put_deferred(&fresh).unwrap(), (BlockId::for_payload(&fresh), true));
+
+        set_catalog_locations_disabled_for_test(true);
+        probe_all(&store);
+        set_catalog_locations_disabled_for_test(false);
+        let (witness_checks, _) = crate::payload_segment::read_path_counters::take();
+        let (index_reads, index_bytes, _) = crate::payload_segment::read_path_counters::take_index_work();
+        assert!(witness_checks >= 2 * (SEGMENTS * SEGMENTS) as u64, "{witness_checks}");
+        assert!(index_reads > 0);
+        println!("probes={} located_candidates={} exact_witness_checks={witness_checks} \
+            exact_index_reads={index_reads} exact_index_bytes={index_bytes}", 2 * SEGMENTS, 2 * SEGMENTS);
+    }
+
+    /// The first table is built once, from every index of the installed
+    /// catalog; any published table, even a stale one, is derived from
+    /// instead of rebuilt.
+    #[test]
+    fn the_first_catalog_location_table_is_built_once() {
+        const SEGMENTS: usize = 4;
+        const BLOCKS: usize = 16;
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        assert!(!store.publish_first_catalog_locations(|| Ok(())).unwrap(), "no catalog, no table");
+        let (references, _) = full_range_catalog(&store, SEGMENTS, BLOCKS);
+        store.install_payload_manifest(PayloadManifest::new(references.clone()).unwrap()).unwrap();
+        assert!(store.publish_first_catalog_locations(|| Ok(())).unwrap());
+        let (publication, table) = store.published_catalog_locations_for_test().unwrap();
+        assert_eq!(publication, store.installed_catalog_publication_for_test());
+        assert_eq!(table.located_blocks(), SEGMENTS * BLOCKS);
+        store.install_payload_manifest(PayloadManifest::new(references[1..].to_vec()).unwrap()).unwrap();
+        let before = segment_reads(&vfs);
+        assert!(!store.publish_first_catalog_locations(|| Ok(())).unwrap());
+        assert_eq!(segment_reads(&vfs) - before, 0, "a stale table is never rebuilt");
+    }
+
+    /// A whole-store pass reuses the published table while it describes the
+    /// installed catalog, derives a stale one, and builds, then publishes, a
+    /// table only when none was published.
+    #[test]
+    fn traversal_readers_share_the_current_published_location_table() {
+        const SEGMENTS: usize = 6;
+        const BLOCKS: usize = 32;
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        let (references, _) = full_range_catalog(&store, SEGMENTS, BLOCKS);
+        store.install_payload_manifest(PayloadManifest::new(references.clone()).unwrap()).unwrap();
+        let before = segment_reads(&vfs);
+        drop(store.traversal_reader(|| Ok(())).unwrap());
+        assert_eq!(segment_reads(&vfs) - before, 3 * SEGMENTS);
+        let before = segment_reads(&vfs);
+        let reader = store.traversal_reader(|| Ok(())).unwrap();
+        assert_eq!(segment_reads(&vfs) - before, 0, "the current published table is reused");
+        assert_eq!(reader.location_table_shape().0, SEGMENTS * BLOCKS);
+        drop(reader);
+
+        store.install_payload_manifest(PayloadManifest::new(references[1..].to_vec()).unwrap()).unwrap();
+        let before = segment_reads(&vfs);
+        drop(store.traversal_reader(|| Ok(())).unwrap());
+        assert_eq!(segment_reads(&vfs) - before, 0, "a stale table is derived: a drop reads no index");
+        let (published, table) = store.published_catalog_locations_for_test().unwrap();
+        assert_eq!(published, store.installed_catalog_publication_for_test());
+        assert_eq!(table.located_blocks(), (SEGMENTS - 1) * BLOCKS);
     }
 
     /// Paired cold-read measurement for full-range catalogs on a real volume
@@ -5159,6 +5724,172 @@ mod tests {
         store.verify_payload_segment(&replacement[0]).unwrap();
         store.install_payload_manifest(PayloadManifest::new(replacement).unwrap()).unwrap();
         pass("after_merge_drop");
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// Paired real-volume measurement of foreground cold reads through the
+    /// published catalog location table versus the exact catalog path
+    /// (docs/TOFUDB_BLOCK_READ_PATH.md, "Published catalog location table").
+    /// `TOFU_DB_COLD_READ_BENCH_DIR` selects the volume. The verified-index
+    /// cache holds 29% of the index bytes, the live 2026-11-06 ratio (3.2 GB
+    /// of about 11 GB). Each pass reads one distinct block per segment in a
+    /// fixed pseudo-random order, and the two passes read disjoint blocks, so
+    /// neither warms the other's payload pages; the exact pass runs second
+    /// and so inherits any page-cache warmth of the shared indexes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn published_location_table_cold_read_measurement() {
+        let Some(root) = std::env::var_os("TOFU_DB_COLD_READ_BENCH_DIR") else { return; };
+        let env = |name: &str, default: usize| {
+            std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
+        };
+        let segments = env("TOFU_DB_COLD_READ_BENCH_SEGMENTS", 1_024);
+        let blocks = env("TOFU_DB_COLD_READ_BENCH_BLOCKS", 8_192);
+        let reads = env("TOFU_DB_COLD_READ_BENCH_READS", 200).min(segments);
+        let directory = std::path::PathBuf::from(root).join(format!("located-read-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let built = std::time::Instant::now();
+        let references = {
+            let store = BlockStore::initialize(&directory).unwrap();
+            full_range_catalog(&store, segments, blocks).0
+        };
+        let catalog_seconds = built.elapsed().as_secs_f64();
+        let index_bytes: usize = references.iter().map(|reference| reference.block_count as usize * 48).sum();
+        let store = BlockStore::open(&directory).unwrap();
+        store.set_cache_capacity_bytes(0).unwrap();
+        store.set_segment_index_cache_bytes(index_bytes * 29 / 100).unwrap();
+        store.install_payload_manifest(PayloadManifest::new(references).unwrap()).unwrap();
+        let started = std::time::Instant::now();
+        drop(store.traversal_reader(|| Ok(())).unwrap());
+        let table_build = started.elapsed();
+        let (_, table) = store.published_catalog_locations_for_test().unwrap();
+        let mut order: Vec<usize> = (0..segments).collect();
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        for index in (1..order.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            order.swap(index, (state % (index as u64 + 1)) as usize);
+        }
+        order.truncate(reads);
+        let io = || {
+            let text = std::fs::read_to_string("/proc/self/io").unwrap();
+            let field = |name: &str| text.lines().find_map(|line| line.strip_prefix(name))
+                .and_then(|value| value.trim().parse::<u64>().ok()).unwrap();
+            (field("rchar:"), field("syscr:"))
+        };
+        let pass = |label: &str, block_number: usize, exact: bool| {
+            set_catalog_locations_disabled_for_test(exact);
+            crate::payload_segment::read_path_counters::take();
+            let (rchar, syscr) = io();
+            let started = std::time::Instant::now();
+            for segment_number in &order {
+                let bytes = format!("catalog-{segment_number}-{block_number}").into_bytes();
+                assert_eq!(store.get(BlockId::for_payload(&bytes)).unwrap(), bytes);
+            }
+            let elapsed = started.elapsed();
+            let (rchar_after, syscr_after) = io();
+            let (witness_checks, _) = crate::payload_segment::read_path_counters::take();
+            set_catalog_locations_disabled_for_test(false);
+            eprintln!(
+                "located_read {label} segments={segments} blocks={blocks} reads={reads} \
+                 us_per_read={:.1} read_bytes_per_read={} read_calls_per_read={:.1} witness_checks_per_read={:.1}",
+                elapsed.as_secs_f64() * 1e6 / reads as f64,
+                (rchar_after - rchar) / reads as u64,
+                (syscr_after - syscr) as f64 / reads as f64,
+                witness_checks as f64 / reads as f64,
+            );
+        };
+        eprintln!(
+            "located_read setup segments={segments} blocks={blocks} catalog_build_s={catalog_seconds:.1} \
+             table_build_ms={} table_bytes={} index_bytes={index_bytes}",
+            table_build.as_millis(), table.resident_bytes(),
+        );
+        pass("located", 1, false);
+        pass("exact", 2, true);
+        pass("located_again", 3, false);
+        drop(table);
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// Paired real-volume measurement of concurrent cold packed reads
+    /// (docs/TOFUDB_BLOCK_READ_PATH.md, "Shared segment read handles"). With
+    /// the payload cache disabled and a published location table, every read
+    /// is a located read of a few hot segments by many threads at once, the
+    /// shape that queued live connection threads on the read-handle cache.
+    /// Reports throughput and this process's CPU time and context switches
+    /// (`getrusage`, terminated threads included) per pass.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn concurrent_packed_read_measurement() {
+        let Some(root) = std::env::var_os("TOFU_DB_COLD_READ_BENCH_DIR") else { return; };
+        let env = |name: &str, default: usize| {
+            std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
+        };
+        let segments = env("TOFU_DB_COLD_READ_BENCH_SEGMENTS", 256);
+        let blocks = env("TOFU_DB_COLD_READ_BENCH_BLOCKS", 4_096);
+        let hot = env("TOFU_DB_CONCURRENT_READ_BENCH_HOT_SEGMENTS", 16).clamp(1, segments);
+        let threads = env("TOFU_DB_CONCURRENT_READ_BENCH_THREADS", 64);
+        let reads = env("TOFU_DB_CONCURRENT_READ_BENCH_READS", 2_000);
+        let directory = std::path::PathBuf::from(root).join(format!("concurrent-read-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let references = {
+            let store = BlockStore::initialize(&directory).unwrap();
+            full_range_catalog(&store, segments, blocks).0
+        };
+        let index_bytes: usize = references.iter().map(|reference| reference.block_count as usize * 48).sum();
+        let store = BlockStore::open(&directory).unwrap();
+        store.set_cache_capacity_bytes(0).unwrap();
+        store.set_segment_index_cache_bytes(index_bytes * 29 / 100).unwrap();
+        store.install_payload_manifest(PayloadManifest::new(references).unwrap()).unwrap();
+        drop(store.traversal_reader(|| Ok(())).unwrap());
+        let usage = || {
+            // SAFETY: getrusage fills the caller-owned structure.
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) }, 0);
+            let micros = |time: libc::timeval| time.tv_sec as i64 * 1_000_000 + time.tv_usec as i64;
+            (micros(usage.ru_utime) + micros(usage.ru_stime), usage.ru_nvcsw as i64, usage.ru_nivcsw as i64)
+        };
+        let pass = |label: &str| {
+            let (cpu, voluntary, involuntary) = usage();
+            let started = std::time::Instant::now();
+            std::thread::scope(|scope| {
+                for thread in 0..threads {
+                    let store = &store;
+                    scope.spawn(move || {
+                        let mut state = 0x9e37_79b9_7f4a_7c15_u64 ^ (thread as u64 + 1).wrapping_mul(0x2545_f491_4f6c_dd1d);
+                        for _ in 0..reads {
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            let segment_number = (state % hot as u64) as usize;
+                            let block_number = ((state >> 32) % blocks as u64) as usize;
+                            let bytes = format!("catalog-{segment_number}-{block_number}").into_bytes();
+                            assert_eq!(store.get(BlockId::for_payload(&bytes)).unwrap(), bytes);
+                        }
+                    });
+                }
+            });
+            let elapsed = started.elapsed().as_secs_f64();
+            let (cpu_after, voluntary_after, involuntary_after) = usage();
+            let total = (threads * reads) as f64;
+            eprintln!(
+                "concurrent_packed_read {label} segments={segments} blocks={blocks} hot={hot} threads={threads} \
+                 reads={} reads_per_s={:.0} cpu_us_per_read={:.1} voluntary_switches_per_read={:.2} \
+                 involuntary_switches_per_read={:.2}",
+                threads * reads,
+                total / elapsed,
+                (cpu_after - cpu) as f64 / total,
+                (voluntary_after - voluntary) as f64 / total,
+                (involuntary_after - involuntary) as f64 / total,
+            );
+        };
+        pass("first");
+        pass("second");
         drop(store);
         std::fs::remove_dir_all(&directory).unwrap();
     }

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu-agent"
-version = "0.18.4"
+version = "0.19.0"
 description = "Embeddable and headless Tofu agent runtime with network and tool capabilities"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -300,7 +300,7 @@ include-package-data = false
 "lib.repo_map" = ["LICENSE.grep-ast.txt"]
 "lib.tools.javascript" = ["bootstrap.js", "assets/*.wasm", "assets/*.json", "assets/*.LICENSE", "assets/NOTICE"]
 "tofu_agent" = ["setup_ui/*.html", "setup_ui/*.css", "setup_ui/*.js"]
-"lib.model_info" = ["data/*.json", "model_inference_defaults.json"]
+"lib.model_info" = ["data/*.json", "model_inference_defaults.json", "media_model_facts.json"]
 "lib.motion_video" = ["guide/*.md", "guide/*.html"]
 "lib.slides" = ["guide/*.md"]
 "lib.design_sys" = ["bibles/*.md"]

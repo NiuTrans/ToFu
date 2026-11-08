@@ -29,7 +29,7 @@ def test_result_drift_after_acceptance_names_its_cause(run):
     from lib.project_dispatch.publication import publication_reason
     r = run; first, pin = _accepted_then_drifted(r)
     binding = r.c.repo.admission(first['id'])
-    task_id = r.attempts[first['execution']['attemptId']]['taskId']
+    task_id = first['execution']['taskId']
     with pytest.raises(ProjectDispatchError, match='result revision changed'):
         r.c.repo.validate_publication(binding, task_id)
     workspace = r.workspaces[task_id]
@@ -42,7 +42,7 @@ def test_result_drift_after_acceptance_names_its_cause(run):
 
 def test_coordinator_reaffirms_same_checkpoint_at_current_result(run):
     r = run; first, pin = _accepted_then_drifted(r)
-    task_id = r.attempts[first['execution']['attemptId']]['taskId']
+    task_id = first['execution']['taskId']
     woken = []
     r.service.publication_wake = lambda: woken.append(True)
     again = r.call('review_project_work', assignment_id=first['id'], result_revision=3,
@@ -71,3 +71,40 @@ def test_reaffirmation_never_changes_what_was_accepted(run, change):
     assert 'error' in r.call('review_project_work', **arguments)
     row = r.c.repo.read(first['id'])
     assert row['review']['resultRevision'] == row['publication']['resultRevision'] == 1
+
+
+@pytest.mark.parametrize('checkpoint', [True, False])
+def test_checkpoint_pin_retires_that_workers_held_receipt(run, checkpoint):
+    r = run; first, pin = completed(r)
+    r.service.publication_wake = lambda: None
+    released = []
+    r.service.publication_release = (
+        lambda project, task_id, *, user_id: released.append((project, task_id, user_id)))
+    arguments = {'assignment_id': first['id'], 'result_revision': 1, 'decision': 'accept',
+                 'note': 'Verified exact code'}
+    if checkpoint:
+        arguments['checkpoint_sha'] = pin['checkpointSha']
+    assert 'error' not in r.call('review_project_work', **arguments)
+    task_id = first['execution']['taskId']
+    assert released == ([(r.c.repo.project, task_id, r.c.repo.owner)] if checkpoint else [])
+
+
+def test_a_publication_hold_names_its_hidden_cause_once(monkeypatch, caplog):
+    import logging
+    from lib.project_dispatch import admission, publication
+
+    class Repository:
+        def validate_publication(self, binding, task_id):
+            raise ProjectDispatchError('Project publication requires explicit human authorization')
+
+    monkeypatch.setattr(admission, 'repository_for', lambda binding: Repository())
+    binding = {'owner': 1, 'projectPath': '/project', 'assignmentId': 'assignment'}
+    row = {'task_id': 'task', 'user_id': 1, 'project_root': '/project',
+           'origin': {admission.KEY: binding}}
+    reason = 'project_publication_authority_missing'
+    with caplog.at_level(logging.WARNING, logger=publication.__name__):
+        assert publication.publication_reason(row, {'state': 'pending'}) == reason
+        # The receiver's later retries of the same hold stay quiet.
+        assert publication.publication_reason(row, {'state': 'blocked', 'reason': reason}) == reason
+    causes = [record.getMessage() for record in caplog.records]
+    assert len(causes) == 1 and 'requires explicit human authorization' in causes[0]

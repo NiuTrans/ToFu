@@ -187,7 +187,7 @@ def dispatch_scheduled_turn(
             logger.info('%s Conversation is in Plan mode; scheduled turn deferred',
                         log_prefix)
             return ScheduledTurnDispatch('busy')
-        task_config = build_task_config(parsed_tools, settings)
+        task_config = build_task_config(parsed_tools, settings, owner=owner_id)
         task_config.update(dict(config_overrides or {}))
         _drop_expanding_chat_mode(task_config)
     if '_ctx' not in projection and 'contextSnapshot' not in projection:
@@ -229,8 +229,8 @@ def dispatch_scheduled_turn(
         logger.info(
             "%s Delivered into the live turn (steer) conv=%s block=%s",
             log_prefix,
-            conversation_id[:12],
-            str(outcome.get("blockId") or "")[:12],
+            conversation_id,
+            str(outcome.get("blockId") or ""),
         )
         return ScheduledTurnDispatch("steered")
     queue_id = str(outcome.get("queueId") or "")
@@ -238,7 +238,7 @@ def dispatch_scheduled_turn(
         logger.info(
             "%s Queued behind the live turn conv=%s queue=%s position=%s",
             log_prefix,
-            conversation_id[:12],
+            conversation_id,
             queue_id[:8],
             outcome.get("position"),
         )

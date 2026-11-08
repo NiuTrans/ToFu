@@ -197,8 +197,9 @@ def test_sign_in_required_uses_main_once_or_fails_without_typed_cause(resilient,
     receipt = build_compaction_receipt(
         trigger='dispatch_guard', status='failed', strategy='unchanged',
         implementation='summary_dispatch', summary_usage=usage)
-    # Sign-in expiry is not availability evidence (compaction_receipt_v1).
-    assert '_summaryFailure' not in usage and 'failure' not in receipt['summary']
+    # A diagnostic permission refusal is not unsent credential availability proof.
+    assert usage['_summaryFailure'] == receipt['summary']['failure'] == {
+        'code': 'summary_permission_denied'}
     [attempt] = receipt['summary']['attempts']
     assert attempt['status'] == 'failed' and attempt['providerReached'] is False
     assert 'authIssue' not in attempt
@@ -407,9 +408,9 @@ def test_auxiliary_outage_falls_back_once_to_authorized_main_route(resilient, mo
         return
     assert result is None
     if case == 'main_fails':
-        # Main reached its provider: the overall failure is not an unsent outage.
+        # Main reached its provider: no credential source/unsent proof is fabricated.
         assert main_calls == [(resilient.parent, 'gpt-6.1-sol')]
-        assert '_summaryFailure' not in usage
+        assert usage['_summaryFailure'] == {'code': 'summary_dispatch_failed'}
     else:
         assert main_calls == []
         assert usage['_summaryFailure']['authIssue'] == 'codex_command_unavailable'
@@ -609,7 +610,7 @@ def test_cleanup_fault_during_outage_never_reselects_or_adopts(resilient, monkey
     with provider_pin(_PARENT_PIN), pytest.raises(RuntimeError, match='cleanup must stop'):
         resilient.summary._generate_query_aware_summary(
             resilient.source, 'continue', task=resilient.task, usage_out=usage)
-    assert '_summaryFailure' not in usage
+    assert usage['_summaryFailure'] == {'code': 'summary_dispatch_failed'}
     assert resilient.task['_summaryAttemptBudget']['_summaryBudgetFailure'] == 'summary_dispatch_failed'
     assert len(calls) == 3
     assert resilient.pool.slots == [resilient.parent]
@@ -687,7 +688,7 @@ def test_real_dispatch_transport_provenance_prevents_false_unsent_reselection(re
     else:
         assert actual is None
         assert len(calls) == (2 if failure == 'prior_ingress' else 1)
-        assert '_summaryFailure' not in usage
+        assert usage['_summaryFailure'] == {'code': 'summary_dispatch_failed'}
         assert all(slot.routing_provider_id == 'provider-a' for slot in calls)
     assert resilient.pool.slots == [resilient.parent]
     assert all(slot.api_key == '' for slot in calls)
@@ -838,7 +839,8 @@ def test_initial_selection_rechecks_authority_before_mint_or_dispatch(
     assert minted == [] and calls == []
     assert resilient.state.resolved == []
     assert resilient.source == original_source and resilient.pool.slots == [resilient.parent]
-    assert '_summaryCalls' not in usage and '_summaryFailure' not in usage
+    assert '_summaryCalls' not in usage
+    assert usage['_summaryFailure'] == {'code': 'summary_route_revalidation_failed'}
 
 
 @pytest.mark.parametrize('structured_principal', [False, True], ids=['compatibility', 'structured'])
@@ -977,7 +979,7 @@ def test_real_summary_producer_compactor_and_root_admission_preserve_failure_ide
             else:
                 assert raised.value.__cause__ is None
                 assert envelope['kind'] == 'internal' and 'authIssue' not in envelope
-                assert 'failure' not in receipt['summary']
+                assert receipt['summary']['failure'] == {'code': 'summary_dispatch_failed'}
         assert get_pinned_provider() == _PARENT_PIN
     body_builder.assert_not_called()
     fallback.assert_not_called()
@@ -1016,7 +1018,8 @@ def test_later_route_cancellation_or_fatal_exit_withdraws_previous_credential_ca
                     resilient.source, 'continue', task=resilient.task, usage_out=usage)
         assert get_pinned_provider() == _PARENT_PIN
     assert len(calls) == 4
-    assert '_summaryFailure' not in usage
+    assert usage['_summaryFailure'] == {'code': (
+        'summary_cancelled' if failure == 'admission_cancel' else 'summary_dispatch_failed')}
     assert reconstructed_summary_failure(resilient.task, summary_usage=usage) is None
     assert resilient.pool.slots == [resilient.parent]
     assert all(slot.api_key == '' for slot in calls)

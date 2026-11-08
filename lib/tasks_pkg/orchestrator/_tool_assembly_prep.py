@@ -251,7 +251,11 @@ def assemble_round_tools(cfg, task, mcfg):
             capture_worker_policy(task, cfg, cfg.get('_executableToolCatalog') or tool_list, mcfg['model'])
             from lib.tasks_pkg.coordinator_policy import (
                 coordinator_tool_settings, prepare_coordinator_tool_surface)
-            cfg['tools'] = coordinator_tool_settings(cfg)
+            if not is_dispatch_task(task):
+                # Admission already fixed a continuation's settings to its grant's.
+                # Re-normalizing them drifts from the grant whenever a flag value
+                # is retired, and the grant fence then stops the continuation.
+                cfg['tools'] = coordinator_tool_settings(cfg)
             tool_list = prepare_coordinator_tool_surface(task, cfg, tool_list, mcfg['project_path'])
             has_real_tools = bool(tool_list)
     except Exception as error:

@@ -124,6 +124,8 @@ enum Job { Raw(RawJob), Resume(Arc<continuation::Continuation<phase_executor::Ph
 
 #[path = "embed_phase_executor.rs"]
 mod phase_executor;
+#[path = "embed_commit_watch.rs"]
+mod commit_watch;
 
 enum JobOutcome {
     Responded(io::Result<Vec<u8>>),

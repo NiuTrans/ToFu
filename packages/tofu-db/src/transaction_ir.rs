@@ -94,7 +94,7 @@ fn execute_fenced_indexed_append(
     require_attempts_live: &[String],
     worker_claim: Option<&crate::worker_job::PublicationClaim>,
 ) -> io::Result<Vec<u8>> {
-    let worker_root = crate::task_result::worker_root_for_task(database, transaction, &request.task_id)?;
+    let worker_root = crate::task_result::worker_root_for_event_stream(database, transaction, &request.task_id)?;
     if worker_root.is_some() || worker_claim.is_some() {
         let root = worker_root.as_deref().unwrap_or(&request.task_id);
         let attempt_id = root.strip_prefix("conversation-attempt:").unwrap_or("");
@@ -6799,6 +6799,7 @@ fn prepare_transaction_ir_mode(
                         limit: *limit,
                         settings_keys: settings_keys.clone(),
                     },
+                    &mut deadline_elapsed,
                 )?));
             }
             TransactionIrStep::ConversationList {

@@ -322,7 +322,8 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
 
     if not (task or {}).get('aborted'):
         from lib.tasks_pkg.context_composer.checklist import carry_checklist_through_compaction
-        carry_checklist_through_compaction(messages, task)
+        carry_checklist_through_compaction(
+            messages, task, protected_count=cache_prefix_count)
     if emitted_count or failed_count:
         logger.info(
             '[L1] evidence task=%s emitted=%d failed=%d event_ms=%.1f total_ms=%.1f',

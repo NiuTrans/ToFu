@@ -216,13 +216,13 @@ def oauth_store_token():
 def oauth_logout():
     """Logout from an OAuth provider.
 
-    POST Body: { "provider": "claude" | "codex", "reuse_only"?: bool }
-    Codex reuse_only never starts a fresh authorization; absence is unavailable.
-    GET Query: ?provider=claude|codex
+    POST Body: { "provider": "claude" | "codex" | "kimi" }
+    GET Query: ?provider=claude|codex|kimi
     """
     data = _oauth_request_data()
     provider = optional_str(data, 'provider', default='', max_len=16)
-    if provider not in ('claude', 'codex'):
+    from lib.oauth.outbound import OAUTH_PROVIDERS
+    if provider not in OAUTH_PROVIDERS:
         return api_bad_request('Invalid provider')
 
     try:

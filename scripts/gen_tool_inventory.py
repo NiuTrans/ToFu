@@ -211,13 +211,17 @@ def _tool_schemas() -> dict:
     """
     out: dict = {}
     try:
+        from lib.tools.environment_capabilities import EVERY_CAPABILITY_AVAILABLE
         from lib.tools.registry import ToolContext, assemble_tool_list
+        # Every environment capability present, so the inventory never
+        # depends on which executables the generating host has.
         ctx = ToolContext(
             cfg={}, task_id='inv', project_path='/tmp/inv', project_enabled=True,
             search_mode='multi', search_enabled=True, fetch_enabled=True,
             code_exec_enabled=False, browser_enabled=True, desktop_enabled=True,
             image_gen_enabled=True, human_guidance_enabled=True,
-            scheduler_enabled=True, messages=[])
+            scheduler_enabled=True, messages=[],
+            environment=EVERY_CAPABILITY_AVAILABLE)
         tool_list, _ = assemble_tool_list(ctx)
         for t in tool_list or []:
             fn = (t or {}).get('function') or {}

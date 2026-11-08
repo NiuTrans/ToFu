@@ -18,6 +18,10 @@ and, like wave-preparation policy copies, borrow live native identity through
 `tasks_pkg/native_parent.py` instead of holding a copied port. Durable
 session metadata retains source IDs and native recovery admission, never ports.
 Verify `test_native_delegation_recovery.py` and the production delegation test.
+Under a durable spawning attempt, parent carriers borrow that task's worker
+claim (`worker_binding.share_conversation_worker`) and `turn_handoff`
+keeps the attempt's job claimed while a session `holds_parent` it. Verify
+`tests/conversation/test_durable_swarm_descendants.py` on all three authorities.
 
 ## Editing rules
 

@@ -94,4 +94,37 @@
             <p class="oauth-provider-desc" data-i18n="settings.oauthCatpawDesc">使用个人 Credit Hub 每日额度，自动读取本机 CatPaw CLI 凭证。</p>
             <p class="oauth-manual-hint" id="oauthCatpawHint" style="display:none" data-i18n="settings.oauthCatpawHint">请先安装并登录 CatPaw CLI（mc --code）。</p>
           </div>
+
+          <div class="oauth-provider-card" id="oauthKimiCard">
+            <div class="oauth-provider-header">
+              <span id="oauthKimiIcon" aria-hidden="true"></span>
+              <span class="oauth-provider-name" data-i18n="settings.oauthProviderKimi">Kimi Code</span>
+              <span class="oauth-status-badge" id="oauthKimiStatus" data-i18n="settings.notLoggedIn">未连接</span>
+              <div class="oauth-provider-actions">
+                <button class="btn-small btn-primary" id="oauthKimiLoginBtn" data-tofu-action="_kimiDeviceLogin()" data-i18n="settings.oauthDeviceLogin">设备码登录</button>
+                <button class="btn-small btn-danger" id="oauthKimiLogoutBtn" data-tofu-action="_kimiLogout()" style="display:none" data-i18n="settings.oauthDisconnect">断开连接</button>
+              </div>
+            </div>
+            <p class="oauth-provider-desc" data-i18n="settings.oauthKimiDesc">连接 Kimi 会员（Plus 及以上）的 Kimi Code 权益，使用 K3.1 Pro、K3 等模型。</p>
+            <div class="oauth-meta-row">
+              <div class="oauth-provider-info" id="oauthKimiInfo" style="display:none">
+                <span class="oauth-email" id="oauthKimiExpiry"></span>
+              </div>
+            </div>
+            <div class="oauth-manual-fallback" id="oauthKimiDevice" style="display:none">
+              <p class="oauth-manual-hint" data-i18n="settings.oauthKimiDeviceHint">在任意设备（含手机）的浏览器打开 Kimi 授权页，确认下面的设备码后会自动连接：</p>
+              <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+                <code id="oauthKimiDeviceCode" style="font-size:20px;letter-spacing:2px;font-weight:600;padding:6px 14px;border-radius:6px;background:var(--code-bg,#1a1a2e);border:1px solid var(--border-color,#333)"></code>
+                <button class="btn-small" data-tofu-action="_kimiCopyDeviceCode(this)" data-i18n="settings.oauthCopyCode">复制</button>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <a href="https://www.kimi.com/code" id="oauthKimiDeviceLink" target="_blank" rel="noopener" class="btn-small btn-primary" style="text-decoration:none" data-i18n="settings.oauthDeviceOpenPage">打开授权页</a>
+                <span class="oauth-manual-hint" data-i18n="settings.oauthDeviceWaiting">等待授权中，完成后会自动连接…</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section-title" data-i18n="settings.subscriptionPlansTitle">国内编程套餐（套餐 API Key）</div>
+          <p class="settings-desc" data-i18n="settings.subscriptionPlansDesc">粘贴套餐专属 API Key 即可接入。多数套餐条款只允许在编程工具中交互使用，请勿把这些模型设为后台任务的默认模型。</p>
+          <div id="oauthPlanKeyCards"></div>
         </div>

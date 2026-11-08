@@ -7,7 +7,7 @@ Why this file exists
 ``tests/cache/test_cache_accounting_convention.py`` Defect 4 pinned a fact that has
 since been shown to be SAMPLE-BIASED, not universal:
 
-    "The sankuai AIGC gateway reports ``cache_write_tokens`` but pins it to 0
+    "The example-corp AIGC gateway reports ``cache_write_tokens`` but pins it to 0
      on every model (231/231 rounds). Every predicate gated on a large
      ``cache_write`` therefore can never fire here."
 

@@ -8,7 +8,10 @@ trial executor inside the VM, and a host orchestrator that resumes safely.
 
 | Module | Role |
 | --- | --- |
-| `harness.py` | Task loading, protocols, Tofu/OpenCode/Pi launch specs, trial spec, task bundle (never contains `solution/`) |
+| `harness.py` | Task loading, protocols, Tofu/OpenCode/Pi/Claude-Code launch specs, trial spec, task bundle (never contains `solution/`) |
+| `../claude_code_contract.py` | Claude Code 2.1.207 pins, native-binary runtime tree, guest settings and launch program |
+| `anthropic_bridge.py` | Anthropic Messages ↔ OpenAI chat-completions bridge for the claude-code arm, in front of the shared relay |
+| `source_guard.py` | Benchmark-source blocklist, one rule projected into each arm's own mechanism, plus the in-container canary |
 | `vm_trial.py` | Uploaded into each VM: image pull → container → runtime install → agent under deadline → `tests/test.sh` → `result.json` + bundle; egress filter proxy |
 | `gateway.py` | pssdk session start/stop and the ingress native exec channel |
 | `runner.py` | Concurrent trials, resumable attempts, `summary.json` |
@@ -29,12 +32,16 @@ RUN=.eval-runs/<run-dir>
 # 1. relay (keys stay in this process; sandboxes see a key-less URL)
 env -u PYTHONPATH $PY -m evaluations.terminal_bench.relay --port 18451 --model glm-5.3-flash-m17 \
   --temperature 1.0 --top-p 1.0 --max-tokens 65536 --log $RUN/relay-requests.jsonl --files-dir $RUN/files
+# 1b. only for the claude-code arm: Anthropic bridge in front of the relay
+env -u PYTHONPATH $PY -m evaluations.terminal_bench.anthropic_bridge --port 18452 \
+  --relay-url http://127.0.0.1:18451 --log $RUN/bridge-requests.jsonl
 # 2. run (SANDBOX_857_TOKEN injected by the sandbox-direct-access skill env overlay)
 env -u PYTHONPATH $PY -m evaluations.terminal_bench run --work-dir $RUN/full --concurrency 178 \
-  --tasks-dir <tb2.1 tasks> --arms tofu,opencode[,pi] --protocol vendor-6h \
+  --tasks-dir <tb2.1 tasks> --arms tofu,opencode[,pi,claude-code] --protocol vendor-6h \
   --relay-url http://<host-ip>:18451 --artifacts-manifest $RUN/artifacts.json \
   --endpoint https://model.internal.example.com/sandboxGateway/system/857 \
   --image rootfs://harbor-pipeline-dind-v5 --proxy http://10.70.33.35:8080
+  # add --anthropic-url http://<host-ip>:18452 when --arms includes claude-code
 # 3. score: merges fix-up dirs, attaches the audit, applies human contamination verdicts
 env -u PYTHONPATH $PY -m evaluations.terminal_bench.report $RUN/full [$RUN/<fixup> ...] \
   --tasks-dir <tb2.1 tasks> [--review $RUN/review.json]
@@ -66,11 +73,19 @@ Runtime artifacts (`artifacts.json`, served from `--files-dir`):
 - Tofu: standalone CPython 3.13 with the `tofu-agent[full]` wheel built per
   `docs/DEVELOPER_RUNTIME.md`. The released wheel cannot run a task headless
   (`lib.storage` excluded but imported by `lib/tasks_pkg`; `languages.json`
-  not shipped), so the artifact adds both from the same commit. Verify any
-  rebuild with `env -i ... python3 -I -c 'import lib.tasks_pkg.manager'`: the
-  host exports `PYTHONPATH=<repo>`, which otherwise hides missing modules.
+  not shipped), so the artifact adds both from the same commit. It also
+  installs that commit's `packages/tofu-search` wheel: tofu-search is a
+  separate distribution, and the base runtime's release would keep its own
+  fetch gate and URL blocklist (the guard canary then fails closed). Verify
+  any rebuild with `env -i ... python3 -I -c 'import lib.tasks_pkg.manager'`
+  (the host exports `PYTHONPATH=<repo>`, which otherwise hides missing
+  modules) and check that the runtime's freeze lists both wheels.
 - OpenCode: `opencode_contract.OPENCODE_VERSION` linux-x64-baseline binary plus
   the pinned `@ai-sdk/openai-compatible` seed from `prepare_cache_seed`.
+- Claude Code: `python -m evaluations.claude_code_contract build-runtime --work-dir <scratch> --out-dir <files>`
+  verifies both npm tarballs against the registry integrity pins, confirms the wrapper pins the
+  platform package at the same version, and packs the native `claude` binary (glibc >= 2.17),
+  exactly what the wrapper's postinstall would install on linux-x64 glibc.
 - Pi: `python -m evaluations.pi_contract build-runtime --work-dir <scratch> --out-dir <files>`
   packs Node `PI_NODE_VERSION` (sha256-checked against nodejs.org) and a
   global `npm --ignore-scripts` install of `PI_PACKAGE@PI_VERSION`, plus
@@ -92,7 +107,30 @@ Runtime artifacts (`artifacts.json`, served from `--files-dir`):
 
 - Same model, keys, relay and sampling for every arm; the relay overrides
   `temperature`, `top_p` and `max_tokens` on every request and logs the
-  harness's original values.
+  harness's original values. The claude-code arm reaches that same relay
+  through `anthropic_bridge.py`: Claude Code speaks only Anthropic Messages,
+  so the bridge translates each request to the relay's OpenAI dialect under
+  the same arm label, and the response back. `output_config.effort` maps to
+  `reasoning_effort` (low/high/max; medium->high, xhigh->max, the deployment's
+  levels), `thinking` enabled/adaptive maps to Z.ai's `thinking: {type:
+  enabled, clear_thinking: false}`, and assistant `thinking` blocks go back as
+  `reasoning_content`, so thinking is preserved across turns. The bridge logs
+  the client's settings, the translated settings and the history's reasoning
+  counts per request, so the protocol can be audited on the wire. Anthropic's
+  server-side tools (web_search) have no OpenAI counterpart: they are dropped
+  with a system note rather than failing the turn. `document` blocks become
+  OpenAI `file` parts (the deployment reads PDFs this way); `count_tokens`
+  returns 404, which Claude Code handles with its own estimate.
+- Claude Code runs as Harbor's upstream adapter does (32164177f009): the
+  instruction on stdin, `--verbose --output-format=stream-json
+  --permission-mode=bypassPermissions --effort max --print`, every model alias
+  pinned to the run model, `CLAUDE_CODE_MAX_OUTPUT_TOKENS` = the protocol limit
+  (its default for an unknown model is 32000). Claude Code assumes a 200 000
+  token context for a model name it does not know; the recorded 262 144 applies
+  to the other arms, and there is no supported override short of disabling
+  compaction. Its run ends at the final stream-json `result` record, so a
+  process lingering on children it started is not killed and its daemons stay
+  up for the verifier.
 - Reasoning effort parity: Pi always sends `reasoning_effort` for GLM-5.3
   (its catalog maps levels to low/high/max) and Tofu/OpenCode send none.
   The 2026-11-03 relay probe (`.eval-runs/native-harness-artifacts/effort-probe`,
@@ -126,13 +164,34 @@ Runtime artifacts (`artifacts.json`, served from `--files-dir`):
   `KILL_GRACE_SEC`, so a program that `exec`s or ignores SIGTERM stops too.
   Detached daemons keep running for the verifier. Tests are uploaded only
   after the agent finished.
-- Egress goes through a per-trial proxy that refuses `BENCHMARK_ANSWER_HOSTS`
-  and logs every request. HTTPS hides paths, so GitHub/Hugging Face mirrors
-  are caught by `audit.py`; a strongly flagged pass is excluded after
-  reviewing the cited tool calls. Only network calls (web tools or URL
-  fetches) give strong evidence: task images ship visible tests,
-  canary-bearing sources and whole repositories, so local reads of hidden
-  lines are a weak flag.
+- Benchmark-source blocklist (`source_guard.py`, on for every new run and
+  frozen in `run.json` as `source_guard`). One rule: `ANSWER_HOSTS`
+  (tbench.ai, marginlab.ai, harborframework.com and their subdomains) refused
+  everywhere; `SOURCE_REPOS` (harbor-framework, laude-institute and the
+  audit-found mirrors Bruce-lys/LLM-benchmark and Eyan-L/Agent_Bench-NSCC)
+  refused wherever they appear in a URL or command; `NAME_MARKERS`
+  (terminal-bench and variants, which forks keep) refused inside a URL. Each
+  arm enforces it through its own mechanism: the trial egress proxy refuses
+  the hosts at CONNECT and the markers in plain-HTTP URLs; Claude Code runs a
+  PreToolUse hook on Bash/WebFetch/WebSearch (exit 2 shows the reason to the
+  model); OpenCode gets `permission.bash` deny patterns; Pi loads a
+  `tool_call` extension; Tofu gets its product `search.skip_domains` setting:
+  the answer hosts as host rules and every source repository and name marker
+  as a path pattern on every host (`*/**/*terminal-bench*`), enforced at the
+  fetch gate, in search listings, in browser navigation and on absolute URLs
+  in `run_command` (scheme-less references such as `git clone github.com/...`
+  stay audit-only for Tofu).
+  HTTPS hides paths from the proxy, so paths on shared hosts are refused only
+  where a harness exposes the URL before it runs; other internet access stays
+  open. Before the agent starts, the trial runs `guard_check` in the container:
+  the canary URLs must be refused and the control URL on the same shared host
+  must pass, and a failure is an install error, never a scored trial.
+- Egress goes through a per-trial proxy that logs every request; agent-phase
+  denials are audit evidence (the setup-phase canary is refused on purpose and
+  is not). Only network calls (web tools or URL fetches) give strong evidence:
+  task images ship visible tests, canary-bearing sources and whole
+  repositories, so local reads of hidden lines are a weak flag. A strongly
+  flagged pass is excluded after reviewing the cited tool calls.
 
 ## Decisions
 
@@ -189,7 +248,12 @@ daemons the verifier tests).
 
 `pytest -q tests/evaluations/test_terminal_bench_native.py` (offline: bundle
 excludes solutions, spec/protocol, launch contracts, proxy allow/deny/CONNECT,
-reward parsing, safe bundle extraction, summary, audit rules) and
+reward parsing, safe bundle extraction, summary, audit rules),
+`pytest -q tests/evaluations/test_claude_code_native.py` (Claude Code command
+assembly, bridge request/response/stream translation and an end-to-end run
+against a fake relay), `pytest -q tests/evaluations/test_tb_source_guard.py`
+(the blocklist rule and its bash/JavaScript/OpenCode projections, canary
+pass/fail, audit evidence), and
 `pytest -q tests/evaluations/test_pi_native_contract.py` (Pi launch spec,
 guest program and event filtering against a scripted Pi, audit of Pi session
 files). Setting `TB_NATIVE_PI_RUNTIME` to an extracted Pi runtime tree also

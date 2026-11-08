@@ -49,6 +49,13 @@ child invocations. Swarm/graph adapters supply the exact control scope; retained
 and issued native controls keep their own authority. See
 `docs/TASK_EXECUTION_MODES.md`, child-cancellation and nested-runtime tests.
 
+`command_controls.py` applies owner-scoped interactive controls at TaskRuntime.
+`command_control_runtime.py` selects the verified resident incarnation and
+`command_control_transport.py` owns its private, joined connection lifecycle;
+`contracts/command_control_v1.json` generates the shared protocol constants.
+Verify command-control transport/runtime and execution-lifespan tests with
+foreground interruption and background handoff contracts.
+
 Parallel tools and streaming prefetch use the shared demand executor in
 `lib/observability.py`. Worker knobs size idle reuse only; prefetch preserves
 qualified occurrences and never restores a local count gate.

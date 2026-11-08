@@ -1,0 +1,17 @@
+{
+  "brand": "minimax",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "minimax_mplan",
+  "category": "subscription",
+  "name": "MiniMax M Plan",
+  "base_url": "https://api.minimax.cn/v1",
+  "catalog_mode": "curated",
+  "catalog_source": {"url": "https://platform.minimax.cn/docs/m-plan/faq", "checked_at": "2026-11-06"},
+  "subscription": {"key_console_url": "https://platform.minimax.cn/console/plan"},
+  "_plan_note": "Go / Explore / Build subscription key (sk-cp-…), 5-hour and weekly windows; any OpenAI- or Anthropic-compatible AI tool may use it for personal interactive work. MiniMax-M3.1-Flash limits (524288 context, 131072 output) come from the official other-tools guide; M3 and M2.7 are the Token Plan coverage the plan kept. International keys use https://api.minimax.io/v1.",
+  "offering_recipes": [
+    {"model_id": "MiniMax-M3.1-Flash", "capabilities": ["text", "vision", "thinking"], "context_window": 524288, "max_output_tokens": 131072},
+    {"model_id": "MiniMax-M3", "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "MiniMax-M2.7", "capabilities": ["text", "thinking"]}
+  ]
+}

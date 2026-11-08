@@ -356,6 +356,31 @@ def test_only_server_restart_pause_is_resume_eligible(context, monkeypatch):
     assert c.repo.restart_paused(c.repo.read(a['id']))
 
 
+def test_continuation_accepts_a_successor_reserved_only_by_its_own_start_claim(context):
+    c = context
+    a = authorize(c)
+    workspace_task = 'project-worker:' + a['id']
+    previous = c.repo.bind_execution(a['id'], 'worker-turn', 'old-attempt',
+                                     task_id=workspace_task)['execution']
+    attempts = {'old-attempt': {'attemptId': 'old-attempt', 'turnId': 'worker-turn',
+                                'conversationId': 'recipient', 'status': 'interrupted',
+                                'taskId': workspace_task}}
+    c.repo.attempt_get = lambda attempt_id, **kwargs: deepcopy(attempts.get(attempt_id))
+    for foreign in ('task-of-another-executor', '@dispatching:other-attempt:owner'):
+        attempts['new-attempt'] = {'attemptId': 'new-attempt', 'turnId': 'worker-turn',
+                                   'conversationId': 'recipient', 'status': 'pending',
+                                   'taskId': foreign}
+        with pytest.raises(ProjectDispatchError, match='exact predecessor/successor'):
+            c.repo.continue_execution(a['id'], previous, 'worker-turn', 'new-attempt')
+        assert c.repo.read(a['id'])['execution'] == previous
+    # Recovery claims the start before it can advance the association; the claim
+    # reserves this successor's dispatch without binding any executor to it.
+    attempts['new-attempt']['taskId'] = '@dispatching:new-attempt:owner'
+    advanced = c.repo.continue_execution(a['id'], previous, 'worker-turn', 'new-attempt')
+    assert advanced['execution'] == {'turnId': 'worker-turn', 'attemptId': 'new-attempt',
+                                     'taskId': workspace_task}
+
+
 def test_immutable_execution_binding_revoke_and_stale_revision(context):
     c = context
     a = authorize(c)

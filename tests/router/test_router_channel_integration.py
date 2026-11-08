@@ -94,6 +94,49 @@ def test_colleague_message_is_nonhuman_evidence_in_the_real_router(world):
         require_human_turn(turn, user_id=owner)
 
 
+def test_channel_media_reach_the_real_router_turn_as_durable_attachments(world, monkeypatch, tmp_path):
+    """A colleague's file and the owner's voice message become Turn attachments (C9)."""
+    from lib.channels.ingress import ingest
+    from lib.channels.model import ChannelEvent, ChannelMedia, ThreadKey
+    from lib.turn_initiation import require_human_turn, resolve_turn_initiator
+    owner, router, store, delivered = world
+    monkeypatch.setattr('lib.knowledge.store._SOURCE_ROOT_OVERRIDE', str(tmp_path / 'knowledge-files'))
+    monkeypatch.setattr('lib.knowledge.store._ASSET_ROOT_OVERRIDE', str(tmp_path / 'knowledge-files'))
+    monkeypatch.setattr('lib.transcription.transcription_available', lambda **kwargs: False)
+    originals = {'report.md': '# Q3\nRevenue grew 12%.\n'.encode(), 'voice-7000000000000000004.amr': b'#!AMR\n\x3c'}
+
+    class Port:
+        def download_media(self, item, path):
+            Path(path).write_bytes(originals[item.name])
+            return {'ok': True, 'contentType': ''}
+
+    def event(thread, external_id, sender, text, message_type, item):
+        return ChannelEvent(thread=ThreadKey.parse(thread), external_id=external_id, sender_id=sender,
+                            sender_name=f'user{sender}', text=text, sent_at_ms=1_700_000_000_000,
+                            message_type=message_type, media=(item,))
+
+    ingest(owner, event(TEAM_GROUP, '7000000000000000003', '2002', '[file: report.md]', 8,
+                        ChannelMedia('file', 'report.md', mime_type='text/markdown', source='https://x/r')),
+           store=store, media=Port())
+    ingest(owner, event(COMMAND_CHAT, '7000000000000000004', OWNER_UID, '[voice message: 2 s]', 2,
+                        ChannelMedia('voice', 'voice-7000000000000000004.amr', mime_type='audio/amr',
+                                     duration_s=2, source='https://x/v')),
+           store=store, media=Port())
+    (_, colleague), (_, command) = delivered
+    assert resolve_turn_initiator(colleague) == 'channel'
+    [report] = colleague['projection']['attachments']
+    assert (report['name'], report['mimeType'], report['status']) == ('report.md', 'text/markdown', 'ready')
+    assert report['textChars'] > 0
+    assert f'attachment_ref="att_media_{report["attachmentId"]}"' in colleague['projection']['content']
+    require_human_turn(command, user_id=owner)
+    [voice] = command['projection']['attachments']
+    assert voice['mimeType'] == 'audio/amr'
+    assert command['projection']['content'] == (
+        '[voice message: 2 s]\n'
+        f'[voice attached: voice-7000000000000000004.amr — att_media_{voice["attachmentId"]}]\n'
+        '[transcript unavailable: no transcription model is configured]')
+
+
 def test_router_policy_boundary_admits_every_contract_channel_tool(world):
     from lib.tasks_pkg.coordinator_policy import coordinator_scope, coordinator_tool_ceiling
     owner, router, _store, _delivered = world

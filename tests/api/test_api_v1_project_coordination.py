@@ -202,7 +202,8 @@ def test_project_conversation_inventory_is_passive_owned_and_includes_empty_shel
     from lib.project_dispatch.repository import ProjectDispatchRepository
     path = '/test/inventory-' + uuid.uuid4().hex
     worker, foreign = 'worker-' + uuid.uuid4().hex, 'foreign-' + uuid.uuid4().hex
-    seed_conversation(worker, title=worker, settings={'projectPath': path, '_coordinatorSource': 'coordinator-source'})
+    seed_conversation(worker, title=worker, settings={'projectPath': path, '_coordinatorSource': 'coordinator-source',
+                                                      'folderId': 'f_inventory'})
     seed_conversation(foreign, user_id=2, settings={'projectPath': path})
     history = Mock(side_effect=RuntimeError('Unused assignment history unavailable'))
     monkeypatch.setattr('lib.conversations.coordinator_conversations.project_catalog_origins', history)
@@ -211,7 +212,7 @@ def test_project_conversation_inventory_is_passive_owned_and_includes_empty_shel
     assert response.status_code == 200, response.get_json()
     body = response.get_json()
     assert body['conversations'] == [{'conversationId': worker, 'title': worker,
-        'turnCount': 0, 'coordinatorId': 'coordinator-source',
+        'turnCount': 0, 'coordinatorId': 'coordinator-source', 'folderId': 'f_inventory',
         'createdAt': body['conversations'][0]['createdAt'], 'updatedAt': body['conversations'][0]['updatedAt']}]
     assert body['conversations'][0]['updatedAt'] >= body['conversations'][0]['createdAt'] > 0
     assert body['nextCursor'] is None and body['coverage'] == 'complete'
@@ -220,6 +221,25 @@ def test_project_conversation_inventory_is_passive_owned_and_includes_empty_shel
     history.assert_not_called()
     value, _ = ProjectDispatchRepository(1, path)._load()
     assert not value['assignments'] and not value.get('requestBudgets')
+
+
+def test_project_conversation_inventory_stamps_owner_live_workers_busy(flask_client, chat_sidecar, monkeypatch):
+    from tests._seed import seed_conversation
+    import lib.tasks_pkg.manager as manager
+    path = '/test/inventory-busy-' + uuid.uuid4().hex
+    live, idle = 'live-' + uuid.uuid4().hex, 'idle-' + uuid.uuid4().hex
+    for conv in (live, idle):
+        seed_conversation(conv, title=conv, settings={'projectPath': path, '_coordinatorSource': 'coordinator-source'})
+    owners = []
+    def running(*args, user_id=None, **kwargs):
+        owners.append(user_id)
+        return [{'taskId': 'task-live', 'convId': live, 'elapsed': 1.0}]
+    monkeypatch.setattr(manager, 'list_running_tasks', running)
+    response = flask_client.get('/api/v4/project/coordination/conversations', query_string={'path': path})
+    assert response.status_code == 200, response.get_json()
+    entries = {item['conversationId']: item for item in response.get_json()['conversations']}
+    assert entries[live]['busy'] is True and 'busy' not in entries[idle]
+    assert owners == [1]
 
 
 def test_assignment_history_read_runs_through_the_live_async_view(flask_app, flask_client, chat_sidecar):

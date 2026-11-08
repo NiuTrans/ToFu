@@ -204,6 +204,8 @@ def build_result_meta(task):
         meta['attemptId'] = task.get('_attemptId') or ''
     if task.get('finishReason'): meta['finishReason'] = task['finishReason']
     if task.get('streamState'): meta['streamState'] = task['streamState']
+    # The abort site's cause; restart recovery reads it back with the verdict fields.
+    if task.get('_abort_reason'): meta['_abort_reason'] = str(task['_abort_reason'])
     if task.get('usage'): meta['usage'] = sanitize_usage_for_persist(task['usage'])
     if task.get('preset'): meta['preset'] = task['preset']
     if task.get('toolSummary'): meta['toolSummary'] = task['toolSummary']

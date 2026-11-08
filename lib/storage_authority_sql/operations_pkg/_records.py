@@ -1463,10 +1463,10 @@ def _append_event_row(
         if isinstance(event, Mapping) else ""
     )
     if not turn_publication_checked:
-        from ._invocations import worker_root_for_task
+        from ._invocations import worker_root_for_event_stream
         from ._worker_jobs import _require_conversation_publication_claim, _starts_tool_effect
         try:
-            worker_root = worker_root_for_task(session, task_id, user_id=payload.get('user_id'))
+            worker_root = worker_root_for_event_stream(session, task_id, user_id=payload.get('user_id'))
             if worker_root is not None or payload.get('worker_claim') is not None:
                 owner = _integer(payload, 'user_id', minimum=1) if payload.get('worker_claim') is not None else 0
                 _require_conversation_publication_claim(

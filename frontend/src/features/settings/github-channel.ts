@@ -2,13 +2,14 @@
  * GitHub channel Settings tab: connection status and enable/disable, the
  * token (pasted and verified into the credential vault, or an existing vault
  * entry chosen by name), the API base for GitHub Enterprise Server, watched
- * issue and pull request threads with their modes and reply policies, and the
- * GitHub replies waiting in the outbox (docs/CHANNELS.md C8).
+ * issue and pull request threads with their modes and reply policies, the
+ * GitHub replies waiting in the outbox (docs/CHANNELS.md C8), and the audit of
+ * what Tofu recorded for other people there (C11).
  * Entry points: populateGitHubTab / destroyGitHubTab, registered as the
  * independent Settings panel `github` (`_populateGitHubTab` / `_destroyGitHubTab`).
- * Dependencies: the `Api.channels` facade (generated wire DTOs), the
- * `Api.credentials` list for vault entry names, the shared channel view
- * (channel-settings-view.ts), tofu-ui factories, i18n.
+ * Dependencies: the `Api.channels` facade (generated wire DTOs), the shared
+ * channel view (channel-settings-view.ts, also the vault entry names),
+ * tofu-ui factories, i18n.
  * Server state is the authority: every accepted command re-reads it. A pasted
  * token lives only in its input until submitted and is never rendered back.
  */
@@ -20,11 +21,12 @@ import { apiFailure } from '../../api/errors';
 import type { ChannelsEndpoints } from '../../api/endpoint-registry/channels';
 import { CHANNEL_DEFAULT_MODE_BY_KIND, CHANNEL_DEFAULT_REPLY_POLICY } from '../../api/channels.generated';
 import type {
-  ChannelThreadView, ConfigurableThreadMode, GitHubAccountView, OutboxItemView, ReplyPolicy,
+  AuditPage, ChannelThreadView, ConfigurableThreadMode, GitHubAccountView, OutboxItemView, ReplyPolicy,
 } from '../../api/channels.generated';
 import {
-  card, cardSection, element, empty, facts, feedback, hint, outboxCard, refreshWhileConnecting, routerLink,
-  rowField, runCommand, selectCell, statusLine, threadRow, threadTable, type CommandView,
+  auditCopy, card, cardSection, createAuditList, element, empty, facts, feedback, hint, outboxCard,
+  refreshWhileConnecting, routerLink, rowField, runCommand, selectCell, statusLine, threadRow, threadTable,
+  vaultEntryNames, type CommandView,
 } from './channel-settings-view';
 
 interface GitHubState {
@@ -32,6 +34,7 @@ interface GitHubState {
   threads: ChannelThreadView[];
   nextCursor: string | null;
   outbox: OutboxItemView[];
+  audit: AuditPage;
   vaultEntries: string[];
 }
 
@@ -40,15 +43,11 @@ type GitHubBridge = {
   _destroyGitHubTab?: () => void;
 };
 
-type CredentialsFacade = { list: () => Promise<unknown> };
-
 const CONFIGURABLE_MODES: ConfigurableThreadMode[] = ['watch', 'mentions', 'ignore'];
-const REPLY_POLICIES: ReplyPolicy[] = ['auto', 'draft', 'never'];
+const REPLY_POLICIES: ReplyPolicy[] = ['notify', 'draft', 'auto', 'never'];
 const THREAD_PREFIX = 'github:';
 // Contract ThreadKey (GitHub part), accepted in any case: owner/repo#number.
 const THREAD_INPUT = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}#[1-9][0-9]{0,9}$/;
-// Vault entries owned by other features are never offered as GitHub tokens.
-const RESERVED_ENTRY = /^(skill|channel)\./;
 // GitHub's public REST API base: any other base is a GitHub Enterprise Server.
 const GITHUB_COM_API = 'https://api.github.com';
 // GitHub's classic token form, pre-filled with the scope tokenHint asks for.
@@ -62,15 +61,6 @@ function channelsApi(): ChannelsEndpoints {
   const api = (featureRegistry.Api as { channels?: ChannelsEndpoints } | undefined)?.channels;
   if (!api) throw new Error('Channel API is not ready');
   return api;
-}
-
-async function vaultEntryNames(): Promise<string[]> {
-  const credentials = (featureRegistry.Api as { credentials?: CredentialsFacade } | undefined)?.credentials;
-  if (!credentials) return [];
-  const listing = await credentials.list().catch(() => null) as { credentials?: Array<{ name?: unknown }> } | null;
-  return (listing?.credentials ?? [])
-    .map((entry) => (typeof entry.name === 'string' ? entry.name : ''))
-    .filter((name) => name && !RESERVED_ENTRY.test(name));
 }
 
 function errorText(error: unknown): string {
@@ -313,15 +303,22 @@ function render(state: GitHubState, current: number): void {
   if (!root || current !== generation) return;
   const view = commandView(current);
   const rendered = ++renders;
+  const stateLabel = (value: OutboxItemView['state']) => t(`settings.github.outboxState.${value}` as const);
+  const audit = createAuditList(auditCopy(stateLabel), {
+    more: (before) => channelsApi().audit('github', before, scope?.signal),
+    isCurrent: view.isCurrent,
+  });
+  audit.setPage(state.audit);
   root.replaceChildren(
     renderAccount(state, view),
     renderToken(state, view),
     renderThreads(state, view, current),
     outboxCard(state.outbox, {
       title: t('settings.github.outbox'), empty: t('settings.github.outboxEmpty'),
-      approve: t('settings.github.approve'), discard: t('settings.github.discard'),
-      state: (value) => t(`settings.github.outboxState.${value}` as const),
+      approve: t('settings.github.approve'), discard: t('settings.github.discard'), state: stateLabel,
+      code: (code) => t('settings.channels.approvalCode', { code }),
     }, view, { approve: (id) => channelsApi().approveOutbox(id), discard: (id) => channelsApi().discardOutbox(id) }),
+    audit.el,
   );
   if (scope) {
     refreshWhileConnecting(scope, state.account, (signal) => channelsApi().githubAccount(signal),
@@ -333,11 +330,12 @@ async function load(current: number): Promise<void> {
   const signal = scope?.signal;
   try {
     const api = channelsApi();
-    const [account, page, outbox, vaultEntries] = await Promise.all([
-      api.githubAccount(signal), api.githubThreads('', signal), api.outbox('github', signal), vaultEntryNames(),
+    const [account, page, outbox, audit, vaultEntries] = await Promise.all([
+      api.githubAccount(signal), api.githubThreads('', signal), api.outbox('github', signal),
+      api.audit('github', '', signal), vaultEntryNames(),
     ]);
     if (current !== generation) return;
-    render({ account, threads: page.items, nextCursor: page.nextCursor, vaultEntries, outbox: outbox.items },
+    render({ account, threads: page.items, nextCursor: page.nextCursor, vaultEntries, outbox: outbox.items, audit },
            current);
   } catch (error) {
     const root = document.getElementById('githubChannelRoot');

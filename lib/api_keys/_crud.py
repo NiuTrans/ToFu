@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import time
 from typing import Optional
@@ -32,6 +33,23 @@ def _boundary(owner_user_id, tenant_id: str | None) -> dict:
 
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode('utf-8')).hexdigest()
+
+
+# A launcher-supplied install secret: 256 random bits as lowercase hex
+# (docs/ANDROID_LOCAL_KERNEL.md, "Launch contract").
+_INSTALL_SECRET_SHAPE = re.compile(r'tofu_admin_[0-9a-f]{64}')
+
+
+def require_personal_key_secret(secret: object) -> str:
+    """Return a supplied install secret that has the install-secret shape.
+
+    Raises ``BadRequest`` (a ``ValueError``) without echoing the value.
+    """
+    if not isinstance(secret, str) or not _INSTALL_SECRET_SHAPE.fullmatch(secret):
+        raise BadRequest(
+            'the install secret must be tofu_admin_ followed by 64 lowercase '
+            'hex digits (256 bits)', field='secret')
+    return secret
 
 
 def list_keys(*, owner_user_id: int, tenant_id: str | None = None) -> list[dict]:
@@ -65,6 +83,7 @@ def _mint_key(
     expires_at: Optional[float] = None,
     metadata: Optional[dict] = None,
     admin: bool = False,
+    plaintext: str | None = None,
 ) -> tuple[dict | None, str]:
     if not isinstance(name, str) or not name.strip():
         raise BadRequest('name required', field='name')
@@ -83,7 +102,12 @@ def _mint_key(
     except (TypeError, ValueError) as exc:
         raise BadRequest('credential limits and expiry must be numeric') from exc
     token_kind = 'admin' if _ADMIN_SCOPE in scope_set else 'live'
-    plaintext = f'tofu_{token_kind}_{secrets.token_hex(16)}'
+    if plaintext is None:
+        plaintext = f'tofu_{token_kind}_{secrets.token_hex(16)}'
+    elif token_kind != 'admin':
+        raise BadRequest('only an admin credential may be supplied', field='secret')
+    else:
+        plaintext = require_personal_key_secret(plaintext)
     prefix = plaintext[:len('tofu_xxxx_') + 6]
     key_id = 'k_' + secrets.token_hex(8)
     if storage_operation not in {
@@ -158,8 +182,12 @@ def create_first_owner_key(
     owner_user_id: int,
     tenant_id: str | None = None,
     metadata: Optional[dict] = None,
+    plaintext: str | None = None,
 ) -> tuple[dict, str] | None:
-    """Atomically mint the bootstrap admin key only when its owner has none."""
+    """Atomically create the bootstrap admin key only when its owner has none.
+
+    ``plaintext`` admits a launcher-supplied secret instead of minting one.
+    """
     row, plaintext = _mint_key(
         name,
         storage_operation='credential.create_if_owner_empty',
@@ -168,6 +196,7 @@ def create_first_owner_key(
         tenant_id=tenant_id,
         metadata=metadata,
         admin=True,
+        plaintext=plaintext,
     )
     return None if row is None else (row, plaintext)
 

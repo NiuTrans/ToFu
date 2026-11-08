@@ -14,7 +14,7 @@ Public exceptions
 - :class:`PromptTooLongError` — HTTP 400/413 indicating context overflow
 - :class:`ContextCompactionError` — local automatic compaction failure
 - :class:`InvalidImageError` — HTTP 400 from image content rejection
-- :class:`InvalidEncryptedContentError` — rejected Responses state; never replay
+- :class:`InvalidEncryptedContentError` — rejected Responses state; never replay unchanged
 - :class:`StreamOnlyError` — HTTP 400 from non-streaming on stream-only models
 
 Public classifier
@@ -127,7 +127,7 @@ class RateLimitError(Exception):
             is_credential_delivery_anomaly)
         # True when the body names a PROJECT/APP-level model limit shared with
         # OTHER tenants or keys of the gateway account (Moonshot project TPM,
-        # or the sankuai gateway's app/model RPM envelope). This is EXTERNAL
+        # or the example-corp gateway's app/model RPM envelope). This is EXTERNAL
         # contention, not key health: it must not feed the model success-rate
         # column nor the consecutive-429 auto-exhaust streak (see
         # Slot.record_error is_shared_contention branch).
@@ -357,7 +357,8 @@ class RequestScopedError(Exception):
 class InvalidEncryptedContentError(RequestScopedError):
     """Exact Responses state rejection, not provider/key availability.
 
-    Stop without replay, model fallback or history repair. Provider messages
+    Never replay the unchanged body or fall back to another model; the round
+    owner may retire rejected reasoning state and retry. Provider messages
     and params can echo ciphertext, so retain only the fixed code and a bounded
     structural input label; never attach arbitrary provider-controlled text.
     """
@@ -594,7 +595,7 @@ class EndpointUnreachableError(Exception):
 # ══════════════════════════════════════════════════════════
 
 # Body markers that mean "this gateway has NO route for the model" — as
-# opposed to "route exists but the payload was rejected". The Meituan AIGC
+# opposed to "route exists but the payload was rejected". The YourProvider AIGC
 # gateway answers a missing route with HTTP 400 stage=validation and a
 # CHINESE message ("不支持的模型类型(model=…)"); reading it as a generic
 # deterministic 400 burns every remaining key of the dead model and lets
@@ -655,6 +656,7 @@ _QUOTA_EXHAUSTED_PATTERNS = [
     'insufficient balance',         # DeepSeek / generic (human text)
     'credit_balance_too_low',       # Anthropic (billing)
     'credit balance is too low',    # Anthropic (human text)
+    'credit balance is insufficient',  # Kimi Code: quota and Extra Usage spent
     'billing_not_active',           # OpenAI billing suspension
     'account_deactivated',          # various
     'quota_exceeded',               # Azure / generic (billing context)
@@ -668,7 +670,7 @@ _QUOTA_EXHAUSTED_PATTERNS = [
 
 # Phrases in a 4xx body that mean the failure is an UPSTREAM-VENDOR TRANSIENT,
 # not a client/auth error — the gateway itself is telling us to retry later.
-# Observed on the toio/sankuai gateway (2026-07-26): the claude-opus-5 vendor
+# Observed on the toio/example-corp gateway (2026-07-26): the claude-opus-5 vendor
 # outage surfaced as HTTP 400 AND 403 with message
 # "请求失败,请稍后(再)尝试" + ext.error.source=UPSTREAM_VENDOR, and our
 # classifier treated the 403 as an auth failure (pair exclusion) and the 400
@@ -686,7 +688,7 @@ _UPSTREAM_TRANSIENT_PATTERNS = [
 
 # Phrases in a 4xx body emitted by the gateway's own ROUTING layer when it
 # fails to resolve a vendor group — a 503 wearing a 4xx costume, NOT an auth
-# rejection. Observed on the toio/sankuai gateway (2026-07-26, 19:15–19:54):
+# rejection. Observed on the toio/example-corp gateway (2026-07-26, 19:15–19:54):
 # 22 hits of ``resolve groups failed: model unsupported by selected groups:
 # claude-opus-5`` (HTTP 403) inside one 40-minute vendor-storm window, 10 of
 # them misclassified PermissionError_ → task deaths / kimi fallbacks wearing
@@ -871,6 +873,8 @@ def provider_error_http_status(error) -> int | None:
         value = error.get(field)
         if isinstance(value, str) and value in _PROVIDER_ERROR_STATUS:
             return _PROVIDER_ERROR_STATUS[value]
+    if invalid_encrypted_content_error_object(error):
+        return 400
     return None
 
 # Regex to detect embedded overload/rate-limit status codes in gateway error bodies.
@@ -969,7 +973,7 @@ def decode_error_body(resp) -> str:
 
     ``requests`` falls back to ISO-8859-1 for ``text/*`` responses without an
     explicit charset (the RFC 2616 default), which garbles UTF-8 CJK payloads
-    from gateways that omit the charset header — observed on the sankuai toio
+    from gateways that omit the charset header — observed on the example-corp toio
     gateway (2026-07-25): its Chinese 400 body surfaced as ``è¯·æ±...``
     mojibake in both logs and the frontend retry HUD. API error bodies are
     JSON per OpenAI/Anthropic convention and thus virtually always UTF-8, so
@@ -1001,8 +1005,26 @@ def decode_error_body(resp) -> str:
 _API_HTTP_PREFIX_RE = re.compile(r'^(API HTTP \d+:\s*)')
 
 
+# OpenAI's fixed rejection sentence. Gateways that re-wrap provider errors
+# ({"type":"error","error":{"type":"<nil>","message":...}}) drop
+# ``error.code`` but keep this message, which then surfaced as an untyped 400.
+_INVALID_ENCRYPTED_CONTENT_MESSAGE_RE = re.compile(
+    r'The encrypted content for item [A-Za-z0-9_-]{1,256} could not be verified\.')
+
+
+def invalid_encrypted_content_error_object(error) -> bool:
+    """Exact code, or (code absent) the provider's sentence at message start."""
+    if not isinstance(error, dict):
+        return False
+    if error.get('code') == InvalidEncryptedContentError.code:
+        return True
+    message = error.get('message')
+    return (not error.get('code') and isinstance(message, str)
+            and _INVALID_ENCRYPTED_CONTENT_MESSAGE_RE.match(message) is not None)
+
+
 def _invalid_encrypted_content_error(text):
-    """Recognize a structured exact code, never a message/type substring."""
+    """Recognize the structured rejection, never a free-text substring."""
     if not isinstance(text, str):
         return None
     prefix = _API_HTTP_PREFIX_RE.match(text)
@@ -1016,8 +1038,7 @@ def _invalid_encrypted_content_error(text):
     if not isinstance(data, dict):
         return None
     error = data.get('error', data)
-    if (not isinstance(error, dict)
-            or error.get('code') != InvalidEncryptedContentError.code):
+    if not invalid_encrypted_content_error_object(error):
         return None
     return InvalidEncryptedContentError(param=error.get('param'))
 
@@ -1214,6 +1235,11 @@ def _is_quota_exhausted(err_msg: str) -> bool:
 _SUBSCRIPTION_QUOTA_PATTERNS = [
     'usage_limit_reached',
     'selected model is at capacity',
+    # Kimi Code 429s (kimi.com/code/docs error reference): the 5-hour,
+    # legacy weekly and monthly membership windows. No reset time is sent.
+    'reached your 5-hour usage limit',
+    'reached your weekly (7-day) usage limit',
+    'reached your monthly usage limit',
 ]
 
 # Tolerate both JSON ("resets_at": 123) and Python-repr ('resets_at': 123)
@@ -1261,7 +1287,7 @@ def parse_subscription_retry_after(err_msg: str, *, now: float = None):
 # tenants or keys of the gateway account. Every phrase in ONE group must
 # appear (narrow on purpose): a per-key/per-account throttle must NEVER match,
 # or a genuinely sick key would be laundered into "external contention" and
-# stop feeding the dead-key safety nets. Observed canonical bodies (sankuai):
+# stop feeding the dead-key safety nets. Observed canonical bodies (example-corp):
 #   Moonshot: "request reached project (kimi-k3) TPM/RPM rate limit"
 #   Moonshot: "request reached project (kimi-k3.1-pro) Concurrency rate limit"
 #   Gateway:  "App:**62518在模型:kimi-k3每分钟请求次数超过限制"

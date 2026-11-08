@@ -1,12 +1,17 @@
 /**
  * 大象 (Daxiang) channel Settings tab: the account (status, login MIS,
- * enable/disable), the command chat, the thread list and the 大象 outbox
- * drafts awaiting the owner's decision (docs/CHANNELS.md).
+ * enable/disable), the command chat, the notification robot, the assistant
+ * card (how Tofu replies for the owner, and the owner's account note), the
+ * thread list (mode, reply policy and note per thread), the 大象 outbox drafts
+ * awaiting the owner's decision with their approval codes, and the audit of
+ * what Tofu recorded for other people (docs/CHANNELS.md, C11).
  * Entry points: populateDxTab / destroyDxTab, registered as the independent
  * Settings panel `dx` (`_populateDxTab` / `_destroyDxTab`).
  * Dependencies: the `Api.channels` endpoint facade (generated wire DTOs), the
- * account cards (dx-account.ts), the thread list (dx-thread-list.ts), the
- * shared channel view (channel-settings-view.ts), tofu-ui factories, i18n.
+ * account cards (dx-account.ts), the robot card (dx-robot.ts), the assistant
+ * card (dx-assistant.ts), the thread list (dx-thread-list.ts), the shared
+ * channel view (channel-settings-view.ts, also the audit list), tofu-ui
+ * factories, i18n.
  * Server state is the authority: each card renders as soon as its own read
  * answers, every accepted command re-reads the server in place (open editors,
  * search and selection stay), and nothing is cached across openings.
@@ -18,11 +23,14 @@ import { createAlert, createSpinner } from '../../ui';
 import type { ChannelsEndpoints } from '../../api/endpoint-registry/channels';
 import type { ChannelAccountView, ChannelThreadView, OutboxItemView } from '../../api/channels.generated';
 import {
-  element, feedback, outboxCard, refreshWhileConnecting, type CommandView,
+  auditCopy, createAuditList, element, feedback, outboxCard, refreshWhileConnecting, vaultEntryNames,
+  type AuditList, type CommandView,
 } from './channel-settings-view';
 import {
   createDxCardUi, renderAccountCard, renderCommandChatCard, replaceKeepingFocus, type DxCardPorts, type DxCardUi,
 } from './dx-account';
+import { renderAssistantCard } from './dx-assistant';
+import { renderRobotCard } from './dx-robot';
 import { createDxThreadList, type DxThreadList } from './dx-thread-list';
 
 interface DxOpening {
@@ -31,9 +39,18 @@ interface DxOpening {
   view: CommandView;
   ui: DxCardUi;
   threadList: DxThreadList;
+  audit: AuditList;
   account: ChannelAccountView | null;
   threads: ChannelThreadView[] | null;
-  slots: { account: HTMLElement; commandChat: HTMLElement; threads: HTMLElement; outbox: HTMLElement };
+  vaultEntries: string[] | null;
+  /** What the robot card last rendered: other re-renders leave its typed fields alone. */
+  robotKey: string | null;
+  /** The account note the assistant card last rendered, for the same reason. */
+  assistantKey: string | null;
+  slots: {
+    account: HTMLElement; commandChat: HTMLElement; robot: HTMLElement; assistant: HTMLElement;
+    threads: HTMLElement; outbox: HTMLElement; audit: HTMLElement;
+  };
   accountRenders: number;
 }
 
@@ -85,12 +102,47 @@ function renderCommandChat(state: DxOpening): void {
                       renderCommandChatCard(state.account, state.threads, state.ui, cardPorts(state)));
 }
 
-/** The account and command chat cards; a connecting account is re-read until it moves. */
+/** The robot card, only when its part of the account or the vault changed, or after its own command. */
+function renderRobot(state: DxOpening): void {
+  const { account } = state;
+  if (!isCurrent(state) || !account) return;
+  const key = JSON.stringify([account.robot ?? null, account.commandChat, state.vaultEntries ?? []]);
+  if (key === state.robotKey) return;
+  state.robotKey = key;
+  const view: CommandView = {
+    ...state.view,
+    reload: () => {
+      state.robotKey = null;
+      return state.view.reload();
+    },
+  };
+  replaceKeepingFocus(state.slots.robot,
+                      renderRobotCard(account, state.vaultEntries ?? [], { api: channelsApi, view }));
+}
+
+/** The assistant card, only when the saved account note changed, or after its own save. */
+function renderAssistant(state: DxOpening): void {
+  const { account } = state;
+  if (!isCurrent(state) || !account || account.assistantNote === state.assistantKey) return;
+  state.assistantKey = account.assistantNote;
+  const view: CommandView = {
+    ...state.view,
+    reload: () => {
+      state.assistantKey = null;
+      return state.view.reload();
+    },
+  };
+  state.slots.assistant.replaceChildren(renderAssistantCard(account, { api: channelsApi, view }));
+}
+
+/** The account, command chat, robot and assistant cards; a connecting account is re-read until it moves. */
 function renderCards(state: DxOpening): void {
   const { account } = state;
   if (!isCurrent(state) || !account) return;
   replaceKeepingFocus(state.slots.account, renderAccountCard(account, state.ui, cardPorts(state)));
   renderCommandChat(state);
+  renderRobot(state);
+  renderAssistant(state);
   const rendered = ++state.accountRenders;
   refreshWhileConnecting(state.scope, account, (signal) => channelsApi().dxAccount(signal),
                          () => isCurrent(state) && rendered === state.accountRenders, state.view.reload);
@@ -102,13 +154,19 @@ function renderOutbox(state: DxOpening, items: OutboxItemView[]): void {
     title: t('settings.dx.outbox'), empty: t('settings.dx.outboxEmpty'),
     approve: t('settings.dx.approve'), discard: t('settings.dx.discard'),
     state: (value) => t(`settings.dx.outboxState.${value}` as const),
+    code: (code) => t('settings.channels.approvalCode', { code }),
+    attachments: {
+      label: t('settings.dx.attachments'), pending: t('settings.dx.attachmentPending'),
+      previewOf: (name) => t('settings.dx.attachmentPreviewOf', { name }),
+      imageUrl: (id, index) => api.outboxAttachmentUrl(id, index),
+    },
   }, state.view, { approve: (id) => api.approveOutbox(id), discard: (id) => api.discardOutbox(id) }));
 }
 
 /**
- * Read the account, every thread and the outbox; each part renders when its
- * read answers. A failed first read replaces its placeholder; a failed
- * re-read keeps the shown card and reports beside its title.
+ * Read the account, every thread, the outbox, the audit's newest page and the
+ * vault entry names; each part renders when its read answers. A failed first read replaces its
+ * placeholder; a failed re-read keeps the shown card and reports beside its title.
  */
 async function load(state: DxOpening): Promise<void> {
   const { signal } = state.scope;
@@ -144,6 +202,18 @@ async function load(state: DxOpening): Promise<void> {
     api.outbox('dx', signal).then((page) => {
       if (isCurrent(state)) renderOutbox(state, page.items);
     }, failed(state.slots.outbox)),
+    api.audit('dx', '', signal).then((page) => {
+      if (isCurrent(state)) state.audit.setPage(page);
+    }, (error: unknown) => {
+      if (isCurrent(state) && !signal.aborted) {
+        state.audit.showError(t('settings.channels.audit.loadFailed', { error: errorText(error) }));
+      }
+    }),
+    vaultEntryNames().then((names) => {
+      if (!isCurrent(state)) return;
+      state.vaultEntries = names;
+      renderRobot(state);
+    }),
   ]);
 }
 
@@ -169,14 +239,23 @@ export function populateDxTab(): void {
     failure: view.failure,
     pendingLabel: view.pendingLabel,
   });
+  const audit = createAuditList(auditCopy((value) => t(`settings.dx.outboxState.${value}` as const)), {
+    more: (before) => channelsApi().audit('dx', before, scope.signal),
+    isCurrent: view.isCurrent,
+  });
   const state: DxOpening = {
-    generation: current, scope, view, ui: createDxCardUi(), threadList, account: null, threads: null,
-    slots: { account: slot(), commandChat: slot(), threads: slot(), outbox: slot() }, accountRenders: 0,
+    generation: current, scope, view, ui: createDxCardUi(), threadList, audit, account: null, threads: null,
+    vaultEntries: null, robotKey: null, assistantKey: null,
+    slots: { account: slot(), commandChat: slot(), robot: slot(), assistant: slot(), threads: slot(),
+             outbox: slot(), audit: slot() },
+    accountRenders: 0,
   };
   opening = state;
   state.slots.account.appendChild(createSpinner());
   state.slots.threads.appendChild(threadList.el);
-  root.replaceChildren(state.slots.account, state.slots.commandChat, state.slots.threads, state.slots.outbox);
+  state.slots.audit.appendChild(audit.el);
+  root.replaceChildren(state.slots.account, state.slots.commandChat, state.slots.robot, state.slots.assistant,
+                       state.slots.threads, state.slots.outbox, state.slots.audit);
   void load(state);
 }
 

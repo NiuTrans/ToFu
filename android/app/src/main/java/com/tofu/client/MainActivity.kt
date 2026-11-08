@@ -21,10 +21,13 @@ import com.tofu.client.data.OnboardingStore
 import com.tofu.client.data.ProfileDatabase
 import com.tofu.client.session.DeepLink
 import com.tofu.client.session.DiagLog
+import com.tofu.client.session.KernelControllers
 import com.tofu.client.session.SecretStore
 import com.tofu.client.session.SessionController
 import com.tofu.client.session.SessionManager
+import com.tofu.client.session.SupervisorClient
 import com.tofu.client.session.UpdateProbe
+import com.tofu.client.session.UrlKernelController
 import com.tofu.client.ui.StartupFailureScreen
 import com.tofu.client.ui.copyDiagnostics
 import com.tofu.client.session.UpdateChecker
@@ -32,6 +35,7 @@ import com.tofu.client.ui.AddEditScreen
 import com.tofu.client.ui.OnboardingScreen
 import com.tofu.client.ui.ProfileListScreen
 import com.tofu.client.ui.ProfilesViewModel
+import com.tofu.client.ui.SshKernelScreen
 import com.tofu.client.ui.UiStatus
 import com.tofu.client.ui.Screen
 import com.tofu.client.ui.WebScreen
@@ -69,7 +73,7 @@ class MainActivity : ComponentActivity() {
         try {
             db = Room.databaseBuilder(
                 applicationContext, ProfileDatabase::class.java, "tofu-profiles.db",
-            ).addMigrations(ProfileDatabase.MIGRATION_1_2).build()
+            ).addMigrations(*ProfileDatabase.ALL_MIGRATIONS).build()
             secrets = SecretStore(applicationContext)
             store = OnboardingStore(applicationContext)
             // One process-wide diagnostic ring, shared by every screen so a report
@@ -77,9 +81,14 @@ class MainActivity : ComponentActivity() {
             // and the WebView's own console output.
             val dao = db.profileDao()
             session = SessionManager(dao, secrets, appVersionCode = BuildConfig.VERSION_CODE, diagnostics = diag)
-            val controller = SessionController(dao, secrets, session, report = { diag.record("I", "Profiles", it) })
+            val kernels = KernelControllers(
+                remoteUrl = UrlKernelController(SupervisorClient(diagnostics = diag), login = session::login),
+                local = com.tofu.client.session.localKernelController(applicationContext, diag),
+                ssh = com.tofu.client.ssh.SshKernelController.forApp(applicationContext, dao, secrets),
+            )
+            val controller = SessionController(dao, secrets, session, kernels, report = { diag.record("I", "Profiles", it) })
             vm = ProfilesViewModel(
-                dao, secrets, controller,
+                dao, secrets, controller, kernels,
                 updateChecker = UpdateChecker(BuildConfig.VERSION_NAME, UpdateProbe(diagnostics = diag)::advertised),
                 diagnostics = diag,
             )
@@ -98,6 +107,8 @@ class MainActivity : ComponentActivity() {
                     val context = LocalContext.current
                     val screen by vm.screen.collectAsState()
                     val profiles by vm.profiles.collectAsState()
+                    val kernelList by vm.kernelList.collectAsState()
+                    val activeKernel by vm.activeKernel.collectAsState()
                     val status by vm.status.collectAsState()
                     val update by vm.update.collectAsState()
                     LaunchedEffect(screen) { diag.record("I", "Screen", screen::class.simpleName.orEmpty()) }
@@ -120,6 +131,8 @@ class MainActivity : ComponentActivity() {
                     val onEdit = remember { vm::startEdit }
                     val onDelete = remember { vm::deleteProfile }
                     val onAdd = remember { { vm.startAdd() } }
+                    val onAddSsh = remember { vm::startAddSsh }
+                    val kernelState = remember { vm::kernelState }
 
                     when (val s = screen) {
                         is Screen.List -> if (profiles.isEmpty() && !onboardingDone && status !is UiStatus.Error) {
@@ -134,14 +147,17 @@ class MainActivity : ComponentActivity() {
                             )
                         } else {
                             ProfileListScreen(
-                                profiles = profiles,
+                                profiles = kernelList,
                                 status = status,
                                 onActivate = onActivate,
                                 onEdit = onEdit,
                                 onDelete = onDelete,
                                 onAdd = onAdd,
+                                onAddSsh = onAddSsh,
                                 session = session,
                                 diag = diag,
+                                kernelState = kernelState,
+                                activeKernel = activeKernel,
                                 update = update,
                                 onUpdate = { openUrl(context, it) },
                                 onCheckUpdate = vm::checkForUpdate,
@@ -168,6 +184,18 @@ class MainActivity : ComponentActivity() {
                                 prefillAlias = vm.addPrefill?.alias,
                             )
                         }
+                        is Screen.AddEditSsh -> SshKernelScreen(
+                            editing = vm.editing,
+                            existingAliases = profiles.map { it.alias }.toSet(),
+                            onCancel = vm::backToList,
+                            onSubmit = vm::submitSsh,
+                            status = status,
+                            publicKey = vm.sshPublicKey.collectAsState().value,
+                            passwordStored = vm.editing?.let { vm.secretStoredFor(it.alias) } == true,
+                            hostKeyToTrust = vm.hostKeyToTrust,
+                            onTrust = vm::trustHostKey,
+                            kernelState = kernelState,
+                        )
                         is Screen.Web -> WebScreen(
                             profile = s.profile,
                             session = session,

@@ -17,7 +17,7 @@ repositories, so local reads never count as strong evidence.
   that line itself (``local_hidden_lines``: the same from local calls, weak);
 - ``canary_results``: network call results containing the canary GUID;
 - ``source_calls``: network calls whose arguments name benchmark answer sources;
-- ``denied_egress``: requests the trial egress proxy refused.
+- ``denied_egress``: agent-phase requests the trial egress proxy refused.
 
 Entry points: ``audit_run(work_dir, tasks_dir)``; CLI
 ``python -m evaluations.terminal_bench.audit WORK_DIR TASKS_DIR``.
@@ -30,13 +30,14 @@ import re
 import sys
 from pathlib import Path
 
-from evaluations.terminal_bench.harness import BENCHMARK_ANSWER_HOSTS, BENCHMARK_URL_MARKERS, TB_CANARY_GUID
+from evaluations.terminal_bench.harness import TB_CANARY_GUID
+from evaluations.terminal_bench.source_guard import ANSWER_HOSTS, URL_MARKERS
 
 # Shorter lines (imports, braces, shell boilerplate) are shared by unrelated code.
 MIN_FINGERPRINT_CHARS = 40
-SOURCE_MARKERS = tuple(BENCHMARK_URL_MARKERS) + tuple(BENCHMARK_ANSWER_HOSTS) + ("test_outputs.py", "solve.sh",
-                                                                                 "solution.sh")
-WEB_TOOLS = frozenset({"web_search", "fetch_url", "webfetch", "websearch", "browser_research_page"})
+SOURCE_MARKERS = tuple(URL_MARKERS) + tuple(ANSWER_HOSTS) + ("test_outputs.py", "solve.sh", "solution.sh")
+WEB_TOOLS = frozenset({"web_search", "fetch_url", "webfetch", "websearch", "browser_research_page",
+                       "WebFetch", "WebSearch"})
 NETWORK_ARGUMENT_MARKERS = ("http://", "https://", "curl ", "wget ", "git clone", "hf_hub_download",
                             "huggingface-cli", "urllib", "requests.get")
 STRONG_FLAGS = ("hidden_lines", "canary_results", "source_calls", "denied_egress")
@@ -103,6 +104,25 @@ def _pi_message_events(message: dict) -> list[tuple[str, str, str, str]]:
     return []
 
 
+def _claude_message_events(message: dict, names: dict[str, str]) -> list[tuple[str, str, str, str]]:
+    events = []
+    for block in message.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_use":
+            names[block.get("id") or ""] = block.get("name") or ""
+            events.append(("call", block.get("id") or "", block.get("name") or "",
+                           _stringify(block.get("input") or {})))
+        elif block.get("type") == "tool_result":
+            content = block.get("content")
+            text = content if isinstance(content, str) else "\n".join(
+                part.get("text") or "" for part in content or []
+                if isinstance(part, dict) and part.get("type") == "text")
+            call_id = block.get("tool_use_id") or ""
+            events.append(("result", call_id, names.get(call_id, ""), text))
+    return events
+
+
 def tool_events(agent_dir: Path) -> list[tuple[str, str, str, str]]:
     """Ordered (kind, call_id, tool, text) with kind in {"call", "result"} for every arm."""
     events: list[tuple[str, str, str, str]] = []
@@ -149,6 +169,21 @@ def tool_events(agent_dir: Path) -> list[tuple[str, str, str, str]]:
                 continue
             if isinstance(event, dict) and event.get("type") in ("message", "message_end"):
                 events.extend(_pi_message_events(event.get("message") or {}))
+    # Claude Code: session transcripts (main and subagent files) are appended per
+    # message; the stream-json stdout is the fallback.
+    projects = agent_dir / "sessions" / "projects"
+    claude_sources = sorted(projects.rglob("*.jsonl")) if projects.is_dir() else []
+    if not claude_sources and (agent_dir / "claude-code.txt").is_file():
+        claude_sources = [agent_dir / "claude-code.txt"]
+    names: dict[str, str] = {}
+    for source in claude_sources:
+        for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("type") in ("assistant", "user"):
+                events.extend(_claude_message_events(event.get("message") or {}, names))
     return events
 
 
@@ -193,7 +228,9 @@ def audit_trial(trial_dir: Path, fingerprints: set[str]) -> dict:
                 record = json.loads(line)
             except ValueError:
                 continue
-            if record.get("decision") == "deny":
+            # Only the agent's own requests are evidence; the setup-phase guard canary
+            # (source_guard.guard_check_program) is refused on purpose.
+            if record.get("decision") == "deny" and record.get("phase") == "agent":
                 denied.append({key: record.get(key) for key in ("phase", "method", "host", "url")})
     flags = [name for name, value in (("hidden_lines", hidden_hits), ("canary_results", canary_results),
                                       ("source_calls", source_calls), ("denied_egress", denied),

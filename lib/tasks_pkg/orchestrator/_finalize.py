@@ -200,7 +200,7 @@ def _check_suspicious_completion(task, last_finish_reason, _loop_exit_reason,
 
 # ── Suspicious-completion INTERCEPTION (act, not just warn) ───────────────
 #
-# WHY this exists (2026-07-28 09:51–10:45 incident): the sankuai gateway
+# WHY this exists (2026-07-28 09:51–10:45 incident): the example-corp gateway
 # intermittently returned a 29-char canned greeting ("Hi! How can I help you
 # today?") with ``finish_reason=stop`` for every Opus 5 request — 68 times,
 # each carrying a real M-TraceId. Tasks that had just spent N rounds doing real
@@ -726,7 +726,9 @@ def _salvage_undelivered_steer(task: dict[str, Any]) -> int:
     In BOTH cases we re-enqueue the steer into ``message_queue`` as a fresh next
     turn, so the message is delivered EXACTLY ONCE (never zero). MUST run BEFORE
     the swarm teardown clears()+tombstones the inbox slot — after that a drain
-    returns nothing.
+    returns nothing. A steer another server process committed to this Turn
+    (``lib.tasks_pkg.committed_steers``) was never in this inbox; it is queued
+    as the next turn through the same turn command.
 
     Returns the number of steer messages salvaged (0 when there was nothing
     undelivered). Best-effort: an enqueue failure is logged, never raised.
@@ -739,12 +741,36 @@ def _salvage_undelivered_steer(task: dict[str, Any]) -> int:
         undelivered = list(task.pop('_steer_inject_pending', None) or [])
         if steer_key:
             undelivered.extend(_drain_inbox(steer_key, modes=['user-steer']))
+        from lib.tasks_pkg.committed_steers import (
+            COMMITTED_STEER, committed_steers, requeue_committed_steer,
+        )
+        try:
+            undelivered.extend(committed_steers(
+                task, taken_elsewhere=[sit.get('blockId') for sit in undelivered]))
+        except Exception as _cse:
+            logger.warning('[Orchestrator] committed steers unreadable on task end '
+                           'conv=%s: %s', task.get('convId'), _cse, exc_info=True)
         conv_id = task.get('convId') or ''
         if undelivered and conv_id:
             from lib.message_queue import enqueue_message
             from lib.tasks_pkg.manager import task_user_id
             owner_user_id = int(task_user_id(task))
             for sit in undelivered:
+                if sit.get(COMMITTED_STEER):
+                    try:
+                        record = requeue_committed_steer(task, sit)
+                    except Exception as _rqe:
+                        logger.error('[Orchestrator] committed steer requeue failed '
+                                     'conv=%s block=%s: %s', conv_id, sit.get('blockId'),
+                                     _rqe, exc_info=True)
+                        continue
+                    if record is not None:
+                        salvaged += 1
+                        task.setdefault('_userSteerInjects', []).append(record)
+                        from lib.scheduler.timer import record_requeued_continuation
+                        record_requeued_continuation(
+                            sit['injectionId'], user_id=owner_user_id)
+                    continue
                 umsg = sit.get('_user_msg')
                 scfg = sit.get('config') or {}
                 if umsg:

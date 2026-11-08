@@ -29,8 +29,19 @@ an undocumented second source of product policy.
   unresolved globs, or implicit current-directory authority.
 - `git_land.py` preserves committed and uncommitted source ownership separately;
   generator families and input/output scopes live in
-  `lib/project_mod/generated_integration.py`. Verify both `test_git_land_*.py`
-  suites and the generated task-delta test in `test_integration_delivery.py`.
+  `lib/project_mod/generated_integration.py`. Merged-result verification lives
+  in `lib/project_mod/landing_verification.py` (impact records: only the test
+  files the merge can affect run) and landing notices in
+  `lib/project_mod/integration_radar.py`. `lane.py` creates one branch plus a
+  recycled local checkout per unit of work (`lib/project_mod/lanes.py`). Verify
+  both `test_git_land_*.py` suites, `test_landing_verification.py`,
+  `test_impact_selection.py`, `test_lanes.py`, `test_integration_radar.py` and
+  the generated task-delta test in `test_integration_delivery.py`.
+  Landing removes the worktree, so first let any swarm worker that still uses
+  it finish (or stop it). In a FUSE worktree, `Entry '<path>' not uptodate.
+  Cannot merge` with no visible diff is stale index stat data (tool-run git
+  uses `--no-optional-locks`): run `git update-index -q --refresh` and retry;
+  never reset.
 - `frontend_vendor_assets.mjs` derives standalone KaTeX files, CSS font closure
   and `lib/http_transport/generated_frontend_vendor.py` from the installed lockfile version.
   Author the iframe adapter under `frontend/src/artifacts/`; verify generation

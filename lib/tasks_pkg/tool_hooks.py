@@ -350,9 +350,16 @@ def _run_command_safety_hook(tool_name: str, args: dict,
     return None
 
 
+def _blocked_url_hook(tool_name: str, args: dict, task: dict) -> HookResult | None:
+    """Refuse tool calls transferring a search.skip_domains-blocked URL."""
+    from lib.search.url_access import url_argument_blocklist_hook
+    return url_argument_blocklist_hook(tool_name, args, task)
+
+
 # Register built-in hooks
 register_post_hook(_empty_result_marker_hook)
 register_pre_hook(_run_command_safety_hook)
+register_pre_hook(_blocked_url_hook)
 
 
 __all__ = [

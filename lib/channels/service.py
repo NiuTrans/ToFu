@@ -7,9 +7,11 @@ no command waits for a 大象 login), command-chat selection or creation, thread
 listing and configuration, subscriptions, outbox listing and decisions.
 Handlers stay stateless; state lives in ``ChannelStore``.
 
-Entry points: ``account_view``, ``update_account``, ``create_command_chat``,
+Entry points: ``account_view``, ``update_account`` (also the notification
+robot, ``lib.channels.dx.robot``), ``create_command_chat``,
 ``thread_page``, ``thread_view``, ``configure_thread``, ``subscribe``,
-``unsubscribe``, ``outbox_page``, ``decide_outbox``. Dependencies:
+``unsubscribe``, ``outbox_page``, ``outbox_attachment`` (a draft's image
+thumbnails), ``decide_outbox``. Dependencies:
 ``ChannelStore``, ``policy``, ``outbox``, ``delivery`` (router lookup) and the
 dx adapter's one-shot launcher commands.
 """
@@ -19,7 +21,8 @@ from typing import Any
 
 from lib.channels import outbox, policy
 from lib.channels.model import (
-    CHANNELS, CONFIGURABLE_MODES, REPLY_POLICIES, ChannelError, OutboxItem, ThreadKey, session_owns_status,
+    CHANNELS, CONFIGURABLE_MODES, OWNER_NOTE_MAX_CHARS, REPLY_POLICIES, ChannelError, OutboxItem, ThreadKey,
+    session_owns_status,
 )
 from lib.channels.store import ChannelStore, now_ms
 
@@ -37,6 +40,7 @@ def account_view(owner: int, *, store: ChannelStore | None = None) -> dict[str, 
     from lib.channels.delivery import RouterUnavailable, global_router_binding
     from lib.channels.dx.adapter import launch_spec
     from lib.channels.dx.login import account_login_mis
+    from lib.channels.dx.robot import robot_view
     store = _store(owner, store)
     account = store.account(CHANNEL) or {}
     status = dict(account.get('status') or {})
@@ -55,22 +59,37 @@ def account_view(owner: int, *, store: ChannelStore | None = None) -> dict[str, 
                    'connectedAtMs': status.get('connectedAtMs')},
         'skillInstalled': launch_spec(store.owner).installed,
         'routerConversationId': router_id,
+        'robot': robot_view(account),
+        'assistantNote': str(account.get('assistantNote') or ''),
     }
 
 
-def update_account(owner: int, update: dict[str, Any], *, store: ChannelStore | None = None) -> dict[str, Any]:
+def _owner_note(value: Any) -> str:
+    """An owner note from Settings (C11): text up to the contract bound; null or blank clears it."""
+    if value is None:
+        return ''
+    if not isinstance(value, str) or len(value) > OWNER_NOTE_MAX_CHARS:
+        raise ChannelError('invalid_note', f'A note is text of at most {OWNER_NOTE_MAX_CHARS} characters')
+    return value.strip()
+
+
+def update_account(owner: int, update: dict[str, Any], *, store: ChannelStore | None = None,
+                   robot_probe=None) -> dict[str, Any]:
     """Apply ``ChannelAccountUpdate`` and return at once.
 
     The supervisor confirms the identity of the login MIS before a session
     starts (``starting``/``authorizing``); a MIS other than the bound
     identity's clears that identity and the command chat of the old account,
-    and ingress of the new one starts now.
+    and ingress of the new one starts now. A robot secret is verified with a
+    token request (``robot_probe`` in tests) before it is stored.
     """
     from lib.channels.dx.login import normalize_mis
+    from lib.channels.dx.robot import robot_update
     store = _store(owner, store)
-    unknown = set(update) - {'enabled', 'commandChat', 'mis'}
+    unknown = set(update) - {'enabled', 'commandChat', 'mis', 'robot', 'assistantNote'}
     if unknown:
         raise ChannelError('invalid_update', f'Unknown fields: {sorted(unknown)}')
+    assistant_note = _owner_note(update['assistantNote']) if 'assistantNote' in update else _UNSET
     mis = normalize_mis(update['mis']) if 'mis' in update else _UNSET
     command_chat = _UNSET
     if 'commandChat' in update:
@@ -81,6 +100,10 @@ def update_account(owner: int, update: dict[str, Any], *, store: ChannelStore | 
     enabled = update.get('enabled')
     if enabled is not None and not isinstance(enabled, bool):
         raise ChannelError('invalid_update', 'enabled must be a boolean')
+    robot = _UNSET
+    if 'robot' in update:
+        current = (store.account(CHANNEL) or {}).get('robot')
+        robot = robot_update(store.owner, update['robot'], current, probe=robot_probe)
 
     def starting():
         return {'state': 'starting', 'detail': '', 'updatedAtMs': now_ms(), 'connectedAtMs': None}
@@ -111,6 +134,10 @@ def update_account(owner: int, update: dict[str, Any], *, store: ChannelStore | 
             account['status'] = starting()
         if command_chat is not _UNSET:
             account['commandChat'] = command_chat
+        if robot is not _UNSET:
+            account['robot'] = robot
+        if assistant_note is not _UNSET:
+            account['assistantNote'] = assistant_note
         return account
     store.update_account(CHANNEL, change)
     if command_chat not in (_UNSET, None):
@@ -178,6 +205,7 @@ def thread_view(record: dict[str, Any], account: dict[str, Any] | None) -> dict[
         'subscribers': list(record.get('subscribers') or []),
         'lastEventAtMs': record.get('lastEventAtMs'),
         'watermark': record.get('watermark'),
+        'note': str(record.get('note') or ''),
     }
 
 
@@ -201,14 +229,18 @@ def thread_page(owner: int, *, cursor: str = '', mode: str | None = None,
 
 
 def configure_thread(owner: int, thread: str, *, mode: Any = _UNSET, reply_policy: Any = _UNSET,
-                     store: ChannelStore | None = None) -> dict[str, Any]:
-    """Owner decision on one thread's mode / reply policy (``None`` = default)."""
+                     note: Any = _UNSET, store: ChannelStore | None = None) -> dict[str, Any]:
+    """Owner decision on one thread's mode / reply policy (``None`` = default) or its owner note.
+
+    Notes come only from Settings: no model tool writes one (C11).
+    """
     store = _store(owner, store)
     key = ThreadKey.parse(thread)
     if mode is not _UNSET and mode is not None and mode not in CONFIGURABLE_MODES:
         raise ChannelError('invalid_mode', f'mode must be one of {list(CONFIGURABLE_MODES)}')
     if reply_policy is not _UNSET and reply_policy is not None and reply_policy not in REPLY_POLICIES:
         raise ChannelError('invalid_reply_policy', f'reply_policy must be one of {list(REPLY_POLICIES)}')
+    note = _owner_note(note) if note is not _UNSET else _UNSET
     account = store.account(key.channel)
 
     def change(value):
@@ -217,6 +249,8 @@ def configure_thread(owner: int, thread: str, *, mode: Any = _UNSET, reply_polic
             value['mode'] = mode
         if reply_policy is not _UNSET:
             value['replyPolicy'] = reply_policy
+        if note is not _UNSET:
+            value['note'] = note
         after = policy.effective_mode(key, value, account)
         if before == 'ignore' and after != 'ignore':
             # A newly watched thread starts now; its ignored past is not replayed.
@@ -282,18 +316,49 @@ def outbox_item_view(owner: int, item_id: str, *, store: ChannelStore | None = N
     return item.view(_titles(store, [item])[item.thread])
 
 
-def decide_outbox(owner: int, item_id: str, decision: str, *,
-                  store: ChannelStore | None = None) -> dict[str, Any]:
+def outbox_attachment(owner: int, item_id: str, index: int, *,
+                      store: ChannelStore | None = None) -> tuple[bytes, str]:
+    """An original image attached to an outbox item, re-read and verified: ``(bytes, MIME type)``.
+
+    Settings shows these as the draft's thumbnails; documents and preview
+    copies have none.
+    """
+    store = _store(owner, store)
+    item, _ = store.outbox_item(item_id)
+    records = (item.extra.get('attachments') if item is not None else None) or []
+    if not 0 <= index < len(records) or records[index]['kind'] != 'image' \
+            or records[index].get('renditionOf') is not None:
+        raise ChannelError('not_found', 'No original image at that position of the outbox item')
+    from lib.channels.attachments import read_original
+    return read_original(records[index], owner=store.owner), records[index]['type']
+
+
+def decide_outbox(owner: int, item_id: str, decision: str, *, by: str = 'owner_settings',
+                  turn_id: str = '', store: ChannelStore | None = None) -> dict[str, Any]:
+    """The owner's decision on an item; ``by`` and ``turn_id`` say where it was given (audit, C11)."""
     store = _store(owner, store)
     if decision == 'approve':
-        item = outbox.approve(store.owner, item_id, store=store)
+        item = outbox.approve(store.owner, item_id, by=by, turn_id=turn_id, store=store)
     elif decision == 'discard':
-        item = outbox.discard(store.owner, item_id, store=store)
+        item = outbox.discard(store.owner, item_id, by=by, turn_id=turn_id, store=store)
     else:
         raise ChannelError('invalid_decision', 'decision must be approve or discard')
     return item.view(_titles(store, [item])[item.thread])
 
 
-__all__ = ['COMMAND_CHAT_TITLE', 'account_view', 'configure_thread', 'create_command_chat',
-           'decide_outbox', 'outbox_item_view', 'outbox_page', 'subscribe', 'thread_page',
-           'thread_view', 'unsubscribe', 'update_account']
+def audit_page(owner: int, *, channel: str, before: str = '',
+               store: ChannelStore | None = None) -> dict[str, Any]:
+    """Contract ``AuditPage``: what Tofu recorded for other people on the owner's behalf, newest first."""
+    store = _store(owner, store)
+    if channel not in CHANNELS:
+        raise ChannelError('invalid_channel', f'channel must be one of {list(CHANNELS)}')
+    if not isinstance(before, str) or len(before) > 512:
+        raise ChannelError('invalid_cursor', 'The cursor is not valid')
+    items, following = store.audit_page(channel, before=before)
+    titles = _titles(store, items)
+    return {'items': [item.view(titles[item.thread]) for item in items], 'nextBefore': following}
+
+
+__all__ = ['COMMAND_CHAT_TITLE', 'account_view', 'audit_page', 'configure_thread', 'create_command_chat',
+           'decide_outbox', 'outbox_attachment', 'outbox_item_view', 'outbox_page', 'subscribe',
+           'thread_page', 'thread_view', 'unsubscribe', 'update_account']

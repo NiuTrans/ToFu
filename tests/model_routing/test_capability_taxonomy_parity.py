@@ -56,6 +56,26 @@ pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 _MODEL_CAPABILITY_OWNER = (
     ROOT / 'frontend/src/core/model-capability-taxonomy.ts')
 
+# Capability lists whose kind both owners must agree on, including mixed
+# lists that exercise precedence and tags that never change the kind.
+_KIND_SAMPLES = {
+    'empty': [],
+    'chat': ['text', 'vision', 'thinking', 'cheap'],
+    'omni_chat': ['text', 'audio_chat', 'video'],
+    'audio_chat_only': ['audio_chat'],
+    'image': ['image_gen'],
+    'image_cheap': ['image_gen', 'cheap'],
+    'video': ['video_gen'],
+    'video_and_image': ['video_gen', 'image_gen', 'text'],
+    'music': ['audio_gen'],
+    'tts': ['tts'],
+    'asr': ['transcription'],
+    'tts_and_asr': ['transcription', 'tts'],
+    'embedding': ['embedding'],
+    'rerank': ['reranking', 'cheap'],
+    'unknown_tag': ['future_tag'],
+}
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -94,6 +114,26 @@ const updatedKnownAccepted = updatedKnown.applyCapabilityTaxonomy({
   chat_excluded_caps: ['video_gen'],
   known_capabilities: ['video_gen', 'text'],
 });
+const kindProbe = createModelCapabilityTaxonomy();
+const kindSamples = JSON.parse(process.argv[2]);
+const kindOf = {};
+for (const [name, caps] of Object.entries(kindSamples)) kindOf[name] = kindProbe.modelKind(caps);
+const malformedKinds = createModelCapabilityTaxonomy();
+const malformedKindsAccepted = malformedKinds.applyCapabilityTaxonomy({
+  chat_excluded_caps: ['video_gen'],
+  model_kinds: [{id: 'chat', capabilities: [], output_modality: 'text',
+    endpoint: 'chat_completions', media_price_units: []},
+  {id: 'chat', capabilities: ['x'], output_modality: 'text',
+    endpoint: 'x', media_price_units: []}],
+});
+const updatedKinds = createModelCapabilityTaxonomy();
+const updatedKindsAccepted = updatedKinds.applyCapabilityTaxonomy({
+  chat_excluded_caps: ['hologram_gen'],
+  model_kinds: [{id: 'conversation', capabilities: [], output_modality: 'text',
+    endpoint: 'chat_completions', media_price_units: []},
+  {id: 'hologram_generation', capabilities: ['hologram_gen'], output_modality: 'hologram',
+    endpoint: 'holograms', media_price_units: ['per_hologram']}],
+});
 process.stdout.write(JSON.stringify({
   fallback: [...CHAT_EXCLUDED_CAPS_FALLBACK],
   fallbackFrozen: Object.isFrozen(CHAT_EXCLUDED_CAPS_FALLBACK),
@@ -125,10 +165,23 @@ process.stdout.write(JSON.stringify({
   malformedKnownListPreserved: malformedKnown.getKnownCapabilities(),
   updatedKnownAccepted,
   updatedKnown: updatedKnown.getKnownCapabilities(),
+  kindsFallback: MODEL_KINDS_FALLBACK.map((row) => ({
+    id: row.id, capabilities: [...row.capabilities],
+    output_modality: row.output_modality, endpoint: row.endpoint,
+    media_price_units: [...row.media_price_units]})),
+  kindsFrozen: Object.isFrozen(MODEL_KINDS_FALLBACK)
+    && MODEL_KINDS_FALLBACK.every((row) => Object.isFrozen(row) && Object.isFrozen(row.capabilities)),
+  kindOf,
+  mediaKinds: kindProbe.getModelKinds().filter((row) => kindProbe.isMediaKind(row.id)).map((row) => row.id),
+  malformedKindsAccepted,
+  malformedKindsPreserved: malformedKinds.modelKind(['video_gen']),
+  updatedKindsAccepted,
+  updatedKindOf: [updatedKinds.modelKind(['hologram_gen', 'text']), updatedKinds.modelKind(['text'])],
+  updatedMediaKind: updatedKinds.isMediaKind('hologram_generation'),
 }));
 '''
     result = subprocess.run(
-        [node, '-e', script, bundle],
+        [node, '-e', script, bundle, json.dumps(_KIND_SAMPLES)],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -384,6 +437,103 @@ def test_neuter_known_capabilities_loses_a_semantics_key(monkeypatch):
     assert set(tax.KNOWN_CAPABILITIES) != set(tax.CAPABILITY_SEMANTICS), (
         'NEUTER did not break coverage — Invariant 7 would not catch a '
         'dropped capability tag')
+
+
+# ── Invariant 9: model kinds (task families) ═══════════════════════════
+
+def test_kind_is_chat_exactly_when_the_chat_picker_admits_the_model():
+    """Kinds and the chat exclusion are one classification, never two."""
+    from lib.model_info.capability_taxonomy import (
+        CHAT_EXCLUDED_CAPS, MODEL_KINDS, is_chat_model, model_kind,
+    )
+    task_caps = {cap for kind in MODEL_KINDS for cap in kind['capabilities']}
+    assert task_caps == set(CHAT_EXCLUDED_CAPS)
+    assert {'video_gen', 'audio_gen'} <= CHAT_EXCLUDED_CAPS
+    for caps in _KIND_SAMPLES.values():
+        assert (model_kind(caps) == 'chat') is is_chat_model(caps), caps
+
+
+def test_kind_precedence_ignores_input_feature_and_price_tags():
+    from lib.model_info.capability_taxonomy import model_kind
+    expected = {
+        'empty': 'chat', 'chat': 'chat', 'omni_chat': 'chat',
+        'audio_chat_only': 'chat', 'image': 'image_generation',
+        'image_cheap': 'image_generation', 'video': 'video_generation',
+        'video_and_image': 'image_generation', 'music': 'audio_generation',
+        'tts': 'speech_synthesis', 'asr': 'speech_recognition',
+        'tts_and_asr': 'speech_synthesis', 'embedding': 'embedding',
+        'rerank': 'reranking', 'unknown_tag': 'chat',
+    }
+    assert {name: model_kind(caps) for name, caps in _KIND_SAMPLES.items()} == expected
+    # 'video' is video INPUT: a chat model that watches video stays chat.
+    assert model_kind(['text', 'video']) == 'chat'
+
+
+def test_media_kinds_own_exactly_the_media_price_units():
+    from lib.model_info.capability_taxonomy import (
+        MEDIA_PRICE_UNITS, MODEL_KINDS, is_media_kind, media_price_units_for,
+    )
+    media = [kind['id'] for kind in MODEL_KINDS if is_media_kind(kind['id'])]
+    assert media == ['image_generation', 'video_generation', 'audio_generation',
+                     'speech_synthesis', 'speech_recognition']
+    declared = {unit for kind in MODEL_KINDS for unit in kind['media_price_units']}
+    assert declared == set(MEDIA_PRICE_UNITS)
+    assert media_price_units_for(['image_gen']) == {'per_image'}
+    assert media_price_units_for(['tts', 'transcription']) == {
+        'per_million_characters', 'per_second', 'per_minute'}
+    assert media_price_units_for(['text', 'vision', 'embedding']) == frozenset()
+
+
+def test_contract_media_unit_enum_is_the_taxonomy_unit_list():
+    """The schema enum and MEDIA_PRICE_UNITS describe one vocabulary."""
+    from lib.model_info.capability_taxonomy import MEDIA_PRICE_UNITS
+    schema = json.loads((ROOT / 'contracts/model_routing_v2.schema.json').read_text())
+    enum = schema['$defs']['mediaPriceRate']['properties']['unit']['enum']
+    assert enum == list(MEDIA_PRICE_UNITS)
+
+
+def test_payload_publishes_ordered_model_kinds():
+    from lib.model_info.capability_taxonomy import MODEL_KINDS, taxonomy_payload
+    payload = taxonomy_payload()
+    assert [row['id'] for row in payload['model_kinds']] == [
+        kind['id'] for kind in MODEL_KINDS]
+    assert payload['model_kinds'][0] == {
+        'id': 'chat', 'capabilities': [], 'output_modality': 'text',
+        'endpoint': 'chat_completions', 'media_price_units': []}
+    json.dumps(payload)  # JSON-native: tuples were projected to lists
+
+
+def test_frontend_model_kinds_fallback_matches_and_classifies_like_backend():
+    from lib.model_info.capability_taxonomy import model_kind, taxonomy_payload
+    contract = _frontend_contract()
+    assert contract['kindsFallback'] == taxonomy_payload()['model_kinds']
+    assert contract['kindsFrozen'] is True
+    assert contract['kindOf'] == {
+        name: model_kind(caps) for name, caps in _KIND_SAMPLES.items()}
+    assert contract['mediaKinds'] == [
+        'image_generation', 'video_generation', 'audio_generation',
+        'speech_synthesis', 'speech_recognition']
+
+
+def test_frontend_rejects_malformed_kinds_and_adopts_server_kinds():
+    contract = _frontend_contract()
+    # Duplicate ids reject the WHOLE payload; the fallback stays in force.
+    assert contract['malformedKindsAccepted'] is False
+    assert contract['malformedKindsPreserved'] == 'video_generation'
+    # A newer server's kinds (and its default kind id) are adopted verbatim.
+    assert contract['updatedKindsAccepted'] is True
+    assert contract['updatedKindOf'] == ['hologram_generation', 'conversation']
+    assert contract['updatedMediaKind'] is True
+
+
+def test_neuter_dropping_a_kind_leaks_its_models_into_chat(monkeypatch):
+    """CHAT_EXCLUDED_CAPS is derived from MODEL_KINDS: removing the video
+    kind must make video generators chat models, proving the derivation is
+    load-bearing."""
+    import lib.model_info.capability_taxonomy as tax
+    patched = tuple(kind for kind in tax.MODEL_KINDS if kind['id'] != 'video_generation')
+    monkeypatch.setattr(tax, 'MODEL_KINDS', patched)
+    assert tax.model_kind(['video_gen']) == 'chat'
 
 
 if __name__ == '__main__':

@@ -20,6 +20,11 @@ Authority by API surface:
   env configuration reads. Adding or renaming an env read requires updating
   it via `python3 scripts/check_config_knobs.py --rescan` in the same change;
   new knobs must enter as `documented` (owner + description), never `legacy`.
+  The scan counts only process-environment reads (`os.environ`, `os.getenv`
+  and the helpers recognized in `scripts/check_config_knobs.py`); a literal
+  key read from a mapping parameter is not a knob read. When a refactor makes
+  a live knob "no longer read anywhere", make its owning helper read
+  `os.environ` again; the suggested `--rescan` would drop a live knob.
 
 ## Editing rules
 

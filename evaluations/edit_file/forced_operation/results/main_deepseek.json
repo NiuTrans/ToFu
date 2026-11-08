@@ -1,0 +1,2070 @@
+{
+ "n_attempts": 34,
+ "missing_http_error": [
+  "deepseek-v4-pro|A1|F06|2",
+  "deepseek-v4-pro|A1|V01|1",
+  "deepseek-v4-pro|A3|K06|2",
+  "deepseek-v4-pro|A3|F08|1",
+  "deepseek-v4-pro|A4|G06|0",
+  "deepseek-v4-pro|A4|G01|2",
+  "deepseek-v4-pro|A2|T06|0",
+  "deepseek-v4-pro|A3|T10|0"
+ ],
+ "models": [
+  "deepseek-v4-pro"
+ ],
+ "per_arm_model": {
+  "A1|deepseek-v4-pro": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 15,
+    "tasks": 14
+   },
+   "first": {
+    "est": 0.9333333333333333,
+    "lo": 0.7857142857142857,
+    "hi": 1.0,
+    "n": 15,
+    "tasks": 14
+   },
+   "payload": {
+    "est": 102.53333333333333,
+    "lo": 69.06666666666666,
+    "hi": 151.17741596638655,
+    "n": 15,
+    "tasks": 14
+   },
+   "completion": {
+    "est": 367.2,
+    "lo": 264.33214285714286,
+    "hi": 488.86999999999995,
+    "n": 15,
+    "tasks": 14
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 15,
+    "tasks": 14
+   },
+   "calls": {
+    "est": 1.0666666666666667,
+    "lo": 1.0,
+    "hi": 1.2142857142857142,
+    "n": 15,
+    "tasks": 14
+   }
+  },
+  "A2|deepseek-v4-pro": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "payload": {
+    "est": 74.0,
+    "lo": 58.333333333333336,
+    "hi": 95.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "completion": {
+    "est": 474.5,
+    "lo": 187.4875,
+    "hi": 1033.2857142857142,
+    "n": 8,
+    "tasks": 7
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "calls": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 8,
+    "tasks": 7
+   }
+  },
+  "A3|deepseek-v4-pro": {
+   "final": {
+    "est": 0.75,
+    "lo": 0.25,
+    "hi": 1.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "first": {
+    "est": 0.75,
+    "lo": 0.25,
+    "hi": 1.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "payload": {
+    "est": 89.5,
+    "lo": 65.5,
+    "hi": 114.25,
+    "n": 4,
+    "tasks": 4
+   },
+   "completion": {
+    "est": 366.5,
+    "lo": 182.5,
+    "hi": 714.5,
+    "n": 4,
+    "tasks": 4
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "calls": {
+    "est": 1.25,
+    "lo": 1.0,
+    "hi": 1.75,
+    "n": 4,
+    "tasks": 4
+   }
+  },
+  "A4|deepseek-v4-pro": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 7,
+    "tasks": 7
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 7,
+    "tasks": 7
+   },
+   "payload": {
+    "est": 66.0,
+    "lo": 47.285714285714285,
+    "hi": 86.85714285714286,
+    "n": 7,
+    "tasks": 7
+   },
+   "completion": {
+    "est": 188.0,
+    "lo": 141.28571428571428,
+    "hi": 249.57142857142858,
+    "n": 7,
+    "tasks": 7
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 7,
+    "tasks": 7
+   },
+   "calls": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 7,
+    "tasks": 7
+   }
+  }
+ },
+ "pooled": {
+  "A1": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 15,
+    "tasks": 14
+   },
+   "first": {
+    "est": 0.9333333333333333,
+    "lo": 0.7857142857142857,
+    "hi": 1.0,
+    "n": 15,
+    "tasks": 14
+   },
+   "payload": {
+    "est": 102.53333333333333,
+    "lo": 69.46571428571428,
+    "hi": 151.4675,
+    "n": 15,
+    "tasks": 14
+   },
+   "payload_first": {
+    "est": 88.8,
+    "lo": 68.87479166666667,
+    "hi": 111.92869047619048,
+    "n": 15,
+    "tasks": 14
+   },
+   "completion": {
+    "est": 367.2,
+    "lo": 264.7064285714286,
+    "hi": 487.8085714285713,
+    "n": 15,
+    "tasks": 14
+   },
+   "completion_first": {
+    "est": 345.2,
+    "lo": 262.42857142857144,
+    "hi": 434.5342857142857,
+    "n": 15,
+    "tasks": 14
+   },
+   "reasoning": {
+    "est": 204.8,
+    "lo": 130.4975,
+    "hi": 283.62604166666665,
+    "n": 15,
+    "tasks": 14
+   },
+   "calls": {
+    "est": 1.0666666666666667,
+    "lo": 1.0,
+    "hi": 1.2142857142857142,
+    "n": 15,
+    "tasks": 14
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 15,
+    "tasks": 14
+   },
+   "missing_operation_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 15,
+    "tasks": 14
+   },
+   "no_tool_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 15,
+    "tasks": 14
+   },
+   "patch": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 15,
+    "tasks": 14
+   },
+   "visible": {
+    "est": 102.53333333333333,
+    "lo": 69.49916666666667,
+    "hi": 151.4303571428571,
+    "n": 15,
+    "tasks": 14
+   }
+  },
+  "A2": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "payload": {
+    "est": 74.0,
+    "lo": 57.90909090909091,
+    "hi": 95.25,
+    "n": 8,
+    "tasks": 7
+   },
+   "payload_first": {
+    "est": 74.0,
+    "lo": 58.333333333333336,
+    "hi": 95.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "completion": {
+    "est": 474.5,
+    "lo": 190.11428571428573,
+    "hi": 1033.5714285714287,
+    "n": 8,
+    "tasks": 7
+   },
+   "completion_first": {
+    "est": 474.5,
+    "lo": 188.71428571428572,
+    "hi": 1029.7142857142858,
+    "n": 8,
+    "tasks": 7
+   },
+   "reasoning": {
+    "est": 345.25,
+    "lo": 60.142857142857146,
+    "hi": 883.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "calls": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "missing_operation_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "no_tool_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "patch": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 8,
+    "tasks": 7
+   },
+   "visible": {
+    "est": 74.0,
+    "lo": 58.4,
+    "hi": 95.42857142857143,
+    "n": 8,
+    "tasks": 7
+   }
+  },
+  "A3": {
+   "final": {
+    "est": 0.75,
+    "lo": 0.25,
+    "hi": 1.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "first": {
+    "est": 0.75,
+    "lo": 0.25,
+    "hi": 1.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "payload": {
+    "est": 89.5,
+    "lo": 65.5,
+    "hi": 114.25,
+    "n": 4,
+    "tasks": 4
+   },
+   "payload_first": {
+    "est": 89.5,
+    "lo": 65.5,
+    "hi": 114.25,
+    "n": 4,
+    "tasks": 4
+   },
+   "completion": {
+    "est": 366.5,
+    "lo": 182.5,
+    "hi": 714.5,
+    "n": 4,
+    "tasks": 4
+   },
+   "completion_first": {
+    "est": 365.75,
+    "lo": 181.0,
+    "hi": 713.75,
+    "n": 4,
+    "tasks": 4
+   },
+   "reasoning": {
+    "est": 223.0,
+    "lo": 40.5,
+    "hi": 580.75,
+    "n": 4,
+    "tasks": 4
+   },
+   "calls": {
+    "est": 1.25,
+    "lo": 1.0,
+    "hi": 1.75,
+    "n": 4,
+    "tasks": 4
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "missing_operation_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "no_tool_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "patch": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "visible": {
+    "est": 89.75,
+    "lo": 65.5,
+    "hi": 114.25,
+    "n": 4,
+    "tasks": 4
+   }
+  },
+  "A4": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 7,
+    "tasks": 7
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 7,
+    "tasks": 7
+   },
+   "payload": {
+    "est": 66.0,
+    "lo": 47.0,
+    "hi": 86.28571428571429,
+    "n": 7,
+    "tasks": 7
+   },
+   "payload_first": {
+    "est": 66.0,
+    "lo": 47.142857142857146,
+    "hi": 86.28571428571429,
+    "n": 7,
+    "tasks": 7
+   },
+   "completion": {
+    "est": 188.0,
+    "lo": 141.0,
+    "hi": 249.57142857142858,
+    "n": 7,
+    "tasks": 7
+   },
+   "completion_first": {
+    "est": 188.0,
+    "lo": 141.85714285714286,
+    "hi": 250.57142857142858,
+    "n": 7,
+    "tasks": 7
+   },
+   "reasoning": {
+    "est": 85.42857142857143,
+    "lo": 47.857142857142854,
+    "hi": 135.14285714285714,
+    "n": 7,
+    "tasks": 7
+   },
+   "calls": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 7,
+    "tasks": 7
+   },
+   "schema_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 7,
+    "tasks": 7
+   },
+   "missing_operation_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 7,
+    "tasks": 7
+   },
+   "no_tool_first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 7,
+    "tasks": 7
+   },
+   "patch": {
+    "est": 56.42857142857143,
+    "lo": 40.142857142857146,
+    "hi": 73.71785714285708,
+    "n": 7,
+    "tasks": 7
+   },
+   "visible": {
+    "est": 66.0,
+    "lo": 46.714285714285715,
+    "hi": 86.57142857142857,
+    "n": 7,
+    "tasks": 7
+   }
+  }
+ },
+ "paired": {
+  "A2-A1|insert": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|insert|S": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|insert|M": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|insert|L": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|replace": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|replace|S": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|replace|M": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|replace|L": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|delete": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|delete|S": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|delete|M": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|delete|L": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|multi": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -35.0,
+    "lo": -35.0,
+    "hi": -35.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 1381.0,
+    "lo": 1381.0,
+    "hi": 1381.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2-A1|multi|S": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|multi|M": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A2-A1|multi|L": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -35.0,
+    "lo": -35.0,
+    "hi": -35.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 1381.0,
+    "lo": 1381.0,
+    "hi": 1381.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2-A1|all": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -35.0,
+    "lo": -35.0,
+    "hi": -35.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 1381.0,
+    "lo": 1381.0,
+    "hi": 1381.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3-A1|insert": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -8.0,
+    "lo": -8.0,
+    "hi": -8.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 581.0,
+    "lo": 581.0,
+    "hi": 581.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3-A1|replace": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A3-A1|delete": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A3-A1|multi": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A3-A1|all": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": -8.0,
+    "lo": -8.0,
+    "hi": -8.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 581.0,
+    "lo": 581.0,
+    "hi": 581.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4-A1|insert": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A4-A1|replace": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A4-A1|delete": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A4-A1|multi": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A4-A1|all": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A4-A3|insert": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A4-A3|replace": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 2.0,
+    "lo": 2.0,
+    "hi": 2.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 163.0,
+    "lo": 163.0,
+    "hi": 163.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4-A3|delete": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A4-A3|multi": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A4-A3|all": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 2.0,
+    "lo": 2.0,
+    "hi": 2.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 163.0,
+    "lo": 163.0,
+    "hi": 163.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3-A2|insert": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A3-A2|replace": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A3-A2|delete": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A3-A2|multi": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A3-A2|all": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  }
+ },
+ "taxonomy": {
+  "A1|deepseek-v4-pro": {
+   "first_error": {
+    "ambiguous": 1
+   },
+   "final_class": {},
+   "tool_ok_but_wrong": 0,
+   "n": 15
+  },
+  "A1|all": {
+   "first_error": {
+    "ambiguous": 1
+   },
+   "final_class": {},
+   "tool_ok_but_wrong": 0,
+   "n": 15
+  },
+  "A2|deepseek-v4-pro": {
+   "first_error": {},
+   "final_class": {},
+   "tool_ok_but_wrong": 0,
+   "n": 8
+  },
+  "A2|all": {
+   "first_error": {},
+   "final_class": {},
+   "tool_ok_but_wrong": 0,
+   "n": 8
+  },
+  "A3|deepseek-v4-pro": {
+   "first_error": {},
+   "final_class": {
+    "other_wrong": 1
+   },
+   "tool_ok_but_wrong": 1,
+   "n": 4
+  },
+  "A3|all": {
+   "first_error": {},
+   "final_class": {
+    "other_wrong": 1
+   },
+   "tool_ok_but_wrong": 1,
+   "n": 4
+  },
+  "A4|deepseek-v4-pro": {
+   "first_error": {},
+   "final_class": {},
+   "tool_ok_but_wrong": 0,
+   "n": 7
+  },
+  "A4|all": {
+   "first_error": {},
+   "final_class": {},
+   "tool_ok_but_wrong": 0,
+   "n": 7
+  }
+ },
+ "by_type": {
+  "A1|insert": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 7,
+    "tasks": 7
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 7,
+    "tasks": 7
+   },
+   "payload": {
+    "est": 62.42857142857143,
+    "lo": 50.42857142857143,
+    "hi": 73.57142857142857,
+    "n": 7,
+    "tasks": 7
+   },
+   "completion": {
+    "est": 251.42857142857142,
+    "lo": 200.28571428571428,
+    "hi": 301.2857142857143,
+    "n": 7,
+    "tasks": 7
+   }
+  },
+  "A1|insert|S": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "payload": {
+    "est": 51.0,
+    "lo": 42.75,
+    "hi": 63.75,
+    "n": 4,
+    "tasks": 4
+   }
+  },
+  "A1|insert|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A1|insert|L": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 3,
+    "tasks": 3
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 3,
+    "tasks": 3
+   },
+   "payload": {
+    "est": 77.66666666666667,
+    "lo": 74.0,
+    "hi": 81.0,
+    "n": 3,
+    "tasks": 3
+   }
+  },
+  "A1|replace": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 3,
+    "tasks": 3
+   },
+   "first": {
+    "est": 0.6666666666666666,
+    "lo": 0.0,
+    "hi": 1.0,
+    "n": 3,
+    "tasks": 3
+   },
+   "payload": {
+    "est": 184.0,
+    "lo": 42.0,
+    "hi": 386.0,
+    "n": 3,
+    "tasks": 3
+   },
+   "completion": {
+    "est": 517.0,
+    "lo": 202.0,
+    "hi": 994.0,
+    "n": 3,
+    "tasks": 3
+   }
+  },
+  "A1|replace|S": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 42.0,
+    "lo": 42.0,
+    "hi": 42.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A1|replace|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A1|replace|L": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 0.5,
+    "lo": 0.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 255.0,
+    "lo": 124.0,
+    "hi": 386.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A1|delete": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 4,
+    "tasks": 3
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 4,
+    "tasks": 3
+   },
+   "payload": {
+    "est": 98.0,
+    "lo": 75.5,
+    "hi": 140.0,
+    "n": 4,
+    "tasks": 3
+   },
+   "completion": {
+    "est": 360.5,
+    "lo": 222.0,
+    "hi": 444.5,
+    "n": 4,
+    "tasks": 3
+   }
+  },
+  "A1|delete|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A1|delete|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 4,
+    "tasks": 3
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 4,
+    "tasks": 3
+   },
+   "payload": {
+    "est": 98.0,
+    "lo": 75.5,
+    "hi": 140.0,
+    "n": 4,
+    "tasks": 3
+   }
+  },
+  "A1|delete|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A1|multi": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 157.0,
+    "lo": 157.0,
+    "hi": 157.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 755.0,
+    "lo": 755.0,
+    "hi": 755.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A1|multi|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A1|multi|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A1|multi|L": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 157.0,
+    "lo": 157.0,
+    "hi": 157.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|insert": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 48.0,
+    "lo": 48.0,
+    "hi": 48.0,
+    "n": 2,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 266.5,
+    "lo": 266.5,
+    "hi": 266.5,
+    "n": 2,
+    "tasks": 1
+   }
+  },
+  "A2|insert|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A2|insert|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 48.0,
+    "lo": 48.0,
+    "hi": 48.0,
+    "n": 2,
+    "tasks": 1
+   }
+  },
+  "A2|insert|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A2|replace": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 79.5,
+    "lo": 62.0,
+    "hi": 97.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 215.0,
+    "lo": 128.0,
+    "hi": 302.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A2|replace|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A2|replace|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 62.0,
+    "lo": 62.0,
+    "hi": 62.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|replace|L": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 97.0,
+    "lo": 97.0,
+    "hi": 97.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|delete": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 70.0,
+    "lo": 59.0,
+    "hi": 81.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 271.0,
+    "lo": 153.0,
+    "hi": 389.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A2|delete|S": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 59.0,
+    "lo": 59.0,
+    "hi": 59.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|delete|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A2|delete|L": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 81.0,
+    "lo": 81.0,
+    "hi": 81.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|multi": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 98.5,
+    "lo": 75.0,
+    "hi": 122.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 1145.5,
+    "lo": 155.0,
+    "hi": 2136.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A2|multi|S": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 75.0,
+    "lo": 75.0,
+    "hi": 75.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A2|multi|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A2|multi|L": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 122.0,
+    "lo": 122.0,
+    "hi": 122.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3|insert": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 99.5,
+    "lo": 70.0,
+    "hi": 129.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 550.5,
+    "lo": 212.0,
+    "hi": 889.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A3|insert|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|insert|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|insert|L": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 99.5,
+    "lo": 70.0,
+    "hi": 129.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A3|replace": {
+   "final": {
+    "est": 0.5,
+    "lo": 0.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "first": {
+    "est": 0.5,
+    "lo": 0.0,
+    "hi": 1.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "payload": {
+    "est": 79.5,
+    "lo": 61.0,
+    "hi": 98.0,
+    "n": 2,
+    "tasks": 2
+   },
+   "completion": {
+    "est": 182.5,
+    "lo": 174.0,
+    "hi": 191.0,
+    "n": 2,
+    "tasks": 2
+   }
+  },
+  "A3|replace|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|replace|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 61.0,
+    "lo": 61.0,
+    "hi": 61.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3|replace|L": {
+   "final": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 98.0,
+    "lo": 98.0,
+    "hi": 98.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A3|delete": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A3|delete|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|delete|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|delete|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|multi": {
+   "final": null,
+   "first": null,
+   "payload": null,
+   "completion": null
+  },
+  "A3|multi|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|multi|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A3|multi|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|insert": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 4,
+    "tasks": 4
+   },
+   "payload": {
+    "est": 51.0,
+    "lo": 38.25,
+    "hi": 71.75,
+    "n": 4,
+    "tasks": 4
+   },
+   "completion": {
+    "est": 152.0,
+    "lo": 131.25,
+    "hi": 178.75,
+    "n": 4,
+    "tasks": 4
+   }
+  },
+  "A4|insert|S": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 3,
+    "tasks": 3
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 3,
+    "tasks": 3
+   },
+   "payload": {
+    "est": 40.666666666666664,
+    "lo": 36.0,
+    "hi": 45.0,
+    "n": 3,
+    "tasks": 3
+   }
+  },
+  "A4|insert|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 82.0,
+    "lo": 82.0,
+    "hi": 82.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|insert|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|replace": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 100.0,
+    "lo": 100.0,
+    "hi": 100.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 354.0,
+    "lo": 354.0,
+    "hi": 354.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|replace|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|replace|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|replace|L": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 100.0,
+    "lo": 100.0,
+    "hi": 100.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|delete": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 53.0,
+    "lo": 53.0,
+    "hi": 53.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 131.0,
+    "lo": 131.0,
+    "hi": 131.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|delete|S": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 53.0,
+    "lo": 53.0,
+    "hi": 53.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|delete|M": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|delete|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|multi": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 105.0,
+    "lo": 105.0,
+    "hi": 105.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "completion": {
+    "est": 223.0,
+    "lo": 223.0,
+    "hi": 223.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|multi|S": {
+   "final": null,
+   "first": null,
+   "payload": null
+  },
+  "A4|multi|M": {
+   "final": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "first": {
+    "est": 1.0,
+    "lo": 1.0,
+    "hi": 1.0,
+    "n": 1,
+    "tasks": 1
+   },
+   "payload": {
+    "est": 105.0,
+    "lo": 105.0,
+    "hi": 105.0,
+    "n": 1,
+    "tasks": 1
+   }
+  },
+  "A4|multi|L": {
+   "final": null,
+   "first": null,
+   "payload": null
+  }
+ }
+}

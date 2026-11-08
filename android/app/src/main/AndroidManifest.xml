@@ -23,9 +23,18 @@
 
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
+    <!-- Local kernel (runtime/LocalKernelService): a specialUse foreground service keeps
+         the on-device Tofu server alive, its notification needs POST_NOTIFICATIONS on 13+,
+         and a partial wakelock is held only while the kernel reports running work. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <application
         android:name=".TofuApplication"
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="Tofu"
@@ -58,6 +67,31 @@
             </intent-filter>
         </activity>
 
+
+        <service
+            android:name=".runtime.LocalKernelService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs the user's local Tofu agent server on 127.0.0.1" />
+        </service>
+
+        <!-- Device self-check (selfcheck/): its own screen, and a specialUse foreground
+             service for the background child-process phase — the same conditions the
+             local kernel runs under, so the S1 measurements are comparable. -->
+        <activity
+            android:name=".selfcheck.SelfCheckActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+        <service
+            android:name=".selfcheck.SelfCheckService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs the device self-check's foreground and background child-process phases" />
+        </service>
 
         <!-- Camera-capture staging for the file-chooser chooser (WebScreen
              buildChooserWithCamera): photos land in cacheDir and are handed

@@ -16,7 +16,7 @@ pytestmark = pytest.mark.unit
 def completed_checkpoint(r):
     row = delegate(r)
     end(r, row, delivered=False)
-    task_id = r.attempts[row['execution']['attemptId']]['taskId']
+    task_id = row['execution']['taskId']
     binding = r.c.repo.admission(row['id'])
     r.workspaces[task_id] = {
         'task_id': task_id, 'user_id': r.c.repo.owner, 'project_root': r.c.repo.project,

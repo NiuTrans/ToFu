@@ -29,6 +29,10 @@ from ._limits import (
 
 logger = get_logger(__name__)
 
+# How often a blocked wait re-checks its task's cancel event. Shared by the
+# local wait and the execution-host relay so both withdraw equally promptly.
+CANCEL_OBSERVATION_SECONDS = 0.25
+
 
 def _normalize_route(client_id, owner_user_id) -> tuple[str, str]:
     client_id = str(client_id or '').strip()
@@ -150,7 +154,7 @@ def _wait_for_result(event, timeout, cancel_event) -> bool:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
-        if event.wait(timeout=min(0.25, remaining)):
+        if event.wait(timeout=min(CANCEL_OBSERVATION_SECONDS, remaining)):
             return True
     return event.is_set()
 

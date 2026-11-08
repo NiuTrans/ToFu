@@ -47,6 +47,8 @@ KILL_GRACE_SEC = 30
 # elides the fork of a simple command or the program ``exec``s, both of which
 # would otherwise erase the marker from the process table.
 MARKED_SHELL = 'bash -lc "$1"\nexit $?'
+# Seconds between checks of an agent's completion marker while it runs.
+COMPLETION_POLL_SEC = 5
 # A proxied connection without traffic in either direction for this long is dead.
 PROXY_IDLE_CLOSE_SEC = 900
 PROXY_HEAD_LIMIT = 65536
@@ -150,8 +152,34 @@ def kill_marked_tree(marker):
     return len(victims), len(survivors)
 
 
-def exec_with_deadline(container, program, env, marker, timeout_sec, stdout_path, stderr_path, workdir=None):
-    """Run ``bash -lc program`` under ``MARKED_SHELL`` in the container; stop the tree at the deadline."""
+class CompletionMarker:
+    """Watches a file the agent appends to for a line starting with ``prefix``, reading only new bytes."""
+
+    def __init__(self, path, prefix):
+        self.path, self.prefix = Path(path), prefix.encode()
+        self.offset, self.partial = 0, b""
+
+    def seen(self):
+        try:
+            with open(str(self.path), "rb") as handle:
+                handle.seek(self.offset)
+                data = handle.read()
+        except OSError:
+            return False
+        self.offset += len(data)
+        lines = (self.partial + data).split(b"\n")
+        self.partial = lines.pop()
+        return any(line.startswith(self.prefix) for line in lines)
+
+
+def exec_with_deadline(container, program, env, marker, timeout_sec, stdout_path, stderr_path, workdir=None,
+                       completion=None):
+    """Run ``bash -lc program`` under ``MARKED_SHELL`` in the container; stop the tree at the deadline.
+
+    With ``completion`` (a ``CompletionMarker``) the run counts as finished once
+    the agent has written its final record, even if its process lingers on
+    children it started: nothing is killed, so daemons stay up for the verifier.
+    """
     argv = ["docker", "exec"]
     if workdir:
         argv += ["-w", workdir]
@@ -163,7 +191,19 @@ def exec_with_deadline(container, program, env, marker, timeout_sec, stdout_path
         proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
         timed_out = False
         try:
-            code = proc.wait(timeout=timeout_sec)
+            if completion is None:
+                code = proc.wait(timeout=timeout_sec)
+            else:
+                while True:
+                    try:
+                        code = proc.wait(timeout=min(COMPLETION_POLL_SEC, max(timeout_sec - (time.time() - started), 0)))
+                        break
+                    except subprocess.TimeoutExpired:
+                        if completion.seen():
+                            return {"exit_code": None, "timed_out": False, "completed_by_marker": True,
+                                    "duration_s": round(time.time() - started, 1)}
+                        if time.time() - started >= timeout_sec:
+                            raise
         except subprocess.TimeoutExpired:
             timed_out = True
             signalled, force_killed = kill_marked_tree(marker)
@@ -511,6 +551,20 @@ class Trial:
                 entry["check_output"] = tail(probe.stdout + probe.stderr, 600)
                 if probe.returncode != 0:
                     raise InfraError("install", "install check failed: %s" % entry["check_output"])
+            guard = agent.get("guard_check")
+            if guard:
+                # The benchmark-source canary runs with the agent's environment, so it
+                # exercises exactly the configuration the agent will run with.
+                argv = ["exec"]
+                for key, value in sorted((agent.get("env") or {}).items()):
+                    argv += ["-e", "%s=%s" % (key, value)]
+                probe = docker(*(argv + [self.container, "bash", "-lc", guard]), check=False, timeout=300,
+                               phase="install")
+                entry["guard_check_output"] = tail(probe.stdout + probe.stderr, 3000)
+                entry["guard_check_ok"] = probe.returncode == 0
+                if probe.returncode != 0:
+                    raise InfraError("install", "benchmark-source guard check failed: %s"
+                                     % entry["guard_check_output"][-1500:])
             entry["artifacts"] = installed
 
     # -- agent run
@@ -520,10 +574,12 @@ class Trial:
         with self.phase("agent") as entry:
             env = dict(agent.get("env") or {})
             env["TB_WORKDIR"] = self.result["image"]["workdir"]
+            done = agent.get("completion_marker")
+            completion = CompletionMarker(self.out / "agent" / done["file"], done["line_prefix"]) if done else None
             outcome = exec_with_deadline(
                 self.container, agent["program"], env, "tbn-agent-" + self.spec["trial_key"],
                 self.spec["agent_timeout_sec"] + agent.get("deadline_grace_sec", 0),
-                self.out / "agent-exec.stdout", self.out / "agent-exec.stderr")
+                self.out / "agent-exec.stdout", self.out / "agent-exec.stderr", completion=completion)
             entry.update(outcome)
             entry["budget_sec"] = self.spec["agent_timeout_sec"]
             for item in agent.get("collect") or []:

@@ -90,27 +90,3 @@ def test_fallback_preserves_destination_wire_and_request_identity(monkeypatch):
     assert task['_executable_tool_catalog'] == authority
 
 
-def test_switchback_uses_the_same_rebuilt_request_owner(monkeypatch):
-    seen = {}
-
-    def attach(task, source, destination, messages, tools, *, round_num, tid):
-        seen.update(model=destination['model'], round_num=round_num,
-                    source_model=source['model'])
-        return destination
-
-    monkeypatch.setattr(requests, 'attach_rebuilt_request_metadata', attach)
-    monkeypatch.setattr(
-        'lib.tasks_pkg.context_composer.turn_requirements.refresh_turn_requirements',
-        lambda *args, **kwargs: None)
-    monkeypatch.setattr('lib.tasks_pkg.manager._events.append_event', lambda *args: None)
-    task = {'id': 'switchback-task', 'convId': 'conv', 'config': {},
-            '_fallback_kind': 'content_filter', '_fallback_from': 'claude-opus-5.5',
-            '_fallback_served_rounds': 1}
-    body, model, probe = requests.prepare_switchback(
-        task, {'model': 'kimi-k3.1-pro', '_thinking_depth': 'max'},
-        'kimi-k3.1-pro', 'kimi-k3.1-pro', 4, 4096, [],
-        [{'role': 'user', 'content': 'Continue'}])
-    assert probe and model == 'claude-opus-5.5'
-    assert seen == {'model': 'claude-opus-5.5', 'round_num': 4,
-                    'source_model': 'kimi-k3.1-pro'}
-    assert body['_reasoning_pending'] is True

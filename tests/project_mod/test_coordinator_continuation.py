@@ -115,7 +115,9 @@ def end(r, row, status='completed', delivered=True):
     attempt['status'] = status
     attempt['settledAt'] = int(r.c.now[0] * 1000)
     if delivered:
-        r.workspaces[attempt['taskId']] = {'task_id': attempt['taskId'], 'user_id': 7, 'project_root': '/project',
+        # A Worker checkout is registered under its assignment's work id.
+        work_id = row['execution']['taskId']
+        r.workspaces[work_id] = {'task_id': work_id, 'user_id': 7, 'project_root': '/project',
             'origin': {admission.KEY: r.c.repo.admission(row['id']), 'delivery': {'state': 'delivered'}}}
 
 
@@ -244,7 +246,7 @@ def test_finish_requires_exact_review_delivery_and_published_report(run):
     assert 'Unfinished/unreviewed' in r.call('finish_project_request', **args)['error']
     reviewed = r.call('review_project_work', assignment_id=first['id'], result_revision=1, decision='accept', note='Verified')
     assert reviewed['review']['decision'] == 'accept'
-    task = r.attempts[first['execution']['attemptId']]['taskId']
+    task = first['execution']['taskId']
     r.workspaces[task]['origin']['delivery']['state'] = 'blocked'
     assert 'delivery' in r.call('finish_project_request', **args)['error']
     r.workspaces[task]['origin']['delivery']['state'] = 'delivered'
@@ -375,6 +377,33 @@ def test_failed_settlement_only_wakes_coordinator_and_leaves_human_queue_alone(m
     assert calls == [(('failed-worker',), {'user_id': 7, 'coordinator_only': True})]
 
 
+@pytest.mark.parametrize('abort_reason', [None, 'server_shutdown'])
+def test_shutdown_interrupted_settlement_leaves_successors_to_startup_recovery(
+        monkeypatch, abort_reason):
+    from lib import turn_lifecycle, message_queue
+    from lib.project_dispatch import recovery
+    calls = []
+    class Thread:
+        def __init__(self, *, target, **kwargs): self.target = target
+        def start(self): self.target()
+    monkeypatch.setattr(threading, 'Thread', Thread)
+    def record(name, value):
+        def call(*args, **kwargs):
+            if abort_reason == 'server_shutdown':
+                pytest.fail('A stopping server must not start successor work: ' + name)
+            calls.append(name)
+            return value
+        return call
+    monkeypatch.setattr(message_queue, 'get_queue_depth', record('queue_depth', 0))
+    monkeypatch.setattr(message_queue, 'dispatch_completed_background_batch', record('background', None))
+    monkeypatch.setattr(recovery, 'recover_conversation_dispatch', record('dispatch_recovery', None))
+    task = {'_userId': 7}
+    if abort_reason:
+        task.update(aborted=True, _abort_reason=abort_reason)
+    turn_lifecycle._drain_queue_after_settlement(task, 'worker', 'interrupted')
+    assert calls == ([] if abort_reason else ['queue_depth', 'background', 'dispatch_recovery'])
+
+
 @pytest.mark.parametrize('source', ['human', 'continuation'])
 def test_superseded_input_does_not_restart_old_request(run, source):
     r = run
@@ -429,6 +458,27 @@ def test_issued_continuation_core_is_direct_with_exact_grant_ceiling(run, narrow
         assert not names(body['tools']) - set(row['request']['profile']['tools'])
         assert body['_programmatic_tool_calling'] == 'off'
     assert r.task['_principalContext']['kind'] == 'system' and not r.task['_attended']
+
+
+def test_continuation_admitted_before_a_tool_flag_retirement_keeps_its_grant(run):
+    """Incident 2026-11-05: a build retired ``toolSearch: auto``. After the restart
+    that loaded it, every Coordinator continuation admitted earlier stopped at
+    tool assembly with dispatch_authority_lost: assembly re-normalized the role's
+    tool settings over the ones its grant had fixed, so the grant fence refused."""
+    from dataclasses import replace
+    from tests.tasks_pkg.test_coordinator_tool_surface import assemble
+
+    r = run
+    issued = r.task['_coordinatorWorkerPolicy']
+    r.task['_coordinatorWorkerPolicy'] = replace(issued, config={
+        **issued.config, 'tools': {**issued.config['tools'], 'toolSearch': 'auto'}})
+    ready(r)
+    row = activate(r)
+    assert row['request']['delegation']['policy']['config']['tools']['toolSearch'] == 'auto'
+    assemble(r.task)
+    assert not r.task['abort_event'].is_set()
+    admission.validate_task(r.task)
+    assert r.task['config']['tools']['programmaticCalling'] == 'off'
 
 
 def _decision_report(r, turn_id='decision-report', ordinal=10):
@@ -499,6 +549,29 @@ def test_decision_requires_a_published_decision_report(run):
     r.turns[report_id]['kind'] = 'coordinator_report.progress'
     assert 'decision' in r.call('request_user_decision', report_turn_id=report_id, recommendation='Use A')['error']
 
+
+
+@pytest.mark.parametrize('asks', [True, False])
+def test_continuation_brief_names_only_tools_its_grant_holds(run, asks):
+    """The brief told every continuation to call request_user_decision after that tool
+    left the Coordinator ceiling, so a continuation asking the human was refused.
+    A grant issued before ask_human was frozen into continuations cannot ask at all."""
+    import re
+    from lib.tasks_pkg.coordinator_policy import COORDINATOR_TOOLS
+    r = run
+    if not asks:
+        names = CONTRACT['continuationTools'] + ['run_command', 'read_files', 'write_file']
+        capture_worker_policy(r.task, r.task['config'],
+                              [{'function': {'name': name}} for name in names if name != 'ask_human'],
+                              'model-a', worker_model='model-a')
+    ready(r)
+    request = controls(r)[0]['request']
+    held = set(request['profile']['tools'])
+    assert ('ask_human' in held) is asks
+    known = COORDINATOR_TOOLS | set(CONTRACT['workerDeniedTools']) | set(CONTRACT['continuationTools'])
+    named = {name for name in known if re.search(rf'\b{re.escape(name)}\b', request['brief'])}
+    assert named <= held, sorted(named - held)
+    assert ('ask_human' in named) is asks
 
 def test_timed_wake_keeps_one_timer_per_project_and_the_earliest_due_time(monkeypatch):
     fired = []

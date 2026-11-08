@@ -226,6 +226,64 @@ pricing-tier tags. The shared provider probe reports an unsupported ranking
 probe as skipped without issuing a chat request or recommending disablement.
 This classification does not claim that a rerank HTTP executor is installed.
 
+## Model kinds and media facts
+
+`MODEL_KINDS` in
+[`capability_taxonomy.py`](../lib/model_info/capability_taxonomy.py) names
+every Model's task family (chat, image/video/audio generation, speech
+synthesis and recognition, embedding, reranking) and the media price units
+each kind bills in. `model_kind()` derives the kind from capabilities; it is
+never stored. Input-modality, feature and price tags never change it: `video`
+is video input, generated video is `video_gen`, music and sound is
+`audio_gen`. `CHAT_EXCLUDED_CAPS` is the union of the non-chat kinds' task
+capabilities, so a new kind cannot reach a chat picker by omission. The
+taxonomy payload publishes `model_kinds` and `media_price_units`; the browser
+adopts them atomically over its parity-pinned fallback.
+
+Media kinds are described by media facts, not a token context window:
+`media_pricing` holds official per-unit rates (optionally per tier, with
+`estimated` marking an amount a creator publishes while billing tokens) and
+`media_profile` holds documented generation or recognition constraints, where
+absence means undocumented, never unsupported. Their shapes are
+`mediaPricing` and `mediaProfile` in
+[`model_routing_v2.schema.json`](../contracts/model_routing_v2.schema.json);
+normalization rejects malformed facts with their field. Admission accepts a
+media price as the price evidence of a media kind. A unit that no kind of the
+Model bills in keeps it a draft, and chat, embedding and reranking Models still
+need token prices. Registration evidence may cite both facts.
+
+[`media_model_facts.json`](../lib/model_info/media_model_facts.json) holds
+maintained official facts per exact Creator/Model identity with checked dates
+and HTTPS sources; [`media_facts.py`](../lib/model_info/media_facts.py)
+validates it against the same schema definitions. `public_projection` stamps
+them as read-only `official_media_pricing` / `official_media_profile` on
+media-kind rows that registered none, never projects a maintained price whose
+units the row's kinds cannot bill, and normalization strips both on write.
+Capability routes carry the effective profile, so `/api/v4/images/models`
+lets the composer offer only documented aspect ratios and resolutions.
+
+Discovery derives a task family from an unmistakable model id, including bare
+`/models` rows that otherwise prove only `text`. The public catalogue feed
+classifies image outputs as `image_gen` and seeds no video producers. No
+video- or music-generation executor exists: kinds and facts make such Models
+registrable, priced and visible without letting them reach chat routes.
+
+Problem: media Models were described with chat facts (zero token prices, an
+import-default context window, raw tags), three hand-copied non-chat lists
+had drifted (two missed `reranking`), and relays seeded image and video
+generators as chat routes. Decision: one derived kind per Model, typed and
+admitted media facts, and a maintained official catalogue projected
+read-only. Alternatives rejected: a stored `kind` field (a second
+classification that can contradict capabilities); media units inside
+`list_pricing` (budgets, the cost frontier and compaction cost would read a
+per-image price as per-token); a free-form profile (unvalidated facts cannot
+drive pickers); name-based media facts at request time (the guessing that
+registration forbids for context and prices). Specifications:
+`tests/model_routing/test_capability_taxonomy_parity.py`,
+`tests/model_routing/test_media_model_facts.py`,
+`tests/llm_dispatch/test_discovery_inference_profiles.py`,
+`tests/providers/test_provider_template_feed.py`.
+
 ## Local model artifact publication
 
 Problem: an independent search distribution needs reproducible local weights
@@ -368,6 +426,31 @@ defaults until the server has restarted onto boot-pinned defaults. `hy4` is a su
 the preview's own reasoning profile stays unregistered. OpenRouter's public
 catalogue lists `tencent/hy4`, and the dynamic feed carries that wire.
 Specification: `tests/model_routing/test_hy4_registration.py`.
+
+LongCat-2.5 knowledge and YourProvider gateway supply (checked 2026-11-06): the
+LongCat API [change log](https://longcat.chat/platform/docs/change-log) makes
+LongCat-2.5 available on 2026-11-02 (LongCat-2.5-Preview on 2026-09-25, so the
+preview release needle precedes its substring). The
+[model-parameter page](https://longcat.chat/platform/docs/api/model-params)
+fixes a 1,048,576 context, a 262,144 `max_tokens` limit, temperature pinned by
+the server (1.0 thinking on, 0.7 off) and the `thinking` enabled/disabled
+switch, the same `thinking_type` wire LongCat-2.0 declares; there is no effort
+ladder, so `supported_efforts` is `[]` (`thinking_budget` is a token cap, not an
+effort). The change log and
+[launch blog](https://longcat.ai/blog/longcat-2.5/) announce native image
+understanding. The official LongCat template lists the Model beside
+LongCat-2.0. The list price is the LongCat API platform's pricing card (behind
+the platform login; the docs `/pricing` path 404s), supplied by the owner on
+2026-11-06: ¥2/¥8 input/output and ¥0.04 cache hit per million, recorded at
+the shared 7.24 rate as $0.276/$1.105 with a 2% cache read, which makes the
+Model `ready` and `cheap`. The YourProvider recipe keeps the gateway's internal
+`cost: 0.0` like LongCat-2.0. Live probes on
+your-llm-gateway.example.com that day: `LongCat-2.5` answered 200 with thinking on and off
+and described an image; `LongCat-2.5-Thinking` is not a model name there
+(400). `hy4` answered 429 with a per-model RPM message (served, App-level
+quota), so the YourProvider template carries `hy4` beside `hy4-preview` with the
+Tencent facts above. Specification:
+`tests/model_routing/test_longcat_25_registration.py`.
 
 The Models settings projection shows `ready` rows and legacy unmarked rows
 awaiting migration, not persisted `pending_*` or `disabled` drafts. Drafts

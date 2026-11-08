@@ -79,6 +79,28 @@ def _client(runtime: _FakeRuntime) -> EmbeddedStorageV2Client:
 
 @pytest.mark.unit
 class TestEmbeddedClientAdapter:
+    @pytest.mark.parametrize('method', ['worker_watch', 'conversation_watch'])
+    def test_watch_uses_cancellable_native_port_without_a_socket(self, method):
+        from tofu_db._request_cancellation import RequestCancellation
+        runtime = _FakeRuntime()
+        cancellation = RequestCancellation()
+        import time
+        deadline = int((time.time() + 5) * 1000)
+        observed = []
+        def watch(operation, cursor, *, deadline_unix_ms, cancellation):
+            observed.append((operation, cursor, deadline_unix_ms, cancellation))
+            return _ok({'cursor': 'native'})
+        runtime.commit_watch = watch
+        assert getattr(_client(runtime), method)(cursor=None, deadline_unix_ms=deadline,
+            cancellation=cancellation) == {'cursor': 'native'}
+        expected = 'worker_control.watch' if method == 'worker_watch' else 'conversation_control.watch'
+        assert observed == [(expected, None, deadline, cancellation)]
+        client = _client(runtime)
+        client.close()
+        with pytest.raises(StorageError, match='closed'):
+            getattr(client, method)(cursor=None, deadline_unix_ms=deadline)
+        assert len(observed) == 1
+
     def test_constructor_validation_inherits_the_loopback_contract(self) -> None:
         runtime = _FakeRuntime()
         with pytest.raises(ValueError):
@@ -205,6 +227,57 @@ class TestEmbeddedSupervisor:
             auto_restart=False)
         runtime.start()
         return runtime
+
+    def test_commit_watches_publish_cancel_and_close_without_sockets(self, tmp_path, monkeypatch):
+        import time
+        import uuid
+        from concurrent.futures import ThreadPoolExecutor
+        from tofu_db._request_cancellation import RequestCancellation
+        from lib.conversation_sync.delivery_runtime import ConversationWakeSource
+        from lib.durable_worker.runtime_policy import runtime_policy
+        from lib.storage.worker_wake import StorageWorkerWakeSource
+        from lib import turn_lifecycle as turns
+        import threading
+
+        sockets_before = _socket_inodes()
+        runtime = self._start(tmp_path, monkeypatch)
+        client = runtime.client()
+        conversation_woke, worker_woke = threading.Event(), threading.Event()
+        conversation = ConversationWakeSource(runtime.client)
+        workers = StorageWorkerWakeSource(runtime.client, runtime_policy())
+        try:
+            conversation.start(lambda scopes: conversation_woke.set())
+            workers.start(lambda operation: worker_woke.set())
+            monkeypatch.setattr(turns, '_turn_client', lambda **kw: runtime.client(**kw))
+            identity = uuid.uuid4().hex
+            turns.create_turn_pair(identity, command_id=identity,
+                input_projection={'content': 'embedded commit'}, config={}, user_id=1,
+                conversation_defaults={'allowCreate': True, 'title': 'Watch', 'settings': {}})
+            assert conversation_woke.wait(5)
+            assert not worker_woke.is_set()
+            client.command('worker_job.enqueue', {'task_id': identity, 'user_id': 1,
+                'tenant_id': '', 'task_kind': 'watch-test', 'payload': {},
+                'idempotency_key': identity, 'priority': 0, 'available_at_ms': 0,
+                'now_ms': int(time.time() * 1000)}, uuid.uuid4().hex)
+            assert worker_woke.wait(5)
+            cancellation = RequestCancellation()
+            cursor = client.conversation_watch(cursor=None,
+                deadline_unix_ms=int((time.time() + 5) * 1000))['cursor']
+            with ThreadPoolExecutor() as pool:
+                pending = pool.submit(client.conversation_watch, cursor=cursor,
+                    deadline_unix_ms=int((time.time() + 60) * 1000), cancellation=cancellation)
+                cancellation.cancel()
+                with pytest.raises((StorageError, OSError)):
+                    pending.result(5)
+            workers.close()
+            conversation.close()
+            assert not workers._thread.is_alive() and not conversation._thread.is_alive()
+            assert client.health()['ready'] is True
+            assert _socket_inodes() <= sockets_before
+        finally:
+            workers.close()
+            conversation.close()
+            runtime.stop()
 
     def test_start_health_round_trip_and_restart_without_sockets(
             self, tmp_path, monkeypatch):

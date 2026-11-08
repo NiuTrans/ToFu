@@ -15,7 +15,6 @@ from . import (
     _pool,
     _recovery,
     _refusal,
-    _requests,
     _retry,
     _transport,
     _usage,
@@ -34,7 +33,6 @@ def _call_primary(
     thinking_enabled,
     accumulated_usage,
     api_rounds,
-    switchback_probe,
     on_tool_call_ready,
 ):
     """Adopt a provider response or bill and retire a refused attempt."""
@@ -122,24 +120,13 @@ def _call_primary(
         stream_result=stream_result,
     )
 
-    if switchback_probe:
-        # The probe round itself succeeded on the primary; clear the
-        # decision-time stamp so done/persist do not claim the whole
-        # turn ran on the fallback when the primary authored this answer.
-        # The round record above already keeps the real model.
-        task.pop('_fallback_model', None)
-        task['_refusal_switchback_ok'] = True
-
     return {
         'assistant_msg': assistant_msg,
         'finish_reason': finish_reason,
         'usage': usage,
         'stream_result': stream_result,
         'model': model,
-        # Downstream of _resolve_model_config the preset IS the model
-        # identity; the probe rebuilt the body for the primary, so the
-        # write-back must not leave rs.preset on the fallback's knob.
-        'preset': model if switchback_probe else preset,
+        'preset': preset,
         'thinking_enabled': thinking_enabled,
         '_loop_action': None,
         '_loop_exit_reason': None,
@@ -177,10 +164,6 @@ def _llm_call_with_fallback(
         logger.debug('[%s] disableModelFallback flag read failed: %s', tid, _e)
     no_fallback_context = 'fallback-disabled' if fallback_disabled else 'no-fallback'
 
-    body, model, switchback_probe = _requests.prepare_switchback(
-        task, body, model, fallback_model, round_num, max_tokens, tool_list, messages
-    )
-
     # ── Primary model call ──
     try:
         return _call_primary(
@@ -193,7 +176,6 @@ def _llm_call_with_fallback(
             thinking_enabled,
             accumulated_usage,
             api_rounds,
-            switchback_probe,
             on_tool_call_ready,
         )
 
@@ -223,6 +205,22 @@ def _llm_call_with_fallback(
         # within the small shared retry budget, preserving the latest typed
         # error from each retry.
         recovered, e, body = _recovery.recover_oversized_request(
+            task,
+            body,
+            model,
+            round_num,
+            tool_list,
+            messages,
+            preset,
+            thinking_enabled,
+            accumulated_usage,
+            api_rounds,
+            on_tool_call_ready,
+            e,
+        )
+        if recovered is not None:
+            return recovered
+        recovered, e, body = _recovery.recover_rejected_encrypted_state(
             task,
             body,
             model,
@@ -285,30 +283,6 @@ def _llm_call_with_fallback(
         )
         if settled is not None:
             return settled
-
-        # A switch-back probe that ALSO refused proves the trigger lives in
-        # the conversation, not in the refused trajectory: latch the fallback
-        # for the rest of the turn so we do not pay one refused attempt per
-        # round, and let the ordinary refusal-fallback path below re-serve
-        # this round on the fallback model.
-        if (
-            isinstance(e, ModelRefusalError)
-            and fallback_model
-            and switchback_probe
-            and model != fallback_model
-            and task.get('_fallback_kind') == 'content_filter'
-            and model == (task.get('_fallback_from') or '')
-        ):
-            task['_refusal_switchback_failed'] = True
-            logger.warning(
-                '[%s] 🚫 Switch-back probe on %s refused again (category=%s) '
-                '— the trigger is in the conversation, latching %s for the '
-                'rest of the turn',
-                tid,
-                model,
-                getattr(e, 'category', None) or '?',
-                fallback_model,
-            )
 
         # A refusal is a content decision, not unavailability: without a
         # distinct configured fallback it settles typed, never pool-rescued

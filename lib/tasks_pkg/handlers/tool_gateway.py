@@ -256,7 +256,8 @@ def _with_browser_availability(result, task, catalog, fn_args):
 
 
 def _with_capability_availability(result, task, catalog, fn_args, task_cfg=None):
-    """Add browser, curated-connector and dormant bundled-plugin evidence."""
+    """Add browser, curated-connector, dormant bundled-plugin and
+    environment-withheld tool evidence."""
     result = _with_browser_availability(result, task, catalog, fn_args)
     if result.get('status') != 'ok':
         return result
@@ -266,18 +267,23 @@ def _with_capability_availability(result, task, catalog, fn_args, task_cfg=None)
         str(fn_args.get('namespace') or ''),
         (task.get('_executableToolNamespaceByName') or {}).values())
     from lib.tools.optional_plugins import bundled_plugin_search_availability
+    from lib.tools.environment_capabilities import environment_search_availability
     evidence = [
         *evidence,
         *bundled_plugin_search_availability(
             task_cfg or {}, fn_args.get('query'),
             fn_args.get('namespace'), (_schema_name(tool) for tool in catalog)),
+        *environment_search_availability(
+            fn_args.get('query'), fn_args.get('namespace'),
+            (_schema_name(tool) for tool in catalog)),
     ]
     if evidence:
         result['capability_availability'] = [
             *(result.get('capability_availability') or []), *evidence]
         dormant_names = {
             row['tool_name'] for row in evidence
-            if row.get('reason_code') == 'bundled_plugin_not_enabled'}
+            if row.get('reason_code') in (
+                'bundled_plugin_not_enabled', 'environment_capability_missing')}
         if result.get('missing_name') in dormant_names:
             # The tool exists: it is gated, not a hallucinated name.
             result.pop('missing_name', None)

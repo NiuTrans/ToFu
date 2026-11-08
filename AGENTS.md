@@ -11,21 +11,32 @@ verification.
   workspace-destroying commands such as `git checkout --`, `git checkout
   <branch>`, `git switch`, `git restore`, `git stash`, `git reset --hard`,
   or `git clean`: they can silently discard concurrent edits. Create each worktree
-  with `git -C <shared-checkout> worktree add <path> -b <branch>
-  <shared-current-branch>`, never from the platform task workspace's `HEAD`,
-  which may be a task-input snapshot. Commits made in an isolated worktree
+  with `python3 scripts/lane.py new <branch>` (never from the platform task
+  workspace's `HEAD`, which may be a task-input snapshot): it creates the
+  branch on a fast local disk and recycles a landed lane's checkout, so a new
+  lane costs about a second rather than minutes on the network volume. Resume
+  a lane whose checkout is gone with `python3 scripts/lane.py restore <branch>`;
+  settlement saves its uncommitted work at `refs/tofu/lanes/<branch>`.
+  Commits made in an isolated worktree
   never reach the current branch by themselves: the
   executing agent (the model — never the human user) must land them itself,
   immediately once the worktree work is finished and verified, not later and
   never as a hand-off: run `python3 scripts/git_land.py <branch>` from the
   shared checkout. Unlike `git merge`, it does not refuse when other writers
   have uncommitted edits in the same files; it carries those edits forward
-  with a three-way merge, then removes the worktree and deletes the branch.
-  Known generated outputs are rebuilt from merged sources; uncommitted sources
-  and their outputs stay uncommitted. Do not reset generated files to unblock it.
-  If it refuses, nothing was changed; follow its printed instruction (merge
-  the current branch into the worktree branch to resolve a real conflict, or
-  rerun after another writer's overlapping lines are committed). A task is
+  with a three-way merge, recycles a lane's clean checkout for the next lane
+  and deletes the branch. Known generated outputs are rebuilt from merged
+  sources; uncommitted sources and their outputs stay uncommitted. Do not
+  reset generated files to unblock it. If it refuses, nothing was changed;
+  follow its printed instruction (merge the current branch into the worktree
+  branch to resolve a real conflict, or rerun after another writer's
+  overlapping lines are committed). Before publishing it runs the test files
+  the merged result can affect (recorded runs say which; a fast-forward counts
+  too) and refuses if one that passes on the current branch now fails
+  reproducibly; tests already failing there never block.
+  A `[Concurrent change]` notice means another conversation's unlanded work
+  or a landing touches your files: read their change (the notice prints the
+  command) and merge the current branch before verifying. A task is
   not complete until its worktree commits are merged into the current
   branch. The merge commit's first parent is the pre-integration backup; the
   tool prints it, so record that SHA in the final answer instead of creating
@@ -36,6 +47,17 @@ verification.
   dump the whole dirty worktree, full diffs, generated bundles, or large logs.
   On this host's FUSE mount, prefer `git ls-files` and `git grep` over `find`/
   `grep -r`: deep `find` walks intermittently return empty.
+- Worktree environment: symlink `node_modules` from the shared checkout (it is
+  gitignored); never run `npm install` in a worktree or under `data/`, which
+  re-resolves the shared tree. Run Python tests with the project
+  `.venv/bin/python3` explicitly whenever another environment (e.g. conda for
+  `node`) is on `PATH`; its `python3` makes results invalid evidence. The
+  command environment exports `PYTHONPATH=<shared checkout>`, so in a worktree
+  a `/tmp` probe (or any script that does not put the worktree first on
+  `sys.path`) imports the shared `lib`: prefix `PYTHONPATH=$PWD` and print
+  `lib.__file__` before trusting the result. Under
+  heavy host load, fixed test deadlines (test bundling, bundle canary) can
+  expire: rerun those failures serially before attributing them to a change.
 - Use `docs/README.md` as the first-hop map to the owning module and contract;
   `docs/catalog.json` is the machine-readable documentation inventory. Change
   the authority first, then derive generated clients and bundles. Edit
@@ -124,6 +146,20 @@ TofuDB it auto-discovers the running application's loopback API (configured
 `--db` only for an explicitly verified offline SQLite override, `--api-url` to
 target a different application. Backend selection and diagnostic limits live
 in `docs/STORAGE.md`.
+
+Runtime facts that shortcut diagnosis:
+
+- Tasks run in two processes: the API host (`server.py`) and the resident
+  execution host (`serverctl_pkg/execution_host.py`). Process-local state
+  (steers, background-command registries, idle checks) does not cross them.
+  Locate a task's process (`py-spy dump --nonblocking <pid>`) and read both
+  processes' logs before blaming a tool. Search logs with `rg -a`.
+- Restart and lifecycle outcomes are recorded only in
+  `logs/server-manager.log`; a browser-initiated restart cannot report them.
+- A merged fix is live only after the owning process restarts; storage also
+  needs a matching engine build (`serverctl_pkg.native_engine.source_fingerprint`).
+  Compare the running build with the merged source before concluding a fix
+  failed.
 
 # Tool and harness quality
 
@@ -227,7 +263,10 @@ Five long-term product constraints govern every change in this repo.
    policy and graph paths, not model/tool loops or presentation state machines.
    Inspect the common owner first; extend it with explicit policy ports where
    needed, and remove redundant paths with behavioral parity tests. Synthetic
-   users never inherit human authorization, and domain-specific verification,
+   users never inherit human authorization, except through an explicit,
+   revocable, audited delegation the owner grants (owner decision 2026-11-06:
+   the Global Router acts, never speaks, for the owner; `docs/ROUTER.md` R9),
+   and domain-specific verification,
    learning and durable settlement remain explicit rather than flattened away.
 
 5. **Optimizations add no tuning hyperparameters.** Owner decision

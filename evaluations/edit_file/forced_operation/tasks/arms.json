@@ -1,0 +1,242 @@
+{
+ "meta": {
+  "tofu_production_edit_file_sha256": "71b441bad698db12f039e2f37cfd5ba39e3cacccedfeffb2e59f2fbfd2402409",
+  "cc_template_sha256": "0243afb6a21b3e2358a5b6bb1f6e06bd57d69f7c383cda0227e7ed393c8afab0",
+  "codex_prompt_section_sha256": "c4f74868d0f47d23e3fc849212f292bf896b4f650637d76b08b7868cbdece274",
+  "codex_lark_sha256": "d6367f4826ed608c424b0a308f3d6163527df63c22513d089b91863552f8bfeb",
+  "system_base": "You are a coding agent working in the repository at {root}. You change files only by calling the provided tool. The user has already shown you the current file contents; each line is prefixed with its line number and a tab, and that prefix is not part of the file. Perform exactly the requested edit, with exact text and indentation. When the tool reports that the edit succeeded, reply with the single word DONE. If the tool reports an error, fix the call and try again."
+ },
+ "arms": {
+  "A1": {
+   "name": "tofu_replace",
+   "tool": {
+    "type": "function",
+    "function": {
+     "name": "edit_file",
+     "description": "Apply ordered anchored edits; read/write targets in an earlier round. Prefer replace, including additions: content is the complete desired replacement, including retained anchor text and all line breaks. After A: `{\"operation\":\"replace\",\"anchor\":\"A\",\"content\":\"A\\nB\"}`; before A: `{\"operation\":\"replace\",\"anchor\":\"A\",\"content\":\"B\\nA\"}`. Name the batch's file once in `path` and leave each edit's own `path` out; set an edit's `path` only to target a different file. Anchors match exactly once; replace_all permits multiple matches only for replace. Later edits see earlier changes. Atomic preflight defaults true: any validation failure writes nothing. With atomic=false, one failure neither rolls back nor stops the others. I/O failures may leave partial writes.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "description": {
+        "type": "string",
+        "maxLength": 120,
+        "description": "Optional pre-edit caption (max 120 chars). Omit it to use the file-path label."
+       },
+       "path": {
+        "type": "string",
+        "minLength": 1,
+        "description": "File this batch edits. Write it once here for a single-file batch instead of repeating it on every edit; an edit's own `path` overrides it."
+       },
+       "edits": {
+        "type": "array",
+        "minItems": 1,
+        "description": "Shortest-unique-anchor operations, in order.",
+        "items": {
+         "type": "object",
+         "properties": {
+          "path": {
+           "type": "string",
+           "minLength": 1,
+           "description": "File for this edit, when it differs from the batch `path`. Never inherited from the previous edit; omit it rather than sending an empty string."
+          },
+          "operation": {
+           "type": "string",
+           "enum": [
+            "replace"
+           ],
+           "description": "Prefer replace for complete old-to-new edits, including additions."
+          },
+          "anchor": {
+           "type": "string",
+           "minLength": 1,
+           "description": "Exact, normally unique existing text. For replace, this is the old text being removed."
+          },
+          "content": {
+           "type": "string",
+           "description": "Replace: complete new text, including anchor parts to keep and all newlines; empty to delete."
+          },
+          "replace_all": {
+           "type": "boolean",
+           "description": "Replace every match."
+          }
+         },
+         "required": [
+          "operation",
+          "anchor",
+          "content"
+         ]
+        }
+       },
+       "atomic": {
+        "type": "boolean",
+        "default": true,
+        "description": "Preflight all edits before writing. False permits partial application."
+       },
+       "allow_outside_workspace": {
+        "type": "boolean",
+        "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused."
+       }
+      },
+      "required": [
+       "edits"
+      ],
+      "additionalProperties": false
+     }
+    }
+   },
+   "executor": "tofu",
+   "system": "You are a coding agent working in the repository at {root}. You change files only by calling the provided tool. The user has already shown you the current file contents; each line is prefixed with its line number and a tab, and that prefix is not part of the file. Perform exactly the requested edit, with exact text and indentation. When the tool reports that the edit succeeded, reply with the single word DONE. If the tool reports an error, fix the call and try again.\n\nEdit style for this session: call `edit_file` and use operation \"replace\" for every edit item, including pure additions (the anchor is the existing text and `content` is that text together with the new lines). Put all edits for a file in one call.",
+   "tool_sha256": "3802ff1578b232f6a5fba35dea02e4d2fbb8d7e60788078e29556a6eefeba063"
+  },
+  "A2": {
+   "name": "tofu_insert",
+   "tool": {
+    "type": "function",
+    "function": {
+     "name": "edit_file",
+     "description": "Apply ordered anchored edits; read/write targets in an earlier round. Prefer insert_after/insert_before for additions: content is only the new text; the anchor stays automatically. After A: `{\"operation\":\"insert_after\",\"anchor\":\"A\",\"content\":\"B\"}`; before A: `{\"operation\":\"insert_before\",\"anchor\":\"A\",\"content\":\"B\"}`. Use replace only to change or remove existing text: content is the complete desired replacement, including retained anchor text and all line breaks. Name the batch's file once in `path` and leave each edit's own `path` out; set an edit's `path` only to target a different file. Anchors match exactly once; replace_all permits multiple matches only for replace. Later edits see earlier changes. Atomic preflight defaults true: any validation failure writes nothing. With atomic=false, one failure neither rolls back nor stops the others. I/O failures may leave partial writes.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "description": {
+        "type": "string",
+        "maxLength": 120,
+        "description": "Optional pre-edit caption (max 120 chars). Omit it to use the file-path label."
+       },
+       "path": {
+        "type": "string",
+        "minLength": 1,
+        "description": "File this batch edits. Write it once here for a single-file batch instead of repeating it on every edit; an edit's own `path` overrides it."
+       },
+       "edits": {
+        "type": "array",
+        "minItems": 1,
+        "description": "Shortest-unique-anchor operations, in order.",
+        "items": {
+         "type": "object",
+         "properties": {
+          "path": {
+           "type": "string",
+           "minLength": 1,
+           "description": "File for this edit, when it differs from the batch `path`. Never inherited from the previous edit; omit it rather than sending an empty string."
+          },
+          "operation": {
+           "type": "string",
+           "enum": [
+            "insert_after",
+            "insert_before",
+            "replace"
+           ],
+           "description": "insert_after adds content below anchor; insert_before above it. Use replace only for edits that change or remove existing text."
+          },
+          "anchor": {
+           "type": "string",
+           "minLength": 1,
+           "description": "Exact, normally unique existing text. For replace, this is the old text being removed."
+          },
+          "content": {
+           "type": "string",
+           "description": "Replace: complete new text, including anchor parts to keep and all newlines; empty to delete. Insert: added lines only, without copied anchor/context."
+          },
+          "replace_all": {
+           "type": "boolean",
+           "description": "Replace every match; ignored by inserts."
+          }
+         },
+         "required": [
+          "operation",
+          "anchor",
+          "content"
+         ]
+        }
+       },
+       "atomic": {
+        "type": "boolean",
+        "default": true,
+        "description": "Preflight all edits before writing. False permits partial application."
+       },
+       "allow_outside_workspace": {
+        "type": "boolean",
+        "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused."
+       }
+      },
+      "required": [
+       "edits"
+      ],
+      "additionalProperties": false
+     }
+    }
+   },
+   "executor": "tofu",
+   "system": "You are a coding agent working in the repository at {root}. You change files only by calling the provided tool. The user has already shown you the current file contents; each line is prefixed with its line number and a tab, and that prefix is not part of the file. Perform exactly the requested edit, with exact text and indentation. When the tool reports that the edit succeeded, reply with the single word DONE. If the tool reports an error, fix the call and try again.\n\nEdit style for this session: call `edit_file`. For every pure addition of new lines use operation \"insert_after\" or \"insert_before\" with `content` containing only the new lines (never repeat the anchor). Use \"replace\" only where existing text must change or be removed. Put all edits for a file in one call.",
+   "tool_sha256": "d54150aee7de6be6fd6823fc625e5354e5b2ff3cb411a9b303fa6a987840e5c6"
+  },
+  "A3": {
+   "name": "cc_edit",
+   "tool": {
+    "type": "function",
+    "function": {
+     "name": "Edit",
+     "description": "Performs exact string replacements in files.\nUsage:\n- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.\n- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + tab. Everything after that is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.\n- The edit will FAIL if `old_string` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use `replace_all` to change every instance of `old_string`.\n- Use `replace_all` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "file_path": {
+        "type": "string",
+        "description": "The absolute path to the file to modify"
+       },
+       "old_string": {
+        "type": "string",
+        "description": "The text to replace"
+       },
+       "new_string": {
+        "type": "string",
+        "description": "The text to replace it with (must be different from old_string)"
+       },
+       "replace_all": {
+        "type": "boolean",
+        "default": false,
+        "description": "Replace all occurrences of old_string (default false)"
+       }
+      },
+      "required": [
+       "file_path",
+       "old_string",
+       "new_string"
+      ],
+      "additionalProperties": false
+     }
+    }
+   },
+   "executor": "cc",
+   "system": "You are a coding agent working in the repository at {root}. You change files only by calling the provided tool. The user has already shown you the current file contents; each line is prefixed with its line number and a tab, and that prefix is not part of the file. Perform exactly the requested edit, with exact text and indentation. When the tool reports that the edit succeeded, reply with the single word DONE. If the tool reports an error, fix the call and try again.\n\nEdit style for this session: call `Edit` with old_string/new_string. Make one `Edit` call per edit location; you may issue several calls in one response.",
+   "tool_sha256": "37721e8593aba0c3a9b27ff243f5d5e4afb4fabf5f55713cb607594f6c2b6c73"
+  },
+  "A4": {
+   "name": "codex_patch",
+   "tool": {
+    "type": "function",
+    "function": {
+     "name": "apply_patch",
+     "description": "The `apply_patch` tool can be used to edit files. Put the whole patch text in the `input` argument.\n\nUse the `apply_patch` tool to edit files. Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:\n\n*** Begin Patch\n[ one or more file sections ]\n*** End Patch\n\nWithin that envelope, you get a sequence of file operations.\nYou MUST include a header to specify the action you are taking.\nEach operation starts with one of three headers:\n\n*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).\n*** Delete File: <path> - remove an existing file. Nothing follows.\n*** Update File: <path> - patch an existing file in place (optionally with a rename).\n\nExample patch:\n\n```\n*** Begin Patch\n*** Add File: hello.txt\n+Hello world\n*** Update File: src/app.py\n*** Move to: src/main.py\n@@ def greet():\n-print(\"Hi\")\n+print(\"Hello, world!\")\n*** Delete File: obsolete.txt\n*** End Patch\n```\n\nIt is important to remember:\n\n- You must include a header with your intended action (Add/Delete/Update)\n- You must prefix new lines with `+` even when creating a new file\n\nThe patch must match this Lark grammar:\nstart: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "input": {
+        "type": "string",
+        "description": "The entire contents of the apply_patch command"
+       }
+      },
+      "required": [
+       "input"
+      ],
+      "additionalProperties": false
+     }
+    }
+   },
+   "executor": "codex",
+   "system": "You are a coding agent working in the repository at {root}. You change files only by calling the provided tool. The user has already shown you the current file contents; each line is prefixed with its line number and a tab, and that prefix is not part of the file. Perform exactly the requested edit, with exact text and indentation. When the tool reports that the edit succeeded, reply with the single word DONE. If the tool reports an error, fix the call and try again.\n\nEdit style for this session: call `apply_patch` with a patch in the apply_patch format in the `input` argument. Put all edits for a file in one patch.",
+   "tool_sha256": "23eaf55b06808e081230a42520996ec840d2dad1a40b67c5f4d6c898e4a99df8"
+  }
+ }
+}

@@ -8,7 +8,7 @@
 //! delete/purge, restore); a lazy bounded backfill brings pre-directory
 //! authorities forward over a handful of commits. The directory only ever
 //! *serves* a list when every coverage gate passes — any disagreement
-//! falls back to the exact legacy read-all+sort answer.
+//! falls back to the exact stable-catalog selection in the parent module.
 
 use std::io;
 
@@ -552,12 +552,18 @@ mod tests {
         database.commit(tx).unwrap();
     }
 
+    /// Move a conversation's recency through the production funnel: it
+    /// stores the header (directory upsert) and rekeys the updated-time index
+    /// and the activity candidate in the same transaction.
     fn bump(database: &mut AuthorityDatabase, id: &str, at: u64) {
         let mut tx = database.begin_with_identity_claim_scopes(TENANT, OWNER).unwrap();
-        let (header, version) = super::super::load_header(database, &mut tx, id).unwrap().unwrap();
-        let mut header = header;
-        header.insert("updated_at".to_owned(), Value::from(at));
-        super::super::store_header(database, &mut tx, id, header, version, at).unwrap();
+        super::super::update_metadata(database, &mut tx, &super::super::MetadataUpdateRequest {
+            conversation_id: id.to_owned(),
+            title: None,
+            updated_at_ms: Some(at),
+            committed_at_ms: at,
+        })
+        .unwrap();
         database.commit(tx).unwrap();
     }
 
@@ -611,9 +617,7 @@ mod tests {
 
     fn legacy(database: &AuthorityDatabase, limit: usize) -> Vec<u8> {
         let mut tx = database.begin(TENANT, OWNER).unwrap();
-        let count = owner_live_count(database, &mut tx).unwrap();
-        super::super::primary_ordered_list(database, &mut tx, &list_request(limit), count, &mut || false)
-            .unwrap()
+        super::super::document_list(database, &mut tx, &list_request(limit), &mut || false).unwrap()
     }
 
     fn state_of(database: &AuthorityDatabase) -> DirectoryState {
@@ -767,9 +771,9 @@ mod tests {
     ) -> (Option<Vec<u8>>, Vec<u8>, Vec<u8>) {
         let mut tx = database.begin(TENANT, OWNER).unwrap();
         let directory = super::super::directory_catalog_page(database, &mut tx, request).unwrap();
-        let public = super::super::catalog_page(database, &mut tx, request).unwrap();
-        let count = owner_live_count(database, &mut tx).unwrap();
-        let legacy = super::super::primary_catalog_page(database, &mut tx, request, count).unwrap();
+        let public = super::super::catalog_page(database, &mut tx, request, &mut || false).unwrap();
+        let legacy =
+            super::super::document_catalog_page(database, &mut tx, request, &mut || false).unwrap();
         (directory, public, legacy)
     }
 
@@ -856,9 +860,11 @@ mod tests {
         database.commit(tx).unwrap();
         let request = catalog_request(3, None, None);
         let mut tx = database.begin(TENANT, OWNER).unwrap();
-        assert!(super::super::primary_catalog_page(&database, &mut tx, &request, 6).is_err());
+        assert!(super::super::document_catalog_page(&database, &mut tx, &request, &mut || false)
+            .is_err());
         let page: Value = serde_json::from_slice(
-            &super::super::catalog_page(&database, &mut tx, &request).unwrap()).unwrap();
+            &super::super::catalog_page(&database, &mut tx, &request, &mut || false).unwrap())
+            .unwrap();
         assert_eq!(page["total_count"], 6);
         assert_eq!(page["has_more"], true);
         let ids: Vec<_> = page["items"].as_array().unwrap().iter()
@@ -888,8 +894,188 @@ mod tests {
         let mut tx = database.begin(TENANT, OWNER).unwrap();
         let request = catalog_request(50, None, None);
         assert!(super::super::directory_catalog_page(&database, &mut tx, &request).unwrap().is_none());
-        // The unchanged legacy plan still reports the corrupted count.
-        assert!(super::super::catalog_page(&database, &mut tx, &request).is_err());
+        // The candidate plan defers to the exact document plan, which still
+        // reports the corrupted count.
+        assert!(super::super::catalog_page(&database, &mut tx, &request, &mut || false).is_err());
+    }
+
+    fn page_ids(page: &[u8]) -> Vec<String> {
+        let page: Value = serde_json::from_slice(page).unwrap();
+        page["items"].as_array().unwrap().iter()
+            .map(|item| item["metadata"]["id"].as_str().unwrap().to_owned()).collect()
+    }
+
+    /// Production failure 2026-11-06: an owner crossed the former 1,000-row
+    /// cutoff, the sidebar's 500-row page moved onto the rekeyed updated-time
+    /// index, and its tombstone history kept every attempt running past its
+    /// deadline. Ordered rows and cost must come from stable-keyed catalogs,
+    /// so replacing that whole index with a decoy changes no answer.
+    #[test]
+    fn large_owner_ordered_reads_never_consult_the_rekeyed_updated_index() {
+        use crate::generated_tofudb_ir::CONVERSATION_UPDATED_INDEX_NAMESPACE;
+
+        let mut database = authority();
+        let live = super::super::INDEX_SCAN_PAGE_ROWS as u64 + 1;
+        for index in 0..live {
+            create(&mut database, &format!("conv-{index:04}"), 1_000 + index);
+        }
+        for at in 10_000..10_064_u64 {
+            bump(&mut database, "conv-0000", at);
+        }
+        let first = catalog_request(500, None, Some(Vec::new()));
+        let deep = catalog_request(500, Some((1_480, "conv-0480")), None);
+        let read = |database: &AuthorityDatabase| {
+            let mut tx = database.begin(TENANT, OWNER).unwrap();
+            let served = (
+                super::super::catalog_page(database, &mut tx, &first, &mut || false).unwrap(),
+                super::super::catalog_page(database, &mut tx, &deep, &mut || false).unwrap(),
+                super::super::list(database, &mut tx, &list_request(500), &mut || false).unwrap(),
+            );
+            let exact = (
+                super::super::document_catalog_page(database, &mut tx, &first, &mut || false)
+                    .unwrap(),
+                super::super::document_catalog_page(database, &mut tx, &deep, &mut || false)
+                    .unwrap(),
+                super::super::document_list(database, &mut tx, &list_request(500), &mut || false)
+                    .unwrap(),
+            );
+            assert_eq!(served, exact);
+            served
+        };
+        let before = read(&database);
+        let first_ids = page_ids(&before.0);
+        assert_eq!(first_ids.len(), 500);
+        assert_eq!(first_ids[0], "conv-0000");
+        assert_eq!(first_ids[1], format!("conv-{:04}", live - 1));
+        assert_eq!(page_ids(&before.1)[0], "conv-0479");
+
+        let mut tx = database.begin_with_identity_claim_scopes(TENANT, OWNER).unwrap();
+        let (mut start, end) =
+            EntityKey::prefix_range(TENANT, OWNER, CONVERSATION_UPDATED_INDEX_NAMESPACE, b"")
+                .unwrap();
+        let mut indexed = Vec::new();
+        loop {
+            let rows = database.entity_scan(&mut tx, &start, &end, 1_000).unwrap();
+            let Some((last, _)) = rows.last() else { break };
+            start = super::super::after_index_key(last, TENANT, OWNER,
+                CONVERSATION_UPDATED_INDEX_NAMESPACE).unwrap();
+            indexed.extend(rows.into_iter().map(|(key, _)| key));
+        }
+        assert_eq!(indexed.len() as u64, live);
+        for key in indexed {
+            database.entity_delete(&mut tx, key).unwrap();
+        }
+        let decoy = super::super::stored_document_envelope(&database, &mut tx, "conv-0001").unwrap();
+        let ghost = super::super::updated_index_key(TENANT, OWNER, 20_000, "conv-ghost").unwrap();
+        database.entity_put(&mut tx, ghost, decoy).unwrap();
+        database.commit(tx).unwrap();
+        assert_eq!(read(&database), before);
+    }
+
+    #[test]
+    fn ordered_reads_past_the_directory_stop_at_the_request_deadline() {
+        let mut database = authority();
+        let live = MAX_RECENCY_DIRECTORY_ENTRIES + 2;
+        for index in 0..live as u64 {
+            create(&mut database, &format!("conv-{index:03}"), 100 + index);
+        }
+        let mut tx = database.begin(TENANT, OWNER).unwrap();
+        let page = catalog_request(live, None, None);
+        assert!(super::super::directory_catalog_page(&database, &mut tx, &page).unwrap().is_none());
+        let mut folder = catalog_request(10, None, None);
+        folder.folder_id = Some("f".to_owned());
+        for request in [&page, &folder] {
+            let error = super::super::catalog_page(&database, &mut tx, request, &mut || true)
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        }
+        let mut titled = list_request(10);
+        titled.title_contains = Some("title".to_owned());
+        for request in [list_request(live), titled] {
+            let error = super::super::list(&database, &mut tx, &request, &mut || true).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        }
+    }
+
+    #[test]
+    fn candidate_disagreement_and_legacy_owners_keep_the_exact_document_plan() {
+        let mut database = authority();
+        let live = MAX_RECENCY_DIRECTORY_ENTRIES + 4;
+        for index in 0..live as u64 {
+            create_with_settings(&mut database, &format!("conv-{index:03}"), 1_000 + index / 2,
+                json!({"model": "m"}));
+        }
+        bump(&mut database, "conv-010", 5_000);
+        remove_conversation(&mut database, "conv-020", 5_001);
+        let live = live - 1;
+        // Pages past the 128-entry directory window: a whole first page, a
+        // cursor page near the tail and an empty page past the last entry.
+        let first_page = catalog_request(live, None, Some(vec!["model".to_owned()]));
+        let tail_page = catalog_request(50, Some((1_002, "conv-005")), None);
+        let empty_page = catalog_request(0, Some((1_000, "conv-001")), None);
+        let mut windowed = list_request(live);
+        windowed.updated_at_gte = Some(1_010);
+        windowed.created_at_lt = Some(1_060);
+        let mut picked = list_request(5);
+        picked.ids = Some(["conv-003", "conv-010", "conv-099", "conv-missing"]
+            .into_iter().map(str::to_owned).collect());
+        picked.updated_at_gt = Some(1_000);
+        let mut titled = list_request(live);
+        titled.title_contains = Some("CONV-1".to_owned());
+        let assert_exact = |database: &AuthorityDatabase, pages: &[&super::super::CatalogPageRequest],
+                            lists: &[&super::super::ListRequest]| {
+            let mut tx = database.begin(TENANT, OWNER).unwrap();
+            for request in pages {
+                assert!(super::super::directory_catalog_page(database, &mut tx, request)
+                    .unwrap().is_none());
+                assert_eq!(
+                    super::super::catalog_page(database, &mut tx, request, &mut || false).unwrap(),
+                    super::super::document_catalog_page(database, &mut tx, request, &mut || false)
+                        .unwrap(),
+                );
+            }
+            for request in lists {
+                let served =
+                    super::super::list(database, &mut tx, request, &mut || false).unwrap();
+                assert_eq!(served,
+                    super::super::document_list(database, &mut tx, request, &mut || false)
+                        .unwrap());
+                assert!(!serde_json::from_slice::<Value>(&served).unwrap()
+                    .as_array().unwrap().is_empty());
+            }
+        };
+        let all_pages = [&first_page, &tail_page, &empty_page];
+        let all_lists = [&list_request(live), &windowed, &picked, &titled];
+        assert_exact(&database, &all_pages, &all_lists);
+
+        // A selected candidate whose timestamps disagree with its header is
+        // caught at hydration. (Like directory entries, candidates are
+        // checked per selected row and by count; an unselected stale row is
+        // trusted to the same-transaction maintenance funnels.)
+        let mut tx = database.begin_with_identity_claim_scopes(TENANT, OWNER).unwrap();
+        let candidate = super::super::activity_candidate_key(TENANT, OWNER, 0, "conv-003").unwrap();
+        let stale = super::super::encode_activity_candidate("conv-003", 1_001, 999_999).unwrap();
+        database.entity_put(&mut tx, candidate, stale).unwrap();
+        database.commit(tx).unwrap();
+        assert_exact(&database, &[&first_page], &[&list_request(live), &windowed, &picked]);
+
+        // A candidate without a live conversation breaks the count check.
+        let mut tx = database.begin_with_identity_claim_scopes(TENANT, OWNER).unwrap();
+        let ghost = super::super::activity_candidate_key(TENANT, OWNER, 0, "conv-ghost").unwrap();
+        let ghost_value = super::super::encode_activity_candidate("conv-ghost", 1, 1).unwrap();
+        database.entity_put(&mut tx, ghost, ghost_value).unwrap();
+        database.commit(tx).unwrap();
+        assert_exact(&database, &all_pages, &all_lists);
+
+        // An owner whose candidate index predates its conversations.
+        let mut tx = database.begin_with_identity_claim_scopes(TENANT, OWNER).unwrap();
+        let state = super::super::activity_candidate_state_key(&tx).unwrap();
+        database.entity_delete(&mut tx, state).unwrap();
+        database.commit(tx).unwrap();
+        let mut read = database.begin(TENANT, OWNER).unwrap();
+        assert!(!super::super::activity_candidate_index_is_complete(&database, &mut read).unwrap());
+        drop(read);
+        assert_exact(&database, &all_pages, &all_lists);
     }
 
     // Real-volume component measurement at the legacy primary plan's largest
@@ -918,11 +1104,13 @@ mod tests {
         for _ in 0..5 {
             let mut tx = database.begin(TENANT, OWNER).unwrap();
             let started = std::time::Instant::now();
-            let legacy = super::super::primary_catalog_page(&database, &mut tx, &request, owner_conversations).unwrap();
+            let legacy = super::super::document_catalog_page(&database, &mut tx, &request, &mut || false)
+                .unwrap();
             legacy_micros.push(started.elapsed().as_micros() as u64);
             let mut tx = database.begin(TENANT, OWNER).unwrap();
             let started = std::time::Instant::now();
-            let served = super::super::catalog_page(&database, &mut tx, &request).unwrap();
+            let served = super::super::catalog_page(&database, &mut tx, &request, &mut || false)
+                .unwrap();
             directory_micros.push(started.elapsed().as_micros() as u64);
             assert_eq!(served, legacy);
         }
@@ -1016,8 +1204,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let exact =
-            super::super::primary_ordered_list(&replica, &mut tx, &list_request(2), 2, &mut || false)
-                .unwrap();
+            super::super::document_list(&replica, &mut tx, &list_request(2), &mut || false).unwrap();
         assert_eq!(
             indexed, exact,
             "index reads must include pending business updates"

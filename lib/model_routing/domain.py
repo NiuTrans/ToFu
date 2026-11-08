@@ -21,6 +21,14 @@ from lib.model_catalog._creator_identity import (
     strip_routing_decoration,
 )
 from lib.model_info import release_date as _release_date
+from lib.model_info.capability_taxonomy import is_media_kind, model_kind
+from lib.model_info.media_facts import (
+    MediaFactError,
+    maintained_media_facts,
+    media_pricing_unit_issues,
+    validate_media_pricing,
+    validate_media_profile,
+)
 from lib.pricing import pricing_for_model as _pricing_for_model
 from lib.provider.provider_headers import is_credential_header, sanitise_extra_headers
 from lib.utils import fast_deepcopy
@@ -443,6 +451,15 @@ def normalize_document(
         # them into the aggregate.
         model.pop("release_date", None)
         model.pop("official_pricing", None)
+        model.pop("official_media_pricing", None)
+        model.pop("official_media_profile", None)
+        for fact, validate in (("media_pricing", validate_media_pricing),
+                               ("media_profile", validate_media_profile)):
+            if fact in model:
+                try:
+                    model[fact] = validate(model[fact], field=f"models[{index}].{fact}")
+                except MediaFactError as exc:
+                    raise ModelRoutingError(str(exc), field=exc.field) from None
         from .registration import validate_registration_metadata
         validate_registration_metadata(model)
         if 'registration_state' in model and model['registration_state'] not in {
@@ -975,6 +992,13 @@ def public_projection(document: Mapping[str, Any]) -> dict[str, Any]:
     stamped here, on the read boundary only, and stripped again by
     :func:`normalize_document`, so it never becomes persisted owner state.
 
+    Media-kind rows (image/video/audio generation, speech) additionally carry
+    ``official_media_pricing`` / ``official_media_profile`` from the maintained
+    :mod:`lib.model_info.media_facts` catalog while the owner registered no
+    ``media_pricing`` / ``media_profile``; maintained prices whose units the
+    row's kinds cannot bill are not facts about it and stay unprojected.
+    Both are stripped on write like ``official_pricing``.
+
     Unpriced rows additionally carry ``official_pricing`` projected from the
     maintained :mod:`lib.pricing` tables — the vendor-authoritative price
     source for officially covered creators (owner policy 2026-09-05).
@@ -992,6 +1016,17 @@ def public_projection(document: Mapping[str, Any]) -> dict[str, Any]:
             official = _official_pricing(model["model_id"])
             if official is not None:
                 model["official_pricing"] = official
+        if not is_media_kind(model_kind(model["capabilities"])):
+            continue
+        media = maintained_media_facts(model["creator_id"], model["model_id"])
+        if media is None:
+            continue
+        pricing = media.get("media_pricing")
+        if ("media_pricing" not in model and pricing is not None
+                and not media_pricing_unit_issues(pricing, model["capabilities"])):
+            model["official_media_pricing"] = pricing
+        if "media_profile" not in model and "media_profile" in media:
+            model["official_media_profile"] = media["media_profile"]
     return projected
 
 

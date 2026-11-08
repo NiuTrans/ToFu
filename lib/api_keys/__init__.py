@@ -25,6 +25,7 @@ from lib.api_keys._crud import (  # noqa: E402
     create_key,
     get_key_by_id,
     list_keys,
+    require_personal_key_secret,
     revoke_key,
     update_key,
 )
@@ -34,10 +35,13 @@ from lib.api_keys._firstrun import (  # noqa: E402
     _purge_stale_first_run_token,
     bootstrap_personal_key,
     has_any_key,
+    install_personal_key,
 )
 
 __all__ = [
     'ALL_SCOPES', 'AuthContext', 'bootstrap_personal_key', 'create_key',
-    'get_key_by_id', 'has_any_key', 'list_keys', 'local_admin_context',
-    'identify_known_token', 'revoke_key', 'update_key', 'validate_token',
+    'get_key_by_id', 'has_any_key', 'install_personal_key', 'list_keys',
+    'local_admin_context', 'identify_known_token',
+    'require_personal_key_secret', 'revoke_key', 'update_key',
+    'validate_token',
 ]

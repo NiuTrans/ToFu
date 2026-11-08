@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import signal
@@ -26,6 +27,28 @@ def _shutdown_loaded_module(module_name: str, close_name: str, **kwargs: Any) ->
     # acquires the existing import lock; direct attribute access does not.
     module = importlib.import_module(module_name)
     getattr(module, close_name)(**kwargs)
+
+
+def _call_within_wall_deadline(deadline_seconds: float, function, *args, **kwargs):
+    """Run ``function`` on its own thread and wait for it on this thread's clock.
+
+    An asyncio deadline is not a wall-clock bound: when a synchronous callback
+    blocks the serving loop, the timer fires on the first iteration afterwards
+    and fails work that finished in time. A timed-out call keeps running; its
+    owner's latch reports what is still live.
+    """
+    outcome = concurrent.futures.Future()
+
+    def run():
+        try:
+            outcome.set_result(function(*args, **kwargs))
+        except BaseException as exc:
+            outcome.set_exception(exc)
+
+    threading.Thread(
+        target=run, name=f"tofu-shutdown-{getattr(function, '__name__', 'call')}",
+        daemon=True).start()
+    return outcome.result(timeout=deadline_seconds)
 
 
 async def _stop_independent_producers(log: logging.Logger) -> None:
@@ -339,6 +362,9 @@ async def shutdown_production_runtime(
     except Exception as exc:
         log.warning('[Server] cgroup monitor stop failed: %s', exc)
     if app is not None:
+        delivery_runtime = sys.modules.get('lib.conversation_sync.delivery_runtime')
+        if delivery_runtime is not None:
+            await asyncio.to_thread(delivery_runtime.stop, app)
         try:
             worker_runtime = sys.modules.get('lib.durable_worker.runtime')
             if worker_runtime is not None:
@@ -354,11 +380,9 @@ async def shutdown_production_runtime(
                 stop_registered_background_services,
             )
             service_stop_started = time.monotonic()
-            await asyncio.wait_for(
-                asyncio.to_thread(
-                    stop_registered_background_services, app, timeout=2.0),
-                timeout=10.0,
-            )
+            await asyncio.to_thread(
+                _call_within_wall_deadline, 10.0,
+                stop_registered_background_services, app, timeout=2.0)
             if app.extensions.get('tofu_registered_background_services'):
                 raise RuntimeError('Process background services have not quiesced')
             service_stop_elapsed = time.monotonic() - service_stop_started
@@ -370,7 +394,8 @@ async def shutdown_production_runtime(
         except TimeoutError:
             log.warning('[Server] process background shutdown exceeded 10s')
             _shutdown_timing_to_stderr('process background services stop exceeded 10s')
-            raise
+            raise TimeoutError(
+                'process background services did not stop within 10s') from None
         except Exception as exc:
             log.warning('[Server] process background shutdown failed: %s', exc)
             raise  # A scheduler/bootstrap writer still owns its storage context.

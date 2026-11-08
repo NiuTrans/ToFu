@@ -2,13 +2,16 @@
 <resources>
 
     <!-- Home / server list -->
-    <string name="list_no_servers">No servers yet</string>
+    <string name="list_no_servers">No kernels yet</string>
     <string name="list_actions_cd">More actions for %1$s</string>
     <string name="list_report_cd">Report a problem</string>
-    <string name="list_empty_title">Your servers live here</string>
-    <string name="list_empty_body">Add a Tofu server once — its address and password are remembered, so opening it later is a single tap.</string>
-    <string name="list_empty_cta">Add your first server</string>
-    <string name="list_fab_add">Add server</string>
+    <string name="list_empty_title">Add a remote kernel</string>
+    <string name="list_empty_body">Add a Tofu server by URL or through SSH once — it is remembered, so opening it later is a single tap.</string>
+    <string name="list_empty_cta">Add a kernel</string>
+    <string name="list_fab_add">Add kernel</string>
+    <string name="list_in_front">In front: %1$s</string>
+    <string name="add_kind_url">Server URL</string>
+    <string name="add_kind_ssh">SSH tunnel</string>
     <string name="list_menu_edit">Edit</string>
     <string name="list_menu_delete">Delete</string>
     <string name="list_signing_in">Signing in to %1$s…</string>
@@ -18,8 +21,8 @@
     <string name="list_download">Download</string>
     <string name="list_footer_version">Tofu v%1$s (%2$d)</string>
     <plurals name="list_server_count">
-        <item quantity="one">%d server</item>
-        <item quantity="other">%d servers</item>
+        <item quantity="one">%d kernel</item>
+        <item quantity="other">%d kernels</item>
     </plurals>
     <plurals name="list_running_count">
         <item quantity="one">%d running</item>
@@ -33,6 +36,42 @@
     <string name="state_working">Working…</string>
     <string name="state_unreachable">Unreachable</string>
     <string name="state_open_only">Open only</string>
+
+    <!-- Kernels (LOCAL / SSH lifecycle, from their KernelController) -->
+    <string name="kernel_this_phone">This phone</string>
+    <string name="kernel_this_phone_desc">Tofu running on this device</string>
+    <string name="kernel_state_ready">Ready</string>
+    <string name="kernel_state_starting">Starting…</string>
+    <string name="kernel_state_stopped">Stopped</string>
+    <string name="kernel_state_failed">Unavailable</string>
+    <string name="kernel_state_safe_mode">Safe mode</string>
+
+    <!-- Add / edit SSH kernel -->
+    <string name="ssh_add_title">Add SSH kernel</string>
+    <string name="ssh_edit_title">Edit SSH kernel</string>
+    <string name="ssh_subtitle">The phone dials out; Tofu must already run on the host</string>
+    <string name="ssh_section_connection">Connection</string>
+    <string name="ssh_field_name_placeholder">Dev box</string>
+    <string name="ssh_field_host">Host</string>
+    <string name="ssh_field_host_placeholder">dev.example.com</string>
+    <string name="ssh_field_port">SSH port</string>
+    <string name="ssh_field_user">User</string>
+    <string name="ssh_field_remote_port">Tofu port on the host</string>
+    <string name="ssh_field_remote_port_helper">Forwarded from this phone to 127.0.0.1 on the host.</string>
+    <string name="ssh_pinned_key">Pinned host key: %1$s</string>
+    <string name="ssh_unpinned_key">The host key is shown for you to confirm on first connect, then pinned.</string>
+    <string name="ssh_section_sign_in">Sign-in</string>
+    <string name="ssh_field_password">Account password (optional)</string>
+    <string name="ssh_field_password_keep">Account password (blank keeps saved)</string>
+    <string name="ssh_field_password_helper">Leave it empty to sign in with this phone\'s key only.</string>
+    <string name="ssh_public_key_label">This phone\'s key</string>
+    <string name="ssh_public_key_helper">Add it to ~/.ssh/authorized_keys on the host to sign in without a password.</string>
+    <string name="ssh_copy_public_key">Copy public key</string>
+    <string name="ssh_public_key_copied">Copied</string>
+    <string name="ssh_trust_title">Trust this host?</string>
+    <string name="ssh_trust_body">First connection to %1$s. Check that this is the host\'s key: on the host, run ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</string>
+    <string name="ssh_trust_action">Trust and connect</string>
+    <string name="action_save">Save</string>
 
     <!-- Add / edit server -->
     <string name="add_title">Add server</string>

@@ -1023,6 +1023,51 @@ worker, timer or durable state is added. Specs:
 TERM-resistant descendants, an already-reaped leader, reattachment, inherited
 lease reacquisition, and stale/current-group refusal.
 
+### Groups a command's descendants created retire with it
+
+Problem: GNU `timeout` (without `--foreground`), `setsid` and job-control
+shells move a child into a process group of its own. Stop, a deadline, the
+`kill` tool and the cancel callback signalled only the command's group, so
+those subtrees outlived all of them. The shell died and its children were
+re-parented, still running in the worktree. One test gate under `timeout` left
+32 xdist workers, its pytest, multiprocessing trackers and a `cargo build`
+behind (2026-11-02 and 2026-11-06). The `kill` tool promises the process tree.
+
+Decision: before any signal, `process_group.escaped_descendant_groups` finds
+every group that a still-linked descendant of the leader leads, or that lies in
+the leader's own session (`start_new_session` makes every member of that
+session the command's). It walks kernel child lists (`descendant_pids`) and
+reads the leader's start time before and after, so a reaped and reused PID
+links no subtree; reattached background records pass their verified start
+time. `retire_process_group(..., escaped_groups=...)` sends those groups TERM
+with the owned group, gives them the same grace, then KILLs and awaits them; an
+unconfirmed one raises the usual retirement error, which `run_command` reports
+as its typed warning. `run_command` discovers while its leader is unreaped and
+remembers the groups on the process: the cancel callback's immediate TERM ends
+the shell and re-parents its children, yet still reaches those groups, and the
+retirement that follows still awaits them. Work that detached completely before
+the signal (`setsid -f`, a double fork) is not linked, is never found and keeps
+running, as after a normal exit. A command that exits normally keeps its
+contract: `_retire_lingering_group` stops only leftovers of its own group.
+
+Alternatives rejected:
+- Signalling each descendant PID: a re-parented member is reachable only
+  through its group, and a bare PID can be reused between TERM and KILL.
+- Scanning the host for the command's session: a per-caller whole-host scan,
+  and a `setsid` child still escapes into a new session.
+- A child subreaper for every command: it changes reaping and exit-status
+  ownership for all commands.
+- Rewording the tool description: the defect would become the contract.
+
+No new resident worker, timer, knob or durable state is added. Specs:
+`tests/tasks_pkg/test_run_command_descendant_retirement.py` covers `timeout`,
+`setsid` and a TERM-ignoring child under `timeout`, each through Stop on both
+runners, the cancel callback's TERM-first path and reattached records. It also
+covers discovery, the leader-identity refusal and refusal of the current group.
+Measurement (2026-11-06, this host): before the change all 14 of those cases
+failed, every escaping subtree outliving Stop, cancel and reattached kill;
+after it, none survives and the existing retirement specs still pass.
+
 ### A finished command's result survives its group's retirement
 
 Problem: `retire_process_group` raises `Process group N did not retire` when a

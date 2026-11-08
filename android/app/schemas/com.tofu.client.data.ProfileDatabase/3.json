@@ -1,0 +1,113 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 3,
+    "identityHash": "61c5a2e6a2e5edcaf7408a081a0435dd",
+    "entities": [
+      {
+        "tableName": "profiles",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `alias` TEXT NOT NULL, `instance_uuid` TEXT, `base_url` TEXT NOT NULL, `auth_type` TEXT NOT NULL, `cookie_host` TEXT, `last_used_at` INTEGER NOT NULL, `project_path` TEXT, `kind` TEXT NOT NULL DEFAULT 'REMOTE_URL', `ssh_host` TEXT, `ssh_port` INTEGER, `ssh_user` TEXT, `ssh_host_key_sha256` TEXT, `ssh_remote_port` INTEGER)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "alias",
+            "columnName": "alias",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "instanceUuid",
+            "columnName": "instance_uuid",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "baseUrl",
+            "columnName": "base_url",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authType",
+            "columnName": "auth_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cookieHost",
+            "columnName": "cookie_host",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastUsedAt",
+            "columnName": "last_used_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "projectPath",
+            "columnName": "project_path",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'REMOTE_URL'"
+          },
+          {
+            "fieldPath": "ssh.host",
+            "columnName": "ssh_host",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "ssh.port",
+            "columnName": "ssh_port",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "ssh.user",
+            "columnName": "ssh_user",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "ssh.hostKeySha256",
+            "columnName": "ssh_host_key_sha256",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "ssh.remotePort",
+            "columnName": "ssh_remote_port",
+            "affinity": "INTEGER",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '61c5a2e6a2e5edcaf7408a081a0435dd')"
+    ]
+  }
+}

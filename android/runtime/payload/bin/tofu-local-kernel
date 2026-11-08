@@ -1,0 +1,19 @@
+#!/bin/sh
+# Guest entry of the on-device Tofu kernel (android/runtime/README.md §4).
+# docs/ANDROID_LOCAL_KERNEL.md owns the launch contract: the secret is the
+# first line of stdin and stays there for local_kernel.py, stdout carries only
+# its listening line, SIGTERM stops it. This script reads and prints nothing
+# and execs, so stdin, stdout, signals and the exit status pass straight
+# through. It resolves the payload from its own location, so the payload also
+# runs unmounted, and uses only shell builtins until it has set PATH.
+set -eu
+case $0 in
+  */*) bin=${0%/*} ;;
+  *) bin=. ;;
+esac
+payload=$(CDPATH='' cd -- "$bin/.." && pwd -P)
+PATH="$payload/bin:$payload/python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+HOME="${HOME:-/root}"
+export PATH HOME
+cd "$payload/tofu"
+exec "$payload/python/bin/python3" local_kernel.py --data-dir /var/lib/tofu "$@"

@@ -134,8 +134,21 @@ def normalize_provider_template(
             f'recipe_version must be {RECIPE_VERSION!r}')
 
     category = raw.get('category', 'relay')
-    if category not in ('official', 'relay', 'local'):
-        raise ProviderTemplateRecipeError('category must be official, relay, or local')
+    if category not in ('official', 'relay', 'local', 'subscription'):
+        raise ProviderTemplateRecipeError(
+            'category must be official, relay, local, or subscription')
+    plan = raw.get('subscription')
+    if category == 'subscription' or plan is not None:
+        console = plan.get('key_console_url') if isinstance(plan, dict) else None
+        parsed = urlparse(console) if isinstance(console, str) else None
+        if (category != 'subscription' or not isinstance(plan, dict)
+                or set(plan) != {'key_console_url'}
+                or parsed is None or parsed.scheme != 'https'
+                or not parsed.hostname or parsed.username or parsed.password
+                or len(console) > 2048):
+            raise ProviderTemplateRecipeError(
+                'a subscription template requires subscription.key_console_url '
+                '(an HTTPS URL) and nothing else')
     catalog_mode = raw.get('catalog_mode', 'curated')
     if catalog_mode not in ('curated', 'discovery'):
         raise ProviderTemplateRecipeError('catalog_mode must be curated or discovery')
@@ -366,9 +379,20 @@ def compile_provider_template_bundle(
     # Managed pricing-tier tags (cheap) are owned by the pricing tables, not
     # hand-authored recipe rows: correct the projection from live pricing,
     # but keep authored tags on models the tables do not price yet.
-    from lib.llm_dispatch.config._pricing import reevaluate_pricing_tags
+    from lib.llm_dispatch.config._pricing import MANAGED_TIER_TAGS, reevaluate_pricing_tags
     reevaluate_pricing_tags(
         recipes, log_prefix='template:%s' % key, strip_unpriced=False)
+    if template.get('category') == 'subscription':
+        # A flat plan charges no per-token price, so no price tier describes
+        # it; the tier would also enrol plan models in unpinned background
+        # pools (auto titles request 'cheap'), which most plan terms forbid.
+        for recipe in recipes:
+            capabilities = [cap for cap in recipe.get('capabilities') or []
+                            if cap not in MANAGED_TIER_TAGS]
+            if capabilities:
+                recipe['capabilities'] = capabilities
+            else:
+                recipe.pop('capabilities', None)
 
 
     legacy = copy.deepcopy(template)

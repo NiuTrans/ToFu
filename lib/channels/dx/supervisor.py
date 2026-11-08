@@ -4,7 +4,8 @@ Responsibility: runs where the scheduled-jobs capability runs. On the
 scheduler's existing maintenance tick (and when this process changes an
 account) it confirms the identity of an enabled account whose login MIS has
 none bound yet, starts a ``DxAdapter`` logged in as that MIS, stops it for a
-disabled or switched account, and restarts it after an exit. Confirmation
+disabled or switched account, and restarts it after an exit, reporting that
+exit's outcome until the new session connects. Confirmation
 (``whoami``, which may first wait for a 大象 login approval) runs on its own
 thread, so neither the tick nor an HTTP request waits for it; it reports
 ``starting`` or, for a MIS without a reusable SSO session, ``authorizing``.
@@ -116,17 +117,24 @@ def reconcile_owner(owner: int, *, store: ChannelStore | None = None,
         if current is not None and current.alive() and bound and current.login_mis == login_mis:
             current.tick()
             return 'running'
+        restarting = False
         if current is not None:
             if not current.stop(stop_timeout):
                 return 'stopping'
             _ADAPTERS.pop(owner, None)
             if bound and current.login_mis == login_mis:
                 # The session of this login exited; one replaced by an account
-                # switch has no outcome for the new login.
+                # switch has no outcome for the new login. Its restart keeps
+                # reporting this outcome (Settings, Router Watchdog) until the
+                # new session connects.
                 state, detail = current.outcome()
+                reported = account.get('status') or {}
+                if (reported.get('state'), reported.get('detail')) != (state, detail):
+                    logger.warning('[Channels] dx session exited owner=%s: %s: %s', owner, state, detail)
                 store.set_status(CHANNEL, state, detail)
                 if state in _TERMINAL_STATES:
                     return state
+                restarting = True
         elif ((account.get('status') or {}).get('state')) in _TERMINAL_STATES:
             return account['status']['state']
         if not launch_spec(owner).installed:
@@ -153,7 +161,8 @@ def reconcile_owner(owner: int, *, store: ChannelStore | None = None,
             store.set_status(CHANNEL, 'error', str(error))
             return 'error'
         adapter = adapter_factory(owner, store=store, login_mis=login_mis)
-        store.set_status(CHANNEL, 'starting', '')
+        if not restarting:
+            store.set_status(CHANNEL, 'starting', '')
         _ADAPTERS[owner] = adapter
         try:
             adapter.start()

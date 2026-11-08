@@ -65,6 +65,35 @@ export type ModelRoutingPricing = {
   "cache_write"?: number;
 };
 
+export type ModelRoutingMediaPriceRate = {
+  "unit": "per_image" | "per_second" | "per_request" | "per_minute" | "per_million_characters";
+  "price": number;
+  "tier"?: string;
+  "estimated"?: boolean;
+};
+
+export type ModelRoutingMediaPricing = {
+  "currency": "USD" | "CNY";
+  "rates": ReadonlyArray<ModelRoutingMediaPriceRate>;
+};
+
+export type ModelRoutingMediaModalities = ReadonlyArray<"text" | "image" | "video" | "audio">;
+
+export type ModelRoutingMediaProfile = {
+  "input_modalities"?: ModelRoutingMediaModalities;
+  "output_modalities"?: ModelRoutingMediaModalities;
+  "sizes"?: ReadonlyArray<string>;
+  "aspect_ratios"?: ReadonlyArray<string>;
+  "resolutions"?: ReadonlyArray<string>;
+  "durations_s"?: ReadonlyArray<number>;
+  "max_outputs"?: number;
+  "native_audio"?: boolean;
+  "voices"?: ReadonlyArray<string>;
+  "audio_formats"?: ReadonlyArray<string>;
+  "max_input_chars"?: number;
+  "max_audio_bytes"?: number;
+};
+
 export type ModelRoutingCreator = {
   "creator_id": ModelRoutingIdentifier;
   "name": string;
@@ -91,6 +120,10 @@ export type ModelRoutingModel = {
   "quality_rank": number;
   "list_pricing"?: ModelRoutingPricing;
   "official_pricing"?: ModelRoutingPricing;
+  "media_pricing"?: ModelRoutingMediaPricing;
+  "official_media_pricing"?: ModelRoutingMediaPricing;
+  "media_profile"?: ModelRoutingMediaProfile;
+  "official_media_profile"?: ModelRoutingMediaProfile;
   "release_date"?: string;
   "lifecycle"?: "stable" | "preview" | "dated_snapshot" | "retired";
 };
@@ -342,7 +375,7 @@ export type CredentialSecretRevealResponse = {
 export type ProviderTemplate = {
   "key": string;
   "name"?: string;
-  "category"?: "official" | "relay" | "local";
+  "category"?: "official" | "relay" | "local" | "subscription";
   "catalog_mode"?: "curated" | "discovery";
   "catalog_source"?: {
   "url": string;

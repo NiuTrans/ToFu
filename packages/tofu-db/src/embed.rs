@@ -348,6 +348,7 @@ impl EmbeddedRuntime {
                 search_projection.as_ref().is_some_and(|index| index.try_lock().is_ok_and(|index| index.available())),
             )),
         };
+        let worker_control = database.lock().map_err(|_| io_other("embedded authority poisoned"))?.worker_control.clone();
         Ok(Self {
             database,
             search_projection,
@@ -365,7 +366,7 @@ impl EmbeddedRuntime {
             authority_watch,
             dispatch_bindings: crate::server::StorageV2Bindings {
                 checkpoint_control: None,
-                worker_control: None,
+                worker_control: Some((worker_control, config.scope)),
                 authority_admission: Arc::default(),
                 published_queries: Some(published_queries),
                 authority_gc_budget: AuthorityGarbageCollectionBudget::from_resource_budget(config.resource_budget),
@@ -379,6 +380,13 @@ impl EmbeddedRuntime {
             resource_budget: config.resource_budget,
             drop_disarmed: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    pub(crate) fn commit_watch_owner(&self) -> io::Result<(Arc<crate::worker_control::WorkerControl>, crate::semantic::AuthenticatedScope)> {
+        if *self.closed.lock().map_err(|_| io_other("embedded close state poisoned"))? {
+            return Err(io_other("embedded runtime is closed"));
+        }
+        self.dispatch_bindings.worker_control.clone().ok_or_else(|| io_other("embedded commit control missing"))
     }
 
     /// Execute one storage.v2 operation through the shared dispatch
@@ -552,6 +560,7 @@ impl EmbeddedRuntime {
             }
             *closed = true;
         }
+        if let Some((control, _)) = &self.dispatch_bindings.worker_control { control.close(); }
         // New checkpoint calls observe closed before effects; wait for entered
         // calls before retiring their WAL/maintenance drivers.
         #[cfg(feature = "native-runtime-checkpoints")]

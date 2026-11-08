@@ -618,3 +618,184 @@ def test_owner_stop_after_summary_settlement_outranks_credential_failure(
     body_builder.assert_not_called()
     fallback.assert_not_called()
     main_provider.assert_not_called()
+
+
+def test_failed_summary_timeline_localizes_legacy_code_without_a_fake_snapshot():
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    receipt = _receipt(outcome_reason='summary_rate_limited')
+    original = deepcopy(receipt)
+    timeline = fold_activity_timeline(None, {
+        'type': 'compaction_done', 'seq': 1,
+        'archiveId': 'summary-failed:projection-task:3', 'receipt': receipt,
+    }, {'id': 'projection-task', '_attemptId': 'attempt-one', 'model': 'main-model'},
+        now_ms=1000)
+    row = timeline['entries'][0]
+    assert row['detailKey'] == 'activity.compaction.failure.summary_rate_limited'
+    assert row['detail'] != 'summary_rate_limited'
+    assert 'archiveId' not in row
+    assert receipt == original
+
+
+DISPLAY_FAILURE_CODES = (
+    'summary_rate_limited', 'summary_provider_unavailable', 'summary_permission_denied',
+    'summary_route_unavailable', 'summary_incomplete', 'summary_empty',
+    'summary_cancelled', 'summary_dispatch_failed', 'summary_route_revalidation_failed',
+)
+
+
+@pytest.mark.parametrize('code', (*DISPLAY_FAILURE_CODES, 'summary_credentials_unavailable'))
+def test_legacy_summary_failure_codes_localize_without_guessing_attempts(code):
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    receipt = _receipt(outcome_reason=code)
+    original = deepcopy(receipt)
+    timeline = fold_activity_timeline(None, {
+        'type': 'compaction_done', 'receipt': receipt,
+    }, {'id': 'projection-task', '_attemptId': 'attempt-one'}, now_ms=1000)
+    row = timeline['entries'][0]
+    assert row['detailKey'] == f'activity.compaction.failure.{code}'
+    assert row['detailArgs'] == {'code': code}
+    assert 'statusCode' not in row
+    assert 'summaryModel' not in row
+    assert receipt == original
+
+
+@pytest.mark.parametrize('code', DISPLAY_FAILURE_CODES)
+def test_schema_generic_display_failure_does_not_certify_unsent_provider_work(code):
+    receipt = _receipt()
+    receipt['summary'].update(failure={'code': code}, attempts=[{
+        'modelId': 'earlier-pass', 'providerId': 'summary-provider',
+        'status': 'succeeded', 'providerReached': True,
+    }])
+    VALIDATOR.validate(receipt)
+    receipt['summary']['failure'].update(statusCode=429, attempts=4, limit=8)
+    VALIDATOR.validate(receipt)
+    receipt['summary']['failure'] = _failure()
+    assert not VALIDATOR.is_valid(receipt)  # Strict credential evidence still requires every route unsent.
+
+
+@pytest.mark.parametrize('failure', [
+    {}, {'code': 'future_failure'}, {'code': 'summary_credentials_unavailable'},
+    {'code': 'summary_dispatch_failed', 'authIssue': 'codex_command_unavailable'},
+    {'code': 'summary_dispatch_failed', 'credentialSource': 'local'},
+    {'code': 'summary_dispatch_failed', 'providerReached': False},
+    {'code': 'summary_dispatch_failed', 'message': PRIVATE_SOURCE},
+    {'code': 'summary_dispatch_failed', 'error': PRIVATE_SOURCE},
+    {'code': 'summary_rate_limited', 'attempts': True},
+    {'code': 'summary_rate_limited', 'attempts': -1},
+    {'code': 'summary_rate_limited', 'attempts': 9007199254740992},
+    {'code': 'summary_rate_limited', 'limit': 0},
+    {'code': 'summary_rate_limited', 'limit': 4},
+    {'code': 'summary_rate_limited', 'limit': 9007199254740992},
+    {'code': 'summary_rate_limited', 'statusCode': 99},
+    {'code': 'summary_rate_limited', 'statusCode': 600},
+    {'code': 'summary_rate_limited', 'statusCode': 429.5},
+])
+def test_schema_rejects_untrusted_display_failure_fields(failure):
+    receipt = _receipt()
+    receipt['summary']['failure'] = failure
+    assert not VALIDATOR.is_valid(receipt)
+
+
+def test_timeline_uses_explicit_dispatcher_count_and_http_status_not_selected_route_counts():
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    failure = {'code': 'summary_rate_limited', 'statusCode': 429, 'attempts': 4, 'limit': 8}
+    receipt = _receipt({'_summaryFailure': failure, '_summaryAttempts': [
+        {'modelId': 'route-one', 'providerId': 'one', 'status': 'failed'},
+        {'modelId': 'route-two', 'providerId': 'two', 'status': 'failed', 'providerReached': True},
+    ]})
+    receipt['summary']['route'] = {'modelId': 'selected-summary', 'providerId': 'selected-provider'}
+    receipt['summary']['cost'].update(callCount=99, calls=[{
+        'model': 'selected-cost-fallback', 'providerId': 'selected-provider',
+        'known': False, 'costUsd': None, 'costBasis': 'metered_api_equivalent',
+    }])
+    original = deepcopy(receipt)
+    VALIDATOR.validate(receipt)
+    timeline = fold_activity_timeline(None, {
+        'type': 'compaction_done', 'receipt': receipt, 'reason': PRIVATE_SOURCE,
+    }, {'id': 'projection-task', '_attemptId': 'attempt-one'}, now_ms=1000)
+    row = timeline['entries'][0]
+    assert row['detailArgs']['attempts'] == 4
+    assert row['detailArgs']['limit'] == 8
+    assert row['statusCode'] == 429
+    assert row['detailArgs']['selectedModels'] == ['route-one', 'route-two']
+    assert row['detailArgs']['routeStatuses'] == ['failed', 'failed']
+    assert row['detailArgs']['providerIngress'] == ['unknown', 'reached']
+    assert row['summarySelectedModel'] == 'selected-summary'
+    assert 'summaryModel' not in row and 'summaryProviderId' not in row
+    assert 'model' not in row['summaryCalls'][0]
+    assert row['summaryCalls'][0]['known'] is False
+    assert row['summaryCalls'][0]['costUsd'] is None
+    assert PRIVATE_SOURCE not in json.dumps(row)
+    assert receipt == original
+
+
+def test_credential_timeline_retains_route_outcomes_without_inventing_request_count():
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    receipt = _receipt({'_summaryFailure': _failure(), '_summaryAttempts': [_attempt()]})
+    timeline = fold_activity_timeline(None, {
+        'type': 'compaction_done', 'receipt': receipt,
+    }, {'id': 'projection-task', '_attemptId': 'attempt-one'}, now_ms=1000)
+    row = timeline['entries'][0]
+    assert row['detailKey'] == 'activity.compaction.failure.summary_credentials_unavailable'
+    assert row['detailArgs']['routeStatuses'] == ['failed']
+    assert row['detailArgs']['providerIngress'] == ['not_reached']
+    assert 'attempts' not in row['detailArgs']
+    assert 'statusCode' not in row and 'summaryModel' not in row
+
+
+def test_timeline_does_not_publish_unvalidated_structured_failure_or_route_material():
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    receipt = _receipt(outcome_reason='summary_dispatch_failed')
+    receipt['summary'].update(
+        failure={'code': 'summary_dispatch_failed', 'attempts': 4, 'error': PRIVATE_SOURCE},
+        attempts=[_attempt(error=PRIVATE_SOURCE)])
+    original = deepcopy(receipt)
+    timeline = fold_activity_timeline(None, {
+        'type': 'compaction_done', 'receipt': receipt, 'reason': PRIVATE_SOURCE,
+    }, {'id': 'projection-task', '_attemptId': 'attempt-one'}, now_ms=1000)
+    row = timeline['entries'][0]
+    assert row['detailArgs'] == {'code': 'summary_dispatch_failed'}
+    assert PRIVATE_SOURCE not in json.dumps(row)
+    assert receipt == original
+
+
+@pytest.mark.parametrize('archive_id', [
+    'summary-failed:legacy:3', 'summary-declined:legacy:3', 'summary-aborted:legacy:3',
+    'summary-cancelled:legacy:3', 'summary-rejected:legacy:3', 'failed:3',
+    '  summary-failed:legacy:3  ', 'real-archive',
+])
+def test_cold_projection_suppresses_synthetic_bridge_ids_without_mutating_source(archive_id):
+    from lib.turn_activity_timeline import normalize_activity_timeline
+
+    source = {'entries': [{
+        'id': 'compact', 'spanId': 'compact', 'seq': 1, 'occurredAt': 1000,
+        'kind': 'status', 'status': 'failed', 'severity': 'warning', 'count': 1,
+        'reasonCode': 'context_compaction', 'archiveId': archive_id,
+    }]}
+    original = deepcopy(source)
+    row = normalize_activity_timeline(source)['entries'][0]
+    if archive_id == 'real-archive':
+        assert row['archiveId'] == archive_id
+    else:
+        assert 'archiveId' not in row
+    assert source == original
+
+
+@pytest.mark.parametrize('status', ['failed', 'aborted', 'rejected', 'cancelled'])
+def test_archive_less_terminal_summary_failure_has_a_localized_row(status):
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    receipt = _receipt(outcome_reason='summary_cancelled')
+    receipt['status'] = status
+    timeline = fold_activity_timeline(None, {
+        'type': 'compaction_done', 'receipt': receipt,
+    }, {'id': 'projection-task', '_attemptId': 'attempt-one'}, now_ms=1000)
+    assert len(timeline['entries']) == 1
+    row = timeline['entries'][0]
+    assert row['detailKey'] == 'activity.compaction.failure.summary_cancelled'
+    assert 'archiveId' not in row

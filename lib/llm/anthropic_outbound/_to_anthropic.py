@@ -11,6 +11,7 @@ from lib.llm.conversion import (
 )
 from lib.llm.conversion import ProtocolConversionError
 from lib.llm.route_features import body_route_profile
+from lib.llm.tool_call_ids import tool_call_id_contract, wire_tool_call_ids
 from lib.llm_sanitize.text_blocks import normalize_text_blocks
 from lib.log import get_logger
 from lib.model_info import model_requires_reasoning_content_replay
@@ -177,7 +178,8 @@ def _key_sorted_copy(value):
     return value
 
 
-def _assistant_blocks(msg: dict, *, replay_unsigned_reasoning=False) -> list:
+def _assistant_blocks(msg: dict, *, replay_unsigned_reasoning=False,
+                      wire_ids=None) -> list:
     """Assistant message → Anthropic content blocks (thinking + text + tool_use).
 
     When the message carries both ``reasoning_content`` and its opaque
@@ -187,7 +189,11 @@ def _assistant_blocks(msg: dict, *, replay_unsigned_reasoning=False) -> list:
     DeepSeek's Messages dialect requires the unsigned reasoning text itself.
     The caller selects that replay policy from the logical model, independently
     of the wire protocol or deployment alias. Never fabricate a signature.
+
+    ``wire_ids`` maps tool-call IDs the Messages pattern rejects to their
+    request spelling (``lib.llm.tool_call_ids``).
     """
+    wire_ids = wire_ids or {}
     _opaque = msg.get('_anthropic_content_blocks')
     if isinstance(_opaque, list) and _opaque:
         # This turn contains Anthropic-owned replay state (for example hosted
@@ -206,13 +212,16 @@ def _assistant_blocks(msg: dict, *, replay_unsigned_reasoning=False) -> list:
         replayed_call_ids = {
             block.get('id') for block in blocks
             if block.get('type') in ('tool_use', 'server_tool_use')}
+        for block in blocks:
+            if block.get('type') == 'tool_use' and block.get('id') in wire_ids:
+                block['id'] = wire_ids[block['id']]
         for tc in msg.get('tool_calls') or []:
             if not isinstance(tc, dict) or tc.get('id') in replayed_call_ids:
                 continue
             fn = tc.get('function') or {}
             blocks.append({
                 'type': 'tool_use',
-                'id': tc.get('id') or '',
+                'id': wire_ids.get(tc.get('id') or '', tc.get('id') or ''),
                 'name': fn.get('name', ''),
                 'input': object_arguments(fn.get('arguments', '{}')),
             })
@@ -241,7 +250,7 @@ def _assistant_blocks(msg: dict, *, replay_unsigned_reasoning=False) -> list:
         args = object_arguments(fn.get('arguments', '{}'))
         blocks.append({
             'type': 'tool_use',
-            'id': tc.get('id') or '',
+            'id': wire_ids.get(tc.get('id') or '', tc.get('id') or ''),
             'name': fn.get('name', ''),
             'input': args,
         })
@@ -346,6 +355,10 @@ def _convert_body_to_anthropic(body: dict) -> dict:
     if tools:
         out['tools'] = tools
 
+    wire_ids = wire_tool_call_ids(
+        body.get('messages', []),
+        tool_call_id_contract('anthropic', body.get('_admission_logical_model')
+                              or body.get('model') or ''))
     system_blocks = []
     messages = []
     for msg in body.get('messages', []):
@@ -368,7 +381,8 @@ def _convert_body_to_anthropic(body: dict) -> dict:
                 _tool_content = _strip_cc(_tool_content)
             block = {
                 'type': 'tool_result',
-                'tool_use_id': msg.get('tool_call_id', ''),
+                'tool_use_id': wire_ids.get(msg.get('tool_call_id', ''),
+                                            msg.get('tool_call_id', '')),
                 'content': _tool_content,
             }
             if _cc:
@@ -383,7 +397,8 @@ def _convert_body_to_anthropic(body: dict) -> dict:
                 messages.append({'role': 'user', 'content': [block]})
         elif role == 'assistant':
             blocks = _assistant_blocks(
-                msg, replay_unsigned_reasoning=replay_unsigned_reasoning)
+                msg, replay_unsigned_reasoning=replay_unsigned_reasoning,
+                wire_ids=wire_ids)
             if not blocks:
                 # Ghost assistant (no signed thinking, no content, no
                 # tool_calls) — a caller bypassed build_body's

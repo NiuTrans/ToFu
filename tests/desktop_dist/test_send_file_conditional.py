@@ -20,7 +20,11 @@ Pinned against the desktop download route (the measured case):
   3. an unsatisfiable range → 416 (quart's own path, untouched);
   4. plain GET → 200 full body (untouched);
   5. NEUTER: bypass the wrapper's catch (raw quart path) → the probe 500s,
-     proving the catch is load-bearing, not decoration.
+     proving the catch is load-bearing, not decoration;
+  6. the fallback's warning names the Range it could not serve.
+
+Suffix ranges (``bytes=-N``, RFC 9110 §14.1.2) are pinned at the APK route,
+``tests/api/test_api_v1_mobile.py``.
 
 Run:  pytest tests/desktop_dist/test_send_file_conditional.py -q
 """
@@ -141,3 +145,45 @@ def test_NEUTER_without_the_catch_the_probe_500s(seeded, flask_app,
         return
     # Buggy library pair: the 500 is exactly what the seam catches.
     assert r.status_code == 500
+
+
+def test_the_fallback_warning_names_the_range_it_could_not_serve(
+        tmp_path, monkeypatch, caplog):
+    """The degraded 200 is diagnosed by the Range the library pair rejected,
+    not by a guessed cause (a suffix range used to be logged as a
+    single-byte probe)."""
+    import asyncio
+    import logging
+
+    from quart import Quart
+
+    from lib import file_serving, quart_sync
+
+    path = tmp_path / 'blob.bin'
+    path.write_bytes(_CONTENT)
+    real_send_file = quart_sync.send_file
+
+    def library_pair_rejecting_ranges(*args, **kwargs):
+        if kwargs.get('conditional'):
+            raise AssertionError('Bad range provided')
+        return real_send_file(*args, **kwargs)
+
+    monkeypatch.setattr(quart_sync, 'send_file', library_pair_rejecting_ranges)
+    app = Quart(__name__)
+
+    @app.route('/blob')
+    def blob():
+        return file_serving.send_file_conditional(path)
+
+    async def _run():
+        response = await app.test_client().get(
+            '/blob', headers={'Range': 'bytes=7-7'})
+        return response.status_code, await response.get_data()
+
+    with caplog.at_level(logging.WARNING, logger='lib.file_serving'):
+        status, data = asyncio.run(_run())
+
+    assert status == 200 and data == _CONTENT
+    warnings = [record.getMessage() for record in caplog.records
+                if record.name == 'lib.file_serving']
+    assert any('bytes=7-7' in message for message in warnings), warnings

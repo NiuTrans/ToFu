@@ -24,9 +24,12 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from threading import RLock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lib.log import get_logger
+
+if TYPE_CHECKING:
+    from lib.tools.environment_capabilities import EnvironmentSnapshot
 
 logger = get_logger(__name__)
 
@@ -114,6 +117,11 @@ class ToolContext:
     # ``cfg['plugins']`` (per-request) falling back to the
     # ``TOFU_DEFAULT_TOOL_PLUGINS`` env var — see :meth:`resolve_enabled_plugins`.
     enabled_plugins: set[str] | None = field(default_factory=set)
+    # The environment-capability snapshot this assembly gates against
+    # (lib/tools/environment_capabilities.py). ``None`` reads the process snapshot
+    # once at assembly start and records it here; the inventory generator and
+    # parity checks pass ``EVERY_CAPABILITY_AVAILABLE`` to stay host-independent.
+    environment: EnvironmentSnapshot | None = None
 
     # ── Mutated by the assembler between phases ──
     current_count: int = 0
@@ -392,7 +400,8 @@ class ToolSpec:
     search_hints: dict[str, str] = field(default_factory=dict)
     # Optional request/UI exposure preference.  ``False`` means omit schemas
     # from the wire while keeping task-available tools searchable and exactly
-    # callable. Environment/tenant availability remains the builder's job.
+    # callable. Environment availability is ``environment_requirements_by_name``;
+    # tenant/connection availability remains the builder's job.
     exposure_gate: Callable[[ToolContext], bool] | None = None
     # A searchable family can still be explicitly pinned by its own composer
     # toggle. Piggy-backed gates (for example Produce riding Web Search) leave
@@ -455,6 +464,17 @@ class ToolSpec:
     # neither its wire nor its executable catalog, whatever routing or Tool
     # Search would otherwise expose. Handlers still refuse a stray call.
     saved_conversation_tools: frozenset[str] = field(default_factory=frozenset)
+    # Appended for positional compatibility. Keys must be declared in
+    # provides; values name capabilities of
+    # ``lib.tools.environment_capabilities.ENVIRONMENT_CAPABILITIES`` the tool
+    # needs in this kernel (an executable, a browser, device reachability).
+    # While the environment snapshot lacks one, assembly withholds the tool
+    # from the wire AND the executable catalog, and a call to it receives the
+    # snapshot's actionable refusal. Unlike ``exposure_gate`` (a wire
+    # preference that keeps a tool searchable and callable), this is
+    # availability.
+    environment_requirements_by_name: dict[str, frozenset[str]] = field(
+        default_factory=dict)
 
 
 # ── Module-level registry ─────────────────────────────────
@@ -559,6 +579,20 @@ def _register_tool_spec_unlocked(spec: ToolSpec, *, replace: bool) -> None:
         raise ValueError(
             f'ToolSpec {spec.key!r} has invalid result recovery policies: '
             f'{invalid_recovery}')
+    from lib.tools.environment_capabilities import ENVIRONMENT_CAPABILITIES
+    undeclared_environment = (
+        set(spec.environment_requirements_by_name) - set(spec.provides))
+    unknown_capabilities = {
+        name: sorted(set(requirements) - set(ENVIRONMENT_CAPABILITIES))
+        for name, requirements in spec.environment_requirements_by_name.items()
+        if not requirements or set(requirements) - set(ENVIRONMENT_CAPABILITIES)
+    }
+    if undeclared_environment or unknown_capabilities:
+        raise ValueError(
+            f'ToolSpec {spec.key!r} environment_requirements_by_name must map '
+            f'declared tool names to known capabilities; undeclared names: '
+            f'{sorted(undeclared_environment)}, unknown or empty requirements: '
+            f'{unknown_capabilities}')
     undeclared_timeout = set(spec.timeout_ms_by_name) - set(spec.provides)
     if undeclared_timeout:
         raise ValueError(
@@ -949,6 +983,12 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
     with _SPEC_LOCK:
         specs = list(_TOOL_SPECS)
     _validate_spec_selection(ctx.cfg, specs)
+    # One snapshot revision for the whole assembly. Assembly runs once per
+    # turn, so a refresh event changes the next turn's tools, never these.
+    if ctx.environment is None:
+        from lib.tools.environment_capabilities import environment_snapshot
+        ctx.environment = environment_snapshot()
+    environment = ctx.environment
     declared_owner = {
         name: spec.key
         for spec in specs
@@ -1167,6 +1207,25 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
         return [tool for tool in contributed
                 if _schema_name(tool) not in spec.saved_conversation_tools]
 
+    def _without_environment_unavailable_tools(
+            spec: ToolSpec, contributed: list[dict]) -> list[dict]:
+        # Also applied before the catalog records anything: a tool this kernel
+        # cannot run joins neither the wire nor the executable catalog; a call
+        # to it receives the snapshot's actionable refusal instead.
+        if not spec.environment_requirements_by_name:
+            return contributed
+        kept = []
+        for tool in contributed:
+            name = _schema_name(tool)
+            missing = environment.missing(
+                spec.environment_requirements_by_name.get(name, ()))
+            if missing:
+                logger.debug('[Task %s] %s withheld: environment lacks %s',
+                             ctx.tid, name, ', '.join(missing))
+                continue
+            kept.append(tool)
+        return kept
+
     def _wire_visible(spec: ToolSpec, exposed: bool) -> bool:
         if not exposed:
             return False
@@ -1199,8 +1258,9 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
             logger.error('[ToolRegistry] spec %s build failed: %s',
                          spec.key, e, exc_info=True)
             contributed = []
-        contributed = _without_saved_conversation_tools(
-            spec, _validated_contribution(spec, contributed))
+        contributed = _without_environment_unavailable_tools(
+            spec, _without_saved_conversation_tools(
+                spec, _validated_contribution(spec, contributed)))
         _record_contribution(spec, contributed, exposed)
         if _wire_visible(spec, exposed):
             tool_list.extend(contributed)
@@ -1223,8 +1283,9 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
             logger.error('[ToolRegistry] spec %s build failed: %s',
                          spec.key, e, exc_info=True)
             contributed = []
-        contributed = _without_saved_conversation_tools(
-            spec, _validated_contribution(spec, contributed))
+        contributed = _without_environment_unavailable_tools(
+            spec, _without_saved_conversation_tools(
+                spec, _validated_contribution(spec, contributed)))
         _record_contribution(spec, contributed, exposed)
         if _wire_visible(spec, exposed):
             tool_list.extend(contributed)

@@ -206,9 +206,31 @@ consume the manager's existing windowed failure budget once per service identity
 Recovery replaces only that host and only with the same prepared source/configuration
 generation. API liveness remains visible while readiness reports the execution
 outage. Code changes or an exhausted budget require the existing explicit restart.
+A killed host's command line disappears before its descriptors close, so its
+lease can still be held at the first retry. `ServiceOwnerDraining` keeps that same
+departure pending for `NATIVE_SERVICE_STOP_SECONDS`, without another failure
+charge; only a lease still held after that budget requires the explicit restart.
 Alternative rejected: giving each replacement a fresh budget permits an endless
 crash loop; retiring the API on execution failure needlessly interrupts clients.
 The bounded recovery record replaces one current value, not a history of tasks.
+An explicit restart retires an execution host whose close failed after it
+exited. Problem (2026-11-06): an approved Settings restart stopped the API,
+then replaced the execution host; its drain recorded `TimeoutError` and
+exited, `ResidentService.stop` raised `execution shutdown failed`, and the
+manager latched `crashloop` with nothing serving until a CLI restart found the
+host gone and only retired its record. Decision: the explicit replacement
+(`reset_failed`, which already resets failure latches) passes
+`retire_failed_close`, so physical exit plus the released lease retire the
+record and the recorded failure is logged. It still refuses while the host
+lives or after the record changed identity; automatic recovery and full stop
+keep raising. Native storage keeps its strict failed-close latch
+(`test_stop_preserves_native_shutdown_failure`): an unclean storage close may
+hold unflushed authority state, while the execution record proves only
+process lifetime. Alternatives rejected: retrying the start stage adds a retry
+budget and still needs this retirement; recording `stopped` for a failed
+drain hides the failure. Verify
+`test_failed_close_is_preserved_unless_an_explicit_replacement_retires_it`
+(real hosts) and `test_only_an_explicit_replacement_may_retire_a_failed_executor_close`.
 Verify `test_execution_composition.py` and `test_execution_application.py`;
 the latter boots the common application against a real SQL authority while the
 HTTP port is occupied, joins execution, and proves storage remains alive.
@@ -237,6 +259,22 @@ kill remains the backstop for a wedged daemon. Alternatives rejected: skipping
 the closing checkpoint moves the same replay onto every open; keeping 25 s and
 accepting replay costs more restart time than it saves and kills the authority
 mid-checkpoint.
+
+Problem (2026-11-06): on a saturated FUSE authority the daemon's SIGKILL
+backstop was not reaped within its confirmation window. The
+`subprocess.TimeoutExpired` escaped the resident host's finalizer before it
+wrote its terminal record, so the record kept the previous `ready` state, the
+manager reported an unconfirmed clean close, and the explicit restart latched
+as a crash loop with the application down. Decision: an unreapable SIGKILL is
+a reported terminal outcome ("leaving the unreapable child to the OS"), never a
+new exception; the host always publishes a terminal record, and a failed drain
+is recorded as `failed`; after replacing a host the manager waits for the
+authority lease with the existing orphan-reap policy and defers the spawn
+through the storage blocker until it clears. Alternatives rejected: raising the
+stop budget (uninterruptible network-volume I/O can exceed any finite
+deadline); starting the replacement while the lease is held (the engine is
+refused and the worker boot fails); treating the stale record as a permanent
+latch (the physical lease is usually released moments later).
 
 ## History growth and maintenance admission
 

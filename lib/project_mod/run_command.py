@@ -553,7 +553,9 @@ def _get_cmd_env(cwd=None, credential_env=None, strip_credential_vars=None,
 
     # Build from the explicit project anchor, so sticky subdirectories keep
     # the same Python packages. Never search above this authorized boundary.
-    from lib.tools.process_environment import apply_tool_paths, validate_environment
+    from lib.tools.process_environment import (
+        apply_tool_paths, tool_cache_root, validate_environment,
+    )
     root = os.path.realpath(project_root or cwd) if (project_root or cwd) else None
 
     # Managed chat output can live beneath the source checkout's data directory.
@@ -583,9 +585,7 @@ def _get_cmd_env(cwd=None, credential_env=None, strip_credential_vars=None,
             env['HOME'] = os.path.realpath(cwd)
         cache_root = os.path.join(root, '.tofu', 'tool-cache') if root else None
     else:
-        cache_root = os.environ.get('TOFU_MCP_CACHE_DIR') or os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-            'data', 'mcp-cache')
+        cache_root = tool_cache_root()
     apply_tool_paths(env, cache_root=cache_root)
     # A server activation marker does not identify the command's interpreter.
     env.pop('VIRTUAL_ENV', None)
@@ -1469,6 +1469,11 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
             frozen_input_paths=frozen_input_paths, redaction=redaction)
     finally:
         redaction.close()
+        # A finished command may have installed a package (apt, uv, npm): the
+        # refresh event of the environment-capability snapshot. The next tool
+        # assembly (the next turn) re-probes; this turn's tools never change.
+        from lib.tools.environment_capabilities import mark_environment_stale
+        mark_environment_stale('run_command')
     return redaction.text(result)
 
 
@@ -2299,6 +2304,7 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
             unregister_cancel = runtime_context.register_cancel_callback(
                 lambda: _signal_process_tree_termination(
                     proc, namespace_supervisor=namespace_supervisor))
+        open_pipes = [proc.stdout, proc.stderr]
         while True:
             # ── timeout ──
             elapsed = time.monotonic() - start_time
@@ -2342,9 +2348,7 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
             # ── drain available output ──
             got_output = False
             try:
-                readable = safe_select_pipes(
-                    [proc.stdout, proc.stderr], timeout=0.2
-                )
+                readable = safe_select_pipes(open_pipes, timeout=0.2)
             except (ValueError, OSError) as _e_audit:
                 logger.debug('[tools] _run_command_simple caught %s: %s', type(_e_audit).__name__, _e_audit)
                 readable = []
@@ -2355,6 +2359,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                 except (BlockingIOError, OSError) as _e_audit:
                     logger.debug('[tools] _run_command_simple caught %s: %s', type(_e_audit).__name__, _e_audit)
                     chunk = None
+                if chunk == b'':
+                    open_pipes.remove(fd)  # End-of-file: no writer remains to wait for.
                 if chunk:
                     got_output = True
                     if task is not None:
@@ -2489,12 +2495,45 @@ def _signal_process_tree_termination(proc, *, namespace_supervisor=False):
         _signal_namespace_child(proc)
         return
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        pgid = os.getpgid(proc.pid)
+        # Signal the groups the command's descendants created first: once the
+        # shell exits, its children are re-parented and can no longer be found.
+        for group in _escaped_descendant_groups(proc, pgid):
+            try:
+                os.killpg(group, signal.SIGTERM)
+            except OSError:
+                pass  # Exited; retirement awaits whatever remains.
+        os.killpg(pgid, signal.SIGTERM)
     except OSError:
         try:
             proc.terminate()
         except OSError:
             pass
+
+
+def _escaped_descendant_groups(proc, pgid) -> tuple[int, ...]:
+    """Groups the command's descendants created outside ``pgid``, remembered on ``proc``.
+
+    Discovery stops once the leader is reaped, since its PID may then name
+    another process; groups found earlier (the cancel callback's TERM) stay
+    known to the retirement that follows. A failed discovery is logged and
+    never prevents retiring the owned group.
+    """
+    known = getattr(proc, '_tofu_escaped_pgids', ())
+    if os.name != 'posix' or proc.returncode is not None:
+        return known
+    from lib.project_mod.process_group import (
+        ProcessGroupRetirementError, escaped_descendant_groups,
+    )
+    try:
+        found = escaped_descendant_groups(proc.pid, pgid)
+    except (OSError, ProcessGroupRetirementError) as error:
+        logger.warning('[run_command] escaped-group discovery failed for pgid=%s: %s',
+                       pgid, error)
+        return known
+    groups = tuple(dict.fromkeys((*known, *found)))
+    proc._tofu_escaped_pgids = groups
+    return groups
 
 
 def _kill_process_tree(proc, *, namespace_supervisor=False):
@@ -2526,8 +2565,11 @@ def _kill_process_tree(proc, *, namespace_supervisor=False):
             except ProcessLookupError:
                 proc.wait(timeout=2)
                 return  # Unregistered direct caller has no surviving group witness.
-        retire_process_group(pgid, wait_leader=lambda seconds: proc.wait(timeout=seconds))
-        logger.info('[run_command] Retired process group pgid=%d (pid=%d)', pgid, pid)
+        escaped = _escaped_descendant_groups(proc, pgid)
+        retire_process_group(pgid, wait_leader=lambda seconds: proc.wait(timeout=seconds),
+                             escaped_groups=escaped)
+        logger.info('[run_command] Retired process group pgid=%d (pid=%d, escaped groups=%s)',
+                    pgid, pid, list(escaped))
         return
     # Windows lacks POSIX groups; keep its direct-child compatibility boundary.
     if proc.poll() is None:
@@ -2969,6 +3011,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                 stdin_probe = StdinProbe(_is_any_child_reading_stdin, proc.pid, stdin_pipe_ino)
             except Exception as exc:
                 logger.debug('stdin sensor unavailable: %s', type(exc).__name__)
+        open_pipes = [proc.stdout, proc.stderr]
         while True:
             # ── abort: user clicked Stop (cooperative, ~0.2s granularity) ──
             if task and task.get('aborted'):
@@ -3005,9 +3048,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
             got_output = False
             from lib.compat import safe_select_pipes
             try:
-                readable = safe_select_pipes(
-                    [proc.stdout, proc.stderr], timeout=0.2
-                )
+                readable = safe_select_pipes(open_pipes, timeout=0.2)
             except (ValueError, OSError) as _e_audit:
                 # fd already closed
                 logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
@@ -3016,6 +3057,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
             for fd in readable:
                 try:
                     chunk = fd.read(65536)
+                    if chunk == b'':
+                        open_pipes.remove(fd)  # End-of-file: no writer remains to wait for.
                     if chunk:
                         got_output = True
                         if task is not None:

@@ -2,6 +2,7 @@ package com.tofu.client.data
 
 import androidx.room.ColumnInfo
 import androidx.room.Dao
+import androidx.room.Embedded
 import androidx.room.Entity
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
@@ -23,7 +24,48 @@ enum class AuthType {
 }
 
 /**
- * A remembered server.
+ * Where a kernel — a Tofu server shown in the WebView — runs, and therefore
+ * which [com.tofu.client.session.KernelController] owns its lifecycle.
+ * Stored by name; every row written before schema v3 is [REMOTE_URL].
+ */
+enum class KernelKind {
+    /** A server reached at [Profile.baseUrl], with the gateway auth of [AuthType]. */
+    REMOTE_URL,
+
+    /** The Tofu server running on this phone ("This phone"). */
+    LOCAL,
+
+    /** A remote Tofu reached through an SSH tunnel the phone dials out ([Profile.ssh]). */
+    SSH,
+}
+
+/**
+ * The SSH carrier of an [KernelKind.SSH] kernel: the phone dials
+ * [user]@[host]:[port] and forwards to the remote Tofu on 127.0.0.1:[remotePort].
+ *
+ * Holds no credential. The password or private key lives in the vault, keyed
+ * like every other secret; [hostKeySha256] is the PUBLIC host key's SHA-256
+ * fingerprint, pinned on first trust and null until then.
+ */
+data class SshEndpoint(
+    @ColumnInfo(name = "host") val host: String,
+    @ColumnInfo(name = "port") val port: Int = DEFAULT_PORT,
+    @ColumnInfo(name = "user") val user: String,
+    @ColumnInfo(name = "host_key_sha256") val hostKeySha256: String? = null,
+    @ColumnInfo(name = "remote_port") val remotePort: Int = DEFAULT_REMOTE_PORT,
+) {
+    companion object {
+        /** The SSH protocol's registered port. */
+        const val DEFAULT_PORT = 22
+
+        /** Tofu's default listen port (`server.py`, `PORT`). */
+        const val DEFAULT_REMOTE_PORT = 15000
+    }
+}
+
+/**
+ * A remembered kernel: a Tofu server the app can put in front, of the given
+ * [kind]. Every row written before schema v3 is a [KernelKind.REMOTE_URL].
  *
  * The [alias] is the STABLE logical identity and the switcher key. The secret
  * (in [com.tofu.client.session.SecretStore]) is keyed by [alias], NOT by
@@ -37,6 +79,12 @@ enum class AuthType {
  * [cookieHost] records the exact host the current cached session cookie is
  * `Domain`-pinned to. On a [baseUrl] change we compare against it: a mismatch
  * means the cached jar is bound to a dead host and MUST be hard-invalidated.
+ *
+ * Only [KernelKind.REMOTE_URL] rows have a stored address. A LOCAL or SSH
+ * kernel's address is runtime state owned by its
+ * [com.tofu.client.session.KernelController] (`ensureRunning`), so those rows
+ * keep [baseUrl] empty and the session works on a copy bound to the live
+ * endpoint, which is never written back.
  */
 @Entity(tableName = "profiles")
 data class Profile(
@@ -53,6 +101,14 @@ data class Profile(
      * (no start/stop controls shown). Added in schema v2.
      */
     @ColumnInfo(name = "project_path") val projectPath: String? = null,
+    /** Added in schema v3; rows from earlier versions are [KernelKind.REMOTE_URL]. */
+    @ColumnInfo(name = "kind", defaultValue = "REMOTE_URL") val kind: KernelKind = KernelKind.REMOTE_URL,
+    /**
+     * Set only for [KernelKind.SSH] (schema v3). Its columns are all NULL on
+     * other rows, which Room reads back as a null endpoint — so none of them
+     * may carry a column default.
+     */
+    @Embedded(prefix = "ssh_") val ssh: SshEndpoint? = null,
 )
 
 @Dao
@@ -117,6 +173,19 @@ interface ProfileDao {
      */
     @Query("UPDATE profiles SET auth_type = :authType WHERE id = :id")
     suspend fun setAuthType(id: Long, authType: AuthType): Int
+
+    /**
+     * Pin an SSH kernel's host key on FIRST trust. Targeted for the same reason
+     * as [setCookieHost], and conditional: it lands only while the row is still
+     * that SSH endpoint and holds no pin. A host or port edited meanwhile is
+     * another machine, and an existing pin is never replaced silently — a
+     * changed host key is a hard stop. Returns the rows pinned (0 or 1).
+     */
+    @Query(
+        "UPDATE profiles SET ssh_host_key_sha256 = :sha256 WHERE id = :id AND kind = 'SSH' " +
+            "AND ssh_host = :host AND ssh_port = :port AND ssh_host_key_sha256 IS NULL",
+    )
+    suspend fun pinSshHostKey(id: Long, host: String, port: Int, sha256: String): Int
 
     @Query("DELETE FROM profiles WHERE id = :id")
     suspend fun deleteById(id: Long)

@@ -67,7 +67,16 @@
         "if": {"required": ["failure"]},
         "then": {
           "properties": {
-            "generated": {"const": false}, "complete": {"const": false}, "accepted": {"const": false},
+            "generated": {"const": false}, "complete": {"const": false}, "accepted": {"const": false}
+          }
+        }
+      }, {
+        "if": {
+          "required": ["failure"],
+          "properties": {"failure": {"required": ["code"], "properties": {"code": {"const": "summary_credentials_unavailable"}}}}
+        },
+        "then": {
+          "properties": {
             "attempts": {"items": {"required": ["providerReached"], "properties": {"status": {"const": "failed"}, "providerReached": {"const": false}}}}
           }
         }
@@ -173,6 +182,31 @@
     },
     "summaryCredentialSource": {"enum": ["local", "desktop", "tofu_oauth"]},
     "summaryFailure": {
+      "oneOf": [
+        {"$ref": "#/$defs/summaryCredentialFailure"},
+        {"$ref": "#/$defs/summaryDisplayFailure"}
+      ],
+      "description": "Safe summary-owner failure diagnostics. Generic display causes never certify credential availability or provider ingress; the credential variant retains its strict unsent evidence. Missing facts remain unknown."
+    },
+    "summaryDisplayFailure": {
+      "type": "object",
+      "required": ["code"],
+      "properties": {
+        "code": {"enum": [
+          "summary_rate_limited", "summary_provider_unavailable",
+          "summary_permission_denied", "summary_route_unavailable",
+          "summary_incomplete", "summary_empty", "summary_cancelled",
+          "summary_dispatch_failed", "summary_route_revalidation_failed"
+        ]},
+        "statusCode": {"type": "integer", "minimum": 100, "maximum": 599},
+        "attempts": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      },
+      "dependentRequired": {"limit": ["attempts"]},
+      "additionalProperties": false,
+      "description": "Content-free display diagnostics only. Optional HTTP status and dispatcher request-count/limit facts come from genuine typed exception evidence, not route counts or selected cost rows. This introduces no summary retry limit and never authorizes fallback, source deletion or credential recovery."
+    },
+    "summaryCredentialFailure": {
       "type": "object",
       "required": ["code", "authIssue", "credentialSource", "providerReached"],
       "properties": {

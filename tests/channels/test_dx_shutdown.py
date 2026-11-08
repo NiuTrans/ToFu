@@ -17,6 +17,7 @@ class Bridge:
     def __init__(self):
         self.events = queue.Queue()
         self.returncode = None
+        self.refusal = ''
 
     def alive(self):
         return self.returncode is None

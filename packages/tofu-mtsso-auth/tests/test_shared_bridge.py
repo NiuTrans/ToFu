@@ -1,10 +1,14 @@
 """Real private-pipe Node bridge with fake upstream APIs, strictly no network."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
+import subprocess
+import threading
 import time
 
 import pytest
@@ -208,7 +212,7 @@ def test_private_stdin_and_output_limits(monkeypatch):
     assert caught.value.code == 'SSO_INPUT_LIMIT'
 
 
-@pytest.mark.parametrize('kind', ['symlink', 'public', 'fifo'])
+@pytest.mark.parametrize('kind', ['symlink', 'public', 'fifo', 'private-content', 'hardlink'])
 def test_sdk_temporary_file_is_admitted_before_refresh(bridge, kind):
     source, store = bridge
     store(expires_at=1, refresh_token='fixture-refresh')
@@ -216,20 +220,120 @@ def test_sdk_temporary_file_is_admitted_before_refresh(bridge, kind):
     temporary = source.with_name(source.name + '.tmp')
     sentinel = source.with_name('sentinel.txt')
     sentinel.write_text('preserve-user-content')
+    linked = source.with_name('linked-empty')
     if kind == 'symlink':
         temporary.symlink_to(sentinel)
     elif kind == 'fifo':
         os.mkfifo(temporary)
+    elif kind == 'hardlink':
+        # Empty and private, yet another name for a file this bridge never reserved.
+        linked.write_text('')
+        linked.chmod(0o600)
+        os.link(linked, temporary)
     else:
+        # Content this bridge did not write, e.g. an upstream CLI write cut off before its rename.
         temporary.write_text('preserve-stale-content')
-        temporary.chmod(0o644)
+        temporary.chmod(0o644 if kind == 'public' else 0o600)
     with pytest.raises(auth.OfficialAuthError) as caught:
         auth.user_token('tofu:1', ['mlp'])
     assert caught.value.code == 'SSO_SESSION_CONFIGURATION'
     assert source.read_bytes() == before
     assert sentinel.read_text() == 'preserve-user-content'
-    if kind == 'public':
+    if kind in ('public', 'private-content'):
         assert temporary.read_text() == 'preserve-stale-content'
+    if kind == 'hardlink':
+        assert temporary.exists() and linked.exists()
+
+
+def _hold_logins(hold: Path, pid_file: Path) -> None:
+    """While ``hold`` exists, the fake SDK's CIBA login waits forever (an unanswered
+    大象 approval) after writing its process ID to ``pid_file``."""
+    sdk = Path(os.environ['MTSSO_SESSION_SDK'])
+    sdk.write_text(sdk.read_text().replace('async loginWithCiba(mis) {', '''async loginWithCiba(mis) {
+    if (fs.existsSync(%s)) {
+      fs.writeFileSync(%s, String(process.pid));
+      await new Promise(() => setInterval(() => {}, 1000));
+    }''' % (json.dumps(str(hold)), json.dumps(str(pid_file)))))
+
+
+def _waiting_login(pid_file: Path) -> int:
+    deadline = time.monotonic() + 60
+    while not pid_file.exists() or not pid_file.read_text():
+        assert time.monotonic() < deadline, 'the login never started waiting'
+        time.sleep(0.02)
+    return int(pid_file.read_text())
+
+
+def test_reservation_left_by_a_killed_login_is_reclaimed(bridge, tmp_path):
+    # The incident: a login waiting for a 大象 approval was killed (deadline
+    # SIGKILL, restart group kill) inside its reservation of the upstream .tmp
+    # path; every later SDK write then refused, so no approval could be requested.
+    source, store = bridge
+    store(expires_at=1)
+    hold, pid_file = tmp_path / 'hold', tmp_path / 'login.pid'
+    hold.touch()
+    _hold_logins(hold, pid_file)
+    killed = []
+
+    def kill():
+        killed.append(_waiting_login(pid_file))
+        os.kill(killed[0], signal.SIGKILL)
+    killer = threading.Thread(target=kill)
+    killer.start()
+    with pytest.raises(auth.OfficialAuthError):
+        auth.user_token('tofu:1', ['mlp'])
+    killer.join()
+    temporary = source.with_name(source.name + '.tmp')
+    assert str(killed[0]) in temporary.read_text()  # the leftover names its dead owner
+    hold.unlink()
+    auth.clear()  # the next launcher is a new process
+    assert auth.user_token('tofu:1', ['mlp']) == 'audience:mlp'
+    assert json.loads(source.read_text())['access_token'] == 'fixture-login'
+    assert not temporary.exists()
+
+
+def test_empty_reservation_of_an_earlier_bridge_is_reclaimed(bridge):
+    source, store = bridge
+    store(expires_at=1, refresh_token='fixture-refresh')
+    temporary = source.with_name(source.name + '.tmp')
+    temporary.write_text('')
+    temporary.chmod(0o600)
+    assert auth.user_token('tofu:1', ['mlp']) == 'audience:mlp'
+    assert json.loads(source.read_text())['access_token'] == 'fixture-refreshed'
+    assert not temporary.exists()
+
+
+def test_reservation_of_a_running_login_is_never_taken_over(bridge, tmp_path):
+    # A login whose launcher was killed keeps running in its own session and
+    # holds its reservation without the source lock.
+    source, store = bridge
+    store(expires_at=1)
+    hold, pid_file = tmp_path / 'hold', tmp_path / 'login.pid'
+    hold.touch()
+    _hold_logins(hold, pid_file)
+    request = {'action': 'login', 'audiences': ['mlp'], 'environment': 'PROD', 'mis': 'alice',
+               'sdk': os.environ['MTSSO_SESSION_SDK'], 'session_file': str(source),
+               'fingerprint': hashlib.sha256(source.read_bytes()).hexdigest()}
+    orphan = subprocess.Popen([shutil.which('node'), str(Path(auth.__file__).with_name('shared_session.mjs'))],
+                              stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True)
+    try:
+        orphan.stdin.write(json.dumps(request).encode())
+        orphan.stdin.close()
+        assert _waiting_login(pid_file) == orphan.pid
+        before = source.read_bytes()
+        with pytest.raises(auth.OfficialAuthError) as caught:
+            auth.user_token('tofu:1', ['mlp'])
+        envelope = caught.value.envelope()
+        assert envelope['error_code'] == 'SSO_AUTH_REQUEST_PENDING' and envelope['auth_state'] == 'pending'
+        assert source.read_bytes() == before
+        assert source.with_name(source.name + '.tmp').exists()
+    finally:
+        orphan.kill()
+        orphan.wait()
+    hold.unlink()
+    auth.clear()
+    assert auth.user_token('tofu:1', ['mlp']) == 'audience:mlp'
 
 
 def test_sdk_plain_terminal_denial_is_safe_and_preserved(bridge):

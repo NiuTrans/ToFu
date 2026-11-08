@@ -90,7 +90,8 @@ left orphan conversations. Decision: deterministic identity with a provision
 marker that alone permits adoption. Alternative rejected: a lock around
 `create` (process-local, still orphans across processes).
 `coordinator_tool_ceiling` returns `ROUTER_TOOLS` only when the scope's project
-is the owner's router home; catalog projection (`filter_coordinator_tools`,
+is the owner's router home (a Turn reviewing other people's channel messages
+gets the narrower review ceiling instead, CHANNELS.md C11); catalog projection (`filter_coordinator_tools`,
 `prepare_coordinator_tool_surface`), the registry builder and
 `coordinator_call_rejection` all ask it, so channel tools appear by name once
 their ToolSpec exists. Router tools are in the project dispatch
@@ -423,6 +424,28 @@ model, else an explicit refusal) and pins it; continuation controls record
 owner default is the server's configured default model today
 (TODO(enterprise): a per-owner default).
 
+**A Router without a model choice.** Problem: a Project Router made by `create`
+or `provision` stores no model until the owner sends from its composer. A turn
+the server started there (a forwarded request, a timer) resolved its config from
+those settings alone and ran with an empty model, which the shared dispatcher
+answers with any free route (2026-11-06: the autoharness Project Router ran on
+GLM-5.3). Tool assembly then issued the Worker ceiling without a Coordinator
+model, and `policy_for_task` refused every delegation with an error that blamed
+tool assembly and advised retrying the same key. Decision: `build_task_config`
+(`lib/scheduler/_shared.py`) gives a conversation without a model choice (no
+name and no `modelRef`, the rule `resolve_conv_settings` applies) the owner's
+default model as `resolve_conv_config`'s `serverModel`, as a fresh composer
+would, the same fallback Workers use. An issued policy without a Coordinator
+model is still refused, as `CoordinatorModelMissing`: effect-free
+(`execution_started: false`), with a recovery that reports the remedy instead of
+retrying. Alternatives rejected: writing a model into the settings at
+`create`/`provision` (a server-authored composer choice the owner never made,
+and existing Routers stay broken until migrated); forwarding with the Global
+Router's model (router and project models are chosen separately, and a light
+router model would silently become the project's); recording the routed model
+after the fact (the Coordinator would still run on an arbitrary route); relaxing
+the refusal (continuations would replay an empty model).
+
 ### R6. Long-lived context: a router conversation runs indefinitely
 
 **Problem:** a router lives for months. Automatic L2 compaction already bounds
@@ -549,8 +572,26 @@ delivery admits the owner's currently bound Watchdog as a sender in every
 project and nobody else from outside it. `watchdog_notify_router` is one peer
 input with `origin.sourceConversationId` = Watchdog, command id hashed from
 (owner, Watchdog, key, message, signals), refused while the Global Router's own
-failed-Turn signal is open. The Global Router neither lists the watchdog path
-as a project nor forwards into it, and Workers are denied every `watchdog_*`
+latest Turn is failed.
+
+**Problem:** a Turn signal never closes itself (the subject reports failures, not
+recovery), so an open signal is not evidence that the Router is still failing. A
+Router that recovered and kept working was still refused notice, and the refusal
+itself told the Watchdog to resolve the signal before notifying — a deadlock.
+**Decision:** before refusing, the tool reads durable Turns; when the newest
+main-lane Turn is `completed` and newer than the failed one, it resolves the
+signal with that Turn as recovery evidence and sends the notice. Only a
+still-failing, running or interrupted Router is refused. A signal whose failed
+Turn is on a branch lane, or whose Turn no longer exists, stays open for the
+Watchdog to judge. Recovery is a durable fact, not the model's say-so.
+**Alternatives rejected:** auto-resolving Turn signals on every completed
+settlement (a storage read on every Turn for a condition only this tool needs);
+merely rewording the refusal (the snapshot reports `last_activity_at` but no
+latest-Turn state, so the Watchdog still cannot tell a stale signal from a live
+one).
+
+The Global Router neither lists the watchdog path as a project nor forwards into
+it, and Workers are denied every `watchdog_*`
 tool. TODO(enterprise): channel signals ride the personal scheduler tick that
 hosts the bridges.
 
@@ -594,6 +635,163 @@ main coordinator (hides the owner's primary entry); renaming the server titles
 titles anyway); provisioning the Watchdog with the router so it needs no
 setting (event-driven model turns the owner did not choose).
 
+### R9. The owner's delegation: the Global Router acts for the owner (owner decision 2026-11-06)
+
+**Problem:** the owner wants the main coordinator to carry out owner
+operations itself, starting with restarting Tofu, without a click each time.
+The owner ruling of 2026-07-28 (`lib/lifecycle_approval.py`) requires a human
+to approve every live-server restart: a request the owner approves in the UI,
+the owner's interactive terminal, or the handoff variable of a caller that
+already passed that gate. AGENTS.md principle 4 kept every synthetic user
+from inheriting human authorization, and the Router's turns are often
+nonhuman (channel events, relayed reports, standing instructions). So a
+Router restart was always refused (2026-11-06 10:20: a non-interactive
+`serverctl.py restart` stopped at the gate and created a pending request),
+while two restarts had passed the gate without any human decision on record
+(11-05: an agent approved a request with `decided_by=explicit-user-instruction-via-codex-chat`;
+11-06 01:21: a terminal or handoff restart left no record).
+
+**Decision:** the owner explicitly delegates operational authority to their
+Global Router, and this narrows the 2026-07-28 ruling to: *a human approves
+every live restart, or the owner has granted their Global Router a revocable
+restart delegation*. The lifecycle approval gate stays the single decision
+point. Scope:
+
+- **One grant per owner**, held by the owner's current Global Router
+  conversation and binding revision (it never carries over to a replaced
+  router), stored in the gate's own document (`lifecycle_approvals.json`,
+  `delegations`). It covers `lifecycle_approval.DELEGATION_SCOPES`: `restart`
+  (`restart_server`) and `conversation_control` (Continue, checkpoint resume
+  and Stop of an exact Attempt through `control_conversation(owner_delegation=…)`
+  when the Router's request has no owner message of its own). It is off until
+  the owner turns it on; it is an authorization setting, not a tuning knob.
+- **Granting needs the owner in the Tofu UI.** `POST /api/v4/router/owner-delegation
+  {"granted": true}` (scope `admin`) admits only a user principal over the UI
+  session cookie, or the loopback open-mode UI, with same-origin browser
+  evidence (Fetch Metadata where the browser sends it, else an `Origin` naming
+  this host): `routes/api_v1/auth.human_ui_provenance`. API keys, scripts and
+  agents get 403, and no model tool can write the grant. The record keeps that
+  provenance (user agent, peer, credential) and an `assurance`:
+  `authenticated` for a UI session, `advisory` in open mode.
+- **Revoking** is any authenticated owner request (`{"granted": false}`) and
+  takes effect at once: every delegated action re-checks the grant in the gate
+  transaction that commits it, including restart acceptance after preparation.
+- **Every action** needs the grant, a reason and an owner trigger: the owner's
+  own message of the current request (`source_turn_id`), an owner message
+  steered into the reply (`source_steer_id`), or an active standing
+  instruction with what triggered it (`instruction_id` + `event_id` or
+  `source_turn_id`), resolved by the forwarding owner exactly as
+  `route_to_project` resolves them, plus the live router attempt fences.
+- **Audit.** The gate writes one `delegatedActions` record per action: who
+  (`requester`: router conversation, binding revision, tenant, Turn, Attempt),
+  why (`reason`, `trigger` with the owner's verbatim words), what (`target`),
+  under which grant (`grantRevision`, `grantedBy`), when (`requestedAt`,
+  `acceptedAt`) and the outcome (`status` `accepted`/`restarting`/`completed`/
+  `refused`/`failed`, `code`, `detail`, `interrupted`). A refusal while a grant
+  exists is recorded as well; without a grant only `audit.log` records it.
+  The server manager reports no outcome back after the handover, so a
+  `restarting` record reads `completed` once a server process that booted
+  after its acceptance answers (`lib.boot_identity`; every restart replaces
+  the serving worker). A refusal inside the manager leaves it `restarting`,
+  with the reason in `server-manager.log`.
+  Every transition also writes `audit.log` (`owner_delegation_*`). The
+  document keeps the newest 50 records, the approval records' existing bound;
+  `audit.log` keeps every event. The owner reads them under "Act for me".
+- **Restart (`restart_server`).** Grant → trigger → restart protection →
+  audit record → a detached thread, so the restart outlives the calling turn:
+  `server_reexec.prepare_server_reexec_frontend()` (the Settings preparation)
+  → protection again → gate acceptance (grant, cooldown and restart stamp in
+  one transaction) → `perform_server_reexec('restart', frontend_prevalidated=True)`
+  → the Supervisor's `application-restart`, whose manager restart runs the
+  repair-capable frontend preflight and stops the old worker only if it
+  succeeds. There is no token, environment variable or pending request on
+  this path, and no grant means a typed `owner_delegation_not_granted` refusal
+  with nothing pending (an agent-made request would be a prompt the owner
+  did not ask for, and its 600-second token does not fit an asynchronous
+  chat). Protection is the Settings signal, `list_running_tasks`, without the
+  Router's own conversation: a protected step (`git_land`, `export`; below)
+  always refuses; other running conversations refuse unless the owner asked
+  to restart anyway (`interrupt_running_conversations`, the Settings force);
+  an unreadable signal refuses. In the managed split the Router runs in the
+  execution host, which owns no frontend: its preparation covers the native
+  engine and the manager's frontend preflight is the build that gates the
+  stop, so a failed frontend build there appears in `server-manager.log`,
+  not in the audit record.
+- **Protected steps.** Landings and exports change or publish the served
+  checkout and often run outside any conversation (a terminal, a background
+  command, another agent), so conversation activity could not see them.
+  `scripts/git_land.py` (except `--check`) and `export.py` hold a process
+  marker under `<data root>/protected-steps/`
+  (`lib/runtime/protected_steps.py`); `list_running_tasks(user_id=None)`
+  lists live ones as `protected-step:<id>` entries, so Settings restart,
+  automatic restart and deferred-restart quiescence see them too. A local
+  marker counts while its process lives; another host's marker counts until
+  its writer removes it, and the refusal names its path.
+
+**The boundary: act, never speak.** The grant lets the Router act as the
+owner; it never lets it speak as the owner. It cannot answer questions
+addressed to the owner or forward its own text as theirs
+(`route_to_project` and `require_human_turn` still require the owner's
+verbatim message), approve its own drafts or prompts meant for the owner
+(`channel_outbox_approve` and `channel_configure_thread` keep the genuine
+human-Turn gate; lifecycle approvals need the owner's UI decision), start
+Workers or record standing instructions from nonhuman input
+(`source_for_task`), or make an irreversible external publication the owner
+has not approved (pushing an edition to GitHub runs in Workers or behind
+owner approvals; the owner's question hg_844c7fcedf23 on the Internal edition
+stays open). Under the grant, conversation control allows only Continue,
+checkpoint resume and Stop of the pinned Attempt, never Regenerate, and
+never creates an assignment: it runs the unchanged session command
+(`session_control.control_session`) with the delegation standing in only for
+the request's source principal, so the resumed Attempt keeps the target's own
+accepted execution identity. Specifications: `tests/router/test_owner_delegation.py`.
+
+**Agents never approve, operators are recorded.** `lifecycle_approval.decide`
+requires the `human-ui` provenance only the HTTP decide endpoint mints, so a
+direct call such as the 11-05 one is refused and audited. `serverctl.py`
+keeps the owner's interactive-terminal confirmation and the handoff variables
+(`TOFU_LIFECYCLE_GATE_PASSED`, `TOFU_RESTART_GATE_PASSED`) but writes each pass
+as a consumed record with its own provenance (`interactive-terminal` with the
+tty, `environment-override` with the variable, pid, parent and user); a
+broken store never blocks the owner's terminal.
+
+**Extending the grant.** Another owner operation (settings, provider keys,
+channel accounts, …) joins the same pattern rather than a new authority: add
+a scope to `DELEGATION_SCOPES` (the grant stays one switch the owner turns on
+or off), give the Router one tool that resolves the owner trigger with
+`owner_delegation.resolve_trigger`, records the action through
+`begin_delegated_action` before any effect and settles it with the outcome,
+and keep that operation's existing owner (the settings store, the credential
+vault) as the writer. Operations whose result speaks for the owner
+(answers, approvals, publications) stay outside the grant.
+
+**Residual risks (stated, not solved).** No Tofu tool, instruction or code
+path can grant the delegation; only the HTTP grant above can. Agents run as
+the server's operating-system user, though, so the server cannot prove that a
+request came from the owner's hands. Open mode has no authentication: any
+local process can send a loopback request with browser Fetch Metadata, so a
+grant made there is recorded as `advisory` and the switch says so. Such a
+forgery is deliberate, not an accident of a chat instruction, and it stays
+visible in the grant record (user agent, peer, credential) and in `audit.log`:
+the same limit as every human-only decision of this gate. An
+agent that drives the owner's real browser acts through the owner's session
+and cannot be told apart from the owner here; the existing browser controls
+(page mutation needs the owner's per-domain approval and the Tofu client tab
+is never an automation target, [browser automation](modules/browser_automation.md))
+and that agent's durable tool rounds are the evidence, and every decision
+keeps its user agent and peer in the record and in `audit.log`.
+
+**Alternatives rejected:** a self-issued approval token or an environment
+variable for the Router (a second, invisible approval path); creating a
+pending approval on every refused Router restart (the owner's click is what
+the grant replaces, and the Router could consume it only through a second
+path); a grant written by the Router or a settings file (indistinguishable
+from the forgery the gate exists to stop); a separate delegation store,
+principal kind or Router-only restart path (a parallel authority beside the
+gate, principle 4); letting the grant also authorize answers, approvals or
+publications (the owner's voice is not an operation); per-operation switches
+or rate knobs (principle 5).
+
 ## Interfaces
 
 Session execution control uses the common Coordinator tools
@@ -616,8 +814,17 @@ target execution authority. See
 - `lib/router/tools.py` — `execute_router_tool` behind
   `execute_coordinator_tool`: `route_to_project` (`forwarding.py`, also
   `verify_forwarded_turn`), `get_router_projects` (`projects.py`; pages follow
-  the project dispatch history page) and `router_instruction_create|list|cancel`
-  (`instructions.py`; `RouterInstructions.pause|resume` are owner HTTP only).
+  the project dispatch history page), `router_instruction_create|list|cancel`
+  (`instructions.py`; `RouterInstructions.pause|resume` are owner HTTP only)
+  and `restart_server` (`owner_delegation.py`, R9).
+- `lib/router/owner_delegation.py` (R9) — `restart_server`,
+  `delegated_conversation_control` (used by `session_control.control_session`),
+  `resolve_trigger`, `router_requester`, `owner_delegation_state`; the grant,
+  audit records and restart acceptance are `lib/lifecycle_approval.py`
+  (`set_delegation`, `check_delegation`, `begin_delegated_action`,
+  `record_delegated_refusal`, `settle_delegated_action`,
+  `accept_delegated_restart`, `delegated_actions`); protected steps are
+  `lib/runtime/protected_steps.py`.
   Schemas: `contracts/router_v1.schema.json` through `lib/router/contract.py`.
   `forwarding.owner_steer_carriers` labels steered owner messages in the router's
   model view; `lib/turn_initiation.py` owns `steer_author` and
@@ -653,8 +860,10 @@ target execution authority. See
   /api/v4/router/worker-model`, `GET /api/v4/router/instructions`, `POST
   /api/v4/router/instructions/{pause,resume,cancel}`, `GET
   /api/v4/router/watchdog` (read, never creates), `POST /api/v4/router/watchdog`
-  (ensure, Idempotency-Key), `POST /api/v4/router/watchdog/review`; DTOs in
-  `frontend/src/api/router.generated.ts`.
+  (ensure, Idempotency-Key), `POST /api/v4/router/watchdog/review`, `GET|POST
+  /api/v4/router/owner-delegation` (R9: read the grant and its audit records;
+  grant only from the owner's UI session, revoke from any owner request);
+  DTOs in `frontend/src/api/router.generated.ts`.
 - Browser (R8): `frontend/src/features/global-router.ts` renders the main
   coordinator card (总负责人 / Main coordinator) with the project coordinator
   card's classes into `#globalRouterEntry`, the leader slot just above
@@ -665,7 +874,10 @@ target execution authority. See
   resume, cancel, cursor paging) and the controls other owners contribute
   (`hosts.controls`). Project Routers show the same Worker model control in
   the task board's footer on their coordinator conversation surface
-  (`project-coordination-surface.ts`). `router-watchdog.ts` contributes the
+  (`project-coordination-surface.ts`). `router-owner-delegation.ts` contributes
+  "Act for me" (代我操作, R9) to that header: the grant switch, its state, an
+  advisory note for an open-mode grant and the last audited use (read when
+  created and when opened, no polling). `router-watchdog.ts` contributes the
   health-check disclosure to that header (off: turn on, which ensures the
   Watchdog; on: the periodic review switch, cron cadence and a button that
   opens the Watchdog conversation) and, on the Watchdog conversation, a

@@ -66,7 +66,9 @@ def test_summary_retains_disposal_owner_after_failure_before_slot_detach(
         assert resilient.pool.slots == [resilient.parent]
         assert set(ephemeral._handles) == live_before
         assert all(slot.api_key == '' for slot in calls)
-        assert '_summaryFailure' not in usage
+        assert usage['_summaryFailure'] == {'code': 'summary_dispatch_failed'}
+        from lib.tasks_pkg.compaction._summary_failure import reconstructed_summary_failure
+        assert reconstructed_summary_failure(resilient.task, summary_usage=usage) is None
         assert resilient.task['_summaryAttemptBudget']['_summaryBudgetFailure'] == 'summary_dispatch_failed'
     finally:
         # A red pre-fix result must not leak the fixture's orphan to later tests.
@@ -146,7 +148,9 @@ def test_persistent_disposal_fault_remains_explicit_bounded_and_uncallable(
         assert not handle.disposed and handle.handle_id in ephemeral._handles
         assert handle.slot.is_available is False
         assert handle.slot.api_key == '' and handle.slot.extra_headers == {}
-        assert '_summaryFailure' not in usage
+        assert usage['_summaryFailure'] == {'code': 'summary_dispatch_failed'}
+        from lib.tasks_pkg.compaction._summary_failure import reconstructed_summary_failure
+        assert reconstructed_summary_failure(resilient.task, summary_usage=usage) is None
         assert resilient.task['_summaryAttemptBudget']['_summaryBudgetFailure'] == 'summary_dispatch_failed'
     finally:
         for handle in list(ephemeral._handles.values()):

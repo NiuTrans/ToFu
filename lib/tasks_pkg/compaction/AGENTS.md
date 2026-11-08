@@ -19,6 +19,8 @@ Final request-size settlement follows all injections/admission, not recompositio
 `_resume_projection.py` validates accepted archive snapshots against fresh
 history/policy/tool-prefix evidence for Continue; its focused regressions are
 `test_dispatch_context_recovery.py` (including isolated storage restart).
+When a resumed Turn compacts again, its `compaction_resume` event (`reason`,
+also `task['_compactionResumeOutcome']`) names why the archive was not reused.
 `_admission_budget.py` owns mandatory limits; `_cache_economics.py` owns shared
 optional rewrite ROI, and `_pressure.py` tries one detached L1 candidate before
 L2. Their contract is `docs/CONTEXT_BUDGET_POLICY.md`; verify with

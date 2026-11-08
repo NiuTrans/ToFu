@@ -4,9 +4,10 @@ The application owns boot phases, worker admission and physical cleanup. This
 host adapter only connects its stop signal and readiness to that same owner.
 """
 import asyncio
+import inspect
 
 
-async def run_execution_lifespan(app, stopped, publish_ready):
+async def run_execution_lifespan(app, stopped, publish_ready, *, before_shutdown=None):
     if stopped.is_set():
         if app is not None:
             app.extensions['tofu_shutdown_requested'].set()
@@ -33,14 +34,19 @@ async def run_execution_lifespan(app, stopped, publish_ready):
             await boot
         if runner.status != 'ready':
             raise RuntimeError(f'Execution bootstrap did not become ready: {runner.status}')
-        publish_ready()
+        ready = publish_ready()
+        if inspect.isawaitable(ready):
+            await ready
         await stopping
     finally:
         shutdown_requested.set()
         try:
-            # A returned handler, timeout or cancelled lease cannot substitute
-            # for the common shutdown owner's physical worker joins.
-            await app.shutdown()
+            try:
+                if before_shutdown is not None:
+                    await before_shutdown()
+            finally:
+                # Cleanup failure cannot skip the common owner's physical joins.
+                await app.shutdown()
         finally:
             stopping.cancel()
             await asyncio.gather(stopping, return_exceptions=True)

@@ -64,6 +64,24 @@ def test_task_registration_receives_the_accepted_principal_tenant(monkeypatch,ta
     assert captured[0].scopes==frozenset()
 
 
+def test_explicit_worker_application_reaches_native_binding_without_request_context(monkeypatch, task_start_fixture):
+    from types import SimpleNamespace
+    from quart import has_app_context
+    runtime, config, task, discarded = task_start_fixture
+    application = SimpleNamespace(extensions={})
+    monkeypatch.setattr(runtime, '_prepare_unbound_task_dispatch', lambda *a: (config, None, False))
+    def bind(actual, *, flow, application):
+        assert not has_app_context()
+        assert actual is task and flow is False
+        assert application is expected_application
+        raise RuntimeError('issued application reached before execution')
+    expected_application = application
+    monkeypatch.setattr('lib.tasks_pkg.native_application.bind_application_native_task', bind)
+    with pytest.raises(RuntimeError, match='issued application reached'):
+        runtime.start_conversation_attempt_executor('conv-ownership', config, application=application)
+    assert discarded == [('task-ownership', 'conv-ownership')]
+
+
 def test_request_budget_binding_precedes_spawn_and_uses_existing_rollback(monkeypatch, task_start_fixture):
     runtime, config, task, discarded = task_start_fixture
     bound = []

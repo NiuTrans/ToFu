@@ -4,7 +4,8 @@ Responsibility: the C2 fast path (docs/CHANNELS.md) as pure functions over a
 thread record, the account record and one normalized event. No storage, no
 model calls, no keyword heuristics: every decision is a protocol fact (sender,
 thread kind, @-mention, quote reply) compared with the bound owner identity.
-Entry points: ``effective_mode``, ``effective_reply_policy``, ``classify``.
+Entry points: ``effective_mode``, ``effective_reply_policy``, ``classify``,
+``robot_thread``.
 """
 from __future__ import annotations
 
@@ -30,6 +31,18 @@ def effective_mode(thread: ThreadKey, record: dict[str, Any] | None,
 
 def effective_reply_policy(record: dict[str, Any] | None) -> str:
     return (record or {}).get('replyPolicy') or DEFAULT_REPLY_POLICY
+
+
+def robot_thread(account: dict[str, Any] | None) -> str:
+    """The thread the account's notification robot posts into (C6), or ''.
+
+    Only a group command chat: the robot posts into groups it is a member of,
+    while a private chat with the robot would be a different conversation.
+    """
+    account = account or {}
+    chat = str(account.get('commandChat') or '')
+    has_robot = bool((account.get('robot') or {}).get('clientId'))
+    return chat if has_robot and chat and ThreadKey.parse(chat).kind == 'gid' else ''
 
 
 def owner_uid(account: dict[str, Any] | None) -> str:

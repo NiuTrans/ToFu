@@ -13,6 +13,7 @@ import requests
 
 from lib.http_transport.client import http_get as _default_http_get
 from lib.log import get_logger
+from lib.model_info.capability_taxonomy import MODEL_KINDS, model_kind
 
 from ._capabilities import _infer_capabilities, _infer_rpm
 
@@ -187,7 +188,7 @@ def discover_models(base_url: str, api_key: str,
             base_url += '/v1'
     # Normalize URL to /models endpoint
     # If the user specified a custom models_path, use it; otherwise default
-    # to appending /models.  Gateways like Meituan may use non-standard
+    # to appending /models.  Gateways like YourProvider may use non-standard
     # paths (e.g. /v1/openai/native/models).
     if models_path:
         # User-supplied path — join with base URL origin
@@ -343,24 +344,20 @@ def discover_models(base_url: str, api_key: str,
             entry['output_price'] = mp.get('output', 0)
         result.append(entry)
 
-    # Sort: text models first, then image_gen, then embedding
-    def _sort_key(m):
-        c = set(m['capabilities'])
-        if 'embedding' in c:
-            return (2, m['model_id'])
-        if 'image_gen' in c:
-            return (1, m['model_id'])
-        return (0, m['model_id'])
-    result.sort(key=_sort_key)
+    # Group by task family in taxonomy order (chat first), then by id.
+    kind_order = {kind['id']: index for index, kind in enumerate(MODEL_KINDS)}
+    result.sort(key=lambda m: (kind_order[model_kind(m['capabilities'])], m['model_id']))
 
-    n_text = sum(1 for m in result if 'text' in m['capabilities'])
     n_cheap = sum(1 for m in result if 'cheap' in m['capabilities'])
-    n_img = sum(1 for m in result if 'image_gen' in m['capabilities'])
-    n_emb = sum(1 for m in result if 'embedding' in m['capabilities'])
+    per_kind = {}
+    for m in result:
+        kind = model_kind(m['capabilities'])
+        per_kind[kind] = per_kind.get(kind, 0) + 1
     result_log = logger.debug if quiet_not_found else logger.info
-    result_log('[Discovery] %d usable models: %d text (%d cheap), '
-               '%d image_gen, %d embedding',
-               len(result), n_text, n_cheap, n_img, n_emb)
+    result_log('[Discovery] %d usable models (%d cheap) by kind: %s',
+               len(result), n_cheap,
+               ', '.join(f'{kind}={count}' for kind, count in sorted(
+                   per_kind.items(), key=lambda item: kind_order[item[0]])))
     return _ret(result, effective_base)
 
 

@@ -262,6 +262,7 @@ long authority/lock paths and read-only refresh preserving drafts/open folds.
 - Daemon and embedded launchers share `lib/storage_authority_sql/projection_paths.py`. `TOFUDB_SEARCH_PROJECTION_DIR` overrides persisted `tofudb_search_projection_dir`; custom bases receive an authority-path namespace, preventing shared-disk collisions. No authority bytes are moved or deleted.
 - Preferences are durable: hold the shared thread/advisory-process JSON lock across strict reread, field-preserving merge, private same-directory temporary write, flush → file fsync → replace → parent-directory fsync; create missing directories privately and sync parent entries. Pre-replacement failures preserve old bytes/absence. Post-replacement fsync failure raises but leaves new bytes visible; never roll back an uncertain commit or change the live index. Reread/retry reconciles it. Problem: shared `update_json_atomic(strict=True)` enforces parsing, not fsync success. Decision: reuse its locks with this local durability boundary, rather than weaken guarantees or alter all callers. Advisory coordination requires filesystem locking support.
 - Dual-path backup mirrors the authority-owned `system.backup` artifact and manifest, pruning only previously copied files. Disposable-index candidates may be ephemeral; backup candidates must exclude known ephemeral storage.
+- The daily backup thread (`lib/database_panel/maintenance.py`) is a scheduled-jobs owner of the registered background services: the serving lifespan starts it after storage and joins it on shutdown. Application assembly only registers the activity clock, so importing or embedding the app starts no thread.
 **Decision: separate authority acceleration from index placement.** Problem: generic static switches appeared before status, then disappeared for TofuDB while the same picker became an index picker; native Fast Path existed but lacked a panel entry. Keep independent optional Fast Path, required search index and verified backup sections with explicit configured/active/pending witnesses. Reject equating search with Fast Path, claiming an absent runtime witness is active, and silently disabling a fenced native authority. Search candidates may be ephemeral because the index is reconstructible; authority/front and backup candidates may not.
 
 ## Owners and entry points
@@ -382,6 +383,10 @@ backend is separate from proving complete source migration and safe cutover.
   value is always the numeric owner, never an account subject).
 - Routes contain no SQL and do not derive storage paths.
 - Static startup scanning rejects drivers, DB helpers, SQL, DB-shaped handles and argument-bearing connection factories. Problem: generic no-argument HTTP/domain `connect()` methods falsely blocked boot. Decision: treat them as domain verbs and invalidate old caches, retaining evidence-based fences instead of a file exemption. This lexical guard cannot prove arbitrary dynamically aliased database ownership.
+- Reconstructible landing-test records use the private `lib/storage_authority_sql/impact_cache.py`
+  cache owner. Project verification passes records/fingerprints and receives `ImpactCacheError`,
+  never a connection or driver exception. This cache uses only the explicitly supplied
+  repository cache file; it never opens or selects an application authority.
 - Application services speak domain vocabulary; operation handlers translate
   that vocabulary into backend-neutral SQL authored inside the Sidecar.
 - SQLite and PostgreSQL expose the same operation/result/error behavior.
@@ -1069,6 +1074,13 @@ pending sync event. Payloads carry durable conversation/Turn/Attempt references
 and an explicit `PrincipalContext`, never projections or request-local provider
 handles. Lost acknowledgements resolve the same job; legacy `@dispatching` or
 another executor binding fails closed instead of creating a second authority.
+This is the ordinary conversation command service's admission path, including
+queue activation and recovered acceptance. A transport error after COMMIT does
+not trigger local execution or an unfenced startup-failure write. Stop winning
+before binding creates no job. After binding, the worker's current claim owns
+execution and settlement. A failure before durable entry settles the Turn
+without inventing an invocation or accounting receipt; an entered preparer's
+known cause survives alongside any unknown external outcome.
 
 Actual worker entry can additionally carry `worker_process` from the common
 process-owner capture. The first `turn.attempt.start` atomically stores the
@@ -1161,8 +1173,8 @@ Problem: API startup previously treated another process's live task as an
 orphan. Decision: recovery follows durable execution ownership. Alternative
 rejected: excluding only currently live leases would misclassify unknown
 effects after a lease expires. Ordinary legacy recovery remains enabled.
-Conversation registration now joins the shared application worker composition;
-ordinary admission and whole-system qualification remain tracked by the
+Conversation registration and ordinary admission use the shared application
+worker composition; whole-system qualification remains tracked by the
 [architecture migration](ARCHITECTURE.md).
 
 **Problem:** process-local commit callbacks strand an idle execution process when a
@@ -1195,6 +1207,35 @@ Queue changes wake the coordinator only; cancellation wakes matching monitors,
 which re-read authority rather than treating a notification as permission. No
 worker ceiling, new timing knob, notification journal or second task registry is
 introduced. The idle service now receives commits from independent producers.
+
+**Problem:** a separate execution process cannot wake API-held conversation
+streams through a process-local callback. Periodic replay finds the data but
+adds delay and redundant reads for every observer.
+**Decision:** [conversation transport control](../contracts/conversation_control_v1.json)
+publishes scoped invalidations from the same committed sync changes. One
+`conversation_sync/delivery_runtime.py` watch belongs to each request-service
+lifecycle. Worker and conversation channels share the generation/wait and
+client cancellation mechanisms; their independent cursors prevent queue traffic
+from waking browsers. Waiter-local sets coalesce scopes; a response gap or epoch
+change invalidates all current subscriptions. The broker then wakes existing
+streams, whose principal-scoped replay remains the sole content authority.
+The existing heartbeat bounds the transport wait; unchanged cursors perform no
+semantic read. Shutdown joins the exact watch before closing storage. No new
+deadline, retry setting, durable row or notification log is introduced.
+**Alternatives rejected:** publishing after the writer receives an RPC response
+loses notification on acknowledgement loss; one watch per conversation multiplies
+connections; another durable notification journal duplicates the replay log.
+Embedded TofuDB uses the same authority condition through an owned native wait
+token. Cancellation can precede enrollment, targets only that token, and joins
+before the token is freed. Runtime close cancels its active tokens before
+waiting for borrowed FFI calls; no socket or polling adapter is added. API
+heartbeats keep the last delivered cursor without querying an unchanged log.
+A 10,000-distinct-scope publication measurement without waiters retained 64
+Python bytes (1,229-byte peak), zero waiter entries and zero durable rows;
+retention is independent of historical notification count. Waiter-local scope
+sets are released when each wait returns.
+SQLite/PostgreSQL COMMIT-fault tests, native generation tests and independent
+producer/client tests cover gaps, scope coalescing, rollback and cancellation.
 
 [Worker lifecycle](../contracts/worker_job_lifecycle_v1.json) owns the states.
 Live-fenced `worker_job.defer` sets `suspended`, releases the lease and indexes
@@ -1696,6 +1737,30 @@ without its Turn binding, lets a stale executor resurrect the record. Specs:
 `tests/tasks_pkg/test_reused_task_result_takeover.py`, the differential script
 `task_results reused identity admits only the current bound attempt` and
 `task_result_reused_identity_admits_only_the_current_bound_attempt`.
+
+Restart-settlement scope — **Problem:** personal composition pairs an API host with
+a resident execution host, and both run executors: the API host starts
+HTTP-initiated turns and the continuations its task-maintenance tick births from
+background-command receipts. On the 2026-11-06 restart the API host resumed two
+Worker turns at 11:04:22 while the execution host was still in boot recovery. The
+execution host's post-serving backstop judged liveness by its own gate time
+(11:05:58) and its own task registry, settled both live Attempts `interrupted` at
+11:06:43, and their executors aborted on the rejected events. **Decision:** boot
+recovery and the backstop share one scope: only Attempts created before this
+process began booting (`server._BOOT_T0`, injected into `_init_database`) can be a
+previous generation's leftovers. The manager starts the execution host before the
+API host it pairs with, so every later Attempt is live in some process of the
+current generation. `recover_stale_tasks_on_startup(created_before_ms=...)` records
+the scope before its first storage read; the backstop re-runs exactly that scope,
+still excluding its own registered tasks, and settles nothing in a process that
+began no restart settlement. **Alternatives rejected:** keeping the gate cutoff
+with the local registry cannot see another process's executors, and no
+cross-process liveness channel exists; the OS process start time survives an
+in-place re-exec, which keeps the PID, so it would hide the previous generation's
+Attempts. Durable executor-owner evidence on every Attempt remains the complete
+answer for an execution host replaced while its API host keeps running; it is a
+storage-contract change. Specs: `tests/serving_loop_lifecycle/test_restart_settlement_scope.py`,
+`tests/server/test_server_startup_recovery.py`.
 
 Native Project Brain recovery — **Problem:** the 2026-10-20 startup spent 29.078 s
 paging project recovery snapshots; checking active work materialized large terminal

@@ -615,6 +615,35 @@ reach it; the guarded statement is kept to one operation. Broad `except
 Exception` with a silent pass is a defect. Prefer the narrowest exception
 class, and re-raise when the caught value is not the named one.
 
+## Descriptor waits have no select() ceiling
+
+Problem: `select.select()` rejects descriptor numbers at or above FD_SETSIZE
+(1024). Long-lived processes reach them: on 2026-11-07 the execution host
+numbered new descriptors up to 4009 (a command's stderr pipe was fd 1817),
+because large workspace-lease sets hold one lock descriptor per leased key
+(3,919 at once in a host 36 minutes after start). `lib.compat.safe_select_pipes`
+swallowed the `ValueError` and returned no ready pipe at once, so both
+`run_command` loops spun on `proc.poll()` and never drained output while the
+command ran: a waiting command burned a full core (a 2 s `sleep` took 2.0-2.2 s
+of CPU) and contended with every agent thread for the GIL, and a command that
+filled a 64 KiB pipe blocked until its deadline. A running command that closes
+its own stdio made the same loops spin on end-of-file (2.0-2.3 s of CPU per
+2 s).
+
+Decision: waits on descriptors in long-lived processes use `select.poll()` or
+`selectors`, never `select.select()`. `safe_select_pipes` polls, skips closed
+streams and, when nothing is left to wait on, still waits its timeout, so a
+waiting loop cannot become a busy loop; the `run_command` loops stop waiting on
+a pipe once a read returns end-of-file. Alternatives rejected: raising the
+descriptor limit (the ceiling is FD_SETSIZE, not RLIMIT_NOFILE); keeping
+descriptor numbers low (any long-lived process with transient bursts
+numbers new descriptors past it); a sleep on the error path alone (the
+output would still never drain). Verify
+`tests/tasks_pkg/test_run_command_descriptor_ceiling.py`, the
+`TestPipeWaitAboveSelectCeiling` specs and
+`tests/meta/test_descriptor_wait_ceiling.py`, which rejects new
+`select.select()` calls in long-lived packages.
+
 ## Closed unions end in assert-never
 
 When switching on a discriminant tag of a closed union (event `type`, result

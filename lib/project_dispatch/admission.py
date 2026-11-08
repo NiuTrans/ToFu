@@ -102,6 +102,37 @@ def repository_for(binding):
     return ProjectDispatchRepository(binding['owner'], binding['projectPath'])
 
 
+def wait_for_dispatch(task, operation, *, label, cancellable=True, effect_free=False):
+    """``wait_for_persistence`` that re-runs one dispatch read or ledger write through contention.
+
+    A lost head CAS or a torn snapshot proves only that another writer
+    committed: the operation reads and validates the live grant again and
+    proceeds, or meets a real verdict. It is bounded by the persistence-wait
+    liveness contract (ACK, owner Stop, server shutdown), never by a count or
+    timeout of its own; its existing backoff lets a burst of writers drain.
+    """
+    from lib.tasks_pkg.persistence_wait import wait_for_persistence
+    from .repository import transient_dispatch_failure
+    return wait_for_persistence(task, operation, label=label, cancellable=cancellable,
+                                effect_free=effect_free, transient=transient_dispatch_failure)
+
+
+def reread_on_contention(task, operation, *, label, cancellable=True, effect_free=False):
+    """Run ``operation`` once; only a transient dispatch failure re-runs it in ``wait_for_dispatch``.
+
+    For call sites without a persistence fence of their own: an uncontended call
+    keeps its existing Stop handling, and only a lost CAS, a torn snapshot or a
+    transient storage failure enters the wait.
+    """
+    from .repository import transient_dispatch_failure
+    try:
+        return operation()
+    except Exception as error:
+        if not transient_dispatch_failure(error):
+            raise
+    return wait_for_dispatch(task, operation, label=label, cancellable=cancellable, effect_free=effect_free)
+
+
 def principal_for(binding):
     return PrincipalContext.system(subject_id='project-dispatch:' + binding['assignmentId'],
         owner_user_id=binding['owner'], tenant_id=binding['tenant'], scopes={'chat'})
@@ -145,21 +176,23 @@ def owned_workspace(task, binding=None):
     if not isinstance(binding, dict):
         raise ToolAdmissionRefused('File execution has no accepted project binding')
     from lib.integration_state_repository import find_workspace
-    from lib.tasks_pkg.workspace_delivery import execution_repositories
+    from lib.tasks_pkg.workspace_delivery import execution_repositories, workspace_work_id
     # The grant keeps the conversation's project key. Integration registers the
     # physical root; compare it with the captured binding so retargeted aliases
-    # cannot adopt another checkout.
+    # cannot adopt another checkout. The checkout is keyed by the assignment's
+    # work id that bind_account stamped from the validated association.
     project_root = str(Path(binding['projectPath']).expanduser().resolve())
+    work_id = workspace_work_id(task)
     with timing_phase('dispatch_authority'):
-        row = find_workspace(project_root, str(task.get('id') or ''), user_id=binding['owner'])
+        row = find_workspace(project_root, work_id, user_id=binding['owner'])
     cfg = task.get('config') or {}
     if (not isinstance(row, dict) or row.get('user_id') != binding['owner']
-            or row.get('task_id') != task.get('id') or row.get('project_root') != project_root
+            or row.get('task_id') != work_id or row.get('project_root') != project_root
             or row.get('state') == 'discarded' or row.get('workspace_path') != cfg.get('projectPath')
             or row.get('workspace_path') == project_root
             or not any(item.get('canonicalRoot') == project_root
                        and item.get('workspacePath') == row.get('workspace_path')
-                       and item.get('workId') == task.get('id')
+                       and item.get('workId') == work_id
                        for item in execution_repositories(task))):
         raise ToolAdmissionRefused('File execution requires its registered owned isolated worktree')
     return row
@@ -183,6 +216,7 @@ def require_isolated_worker_root(project_path):
     refusal = isolated_workspace_refusal(project_path)
     if refusal is not None:
         raise WorkerWorkspaceUnavailable(refusal.message())
+
 
 
 # Model-view selections of the human request a Coordinator continuation resumes.
@@ -302,6 +336,21 @@ class TrustedDispatch:
         return 'project-worker:' + self.binding['assignmentId']
 
 
+def continue_recovered_execution(config, turn_id, attempt_id):
+    """Bind or advance the association for an attempt started by recovery.
+
+    Accepted-attempt recovery can claim an attempt whose delegation committed it
+    but has not yet bound it. Under that exclusive claim this performs the same
+    idempotent bind/exact continuation from the accepted config's server-captured
+    carrier, so binding still precedes executor birth. Other configs are untouched.
+    """
+    if KEY not in config:
+        return None
+    if not isinstance(config[KEY], dict):
+        raise PermissionError('Malformed project dispatch authorization')
+    return TrustedDispatch(config[KEY]).continue_execution(turn_id, attempt_id)
+
+
 def restore_dispatch_identity(config, *, task=None):
     principal, attended, _ = _restored_identity(config, task=task)
     return principal, attended
@@ -375,10 +424,9 @@ def validated_dispatch(task, *, require_account=True):
     """
     if not is_dispatch_task(task):
         return None
-    from lib.tasks_pkg.persistence_wait import wait_for_persistence
     try:
         with timing_phase('dispatch_authority'):
-            return wait_for_persistence(task,
+            return wait_for_dispatch(task,
                 lambda: _validated_binding(task, require_account=require_account),
                 label='project dispatch authority', effect_free=True)
     except AbortedError as error:
@@ -438,10 +486,16 @@ def bind_account(task):
     budget = _ensure_execution_budget(task)
 
     from .accounting import holder_consumption
-    from lib.tasks_pkg.persistence_wait import wait_for_persistence
-    assigned = wait_for_persistence(task,
+    assigned = wait_for_dispatch(task,
         lambda: repository_for(binding).read(binding['assignmentId']),
         label='project dispatch account', effect_free=True)
+    # The checkout and the occurrence ledger belong to the assignment. Each
+    # physical attempt is its own durable-worker task, so every attempt borrows
+    # the association's work id: it keys the checkout registration and is the
+    # ledger's root, and a resumed attempt continues both.
+    from lib.tasks_pkg.workspace_delivery import WORKSPACE_WORK_ID_KEY
+    work_id = repository_for(binding).workspace_task_id(assigned)
+    task[WORKSPACE_WORK_ID_KEY] = work_id
 
     resume = (task.get('config') or {}).get('_resumeSource') or {}
     account_nonce = next((row['account_nonce'] for row in assigned.get('modelAttempts', [])
@@ -472,11 +526,11 @@ def bind_account(task):
         validate_task(task)
         def record(row):
             counter = row['toolReservations']
-            if (counter['rootTaskId'] != event['root_task_id'] or counter['accountNonce'] != account_nonce
+            if (counter['rootTaskId'] != work_id or counter['accountNonce'] != account_nonce
                     or event['reservation_ordinal'] not in (counter['count'], counter['count'] + 1)):
                 raise AbortedError('Worker tool reservation differs from its physical occurrence')
             counter['count'] = event['reservation_ordinal']
-        wait_for_persistence(task,
+        wait_for_dispatch(task,
             lambda: repository_for(binding).mutate(binding['assignmentId'], record),
             label='project dispatch tool reservation')
         validate_task(task)
@@ -484,19 +538,19 @@ def bind_account(task):
     reservations = 0
     if shared_id:
         def register_counter(row):
-            counter = {'rootTaskId': task['id'], 'accountNonce': account_nonce, 'count': 0}
+            counter = {'rootTaskId': work_id, 'accountNonce': account_nonce, 'count': 0}
             stored = row.get('toolReservations')
             if stored is None:
                 row['toolReservations'] = counter
             elif stored != counter and not (restarted and {**stored, 'count': 0} == counter):
                 raise AbortedError('Worker tool reservations cannot be replenished')
-        registered = wait_for_persistence(task,
+        registered = wait_for_dispatch(task,
             lambda: repository_for(binding).mutate(binding['assignmentId'], register_counter),
             label='project dispatch reservation account')
         reservations = registered['toolReservations']['count']
     def observe(event):
 
-        event = {**event, 'account_nonce': account_nonce}
+        event = {**event, 'root_task_id': work_id, 'account_nonce': account_nonce}
         repository = repository_for(binding)
         if event['phase'] == 'dispatch_intent':
             validate_task(task)
@@ -523,7 +577,7 @@ def bind_account(task):
                 fold_settled_models(assignment)
             return assignment
         try:
-            wait_for_persistence(task,
+            wait_for_dispatch(task,
                 lambda: repository.mutate(binding['assignmentId'], record),
                 label='project dispatch model occurrence',
                 cancellable=event['phase'] == 'dispatch_intent')
@@ -545,9 +599,9 @@ def bind_account(task):
     def observe_tool(event):
         if event['phase'] == 'intent':
             validate_task(task)
-        selected = {key: event[key] for key in ('root_task_id', 'tool_ordinal', 'task_id',
+        selected = {key: event[key] for key in ('tool_ordinal', 'task_id',
                     'tool_call_id', 'tool_name', 'phase')}
-        selected['account_nonce'] = account_nonce
+        selected.update(root_task_id=work_id, account_nonce=account_nonce)
         def record(row):
             from .accounting import fold_settled_tools, folded_tool_event
             from .scope import granted_tools
@@ -565,13 +619,23 @@ def bind_account(task):
                     raise AbortedError('Tool occurrence is already terminal')
                 old.update(deepcopy(selected))
             elif selected['phase'] == 'intent':
-                if (selected['tool_name'] not in granted_tools(profile)
-                        or profile.get('maxToolCalls') is not None and len(attempts) >= profile['maxToolCalls']
-                        or any(item['root_task_id'] != selected['root_task_id']
-                               or item['phase'] == 'intent' and not (
-                                   profile['mode'] in ('project', 'coordinator') and item['account_nonce'] == account_nonce
-                                   and item['tool_ordinal'] in active_tools) for item in attempts)):
-                    raise AbortedError('Tool authority exhausted or prior effect remains unconfirmed')
+                # Distinct refusals: a Coordinator must not read an unconfirmed
+                # effect as a call budget (none exists unless maxToolCalls is set).
+                if selected['tool_name'] not in granted_tools(profile):
+                    raise AbortedError(f"Tool {selected['tool_name']!r} is not in this Worker's grant")
+                if profile.get('maxToolCalls') is not None and len(attempts) >= profile['maxToolCalls']:
+                    raise AbortedError(f"Tool call limit reached: maxToolCalls={profile['maxToolCalls']}")
+                blocking = next((item for item in attempts if item['root_task_id'] != selected['root_task_id']
+                                 or item['phase'] == 'intent' and not (
+                                     profile['mode'] in ('project', 'coordinator')
+                                     and item['account_nonce'] == account_nonce
+                                     and item['tool_ordinal'] in active_tools)), None)
+                if blocking is not None:
+                    raise AbortedError(
+                        'Prior tool effect remains unconfirmed (not a call budget): %s #%d %s phase=%s; '
+                        'its completion was never durably recorded, so further effects are refused'
+                        % (blocking['tool_name'], blocking['tool_ordinal'], blocking['tool_call_id'],
+                           blocking['phase']))
                 attempts.append(deepcopy(selected))
             elif selected['phase'] != 'not_entered':
                 raise AbortedError('Cannot settle an unrecorded tool occurrence')
@@ -580,7 +644,7 @@ def bind_account(task):
                 fold_settled_tools(row, CONTRACT['terminalToolPhases'])
             return row
         try:
-            wait_for_persistence(task,
+            wait_for_dispatch(task,
                 lambda: repository_for(binding).mutate(binding['assignmentId'], record),
                 label='project dispatch tool occurrence',
                 cancellable=event['phase'] == 'intent')

@@ -259,6 +259,15 @@ impl TurnSearchProjection {
     pub(crate) fn available(&self) -> bool {
         self.opened.is_some()
     }
+    /// The opened index's block store, whose published catalog location
+    /// table the maintenance worker keeps current; `None` while opening.
+    pub(crate) fn block_store_shared(&self) -> Option<Arc<crate::block::BlockStore>> {
+        self.opened.as_ref().map(|opened| opened.database.block_store_shared())
+    }
+    #[cfg(test)]
+    pub(crate) fn database_mut_for_test(&mut self) -> &mut AuthorityDatabase {
+        &mut self.opened.as_mut().expect("search index is open").database
+    }
     fn opened(&self) -> io::Result<&OpenTurnSearchProjection> {
         self.opened.as_ref().ok_or_else(|| {
             io::Error::new(

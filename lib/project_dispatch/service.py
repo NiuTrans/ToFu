@@ -16,9 +16,12 @@ import time
 from copy import deepcopy
 
 from lib.identity import PrincipalContext
+from lib.log import get_logger
 from lib.turn_initiation import INITIATOR_BRAIN, stamp_initiator
 from .admission import TrustedDispatch
 from .repository import CONTRACT
+
+logger = get_logger(__name__)
 
 # The list projection of a request: exact lookups keep every request field.
 HISTORY_REQUEST_FIELDS = tuple(CONTRACT['$defs']['historyRequest']['properties'])
@@ -67,7 +70,7 @@ def _preview_version(turn):
 class ProjectDispatchService:
     def __init__(self, repository, *, commands=None, turn_get=None, attempt_get=None,
                  workspace_get=None, publication_lock=None, publication_wake=None,
-                 history_previews=None):
+                 history_previews=None, publication_release=None):
         self.repository = repository
         if commands is None:
             from lib.conversation_sync.runtime import conversation_turn_commands
@@ -84,6 +87,7 @@ class ProjectDispatchService:
             self.repository.workspace_get = workspace_get
         self.publication_lock = publication_lock
         self.publication_wake = publication_wake
+        self.publication_release = publication_release
         self.history_previews = HistoryPreviews() if history_previews is None else history_previews
 
     def _publication_lock(self):
@@ -276,14 +280,31 @@ class ProjectDispatchService:
             self.view_for_coordinator(arguments['assignment_id'], scope=scope)
             assignment = review_worker(self.repository, task, arguments)
             if arguments.get('checkpoint_sha'):
-                attempt = self.repository.get_attempt(assignment['execution']['attemptId'])
-                self.repository.validate_publication(self.repository.admission(assignment['id']), attempt['taskId'])
+                work_id = self.repository.workspace_task_id(assignment)
+                self.repository.validate_publication(self.repository.admission(assignment['id']), work_id)
+                self._release_publication_hold(work_id)
                 wake = self.publication_wake
                 if wake is None:
                     from lib.integration_control import _start_or_wake_worker
                     wake = _start_or_wake_worker
                 wake()
         return self.view_for_coordinator(assignment['id'], scope=scope)
+
+    def _release_publication_hold(self, task_id):
+        """Retire the receipt's pre-pin hold under this publication lock.
+
+        Views and delivery waits then report the delivery in progress instead
+        of the earlier refusal. The receiver still delivers and rechecks every
+        fence; a failed release only leaves that to its next pass.
+        """
+        release = self.publication_release
+        if release is None:
+            from lib.integration_control import release_publication_hold as release
+        try:
+            release(self.repository.project, task_id, user_id=self.repository.owner)
+        except Exception:
+            logger.warning('[ProjectDispatch] publication hold release left to the receiver '
+                           'task=%s', task_id, exc_info=True)
 
     def _bound_turn(self, identity, owner, *, settlement_only, previews):
         """Return the bound Turn plus the exact remembered preview it still has.
@@ -477,7 +498,9 @@ class ProjectDispatchService:
                 expected_revision=expected_revision, result_revision=result_revision,
                 expected_checkpoint_sha=expected_checkpoint_sha)
             binding = self.repository.admission(assignment_id)
-            self.repository.validate_publication(binding, execution['taskId'])
+            # The delivery names the checkout's work id; the executor ran as its own task.
+            self.repository.validate_publication(binding, view['delivery']['taskId'])
+            self._release_publication_hold(view['delivery']['taskId'])
             wake = self.publication_wake
             if wake is None:
                 from lib.integration_control import _start_or_wake_worker

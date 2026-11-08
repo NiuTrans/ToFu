@@ -100,6 +100,10 @@
       "legacyTokenSha256": "de83a52c80d4f9f28ede8fb7792b3199bec17f79f359f3d23874a1229a77d972"
     },
     {
+      "path": "02-image-toolbar-model-options.css",
+      "responsibility": "image toolbar options the selected Model does not support"
+    },
+    {
       "path": "02-image-results.css",
       "responsibility": "image results",
       "legacyTokenSha256": "23d87e9f975e213b3c6c50a649fa95c9aae401b4e09a41fad1ed7a624c576051"

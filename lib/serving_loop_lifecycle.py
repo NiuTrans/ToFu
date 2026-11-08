@@ -100,8 +100,7 @@ def _recover_dispatchable_attempts(created_before_ms: int) -> dict[str, int]:
     )
 
 
-def _turn_recovery_backstop_body(
-        stop_event: Any, gate_open_ms: int, log: logging.Logger) -> None:
+def _turn_recovery_backstop_body(stop_event: Any, log: logging.Logger) -> None:
     """Post-serving safety net for restart settlement (2026-08-19 incident).
 
     Boot recovery (_init_database) is the ONLY other place orphaned
@@ -111,7 +110,10 @@ def _turn_recovery_backstop_body(
     "回答中" plus a topbar badge stuck on "重连中". Re-run the settlement
     once, shortly after serving starts, with HARD liveness guards so a
     genuinely-live attempt can never be swept:
-      • created_before_ms — only attempts older than the serving gate;
+      • created_before_ms — exactly boot recovery's restart-settlement scope.
+        Every later attempt belongs to the current generation, and this
+        process cannot see executors another role's process runs (the
+        personal API host resumes and starts turns of its own);
       • exclude_task_ids — skip attempts whose task is in the live registry.
     Idempotent: when boot recovery already did its job this finds nothing.
     """
@@ -119,11 +121,15 @@ def _turn_recovery_backstop_body(
         if stop_event.is_set():
             return
         _time.sleep(1)
+    from lib.tasks_pkg.manager import restart_settlement_scope_ms
+    created_before_ms = restart_settlement_scope_ms()
+    if created_before_ms is None:
+        return
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
     live_task_ids = set(chat_task_runtime.task_ids())
     from lib.turn_lifecycle import recover_running_attempts
     settled = recover_running_attempts(
-        created_before_ms=gate_open_ms, exclude_task_ids=live_task_ids)
+        created_before_ms=created_before_ms, exclude_task_ids=live_task_ids)
     if settled:
         log.warning(
             '[Server] post-serving turn-recovery backstop settled %d '
@@ -264,13 +270,9 @@ def register_serving_loop_lifecycle(
             await gate.wait()
             if stop_event.is_set():
                 return
-            # Attempts created before the gate opened cannot belong to this
-            # process's serving era; combined with the live-registry exclusion
-            # inside the backstop body, a live turn can never be swept.
-            gate_open_ms = int(_time.time() * 1000)
             try:
                 await asyncio.to_thread(
-                    _turn_recovery_backstop_body, stop_event, gate_open_ms, log)
+                    _turn_recovery_backstop_body, stop_event, log)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

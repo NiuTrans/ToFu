@@ -64,8 +64,9 @@ def test_failed_input_is_not_dispatched_again(summary_env, monkeypatch, failure,
     assert len(calls) == 1
     assert messages == before
     assert task['aborted'] is False
-    assert task['_summaryAttemptBudget']['_summaryBudgetFailure'] == (
-        'summary_incomplete' if failure == 'unverified' else 'summary_dispatch_failed')
+    expected_reason = {'empty': 'summary_empty', 'scratchpad': 'summary_empty',
+                       'unverified': 'summary_incomplete', 'exception': 'summary_dispatch_failed'}
+    assert task['_summaryAttemptBudget']['_summaryBudgetFailure'] == expected_reason[failure]
     assert len(charged) == (0 if failure == 'exception' else 1)
     if failure != 'exception':
         assert 'model=observed-model provider=observed-provider' in caplog.text

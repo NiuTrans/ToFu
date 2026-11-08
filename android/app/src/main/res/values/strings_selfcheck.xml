@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Device self-check (selfcheck/SelfCheckActivity) -->
+    <string name="selfcheck_title">Device self-check</string>
+    <string name="selfcheck_intro">Measures this phone against the on-device kernel checks in docs/ANDROID_KERNELS.md (S1): proot execution at targetSdk 34, 16 KB pages, time to kernel Ready, and Android\'s child-process limits with a foreground and a background phase. Nothing leaves the phone unless you share the report.</string>
+    <string name="selfcheck_warning">The child-process test starts 36 processes per phase, above Android\'s system-wide cap of 32. Android may kill the surplus — including other apps\' background child processes while the test runs. Stop other apps\' servers first if that matters. Close any running local kernel before starting.</string>
+    <string name="selfcheck_duration_label">Minutes per phase (foreground, then background)</string>
+    <string name="selfcheck_run">Run self-check</string>
+    <string name="selfcheck_cancel">Cancel</string>
+    <string name="selfcheck_close">Close</string>
+    <string name="selfcheck_share">Share report</string>
+    <string name="selfcheck_share_subject">Tofu device self-check report</string>
+    <string name="selfcheck_report_clip_label">Device self-check report</string>
+    <string name="selfcheck_skip_background">Skip background phase</string>
+    <string name="selfcheck_background_instructions">Press Home now. The background phase runs under the foreground service; a notification tells you when it is done. Come back then, or tap Share report in that notification.</string>
+    <string name="selfcheck_summary_title">Summary</string>
+    <string name="selfcheck_no_report">No report yet. Run the self-check, or share a previous one if this process was restarted.</string>
+    <string name="selfcheck_running">Self-check is running…</string>
+    <string name="selfcheck_waiting_background">Waiting for you to press Home…</string>
+    <string name="selfcheck_finished">Device self-check finished</string>
+    <string name="selfcheck_finished_text">The report is ready to share.</string>
+    <string name="selfcheck_channel_name">Device self-check</string>
+    <string name="selfcheck_channel_description">Shown while the device self-check runs, including its background phase</string>
+    <string name="selfcheck_interrupted">The previous self-check ended with the app process. Its last report was kept, with Android\'s exit reasons.</string>
+</resources>

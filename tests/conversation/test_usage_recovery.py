@@ -1,7 +1,6 @@
 """Unknown usage authorizes only an explicitly confirmed, fresh bounded Turn.
 
-Exercise the real Sidecar and Turn/Attempt event fold. Only executor startup is
-replaced: recovery must not settle old usage, replay a checkpoint, bypass the
+Exercise the real Sidecar and Turn/Attempt event fold. Physical execution outcomes are controlled; durable admission stays real: recovery must not settle old usage, replay a checkpoint, bypass the
 owner/revision/lane fences, or launch twice after a lost acknowledgement.
 """
 
@@ -18,6 +17,8 @@ import time
 import uuid
 
 import pytest
+
+from tests.support.conversation_workers import worker_attempts as worker_attempts
 
 
 pytestmark = [pytest.mark.api, pytest.mark.auth_mode('open')]
@@ -236,23 +237,10 @@ def recovery_source(chat_sidecar, flask_client, monkeypatch):
 
 
 @pytest.fixture()
-def executor_starts(monkeypatch):
-    """Keep claim/bind persistence real, but never enter a model or worker."""
-    import lib.conversation_sync.task_start as task_start
-
-    starts = []
-
-    def start(conversation_id, config, **kwargs):
-        task_id = f'recovery-task-{uuid.uuid4().hex}'
-        starts.append({
-            'conversationId': conversation_id, 'config': deepcopy(config),
-            'taskId': task_id, 'executionClock': kwargs.get('execution_clock'),
-        })
-        kwargs['on_task_registered'](task_id)
-        return task_id, None
-
-    monkeypatch.setattr(task_start, 'start_conversation_attempt_executor', start)
-    return starts
+def worker_admissions(monkeypatch, worker_attempts):
+    """Observe real worker admission without entering a model or tool."""
+    from tests.support.conversation_workers import observe_admissions
+    return observe_admissions(monkeypatch)
 
 
 def _preview(flask_client, source):
@@ -276,10 +264,8 @@ def _assert_conflict(response, kind):
     assert response.get_json()['error']['kind'] == kind
 
 
-def _finish_success(source, accepted, task_id):
-    from lib.turn_lifecycle import mark_task_started, record_task_event
+def _finish_success(worker_attempts, source, accepted, task_id):
     attempt_id = accepted['attempt']['attemptId']
-    mark_task_started(attempt_id, task_id, user_id=source.owner_id)
     task = {
         'id': task_id, 'convId': source.conversation_id, '_userId': source.owner_id,
         '_turnId': accepted['turn']['turnId'], '_attemptId': attempt_id,
@@ -287,11 +273,11 @@ def _finish_success(source, accepted, task_id):
         'thinking': '', 'toolRounds': [], 'segments': [],
         'config': {'model': 'gpt-4o-mini'},
     }
-    assert record_task_event(task, {'type': 'done', 'finishReason': 'stop'})
+    assert worker_attempts.publish(task, {'type': 'done', 'finishReason': 'stop'})
 
 
 def test_get_is_read_only_and_proposes_a_finite_new_budget(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     source = recovery_source()
     before = deepcopy(source.snapshot())
@@ -310,7 +296,7 @@ def test_get_is_read_only_and_proposes_a_finite_new_budget(
     assert _preview(flask_client, source) == preview
     assert source.snapshot() == before
     assert source.attempt() == before_attempt
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 @pytest.mark.parametrize('source_options', [
@@ -319,7 +305,7 @@ def test_get_is_read_only_and_proposes_a_finite_new_budget(
     {'turn_status': 'interrupted', 'with_error': False},
 ], ids=['request-rejection', 'generic-failure', 'restart-without-error'])
 def test_any_settled_unconfirmed_usage_has_a_forward_recovery_not_a_doomed_resume(
-    flask_client, recovery_source, executor_starts, source_options,
+    flask_client, recovery_source, worker_admissions, source_options,
 ):
     source = recovery_source(**source_options)
     before = deepcopy(source.turn())
@@ -328,12 +314,12 @@ def test_any_settled_unconfirmed_usage_has_a_forward_recovery_not_a_doomed_resum
     response = flask_client.post(source.url, json=_confirmation(preview))
     assert response.status_code == 200, response.get_json()
     assert response.get_json()['attempt']['operation'] == 'generate'
-    assert len(executor_starts) == 1
+    assert len(worker_admissions) == 1
     assert source.turn() == before
 
 
 def test_proposed_budget_fits_saved_large_input_and_a_real_model_admission(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     from lib.agent_core.execution_budget import model_budget_admission
 
@@ -348,7 +334,7 @@ def test_proposed_budget_fits_saved_large_input_and_a_real_model_admission(
     assert preview['budget']['maxTokens'] > prompt_tokens + output_limit
     response = flask_client.post(source.url, json=_confirmation(preview))
     assert response.status_code == 200, response.get_json()
-    config = executor_starts[0]['config']
+    config = worker_admissions[0]['config']
     owner = {'id': 'fresh-recovery', 'config': config, 'usage': {}, 'toolRounds': []}
     lease = model_budget_admission(owner)(
         input_tokens=prompt_tokens, max_output_tokens=output_limit)
@@ -359,7 +345,7 @@ def test_proposed_budget_fits_saved_large_input_and_a_real_model_admission(
 
 
 def test_large_saved_context_is_counted_locally_even_without_a_provider_receipt(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     from lib.token_counter import count_tokens
 
@@ -371,11 +357,11 @@ def test_large_saved_context_is_counted_locally_even_without_a_provider_receipt(
     preview = _preview(flask_client, source)
     assert preview['state'] == 'ready'
     assert preview['budget']['maxTokens'] > estimate + 2048
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 def test_a_saved_limit_too_small_for_one_request_is_blocked_before_authorization(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     source = recovery_source(config={
         'maxTokens': 2048, 'executionLimits': {'max_tokens': 1000},
@@ -388,14 +374,14 @@ def test_a_saved_limit_too_small_for_one_request_is_blocked_before_authorization
     assert (preview['state'], preview['reason']) == ('blocked', 'budget_insufficient')
     response = flask_client.post(source.url, json=_confirmation(preview))
     _assert_conflict(response, 'usage_recovery_blocked')
-    assert source.snapshot() == before and executor_starts == []
+    assert source.snapshot() == before and worker_admissions == []
 
 
 @pytest.mark.parametrize(('operation', 'content'), [
     ('continue', ''), ('checkpoint_resume', SAVED_OUTPUT),
 ])
 def test_unconfirmed_settlement_still_accepts_an_ordinary_resume(
-    flask_client, recovery_source, executor_starts, operation, content,
+    flask_client, recovery_source, worker_admissions, operation, content,
 ):
     """A missing receipt must not cost the reader their unfinished task.
 
@@ -415,12 +401,12 @@ def test_unconfirmed_settlement_still_accepts_an_ordinary_resume(
               'config': {'model': 'gpt-4o-mini'}})
     assert response.status_code == 200, response.get_json()
     assert response.get_json()['attempt']['operation'] == operation
-    assert len(executor_starts) == 1
-    assert executor_starts[0]['config']['_unknownUsagePolicy'] == 'continue'
+    assert len(worker_admissions) == 1
+    assert worker_admissions[0]['config']['_unknownUsagePolicy'] == 'continue'
 
 
 def test_recovery_carries_original_objective_as_task_text_not_old_automation_authority(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     objective = 'Complete the reviewed source change, validate it and preserve existing user edits.'
     source = recovery_source(config={'_goalObjective': objective})
@@ -428,13 +414,13 @@ def test_recovery_carries_original_objective_as_task_text_not_old_automation_aut
     assert response.status_code == 200, response.get_json()
     accepted = response.get_json()
     assert objective in accepted['submittedTurn']['projection']['content']
-    config = executor_starts[0]['config']
+    config = worker_admissions[0]['config']
     assert '_goalObjective' not in config and '_goalRunId' not in config
     assert config['autopilot'] is False
 
 
 def test_recovery_model_context_keeps_original_task_and_tool_results_not_rejected_ciphertext(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     from lib.turn_lifecycle import build_api_messages
 
@@ -451,7 +437,7 @@ def test_recovery_model_context_keeps_original_task_and_tool_results_not_rejecte
     response = flask_client.post(source.url, json=_confirmation(_preview(flask_client, source)))
     assert response.status_code == 200, response.get_json()
     target = response.get_json()['turn']['turnId']
-    config = deepcopy(executor_starts[0]['config'])
+    config = deepcopy(worker_admissions[0]['config'])
     messages = build_api_messages(source.conversation_id, target, config, user_id=1)
     assert messages is not None
     assert any(message.get('content') == 'Finish the existing task.' for message in messages)
@@ -463,7 +449,7 @@ def test_recovery_model_context_keeps_original_task_and_tool_results_not_rejecte
 
 
 def test_preview_does_not_increase_smaller_saved_limits(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     source = recovery_source(config={'executionLimits': {
         'max_tokens': 3210, 'max_tool_calls': 4, 'deadline': time.time() + 60,
@@ -473,12 +459,12 @@ def test_preview_does_not_increase_smaller_saved_limits(
     assert preview['budget']['maxTokens'] == 3210
     assert preview['budget']['maxToolCalls'] == 4
     assert 1 <= preview['budget']['durationSeconds'] <= 61
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 @pytest.mark.parametrize('confirmed', [None, False], ids=['missing', 'false'])
 def test_post_requires_explicit_confirmation(
-    flask_client, recovery_source, executor_starts, confirmed,
+    flask_client, recovery_source, worker_admissions, confirmed,
 ):
     source = recovery_source()
     body = _confirmation(_preview(flask_client, source))
@@ -490,12 +476,12 @@ def test_post_requires_explicit_confirmation(
     response = flask_client.post(source.url, json=body)
     assert response.status_code == 400, response.get_json()
     assert source.snapshot() == before
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 @pytest.mark.parametrize('field', ['maxTokens', 'maxToolCalls', 'durationSeconds'])
 def test_tampered_budget_is_rejected_without_creating_a_turn(
-    flask_client, recovery_source, executor_starts, field,
+    flask_client, recovery_source, worker_admissions, field,
 ):
     source = recovery_source()
     body = _confirmation(_preview(flask_client, source))
@@ -504,12 +490,12 @@ def test_tampered_budget_is_rejected_without_creating_a_turn(
     response = flask_client.post(source.url, json=body)
     _assert_conflict(response, 'usage_recovery_budget_changed')
     assert source.snapshot() == before
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 @pytest.mark.parametrize('field', ['maxTokens', 'maxToolCalls', 'durationSeconds'])
 def test_boolean_budget_is_not_an_integer_authorization(
-    flask_client, recovery_source, executor_starts, field,
+    flask_client, recovery_source, worker_admissions, field,
 ):
     source = recovery_source()
     body = _confirmation(_preview(flask_client, source))
@@ -518,11 +504,11 @@ def test_boolean_budget_is_not_an_integer_authorization(
     response = flask_client.post(source.url, json=body)
     assert response.status_code == 400, response.get_json()
     assert source.snapshot() == before
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 def test_post_does_not_accept_caller_config_or_checkpoint_authority(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     source = recovery_source()
     body = _confirmation(_preview(flask_client, source))
@@ -532,11 +518,11 @@ def test_post_does_not_accept_caller_config_or_checkpoint_authority(
     response = flask_client.post(source.url, json=body)
     assert response.status_code == 400, response.get_json()
     assert source.snapshot() == before
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 def test_confirmed_recovery_creates_fresh_bounded_turn_and_preserves_unknown_source(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     from lib.agent_core.execution_clock import ExecutionClock
     from lib.turn_lifecycle import get_attempt, get_turn
@@ -555,10 +541,14 @@ def test_confirmed_recovery_creates_fresh_bounded_turn_and_preserves_unknown_sou
     finished_at = time.time()
     assert response.status_code == 200, response.get_json()
     accepted = response.get_json()
-    assert len(executor_starts) == 1
-    start = executor_starts[0]
+    assert len(worker_admissions) == 1
+    start = worker_admissions[0]
     assert start['conversationId'] == source.conversation_id
-    assert isinstance(start['executionClock'], ExecutionClock)
+    frozen_attempt = source.client.query('turn.attempt.get', {
+        'attempt_id': accepted['attempt']['attemptId'], 'user_id': source.owner_id,
+        'include_execution_config': True})
+    watermark = frozen_attempt['config']['_dispatchRequestStartedAtMs']
+    assert int(started_at * 1000) <= watermark <= int(finished_at * 1000)
     new_turn = accepted['turn']
     new_attempt = accepted['attempt']
     assert new_turn['turnId'] != source.turn_id
@@ -615,7 +605,8 @@ def test_confirmed_recovery_creates_fresh_bounded_turn_and_preserves_unknown_sou
 
 
 def test_same_command_starts_once_and_a_different_command_cannot_reuse_old_tail(
-    flask_client, recovery_source, executor_starts,
+    worker_attempts,
+    flask_client, recovery_source, worker_admissions,
 ):
     source = recovery_source()
     body = _confirmation(_preview(flask_client, source))
@@ -628,11 +619,11 @@ def test_same_command_starts_once_and_a_different_command_cannot_reuse_old_tail(
     assert replay.get_json()['idempotentReplay'] is True
     assert replay.get_json()['attempt']['attemptId'] == accepted['attempt']['attemptId']
     assert replay.get_json()['turn']['turnId'] == accepted['turn']['turnId']
-    assert len(executor_starts) == 1
+    assert len(worker_admissions) == 1
     assert source.snapshot() == before_replay
 
     # Settle the successor so rejection proves stale-tail CAS, not just busy.
-    _finish_success(source, accepted, executor_starts[0]['taskId'])
+    _finish_success(worker_attempts, source, accepted, worker_admissions[0]['taskId'])
     before_new_command = deepcopy(source.snapshot())
     different = {**body, 'commandId': f'different-{uuid.uuid4().hex}'}
     rejected = flask_client.post(source.url, json=different)
@@ -641,11 +632,11 @@ def test_same_command_starts_once_and_a_different_command_cannot_reuse_old_tail(
     settled_replay = flask_client.post(source.url, json=body)
     assert settled_replay.status_code == 200, settled_replay.get_json()
     assert settled_replay.get_json()['attempt']['attemptId'] == accepted['attempt']['attemptId']
-    assert len(executor_starts) == 1
+    assert len(worker_admissions) == 1
 
 
 def test_busy_lane_is_rejected_instead_of_queuing_another_recovery(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     from lib.turn_lifecycle import create_turn_pair
     source = recovery_source()
@@ -658,12 +649,12 @@ def test_busy_lane_is_rejected_instead_of_queuing_another_recovery(
     _assert_conflict(response, 'lane_busy')
     assert source.snapshot() == before
     assert source.snapshot()['queueItems'] == []
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 @pytest.mark.parametrize('method', ['get', 'post'])
 def test_foreign_owner_cannot_inspect_or_recover_a_turn(
-    flask_client, recovery_source, executor_starts, method,
+    flask_client, recovery_source, worker_admissions, method,
 ):
     source = recovery_source(owner_id=2)
     before = deepcopy(source.snapshot())
@@ -674,11 +665,11 @@ def test_foreign_owner_cannot_inspect_or_recover_a_turn(
         response = flask_client.post(source.url, json=_confirmation(source.owner_preview))
     assert response.status_code == 404, response.get_json()
     assert source.snapshot() == before
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 def test_revision_changed_after_preview_rejects_post_without_starting(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     from lib.turn_lifecycle import update_turn_projection
     source = recovery_source()
@@ -691,11 +682,11 @@ def test_revision_changed_after_preview_rejects_post_without_starting(
     response = flask_client.post(source.url, json=body)
     _assert_conflict(response, 'projection_conflict')
     assert source.snapshot() == before
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 def test_source_revision_cas_also_applies_after_recovery_has_been_prepared(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     """The storage acceptance fence, not only HTTP preflight, owns this race."""
     from lib.conversation_sync.runtime import conversation_turn_commands
@@ -719,7 +710,7 @@ def test_source_revision_cas_also_applies_after_recovery_has_been_prepared(
             trusted_usage_recovery_revision=plan.source['projectionRevision'])
     assert conflict.value.code == 'lane_advanced'
     assert source.snapshot() == before
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 def _unknown_effect(*, status='aborted'):
@@ -785,7 +776,7 @@ UNCONFIRMED_ROWS = [
 
 @pytest.mark.parametrize('tool_rounds', UNCONFIRMED_ROWS)
 def test_unconfirmed_tool_effect_or_background_work_blocks_recovery(
-    flask_client, recovery_source, executor_starts, tool_rounds,
+    flask_client, recovery_source, worker_admissions, tool_rounds,
 ):
     source = recovery_source(tool_rounds=tool_rounds)
     before = deepcopy(source.snapshot())
@@ -794,7 +785,7 @@ def test_unconfirmed_tool_effect_or_background_work_blocks_recovery(
     response = flask_client.post(source.url, json=_confirmation(preview))
     _assert_conflict(response, 'usage_recovery_blocked')
     assert source.snapshot() == before
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 @pytest.mark.parametrize('source_options', [
@@ -802,7 +793,7 @@ def test_unconfirmed_tool_effect_or_background_work_blocks_recovery(
     {'usage_complete': True, 'error_kind': 'generic'},
 ], ids=['complete-usage', 'different-failure-with-complete-usage'])
 def test_non_applicable_source_never_authorizes_new_work(
-    flask_client, recovery_source, executor_starts, source_options,
+    flask_client, recovery_source, worker_admissions, source_options,
 ):
     source = recovery_source(**source_options)
     before = deepcopy(source.snapshot())
@@ -811,7 +802,7 @@ def test_non_applicable_source_never_authorizes_new_work(
     response = flask_client.post(source.url, json=_confirmation(preview))
     _assert_conflict(response, 'usage_recovery_blocked')
     assert source.snapshot() == before
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 @pytest.mark.parametrize('tool_rounds', [
@@ -829,14 +820,14 @@ def test_non_applicable_source_never_authorizes_new_work(
                       'status': 'completed'}]}],
 ], ids=['read-only', 'proven-not-started', 'display-metadata', 'completed-program-child'])
 def test_safe_receipts_and_display_metadata_do_not_block_preview(
-    flask_client, recovery_source, executor_starts, tool_rounds,
+    flask_client, recovery_source, worker_admissions, tool_rounds,
 ):
     source = recovery_source(tool_rounds=tool_rounds)
     before = deepcopy(source.snapshot())
     preview = _preview(flask_client, source)
     assert (preview['state'], preview['reason']) == ('ready', 'ready')
     assert source.snapshot() == before
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 @pytest.mark.parametrize('config', [
@@ -844,7 +835,7 @@ def test_safe_receipts_and_display_metadata_do_not_block_preview(
     {'executionLimits': {'max_tokens': 0, 'max_tool_calls': 0}},
 ], ids=['missing-model', 'zero-token-cap'])
 def test_unavailable_source_configuration_cannot_authorize_work(
-    flask_client, recovery_source, executor_starts, config,
+    flask_client, recovery_source, worker_admissions, config,
 ):
     source = recovery_source(config=config)
     before = deepcopy(source.snapshot())
@@ -853,14 +844,14 @@ def test_unavailable_source_configuration_cannot_authorize_work(
     response = flask_client.post(source.url, json=_confirmation(preview))
     _assert_conflict(response, 'usage_recovery_blocked')
     assert source.snapshot() == before
-    assert executor_starts == []
+    assert worker_admissions == []
 
 
 @pytest.mark.parametrize('publication', [
     'unpublished', 'published', 'conflict', 'missing-stage', 'duplicate',
 ])
 def test_unknown_write_is_checked_against_real_file_publication_evidence(
-    flask_client, recovery_source, executor_starts, tmp_path, monkeypatch, publication,
+    flask_client, recovery_source, worker_admissions, tmp_path, monkeypatch, publication,
 ):
     from lib.project_mod import modifications
     from lib.project_mod.effect_reconciliation import inspect_prepared_write, reference_for
@@ -916,15 +907,15 @@ def test_unknown_write_is_checked_against_real_file_publication_evidence(
     assert (preview['state'], preview['reason']) == (
         ('ready', 'ready') if ready else ('blocked', 'operation_unconfirmed'))
     assert source.snapshot() == before_snapshot
-    assert executor_starts == []
+    assert worker_admissions == []
     response = flask_client.post(source.url, json=_confirmation(preview))
     if ready:
         assert response.status_code == 200, response.get_json()
-        assert len(executor_starts) == 1
+        assert len(worker_admissions) == 1
     else:
         _assert_conflict(response, 'usage_recovery_blocked')
         assert source.snapshot() == before_snapshot
-        assert executor_starts == []
+        assert worker_admissions == []
     assert source.turn() == before_source
     assert source.attempt() == before_attempt
     assert journal_bytes() == before_journal
@@ -942,7 +933,7 @@ def test_unknown_write_is_checked_against_real_file_publication_evidence(
     {'_unknownUsagePolicy': 'fence'},
 ], ids=['chat', 'goal-mode', 'goal-mode-setting', 'flow', 'forged-fence'])
 def test_every_conversation_resume_continues_without_a_receipt(
-    flask_client, recovery_source, executor_starts, mode,
+    flask_client, recovery_source, worker_admissions, mode,
 ):
     """Goal Mode and Flow resumes keep going on a missing receipt, like chat.
 
@@ -965,12 +956,12 @@ def test_every_conversation_resume_continues_without_a_receipt(
               'expectedProjectionRevision': source.turn()['projectionRevision'],
               'config': {'model': 'gpt-4o-mini', **mode}})
     assert response.status_code == 200, response.get_json()
-    assert len(executor_starts) == 1
-    assert executor_starts[0]['config']['_unknownUsagePolicy'] == 'continue'
+    assert len(worker_admissions) == 1
+    assert worker_admissions[0]['config']['_unknownUsagePolicy'] == 'continue'
 
 
 def test_a_new_goal_mode_turn_continues_without_a_receipt(
-    flask_client, recovery_source, executor_starts,
+    flask_client, recovery_source, worker_admissions,
 ):
     """A fresh Goal Mode run shares ordinary chat's unknown-usage policy."""
     source = recovery_source(error_kind='bad_request')
@@ -980,7 +971,7 @@ def test_a_new_goal_mode_turn_continues_without_a_receipt(
               'inputTurn': {'content': 'Keep hardening the storage layer.'},
               'config': {'model': 'gpt-4o-mini', 'autopilot': True}})
     assert response.status_code == 200, response.get_json()
-    assert len(executor_starts) == 1
-    config = executor_starts[0]['config']
+    assert len(worker_admissions) == 1
+    config = worker_admissions[0]['config']
     assert config['autopilot'] is True
     assert config['_unknownUsagePolicy'] == 'continue'

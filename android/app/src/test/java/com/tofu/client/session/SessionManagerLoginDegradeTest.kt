@@ -62,6 +62,7 @@ class SessionManagerLoginDegradeTest {
         override suspend fun setAuthType(id: Long, authType: AuthType): Int {
             current = current.copy(authType = authType); return 1
         }
+        override suspend fun pinSshHostKey(id: Long, host: String, port: Int, sha256: String): Int = 0
     }
 
     /**

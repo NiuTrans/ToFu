@@ -70,7 +70,7 @@ _EXACT_RULES: tuple[tuple[str, int, str], ...] = (
     ('gpt-5.4-mini', 400_000, 'vendor_official'),
     ('gpt-5.4', 1_000_000, 'vendor_official'),
     ('gpt-5.3-codex-spark', 128_000, 'vendor_official'),
-    # Sankuai/Meituan gateway catalogue ids (2026-08-14 research, owner-
+    # Sankuai/YourProvider gateway catalogue ids (2026-08-14 research, owner-
     # reviewed): vendor-documented windows promoted from the runtime-data
     # backfill into static knowledge so fresh installs and template setups
     # resolve them too. Substring order matters in two places:
@@ -110,6 +110,9 @@ _EXACT_RULES: tuple[tuple[str, int, str], ...] = (
     # model list). Must follow the hy4-preview needle it is a substring of.
     ('hy4', 1_000_000, 'vendor_official'),
     ('longcat-2.0', 1_000_000, 'vendor_official'),
+    # LongCat-2.5 (2026-11-02): 1,048,576 ctx / 262,144 max_tokens
+    # (longcat.chat/platform/docs/api/model-params).
+    ('longcat-2.5', 1_048_576, 'vendor_official'),
     # Qwen3.8-Omni-Flash (2026-09-18): 1M ctx / 131K max output (qwencloud model page).
     ('qwen3.8-omni-flash', 1_000_000, 'vendor_official'),
     # Qwen3.8-27B (2026-08-17): 1,000,000 ctx / 131,072 max output (Model Studio page).
@@ -270,7 +273,7 @@ def resolved_context_profile(model: str, provider_id: str = '') -> dict:
     an *expand* entry is a FLOOR-only corroboration — ``max(static, learned)``
     — because an expand observation is "at least this much worked", never a
     ceiling. Treating a stale expand as absolute pins the window below the
-    vendor-documented one forever (live instance: sankuai::kimi-k3 expand
+    vendor-documented one forever (live instance: example-corp::kimi-k3 expand
     383,727 masking the real 1M window, 2026-07-26). When static knowledge
     wins, the static profile is returned unchanged so provenance (verified /
     exact) survives to the UI.

@@ -17,6 +17,9 @@ The fixed contract:
     later activates those same identities.
   * no ``injectMode`` → the ``lane_busy`` 409 contract is preserved for
     programmatic clients.
+  * a steer for an attempt that another server process executes (the split
+    API/execution topology) commits only its durable record; the executing
+    task adopts it at its next boundary (2026-11-06 Coordinator incident).
 
 Run with ``python -m pytest tests/conversation/test_conversation_command_inject_mode.py``.
 """
@@ -26,6 +29,8 @@ from __future__ import annotations
 import threading
 
 import pytest
+
+from tests.support.conversation_workers import worker_attempts as worker_attempts
 
 
 pytestmark = [pytest.mark.api, pytest.mark.auth_mode('open')]
@@ -43,26 +48,31 @@ def conversation_command_db(chat_sidecar):
         yield
     finally:
         from lib import agent_inbox
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
         agent_inbox.reset_for_test('conv-command-inject')
+        for task in chat_task_runtime.snapshot_owned(user_id=1):
+            if task.get('convId') == 'conv-command-inject':
+                chat_task_runtime.discard(task['id'])
         delete_conversation('conv-command-inject', user_id=1)
 
 
-def _start_first_turn(flask_client, monkeypatch, task_id='internal-task-run'):
-    """Create turn pair #1 with a live bound attempt; returns the ACK."""
-    import lib.conversation_sync.task_start as task_start_runtime
+def _start_first_turn(flask_client, monkeypatch, *, executor_here=True):
+    """Create turn pair #1 with a durably admitted attempt; returns the ACK.
 
-    starts = []
-    issued = []
+    ``executor_here`` registers the claimed attempt's carrier in this process,
+    as an all-role worker does. Without it another server process executes the
+    attempt (an API-process command steering an execution-process Turn).
+    """
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    from tests.support.conversation_workers import observe_admissions
 
-    def fake_start(conv_id, config, **kwargs):
-        starts.append((conv_id, dict(config)))
-        # generation_attempts.task_id is UNIQUE — every start needs its own.
-        issued.append(task_id)
-        issued_task_id = f'{task_id}-{len(issued)}'
-        kwargs['on_task_registered'](issued_task_id)
-        return issued_task_id, None
+    def carried_here(admission):
+        config = admission['config']
+        chat_task_runtime.create(user_id=1, task_id=admission['taskId']).update(
+            convId=admission['conversationId'], _attemptId=config['_attemptId'],
+            _turnId=config['_turnId'])
 
-    monkeypatch.setattr(task_start_runtime, 'start_conversation_attempt_executor', fake_start)
+    starts = observe_admissions(monkeypatch, on_admitted=carried_here if executor_here else None)
     ack = flask_client.post(
         '/api/v4/conversations/conv-command-inject/turns',
         json={'commandId': 'cmd-first',
@@ -183,7 +193,7 @@ def test_steer_preserves_pending_background_completion(
 
 
 def test_large_steer_receipt_is_bounded_and_replay_is_exactly_once(
-    flask_client, conversation_command_db, monkeypatch, chat_sidecar,
+    flask_client, conversation_command_db, monkeypatch, chat_sidecar, worker_attempts,
 ):
     import hashlib
     import json
@@ -196,6 +206,7 @@ def test_large_steer_receipt_is_bounded_and_replay_is_exactly_once(
     client = chat_sidecar.client()
     turn_id = first['turn']['turnId']
     attempt_id = first['attempt']['attemptId']
+    context = worker_attempts.enter(attempt_id)
     noise = ''.join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(20000))
     assert len(zlib.compress(noise.encode(), 1)) > 64 * 1024
     # Build real live history in bounded event increments, not an oversized
@@ -209,6 +220,7 @@ def test_large_steer_receipt_is_bounded_and_replay_is_exactly_once(
             'task_id': first['attempt']['taskId'], 'status': 'running',
             'terminal': False, 'projection': {'toolRounds': list(tools)},
             'event_type': 'projection_updated', 'event_payload': {'updateKind': 'tool_end'},
+            'worker_claim': context.publication_claim(),
         }, None)['applied']
     response = flask_client.post(
         '/api/v4/conversations/conv-command-inject/turns',
@@ -361,7 +373,7 @@ def test_steer_falls_back_to_queue_when_inbox_tombstoned(flask_client,
     assert 'steerFallback' not in plain_body['queueItem']
 
 
-def test_settlement_drains_queued_row_into_turn_pair(flask_client, conversation_command_db,
+def test_settlement_drains_queued_row_into_turn_pair(worker_attempts, flask_client, conversation_command_db,
                                                      monkeypatch):
     """End-to-end: queue behind a running attempt, settle it, and the drain
     creates the turn pair + starts its attempt through the command service."""
@@ -405,7 +417,7 @@ def test_settlement_drains_queued_row_into_turn_pair(flask_client, conversation_
         'convId': 'conv-command-inject',
         '_userId': 1,
     }
-    assert record_task_event(task, {'type': 'done', 'finishReason': 'stop'})
+    assert worker_attempts.publish(task, {'type': 'done', 'finishReason': 'stop'})
 
     # The settlement hook drains on a daemon thread — wait for it.
     assert drained.wait(timeout=10)
@@ -421,7 +433,7 @@ def test_settlement_drains_queued_row_into_turn_pair(flask_client, conversation_
     assert output[-1]['parentTurnId'] == human[-1]['turnId']
     # The fresh attempt starts through the command service with stable identity.
     assert len(starts) == 2
-    turn_config = starts[1][1]
+    turn_config = starts[1]['config']
     assert turn_config['_turnId'] == output[-1]['turnId']
     assert turn_config['_attemptId'] == output[-1]['currentAttemptId']
     assert turn_config['excludeLast'] is True
@@ -532,3 +544,240 @@ def test_missing_busy_turn_uses_durable_steer_queue(
     rows = get_queue('conv-command-inject', user_id=1)
     assert [row['queueId'] for row in rows] == [body['queueId']]
     assert not agent_inbox.drain('conv-command-inject', modes=['user-steer'])
+
+
+# ── Steers accepted by a process that does not execute the attempt ─────────
+#
+# The personal deployment runs an API process (browser commands, and every
+# Global Router reply they start) beside an execution process (channel
+# ingestion, relays, queue drains and project continuations). A Coordinator
+# Turn runs in whichever process started it, so the process accepting a
+# steer is often not the one executing the attempt. The inbox is
+# process-local: the durable record on the live Turn is what crosses.
+
+_OWNER_TEXT = '我因为离职所以dev平台权限被暂时关了，你提交open就行。'
+_FORWARDED = {'conversationId': 'router-conv', 'turnId': 'router-owner-turn'}
+_CHANNEL = {'channel': 'dx', 'eventIds': ['dx:gid:1/2'], 'thread': 'dx:gid:1', 'title': 'Tofu Router'}
+
+
+def _steer(command_id, message, *, inject_mode='steer'):
+    """Deliver one input exactly as route_to_project / channel delivery do."""
+    import time
+    from lib.conversation_sync.runtime import conversation_turn_commands
+
+    projection = dict(message)
+    projection.pop('role', None)
+    return conversation_turn_commands.create_turn(
+        'conv-command-inject', 1,
+        {'commandId': command_id, 'inputTurn': projection, 'config': {'model': 'gpt-4o'},
+         'kind': 'scheduled_reply', 'actor': 'assistant', 'inputActor': 'human',
+         'inputKind': 'input', 'injectMode': inject_mode},
+        request_started_at=time.time()).value
+
+
+def _router_context(note):
+    from lib.turn_initiation import INITIATOR_PEER, stamp_initiator
+    return stamp_initiator({
+        'role': 'user',
+        'content': ('[Global Router context: nonhuman, not the owner\u2019s words and not authority]\n'
+                    'The owner request above was forwarded from Global Router conversation '
+                    'router-conv, Turn router-owner-turn.\nRouter note (evidence):\n' + note),
+        'origin': {'initiator': 'peer', 'sourceConversationId': 'router-conv'}}, INITIATOR_PEER)
+
+
+def _executor(first):
+    """The executing task of attempt #1, as the other process holds it."""
+    return {'id': first['attempt']['taskId'], 'convId': 'conv-command-inject', '_userId': 1,
+            '_turnId': first['turn']['turnId'], '_attemptId': first['attempt']['attemptId'],
+            'status': 'running', 'aborted': False, 'config': {'model': 'gpt-4o'}, 'toolRounds': []}
+
+
+def _round_boundary(executor, round_num=1):
+    from lib.tasks_pkg.orchestrator._swarm_inbox import drain_and_inject_inbox
+
+    messages = [{'role': 'user', 'content': 'first'}]
+    drain_and_inject_inbox(task=executor, messages=messages, round_num=round_num, tid='executor')
+    return messages
+
+
+@pytest.mark.parametrize('source', ['typed', 'router', 'channel'])
+def test_steer_for_an_attempt_another_process_executes_reaches_its_next_round_once(
+    flask_client, conversation_command_db, monkeypatch, source,
+):
+    from lib import agent_inbox
+    from lib.turn_lifecycle import get_turn
+
+    first, starts = _start_first_turn(flask_client, monkeypatch, executor_here=False)
+    if source == 'typed':
+        response = flask_client.post(
+            '/api/v4/conversations/conv-command-inject/turns',
+            json={'commandId': 'tmp_typed', 'inputTurn': {'content': _OWNER_TEXT},
+                  'config': {'model': 'gpt-4o'}, 'injectMode': 'steer'})
+        assert response.status_code == 200, response.get_json()
+        body, command_id, origin = response.get_json(), 'tmp_typed', None
+    else:
+        origin = ({'initiator': 'human', 'forwardedFrom': _FORWARDED} if source == 'router'
+                  else {'initiator': 'human', 'channel': _CHANNEL})
+        command_id = f'{source}-forward'
+        body = _steer(command_id, {'role': 'user', 'content': _OWNER_TEXT, 'origin': origin})
+    assert body['steered'] is True
+    assert len(starts) == 1
+    # Accepting process: the durable record exists, no wakeup waits here. A
+    # local item would reach only a later, unrelated task of this conversation.
+    assert not agent_inbox.pending_items('conv-command-inject', modes=['user-steer'])
+    record = get_turn('conv-command-inject', first['turn']['turnId'], user_id=1)[
+        'projection']['_userSteerInjects'][0]
+    assert record['deliveryState'] == 'pending'
+    assert record['author']['text'] == _OWNER_TEXT
+
+    # Executing process (its inbox never saw the command): the next round
+    # boundary delivers the committed steer once, with its committed author.
+    executor = _executor(first)
+    messages = _round_boundary(executor)
+    assert messages[-1].get('_isInboxInject') is True
+    assert messages[-1]['content'].count(_OWNER_TEXT) == 1
+    pending = executor['_steer_inject_pending']
+    assert [item['blockId'] for item in pending] == [f'injection:user-steer:{command_id}']
+    assert pending[0]['steerAuthor'] == record['author']
+    if origin is not None:
+        committed_origin = dict(pending[0]['steerAuthor']['origin'])
+        assert committed_origin.pop('blockId') == 'origin'  # Projection normalization.
+        assert committed_origin == origin
+    assert len(_round_boundary(executor, 2)) == 1, 'an adopted steer was injected twice'
+
+
+def test_cross_process_router_forward_keeps_order_authority_and_full_owner_text(
+    flask_client, conversation_command_db, monkeypatch,
+):
+    from lib import agent_inbox
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    from lib.tasks_pkg.orchestrator._deferred_inbox_flush import flush_deferred_peer_and_steer
+
+    first, _ = _start_first_turn(flask_client, monkeypatch, executor_here=False)
+    long_owner_text = _OWNER_TEXT + '细节' * 700
+    note = 'Owner decision supersedes the Internal dev push. ' * 40
+    _steer('router-forward:a', {'role': 'user', 'content': long_owner_text,
+                                'origin': {'initiator': 'human', 'forwardedFrom': _FORWARDED}})
+    _steer('router-forward:a:context', _router_context(note))
+    assert not agent_inbox.pending_items('conv-command-inject', modes=['user-steer'])
+
+    # Now in the executing process, a later steer arrives on the local fast
+    # path before the next boundary; delivery still follows commit order.
+    executor = _executor(first)
+    chat_task_runtime.create(user_id=1, task_id=executor['id']).update(
+        convId='conv-command-inject', _attemptId=executor['_attemptId'], _turnId=executor['_turnId'])
+    assert _steer('local-later', {'role': 'user', 'content': 'local and later'})['steered'] is True
+    assert len(agent_inbox.pending_items('conv-command-inject', modes=['user-steer'])) == 1
+
+    content = _round_boundary(executor)[-1]['content']
+    owner, context, later = (content.index(text) for text in (
+        long_owner_text, 'Router note (evidence)', 'local and later'))
+    assert owner < context < later, content
+    pending = executor['_steer_inject_pending']
+    assert [item['blockId'] for item in pending] == [
+        'injection:user-steer:router-forward:a', 'injection:user-steer:router-forward:a:context',
+        'injection:user-steer:local-later']
+    # The owner's words arrive complete under their committed human author; the
+    # Router's nonhuman evidence has no author, is only its stored preview and
+    # says so.
+    assert pending[0]['value'] == long_owner_text
+    assert pending[0]['steerAuthor']['origin']['forwardedFrom'] == _FORWARDED
+    assert 'steerAuthor' not in pending[1]
+    assert pending[1]['value'].startswith('[Global Router context: nonhuman')
+    assert 'another server process' in pending[1]['value']
+
+    monkeypatch.setattr('lib.tasks_pkg.orchestrator._deferred_inbox_flush.append_event',
+                        lambda task, event: None)
+    flush_deferred_peer_and_steer(executor, round_num=1, tid='executor')
+    delivered = {record['blockId']: record for record in executor['_userSteerInjects']}
+    assert all(record['deliveryState'] == 'delivered' for record in delivered.values())
+    assert delivered['injection:user-steer:router-forward:a']['author']['actor'] == 'human'
+    assert 'author' not in delivered['injection:user-steer:router-forward:a:context']
+    assert len(_round_boundary(executor, 2)) == 1
+
+
+def test_cross_process_steer_missing_the_last_boundary_becomes_the_next_turn(
+    flask_client, conversation_command_db, monkeypatch,
+):
+    from lib.message_queue import get_queue
+    from lib.tasks_pkg.orchestrator._finalize import _salvage_undelivered_steer
+    from lib.turn_initiation import resolve_turn_initiator
+
+    first, starts = _start_first_turn(flask_client, monkeypatch, executor_here=False)
+    _steer('router-forward:b', {'role': 'user', 'content': _OWNER_TEXT,
+                                'origin': {'initiator': 'human', 'forwardedFrom': _FORWARDED}})
+    _steer('router-forward:b:context', _router_context('short note'))
+    executor = _executor(first)
+    # The executor reaches its end after its last round boundary.
+    assert _salvage_undelivered_steer(executor) == 2
+    rows = get_queue('conv-command-inject', user_id=1)
+    assert len(rows) == 2 and len(starts) == 1
+    queued = {record['blockId']: record for record in executor['_userSteerInjects']}
+    assert queued['injection:user-steer:router-forward:b']['deliveryState'] == 'queued'
+    assert queued['injection:user-steer:router-forward:b:context']['deliveryState'] == 'queued'
+    assert {record['queueId'] for record in queued.values()} == {row['queueId'] for row in rows}
+    from lib.turn_lifecycle import list_turns
+    inputs = [turn for turn in list_turns('conv-command-inject', user_id=1)['turns']
+              if turn['actor'] == 'human'][1:]
+    # Owner text keeps its forwarded owner origin (verified when it authorizes);
+    # the nonhuman notice stays nonhuman.
+    assert inputs[0]['projection']['content'] == _OWNER_TEXT
+    assert inputs[0]['projection']['origin']['forwardedFrom'] == _FORWARDED
+    assert resolve_turn_initiator(inputs[0]) == 'human'
+    assert resolve_turn_initiator(inputs[1]) == 'peer'
+    assert _salvage_undelivered_steer(executor) == 0, 'a requeued steer was requeued twice'
+
+
+def test_steer_committed_while_another_tool_runs_reaches_the_next_boundary_with_one_read(
+    flask_client, conversation_command_db, monkeypatch,
+):
+    from lib import turn_lifecycle
+    from lib.turn_lifecycle import record_task_event
+
+    first, _ = _start_first_turn(flask_client, monkeypatch, executor_here=False)
+    executor = _executor(first)
+    # The executor writes its live Turn (a tool starts); its written view is current.
+    assert record_task_event(executor, {'type': 'phase', 'phase': 'tool'})
+    reads, real_get = [], turn_lifecycle.get_turn
+
+    def recorded(conversation_id, turn_id, **kwargs):
+        reads.append(kwargs.get('include_projection', True))
+        return real_get(conversation_id, turn_id, **kwargs)
+
+    monkeypatch.setattr(turn_lifecycle, 'get_turn', recorded)
+    assert len(_round_boundary(executor, 1)) == 1
+    assert reads == [False], 'a boundary without a foreign write read the Turn body'
+    # While another tool runs, another process commits the owner's message.
+    _steer('router-forward:tool', {'role': 'user', 'content': _OWNER_TEXT,
+                                   'origin': {'initiator': 'human', 'forwardedFrom': _FORWARDED}})
+    reads.clear()
+    messages = _round_boundary(executor, 2)
+    assert messages[-1]['content'].count(_OWNER_TEXT) == 1
+    assert reads == [False, True]
+    reads.clear()
+    assert len(_round_boundary(executor, 3)) == 1
+    assert reads == [False], 'an unchanged Turn was read again'
+
+
+def test_replayed_forward_with_the_same_command_is_delivered_once(
+    flask_client, conversation_command_db, monkeypatch,
+):
+    """2026-11-06: the Global Router re-forwarded an owner message (same source,
+    same command id) and the running Coordinator received it a second time."""
+    from lib import agent_inbox
+    from lib.tasks_pkg.orchestrator._deferred_inbox_flush import flush_deferred_peer_and_steer
+
+    first, _ = _start_first_turn(flask_client, monkeypatch)
+    executor = _executor(first)
+    forward = {'role': 'user', 'content': _OWNER_TEXT,
+               'origin': {'initiator': 'human', 'forwardedFrom': _FORWARDED}}
+    assert _steer('router-forward:again', forward)['steered'] is True
+    assert _round_boundary(executor, 1)[-1]['content'].count(_OWNER_TEXT) == 1
+    monkeypatch.setattr('lib.tasks_pkg.orchestrator._deferred_inbox_flush.append_event',
+                        lambda task, event: None)
+    flush_deferred_peer_and_steer(executor, round_num=1, tid='executor')
+    # The replay commits idempotently and wakes this process's inbox again.
+    assert _steer('router-forward:again', forward)['steered'] is True
+    assert len(agent_inbox.pending_items('conv-command-inject', modes=['user-steer'])) == 1
+    assert len(_round_boundary(executor, 2)) == 1, 'a replayed steer was delivered twice'
+    assert not agent_inbox.pending_items('conv-command-inject', modes=['user-steer'])

@@ -309,11 +309,13 @@ function _loadOAuthStatus(fromRepoll) {
   }, function(result) {
     _autoConfigureOAuthProvider('codex', result, view);
   });
+  if (!fromRepoll) subscriptionPlans.refresh(_planPorts());
   return view.loadStatus({
     read: function(options) { return Api.oauth.status(options); },
     publish: function(data) {
       _updateOAuthCard('claude', data.claude);
       if (view.isCurrent()) _updateOAuthCard('codex', data.codex);
+      if (view.isCurrent()) kimiCodeLogin.render(data.kimi, _kimiPorts());
     },
   }, !!fromRepoll);
 }
@@ -553,7 +555,7 @@ function _updateOAuthCard(provider, status) {
       _startDeviceStatusPoll(provider);
     } else if (status.authenticated || !devWaiting) {
       _hideDevicePanel();
-      _stopDeviceStatusPoll();
+      _stopDeviceStatusPoll(provider);
     }
     if (deviceBtn) {
       deviceBtn.style.display = status.authenticated ? 'none' : '';
@@ -652,7 +654,7 @@ function _oauthCancelAndRetry(provider) {
   if (manualDiv) manualDiv.style.display = 'none';
   // Hide device panel + stop its status poll (codex)
   if (provider === 'codex') {
-    _stopDeviceStatusPoll();
+    _stopDeviceStatusPoll(provider);
     _hideDevicePanel();
     var deviceBtn = document.getElementById('oauthCodexDeviceBtn');
     if (deviceBtn) {
@@ -986,9 +988,9 @@ function _startDeviceStatusPoll(provider) {
   });
 }
 
-function _stopDeviceStatusPoll() {
+function _stopDeviceStatusPoll(provider) {
   var view = captureOAuthPanel();
-  if (view) view.stopDevicePoll();
+  if (view) view.stopDevicePoll(provider);
 }
 
 async function _oauthLogout(provider) {
@@ -1158,3 +1160,25 @@ function _autoConfigureOAuthProvider(provider, status, view) {
 // status, connection intent and teardown are owned by the typed Settings module.
 function _catpawImport() { return catpawSettings.connect(); }
 function _catpawDisconnect() { return catpawSettings.disconnect(); }
+
+// ── Kimi Code device sign-in and domestic coding-plan cards ──
+// Action bridges into the typed owners (kimi-code-login.ts,
+// subscription-plans.ts); remove with the retained subscription presenter.
+function _kimiPorts() {
+  return {
+    loadStatus: function(fromRepoll) { return _loadOAuthStatus(fromRepoll); },
+    refreshCatalog: function(session) {
+      return typeof _refreshSubscriptionModelCatalog === 'function'
+        ? _refreshSubscriptionModelCatalog(session) : null;
+    },
+  };
+}
+// The Provider add command lives in provider_render.js; resolve it at Connect.
+function _planPorts() {
+  return {
+    stage: function(bundle, apiKey) { return _stageModelRoutingProviderBundle(bundle, apiKey); },
+  };
+}
+function _kimiDeviceLogin() { return kimiCodeLogin.start(_kimiPorts()); }
+function _kimiLogout() { return kimiCodeLogin.logout(_kimiPorts()); }
+function _kimiCopyDeviceCode(button) { return kimiCodeLogin.copyCode(button); }

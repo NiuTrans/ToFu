@@ -21,6 +21,7 @@ from typing import Any
 
 from lib.agent_core.execution_clock import task_execution_time_ms
 from lib.agent_core.events import EventType, build_event
+from lib.llm.tool_call_ids import portable_tool_call_id
 from lib.log import get_logger
 from lib.logging_pkg.log_record_values import text_value
 from lib.model_info import model_supports_vision
@@ -199,13 +200,17 @@ def _mint_fresh_call_id(
     ``PREFIX MUTATION DETECTED`` re-bill loop. A fresh id that can never
     collide with any id already present in the conversation makes that class
     of rewrite unrepresentable.
+
+    The id is persisted and replayed to whichever provider serves a later
+    round, so it is spelled within every provider's contract.
     """
     seen = (used_ids if used_ids is not None
             else _collect_used_tool_call_ids(task, messages))
 
     base = preferred or 'call'
     while True:
-        candidate = f'{base}#r{round_num}#{uuid.uuid4().hex[:8]}'
+        candidate = portable_tool_call_id(
+            base, f'r{round_num}_{uuid.uuid4().hex[:8]}')
         if candidate not in seen:
             seen.add(candidate)
             return candidate

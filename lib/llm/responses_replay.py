@@ -236,3 +236,36 @@ def ordered_replay(message, function_calls, *, allowed_types):
             or seen_calls != set(range(len(function_calls)))):
         raise ReplayOrderError()
     return out
+
+
+def retire_rejected_reasoning_state(messages) -> int:
+    """Drop encrypted ``reasoning`` items a provider refused to decrypt.
+
+    Mutates each affected message's sidecar (rebuilt as a new list) and returns
+    how many items were retired. Reasoning is optional stateless replay input:
+    the model re-reasons without it. ``compaction`` state is retained because
+    it stands in for history the transcript no longer holds. The order witness
+    describes the original native sequence, so it goes too (default order then
+    applies); the origin marker goes once no ciphertext remains.
+    """
+    retired = 0
+    for message in messages or ():
+        items = message.get('_responses_items') if isinstance(message, dict) else None
+        if not isinstance(items, list):
+            continue
+        kept = [item for item in items
+                if not (isinstance(item, dict) and item.get('type') == 'reasoning'
+                        and item.get('encrypted_content'))]
+        if len(kept) == len(items):
+            continue
+        retired += len(items) - len(kept)
+        kept = [item for item in kept
+                if not (isinstance(item, dict) and item.get('type') == REPLAY_ORDER_TYPE)]
+        if not any(isinstance(item, dict) and item.get('encrypted_content') for item in kept):
+            kept = [item for item in kept
+                    if not (isinstance(item, dict) and item.get('type') == STATE_ORIGIN_TYPE)]
+        if kept:
+            message['_responses_items'] = kept
+        else:
+            message.pop('_responses_items', None)
+    return retired

@@ -77,6 +77,49 @@ CPU 7–9% lower and passed unchanged tail/RSS guards; earlier 100-operation tai
 failures remain recorded. This is component evidence, not HTTP or system speed.
 See `system_audit_rotation_preflight_admission_20261009.json`.
 
+## Shared rotating files
+
+**Problem.** The API host (`server.py`) and the resident execution host
+(`serverctl_pkg.execution_host`, which imports `server`) each build this logging
+runtime on the same `logs/` directory, so every handler-owned stream (`app`,
+`access`, `error`, `vendor`, `frontend`, `incident`) has one writer per process.
+Each process rotated on its own while the other kept writing through its
+descriptor to the renamed file. On the BeeGFS FUSE mount that holds `logs/`,
+such a write shares its O_APPEND position with the new file at the old path
+(two descriptors in one process reproduce it; local filesystems do not): both
+files gained complementary NUL holes, and since each file's size counts only
+its own bytes, the rest of its lines were lost. On 2026-11-06 the holes were
+25–52% of every rotated `app.log` chunk, `error.log` and `incident.jsonl`. A
+peer could also repeat a time rollover or race a rename (`FileNotFoundError`,
+dropped records).
+
+**Decision.** `lib/logging_pkg/log_shared_rotation.SharedRotationMixin` wraps
+the rotating handlers (`_SizeAndTimeRotatingFileHandler`,
+`_PrivateRotatingFileHandler` and the incident sink). Every record and rollover
+holds an exclusive `flock` on the file currently at the path. Holding it, a
+writer reopens the path when its descriptor is no longer that file, adopting
+the peer's rollover, and seeks to the end so size checks count every writer.
+A rollover keeps the outgoing file locked until its successor is open. File
+names, policies and readers are unchanged; platforms without `fcntl` keep the
+stock handlers. Files damaged before the fix are left as they are.
+
+**Alternatives rejected.** Per-process file families (every reader, the
+retention policy and the incident index would have to merge two families);
+forwarding execution-host records to the API host (the execution host outlives
+API restarts, so records would be lost meanwhile); reopening on change without
+a lock (a write can still race a peer's rename); a separate lock file in
+`logs/` (family-prefixed names are pruned as rotated chunks and unmanaged names
+are evicted under budget pressure, which would silently split the lock);
+copytruncate (truncation races the other writers' appends).
+
+**Evidence.** On the BeeGFS mount, two processes writing 3,000 records each with
+a 512 KiB rollover: the previous handler left NUL bytes in 7 of 11 files (831
+runs, 1.74 MB), lost 424 records and raised 72 handler errors; with the mixin,
+three runs had no NUL byte, missing or duplicated record, or handler error. The
+lock and identity check cost about 0.66 ms per record against 0.49–0.75 ms for
+the write alone on that mount. Specification:
+`tests/server/test_logging_shared_rotation.py`.
+
 ## Task startup timing anchors
 
 `measure_task_startup` retains the existing closed-cardinality histogram and

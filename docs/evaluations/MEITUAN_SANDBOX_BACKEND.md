@@ -1,8 +1,19 @@
-# yourprovider-sandbox 评测后端（粒度 1：画布 TerminalBenchPipeline 提交端）
+# yourprovider-sandbox 评测后端（粒度 1：画布 TerminalBenchPipeline 提交端）——已废弃
 
-状态：实现中（设计已评审，资源/预算已拍板）
+状态：**已废弃**（owner 指令 2026-11-05：我们的评测不走画布）；原状态：实现中（设计已评审，资源/预算已拍板）
 日期：2026-09-30
 作者：tofu 评测框架
+
+> **Superseded (owner directive 2026-11-05).** Our evaluation runs (Terminal-Bench,
+> SWE-bench Pro, …) use our own code and launchers with our project's own API
+> keys: [`evaluations/terminal_bench/`](../../evaluations/terminal_bench/README.md)
+> drives EnvSandbox VMs directly (run dirs `.eval-runs/tb21-native-*`), and
+> [`evaluations/swebench/`](../../evaluations/swebench/README.md) runs Harbor
+> locally. The canvas (画布 / TerminalBenchPipeline / model.internal.example.com
+> experiment templates) is not used for our evaluations; canvas results are
+> legacy and are excluded from our reported numbers. API-SERVING may still serve
+> model weights. This page and `evaluations/swebench/yourprovider_sandbox/` remain
+> only as the record of the legacy canvas submitter: do not extend or run it.
 
 ## 1. Problem
 
@@ -19,7 +30,8 @@ IO 抖动污染 trial 计时与结果。目标是把 TB2.1 trial 卸载到美团
   方也不接受开通用集群的请求。
 - **唯一已验证路径**：tofu 作为 agentix kernel（`agentix@<branch>@simple@tofu`）装进画布
   TerminalBenchPipeline 容器跑。实证：画布 362610 / flow 871428 DONE（Tofu 0.17.4，
-  13 题 canary first-attempt 9/13）。
+  13 题 canary first-attempt 9/13）。（2026-09-30 的结论，已过时：`evaluations/terminal_bench/`
+  经 Harbor ingress 的 native exec 通道直连沙盒 VM，2026-11-02 起实跑。）
 
 ## 2. Decision
 

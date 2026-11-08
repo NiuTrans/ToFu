@@ -10,16 +10,13 @@ in-process projection may reconstruct a typed credential cause at admission.
 import time
 
 from lib.tasks_pkg.compaction._summary_failure import (
-    SUMMARY_FAILURE_CODE,
+    SUMMARY_FAILURE_CODES,
     _failure_matches_attempts,
     validate_summary_attempts,
     validate_summary_failure,
 )
 
-_BUDGET_FAILURE_REASONS = frozenset({
-    SUMMARY_FAILURE_CODE, 'summary_dispatch_failed', 'summary_incomplete',
-    'summary_cancelled', 'summary_route_revalidation_failed',
-})
+_BUDGET_FAILURE_REASONS = SUMMARY_FAILURE_CODES
 
 
 def bounded_summary_task(task):
@@ -170,10 +167,15 @@ class SummaryBudget:
                           and (not attempts or bool(safe_attempts)))
         safe_failure = (prior_failure if failure_evidence is None
                         else validate_summary_failure(failure_evidence))
+        if safe_failure is None and failure_evidence is None:
+            # A known display code does not prove unsent credentials; that
+            # shape still requires its explicit source and ingress witnesses.
+            safe_failure = validate_summary_failure({
+                'code': self.task.get('_summaryBudgetFailure')})
         if (success or cancelled or not attempts_valid
-                or self.task.get('_summaryBudgetFailure') != SUMMARY_FAILURE_CODE
-                or (safe_failure is not None
-                    and not _failure_matches_attempts(safe_failure, safe_attempts))):
+                or (safe_failure is not None and (
+                    safe_failure['code'] != self.task.get('_summaryBudgetFailure')
+                    or not _failure_matches_attempts(safe_failure, safe_attempts)))):
             safe_failure = None
         state.record_metadata(safe_failure, safe_attempts)
 
@@ -193,7 +195,7 @@ class SummaryBudget:
             return
         failure, attempts = state.validated_metadata()
         usage_out['_summaryRequestKey'] = state['requestKey']
-        if failure is not None and state.get('_summaryBudgetFailure') == SUMMARY_FAILURE_CODE:
+        if failure is not None and state.get('_summaryBudgetFailure') == failure['code']:
             usage_out['_summaryFailure'] = failure
             state.projected_failure = failure
         else:

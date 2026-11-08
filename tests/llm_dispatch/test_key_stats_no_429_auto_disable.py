@@ -5,7 +5,7 @@
     才自动禁用。
 
 The 2026-07-29 incident this policy answers: an upstream-vendor outage on the
-sankuai anthropic face wrapped itself in 429s/403s for ~90 minutes. The
+example-corp anthropic face wrapped itself in 429s/403s for ~90 minutes. The
 consecutive-429 streak heuristic read that storm as "key is dead" and
 auto-exhausted ALL THREE Opus-5 keys for the day — a transient upstream
 incident became a total model outage that needed a human to hand-re-enable

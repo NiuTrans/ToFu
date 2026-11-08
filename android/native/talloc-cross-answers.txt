@@ -1,0 +1,16 @@
+Checking uname sysname type: "Linux"
+Checking uname machine type: "aarch64"
+Checking uname release type: "dontcare"
+Checking uname version type: "dontcare"
+rpath library support: OK
+-Wl,--version-script support: FAIL
+Checking getconf LFS_CFLAGS: OK
+Checking for large file support without additional flags: OK
+Checking getconf large file support flags work: OK
+Checking correct behavior of strtoll: FAIL
+Checking for working strptime: OK
+Checking for C99 vsnprintf: OK
+Checking for HAVE_SHARED_MMAP: OK
+Checking for HAVE_MREMAP: OK
+Checking for HAVE_INCOHERENT_MMAP: FAIL
+Checking for HAVE_SECURE_MKSTEMP: OK

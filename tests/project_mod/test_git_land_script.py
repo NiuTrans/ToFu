@@ -43,6 +43,13 @@ def rev(cwd, revision='HEAD') -> str:
     return git(cwd, 'rev-parse', revision).strip()
 
 
+@pytest.fixture(autouse=True)
+def private_local_root(tmp_path: Path, monkeypatch):
+    """Lanes, the warm merge checkout and test records stay inside this test's directory."""
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.setenv('TOFU_LOCAL_DIR', str(tmp_path / 'local'))
+
+
 @pytest.fixture()
 def shared(tmp_path: Path) -> Path:
     repo = tmp_path / 'shared'
@@ -76,11 +83,18 @@ def replace_line(path: Path, number: int, text: str) -> None:
 
 
 def state(repo: Path) -> tuple:
-    """Everything a refused landing must leave byte-identical."""
+    """Everything a refused landing must leave byte-identical.
+
+    The warm verification checkout is git_land's private reconstructible
+    cache, so its registration is not part of the state.
+    """
     files = {str(path.relative_to(repo)): path.read_bytes() for path in repo.rglob('*')
              if path.is_file() and '.git' not in path.relative_to(repo).parts}
+    worktrees = '\n\n'.join(
+        block for block in git(repo, 'worktree', 'list', '--porcelain').split('\n\n')
+        if '/tofu-verification/' not in block and '/.verification/' not in block)
     return (git(repo, 'for-each-ref'), rev(repo), (repo / '.git' / 'index').read_bytes(),
-            files, git(repo, 'worktree', 'list', '--porcelain'))
+            files, worktrees)
 
 
 def _snapshot_branch(shared: Path, tmp_path: Path, name: str) -> tuple[str, str]:
@@ -428,3 +442,21 @@ def test_command_line_reports_and_exits_by_outcome(shared, feature):
     assert landed.returncode == 0, landed.stdout + landed.stderr
     assert landed.stdout.startswith('Landed feature on main: merge ')
     assert 'deleted branch feature' in landed.stdout
+
+
+def test_a_landing_holds_a_restart_protected_step_and_check_mode_does_not(monkeypatch, tmp_path):
+    """A restart must not boot from a half-landed checkout: while the CLI can change
+    the checkout, the restart-protection signal sees it (lib/runtime/protected_steps.py)."""
+    from lib.runtime import protected_steps
+    monkeypatch.setattr(protected_steps, 'protected_steps_root', lambda: str(tmp_path / 'steps'))
+    seen = []
+
+    def observed_land(branch, *, into=None, keep=False, check=False):
+        seen.append((check, [step['kind'] for step in protected_steps.active_protected_steps()]))
+        return {'status': 'landable' if check else 'already-merged', 'branch': branch, 'into': 'main',
+                'paths': 0, 'preIntegration': 'abc'}
+    monkeypatch.setattr(land, 'land', observed_land)
+    assert land.main(['feature/x']) == 0
+    assert land.main(['feature/x', '--check']) == 0
+    assert seen == [(False, ['git_land']), (True, [])]
+    assert protected_steps.active_protected_steps() == []

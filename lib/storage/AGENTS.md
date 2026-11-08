@@ -43,3 +43,10 @@ Run `tests/storage_authority_sql/test_storage_process_boundary.py` and focused c
 then `tests/storage/test_storage_application_contract.py` against both native and SQLite
 processes for changed semantic operations. Native wire changes also exercise
 `tests/tofudb/test_tofudb_differential.py` with the explicitly selected test binary.
+
+Storage latency evidence: native engine records are JSON lines with
+`"source":"tofu-db"` in `logs/server-console.log` (`authority_hold`
+phase/stage splits, `online_gc`, `search_retry`; most carry no timestamp and
+those that do are UTC). Live per-operation latency is the
+`tofu_storage_rpc_seconds` histogram at `GET /metrics`. Never `du`/`find` a
+live store on the FUSE mount; see `docs/STORAGE_OPERATIONS.md`.

@@ -46,6 +46,27 @@ def worker_root_for_task(session, task_id, *, user_id=None):
         conversation, current = conv, parent
 
 
+def worker_root_for_event_stream(session, task_id, *, user_id=None):
+    """Inspector names identify a registered child, never a separate executor."""
+    parent, separator, child = task_id.partition('#agent:')
+    if not separator:
+        return worker_root_for_task(session, task_id, user_id=user_id)
+    parent_root = worker_root_for_task(session, parent, user_id=user_id)
+    child_root = worker_root_for_task(session, child, user_id=user_id)
+    if parent_root is None and child_root is None:
+        return None
+    from ._common import _load
+    row = session.fetch_one(
+        'SELECT value_json FROM storage_records WHERE namespace=? AND record_key=?',
+        ('task_results', child))
+    value = _load(row['value_json']) if row is not None else {}
+    birth = value.get('child_invocation') or {}
+    if (parent_root != child_root or parent_root is None
+            or birth.get('parent_task_id') != parent or birth.get('child_task_id') != child):
+        raise StorageError('database_protocol_error', 'Inspector stream differs from child birth')
+    return parent_root
+
+
 def starts_new_tool_effect(session, task_id, incoming, *, intent=None):
     """Only newly introduced operation IDs need effect-entry authority."""
     if 'tool_rounds' not in incoming:

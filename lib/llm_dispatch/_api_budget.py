@@ -116,6 +116,9 @@ def _force_oauth_token_refresh(
         elif oauth == 'codex':
             from lib.oauth.codex import codex_refresh_token
             refreshed = codex_refresh_token(user_id=owner_scope)
+        elif oauth == 'kimi':
+            from lib.oauth.kimi import kimi_refresh_token
+            refreshed = kimi_refresh_token(user_id=owner_scope)
         else:
             logger.warning('%s _force_oauth_token_refresh: unknown oauth '
                            'provider %r', log_prefix, oauth)

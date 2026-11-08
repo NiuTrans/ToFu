@@ -20,8 +20,9 @@ import java.util.concurrent.TimeUnit
 class HealthProbe(
     http: OkHttpClient = defaultClient(),
     private val diagnostics: DiagLog? = null,
+    /** By default never This phone's credential: the URL being probed is someone else's server. */
     private val cookieProvider: (String) -> String? = { origin ->
-        CookieManager.getInstance().getCookie(origin)
+        if (LocalKernelCookie.isReservedUrl(origin)) null else CookieManager.getInstance().getCookie(origin)
     },
 ) {
     private val http = DiagnosticHttp.attach(http, diagnostics, "HealthHttp").newBuilder()

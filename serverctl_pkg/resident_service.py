@@ -102,6 +102,10 @@ def await_published_record(state_path: Path, *, service_id: str, manager_pid: in
     return {}
 
 
+class ServiceOwnerDraining(RuntimeError):
+    """The previous host still holds its lease; it has not finished exiting."""
+
+
 def acquire_service_lock(path: Path) -> int:
     """Hold the host lease through PID publication and final owned-runtime shutdown."""
     import fcntl
@@ -113,7 +117,7 @@ def acquire_service_lock(path: Path) -> int:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise RuntimeError('resident service owner is still draining') from exc
+            raise ServiceOwnerDraining('resident service owner is still draining') from exc
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -236,10 +240,19 @@ class ResidentService:
             if manager_write is not None and not published:
                 os.close(manager_write)
 
-    def stop(self, timeout: float) -> None:
+    def stop(self, timeout: float, *, retire_failed_close: bool = False) -> str:
+        """Signal, join physical exit and release the lease of this manager's host.
+
+        A host that exited without confirming a clean close keeps its failed
+        record and raises, unless ``retire_failed_close`` lets an explicit
+        replacement retire it: physical exit plus the released lease already
+        prove release, as a later explicit restart would find. Returns the
+        retired close failure, or ``''``.
+        """
         record = self.record()
         if record.get('host') not in (None, socket.gethostname()):
             raise RuntimeError(f'{self.service_name} service belongs to another host')
+        retired = ''
         if self.host_matches(record):
             # A different manager must first observe its predecessor's exit.
             if (record.get('managerPid') != os.getpid()
@@ -255,7 +268,9 @@ class ResidentService:
             if (stopped.get('serviceId') != record.get('serviceId')
                     or stopped.get('state') != 'stopped'):
                 detail = str(stopped.get('error') or 'clean close was not confirmed')[:300]
-                raise RuntimeError(f'{self.service_name} shutdown failed: {detail}')
+                if not retire_failed_close or stopped.get('serviceId') != record.get('serviceId'):
+                    raise RuntimeError(f'{self.service_name} shutdown failed: {detail}')
+                retired = detail
         if self._process is not None and self._process.poll() is not None:
             self._process.wait()
             self._process = None
@@ -268,3 +283,4 @@ class ResidentService:
                     self.state_path.unlink(missing_ok=True)
             finally:
                 os.close(descriptor)
+        return retired

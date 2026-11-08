@@ -62,6 +62,16 @@ ports; backend libraries never import routes or browser owners.
 - Cross-process contract modules (sidecar-shared) are marked in their file
   headers and listed in `scripts/check_architecture.py`; they may only import
   the standard library and each other.
+- Derive every writable path from `runtime_path_policy.get_runtime_base()` or
+  `lib.runtime.runtime_paths.data_root()`/`logs_root()`, never from
+  `__file__` or the CWD. In a source checkout, any entry under `<repo>/data`
+  makes the next boot select the in-tree base instead of the per-user one
+  (`resolve_runtime_base`), silently orphaning the user's existing data.
+- URLs the server emits for direct browser use (`<img src>`, downloads,
+  previews) bypass the frontend transport's v1->v4 rewrite (`resolveApiPath`),
+  so they must name a mounted `/api/v4/...` route; `/api/v1/*` answers 426
+  once v4 is active (`lib/api_v4.py`). Attachment originals use
+  `lib/media_attachments.attachment_source_url`.
 - `utils.py` owns the shared CPython hashing primitive.
   Preserve byte-identical digests and sub-threshold updates; callers must not
   copy that algorithm into token counting or snapshot projection.

@@ -41,7 +41,7 @@ def test_github_tab_follows_dx_and_renders_live_channel_state(page, live_server,
     tab.click()
     page.wait_for_selector('#settingsTab_github .channel-card', state='visible')
     titles = page.locator('#settingsTab_github .channel-card-title').all_inner_texts()
-    assert len(titles) == 4, titles
+    assert len(titles) == 5, titles
     assert page.locator('#settingsTab_github .ui-alert--error').count() == 0
     account_card = page.locator('#settingsTab_github .channel-card').first
     enable = account_card.locator('button', has_text='启用')
@@ -98,8 +98,8 @@ def test_setting_github_jump_chip_opens_the_github_tab(page, live_server):
 
 def _issue(key, title, *, mode=None):
     return {'key': key, 'kind': 'issue', 'title': title, 'mode': mode or 'mentions', 'modeOverride': mode,
-            'replyPolicy': 'draft', 'replyPolicyOverride': None, 'isCommandChat': False, 'subscribers': [],
-            'lastEventAtMs': 1, 'watermark': None}
+            'replyPolicy': 'notify', 'replyPolicyOverride': None, 'isCommandChat': False, 'subscribers': [],
+            'lastEventAtMs': 1, 'watermark': None, 'note': ''}
 
 
 def _route_connected_github(page):
@@ -117,7 +117,8 @@ def _route_connected_github(page):
     outbox = [{'id': 'ob1', 'thread': 'github:octo/repo#12', 'threadTitle': 'Fix the poller',
                'text': '[Tofu 代发] Plan B is in; releasing tonight.', 'replyTo': None, 'state': 'draft',
                'origin': {'kind': 'tool', 'conversationId': 'router-conv', 'turnId': 't'},
-               'createdAtMs': 1, 'updatedAtMs': 1, 'externalId': None, 'error': None}]
+               'createdAtMs': 1, 'updatedAtMs': 1, 'externalId': None, 'error': None, 'attachments': [],
+               'approvalCode': '0A1B2C', 'authority': 'third_party', 'decision': None}]
 
     def answer_outbox(route):
         assert parse_qs(urlparse(route.request.url).query).get('channel') == ['github'], route.request.url

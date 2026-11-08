@@ -2,7 +2,8 @@
 
 One tiny daemon thread owns the recurring job: when dual-path backup is
 enabled, mirror one verified snapshot to the configured stable directory
-once every 24 h.
+once every 24 h. The serving lifespan starts and stops it through
+``lib/server/server_background_services.py``; assembly never does.
 
 HTTP activity is fed by a single ``before_request`` hook registered in
 ``lib/app/app_assembly.py``; the hook and the loop are both fully guarded so a
@@ -23,6 +24,7 @@ _TICK_S = 60.0
 _BACKUP_INTERVAL_S = 24 * 60 * 60
 
 _started = False
+_thread: threading.Thread | None = None
 _start_lock = threading.Lock()
 _stop = threading.Event()
 _activity_lock = threading.Lock()
@@ -83,12 +85,32 @@ def _loop() -> None:
 
 def start_maintenance() -> bool:
     """Start the scheduler thread once per process; returns True if started."""
-    global _started
+    global _started, _thread
     with _start_lock:
         if _started:
             return False
         _started = True
-    threading.Thread(
-        target=_loop, name='database-panel-maintenance', daemon=True).start()
+        _stop.clear()
+        _thread = threading.Thread(
+            target=_loop, name='database-panel-maintenance', daemon=True)
+        _thread.start()
     logger.info('[DatabasePanel] maintenance thread started')
+    return True
+
+
+def stop_maintenance(timeout: float = 2.0) -> bool:
+    """Stop and bounded-join the thread; a live thread keeps the start latch."""
+    global _started, _thread
+    with _start_lock:
+        _stop.set()
+        thread = _thread
+    if thread is None:
+        return True
+    thread.join(timeout)
+    if thread.is_alive():
+        return False
+    with _start_lock:
+        if _thread is thread:
+            _thread = None
+            _started = False
     return True

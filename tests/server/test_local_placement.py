@@ -175,6 +175,22 @@ def test_redirected_xdg_cache_falls_back_to_the_home_cache(tmp_path, durable_tmp
     ) == [local / 'x' / 'runtime-replicas']
 
 
+def test_lanes_use_a_local_root_by_default_and_follow_the_operator_switch(
+        tmp_path, durable_tmp):
+    source, local, environment = _layout(tmp_path)
+    overlay = _mountinfo(source, local, local_fs='overlay')
+
+    default_overlay = _choose(source, local, environment, placement.PURPOSE_LANES,
+                              mountinfo_text=overlay)
+    disabled = _choose(source, local, {**environment, 'TOFU_LOCAL_WORKSPACES': 'off'},
+                       placement.PURPOSE_LANES, mountinfo_text=overlay)
+
+    assert default_overlay.selected
+    assert Path(default_overlay.root) == local / 'home' / '.local' / 'state' / 'tofu' / 'lanes'
+    assert (disabled.selected, disabled.reason) == (False, 'disabled')
+    assert placement.placement_mode(placement.PURPOSE_WORKSPACES, environment) == 'off'
+
+
 def test_task_checkouts_stay_on_the_data_volume_unless_the_operator_opts_in(
         tmp_path, durable_tmp):
     source, local, environment = _layout(tmp_path)

@@ -186,8 +186,10 @@ def test_global_owner_slot_keeps_provider_boundary(routes):
     for slot in routes.slots:
         slot.request_scoped = False
         slot.provider_id = 'supplier'
+    routes.slots[:] = list(routes.slots)  # Publish changed keys through the pool owner.
     assert _select(routes)['modelId'] == 'cheap'
     routes.slots[1].provider_id = 'other-execution-scope'
+    routes.slots[:] = list(routes.slots)
     assert _select(routes)['modelId'] == 'main'
 
 

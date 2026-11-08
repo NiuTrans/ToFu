@@ -642,6 +642,14 @@ def get_active_session(task_id: str) -> MasterOrchestrator | None:
     return _get_session(task_id)
 
 
+def sessions_holding_parent(task_id: str) -> list[MasterOrchestrator]:
+    """Live sessions whose running or future workers are born under ``task_id``."""
+    with _sessions_lock:
+        sessions = list({id(session): session for session in _active_sessions.values()}.values())
+    # Session locks are taken outside the registry lock, as every other reader does.
+    return [session for session in sessions if session.holds_parent(task_id)]
+
+
 def _agent_status_counts(agents: list[dict]) -> dict[str, int]:
     """Fold the returned roster, never independently sampled pool occupancy."""
     return {

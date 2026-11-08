@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 本机内核（runtime/LocalKernelService） -->
+    <string name="local_kernel_channel_name">本机内核</string>
+    <string name="local_kernel_channel_description">Tofu 在本机运行时显示</string>
+    <string name="approval_channel_name">需要批准</string>
+    <string name="approval_channel_description">本机上的智能体正在等待你的批准</string>
+    <string name="local_kernel_running">Tofu 正在本机运行</string>
+    <string name="local_kernel_starting">正在本机启动 Tofu…</string>
+    <string name="local_kernel_stopping">正在停止本机的 Tofu…</string>
+    <string name="local_kernel_action_open">打开</string>
+    <string name="local_kernel_action_stop">停止</string>
+    <string name="local_kernel_not_available">此版本不包含本机运行环境</string>
+    <string name="local_kernel_failed_title">本机的 Tofu 已停止</string>
+    <string name="local_kernel_failed_install">无法安装本机运行环境：%1$s</string>
+    <string name="local_kernel_failed_secret">无法读取本机内核的密钥：%1$s</string>
+    <string name="local_kernel_failed_launch">无法启动本机内核：%1$s</string>
+    <string name="local_kernel_failed_usage">本机内核拒绝了启动参数（退出码 2）。</string>
+    <string name="local_kernel_failed_protocol">本机内核未遵守启动协议：%1$s</string>
+    <string name="local_kernel_safe_mode">Tofu 在 2 分钟内崩溃了 %1$d 次，已停止自动重启。打开 Tofu 可重新启动。</string>
+    <string name="local_kernel_killed_title">Android 结束了 Tofu 的进程</string>
+    <string name="local_kernel_killed_guidance_developer_option">这很可能是 Android 对应用子进程数量的限制。请在“设置 → 系统 → 开发者选项”中开启“停止限制子进程”（Disable child process restrictions），然后打开 Tofu 重新启动。</string>
+    <string name="local_kernel_killed_guidance_device_config">这很可能是 Android 对应用子进程数量的限制。如需提高上限，请用电脑通过 adb 运行：\nadb shell \"/system/bin/device_config set_sync_disabled_for_tests persistent; /system/bin/device_config put activity_manager max_phantom_processes 2147483647\"\n然后打开 Tofu 重新启动。</string>
+    <string name="local_kernel_killed_guidance_restart">请打开 Tofu 重新启动。</string>
+</resources>

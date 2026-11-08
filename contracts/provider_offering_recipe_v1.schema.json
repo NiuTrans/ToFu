@@ -15,7 +15,8 @@
     "key": {"type": "string", "minLength": 1, "maxLength": 160},
     "name": {"type": "string", "minLength": 1, "maxLength": 240},
     "brand": {"type": "string"},
-    "category": {"enum": ["official", "relay", "local"], "description": "Official means a model developer's own API; relay means a third-party inference host, aggregator or gateway, not an endorsement."},
+    "category": {"enum": ["official", "relay", "local", "subscription"], "description": "Official means a model developer's own API; relay means a third-party inference host, aggregator or gateway, not an endorsement; subscription means a vendor's own plan-bound coding endpoint reached with a plan key, whose quota and terms belong to the plan and whose declared limits are Offering limits, never Model facts."},
+    "subscription": {"type": "object", "additionalProperties": false, "required": ["key_console_url"], "properties": {"key_console_url": {"type": "string", "format": "uri", "pattern": "^https://", "description": "Official console page where the subscriber creates the plan key."}}, "description": "Subscription-plan presentation for Settings → Subscription sign-in; only meaningful with category subscription."},
     "catalog_mode": {"enum": ["curated", "discovery"], "default": "curated", "description": "Discovery templates may be connection-only; model availability must be discovered with the owner's credential."},
     "catalog_source": {
       "type": "object",

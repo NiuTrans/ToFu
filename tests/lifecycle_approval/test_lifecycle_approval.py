@@ -42,6 +42,10 @@ import pytest
 import lib.lifecycle_approval as la
 from lib.mcp.registry import is_opensource_build
 
+# What routes/api_v1/auth.human_ui_provenance mints for the owner's browser.
+HUMAN_UI = {'kind': 'human-ui', 'ownerUserId': 1, 'subject': 'session-key', 'credential': 'session',
+            'browser': 'fetch-metadata', 'userAgent': 'Mozilla/5.0', 'remoteAddr': '127.0.0.1'}
+
 pytestmark = pytest.mark.unit
 
 # The destructive A/B fault-injection cases remain in the internal lifecycle
@@ -88,7 +92,7 @@ class TestTokenStore:
         ok, why = la.validate(rec['id'], 'restart')
         assert not ok and 'not-approved' in why
 
-        decided = la.decide(rec['id'], True)
+        decided = la.decide(rec['id'], True, provenance=HUMAN_UI)
         assert decided['status'] == 'approved'
         ok, _ = la.validate(rec['id'], 'restart')
         assert ok
@@ -101,7 +105,7 @@ class TestTokenStore:
 
     def test_deny_is_terminal(self, store):
         rec = la.create_request('shutdown')
-        la.decide(rec['id'], False)
+        la.decide(rec['id'], False, provenance=HUMAN_UI)
         ok, why = la.validate(rec['id'], 'shutdown')
         assert not ok and 'denied' in why
         ok, _ = la.consume(rec['id'], 'shutdown')
@@ -111,28 +115,28 @@ class TestTokenStore:
         ok, why = la.validate('nope', 'restart')
         assert not ok and why == 'unknown-id'
         rec = la.create_request('shutdown')
-        la.decide(rec['id'], True)
+        la.decide(rec['id'], True, provenance=HUMAN_UI)
         ok, why = la.validate(rec['id'], 'restart')
         assert not ok and 'action-mismatch' in why
 
     def test_approved_token_expires(self, store, monkeypatch):
         monkeypatch.setattr(la, 'APPROVED_TTL_SEC', -1)
         rec = la.create_request('restart')
-        la.decide(rec['id'], True)
+        la.decide(rec['id'], True, provenance=HUMAN_UI)
         ok, why = la.validate(rec['id'], 'restart')
         assert not ok and 'expired' in why
         # …and an expired record cannot be approved again (decide fail-closed)
-        assert la.decide(rec['id'], True) is None
+        assert la.decide(rec['id'], True, provenance=HUMAN_UI) is None
 
     def test_decide_twice_rejected(self, store):
         rec = la.create_request('restart')
-        assert la.decide(rec['id'], True) is not None
-        assert la.decide(rec['id'], False) is None  # already terminal
+        assert la.decide(rec['id'], True, provenance=HUMAN_UI) is not None
+        assert la.decide(rec['id'], False, provenance=HUMAN_UI) is None  # already terminal
 
     def test_list_records_filters(self, store):
         r1 = la.create_request('restart')
         r2 = la.create_request('shutdown')
-        la.decide(r2['id'], True)
+        la.decide(r2['id'], True, provenance=HUMAN_UI)
         pending = la.list_records(status='pending')
         assert any(r['id'] == r1['id'] for r in pending)
         assert all(r['id'] != r2['id'] for r in pending)
@@ -207,7 +211,7 @@ class TestScriptGateHelper:
 
     def test_consumes_approved_token(self, store, capsys):
         rec = la.create_request('restart')
-        la.decide(rec['id'], True)
+        la.decide(rec['id'], True, provenance=HUMAN_UI)
         rc = la._script_gate('restart')
         assert rc == 0
         capsys.readouterr()

@@ -273,6 +273,12 @@ def resume_chat_goal(runs, source_run_id, *, owner_user_id, tenant_id='', ports=
         return existing
     latest = ports.goal_repository.latest_for_conversation(conversation_id)
     attempt = ports.get_attempt(metadata['attempt_id'], user_id=owner_user_id, include_execution_config=True)
+    if (attempt.get('turnId') == metadata['turn_id']
+            and attempt.get('taskId') == metadata['task_id']
+            and str(attempt.get('taskId') or '').startswith('conversation-attempt:')
+            and attempt.get('status') in {'pending', 'running'}):
+        from lib.orchestration.execution_journal import RecoveryDeferred
+        raise RecoveryDeferred('Goal awaits its durable worker physical-exit receipt')
     if (attempt.get('turnId') != metadata['turn_id']
             or attempt.get('taskId') != metadata['task_id']
             or attempt.get('status') != 'interrupted'):

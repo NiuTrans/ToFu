@@ -17,10 +17,18 @@ unsatisfiable ones (416) work fine; plain GETs are unaffected.
 calls instead of send_file directly. Behaviour:
 
   * identical to ``send_file(..., conditional=True)`` for every input
-    except that exact AssertionError;
+    except a suffix range and that exact AssertionError;
+  * a suffix range (``bytes=-N``) is served as RFC 9110 §14.1.2 defines it:
+    the last N bytes, the whole file when it is shorter than N, and 416 for
+    ``bytes=-0``. Quart cannot: werkzeug parses ``bytes=-N`` as start ``-N``
+    and quart's file body keeps that negative start, so the same
+    AssertionError fired (quart 0.22.0 / werkzeug 3.1.8, measured
+    2026-11-05; single-byte ranges are served correctly by that pair), and
+    N beyond the file answered 416. The seam hands quart the equivalent
+    int-range ``bytes=max(0, size-N)-`` instead;
   * that AssertionError degrades to a plain full-body 200 (a spec-legal
     answer to any GET — a server may always ignore a Range header),
-    logged with the path, never a 500.
+    logged with the path and the Range received, never a 500.
 
 The catch is narrowed to the werkzeug message so no OTHER assertion
 silently turns into a 200.
@@ -31,9 +39,34 @@ threads. Quart itself remains untouched, while legacy synchronous routes still
 receive a concrete Response rather than a coroutine object.
 """
 
+import os
+
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+
+def _resolve_suffix_range(request, path) -> None:
+    """Replace a parsed ``bytes=-N`` by its RFC 9110 int-range for quart.
+
+    ``request.range`` is werkzeug's settable cached parse of the Range header,
+    which is what quart serves; the header itself is left as received.
+    """
+    parsed = request.range
+    if parsed is None or parsed.units != 'bytes' or len(parsed.ranges) != 1:
+        return
+    start, stop = parsed.ranges[0]
+    spec = request.headers.get('Range', '').partition('=')[2].strip()
+    if stop is not None or not spec.startswith('-'):
+        return
+    if start == 0:
+        # werkzeug reads bytes=-0 as bytes=0-. With no satisfiable range
+        # quart answers 416 + "Content-Range: bytes */size" (unless If-Range
+        # says to ignore the Range, then 200).
+        request.range = None
+        return
+    from werkzeug.datastructures import Range
+    request.range = Range('bytes', [(max(0, os.path.getsize(path) + start), None)])
 
 
 def send_file_conditional(path, **kwargs):
@@ -42,16 +75,19 @@ def send_file_conditional(path, **kwargs):
     Drop-in for synchronous routes' current
     ``send_file(..., conditional=True)`` calls (see module docstring).
     """
+    from quart import request
     from lib.quart_sync import send_file as _send_file
     kwargs['conditional'] = True
+    _resolve_suffix_range(request, path)
     try:
         return _send_file(path, **kwargs)
     except AssertionError as e:
         if 'Bad range provided' not in str(e):
             raise
-        logger.warning('[FileServing] conditional send_file failed for %s '
-                       '(single-byte Range probe; see module docstring) — '
-                       'falling back to full-body 200', path)
+        logger.warning('[FileServing] quart/werkzeug rejected Range %r for %s '
+                       '(AssertionError: Bad range provided; see module '
+                       'docstring) — falling back to full-body 200',
+                       request.headers.get('Range'), path)
         kwargs['conditional'] = False
         return _send_file(path, **kwargs)
 

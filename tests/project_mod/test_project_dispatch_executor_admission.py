@@ -297,9 +297,10 @@ def test_bound_worker_root_loop_runs_tools_in_its_registered_workspace(runtime, 
     config.update(projectPath=str(workspace), canonicalProjectPaths=[],
                   workspaceRuntimeRoots=runtime_roots)
     task['_workspaceRootPolicy'] = policy
+    from lib.tasks_pkg.workspace_delivery import workspace_work_id
     task['_workspaceDelivery'] = {'repositories': [{
         'canonicalRoot': str(Path(canonical).resolve()), 'workspacePath': str(workspace),
-        'workId': task['id']}]}
+        'workId': workspace_work_id(task)}]}
     monkeypatch.setattr('lib.integration_state_repository.find_workspace',
                         lambda root, task_id, user_id: {
                             'user_id': user_id, 'task_id': task_id, 'project_root': root,

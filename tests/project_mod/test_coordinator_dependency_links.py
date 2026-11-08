@@ -8,7 +8,7 @@ pytestmark = pytest.mark.unit
 
 def completed(r):
     worker = delegate(r); end(r, worker)
-    workspace = r.workspaces[r.attempts[worker['execution']['attemptId']]['taskId']]
+    workspace = r.workspaces[worker['execution']['taskId']]
     workspace.update(checkpoint_sha='a' * 40, state='integrated')
     workspace['origin']['delivery']['checkpointSha'] = workspace['checkpoint_sha']
     return worker, {'assignmentId': worker['id'], 'grantRevision': worker['grant']['revision'],

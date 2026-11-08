@@ -62,7 +62,7 @@ const meteredRound = (round) => ({
   round, model: 'claude-opus-5.5',
   usage: { prompt_tokens: 166000, completion_tokens: 2300,
            _dispatch: { model: 'kunlunbedrock.claude-opus-5.5-m17',
-                        provider_id: 'sankuai', key_tail: '4861' } },
+                        provider_id: 'example-corp', key_tail: '4861' } },
 });
 const subscriptionRound = (round, prompt, completion) => ({
   round, model: 'gpt-6.1-sol',
@@ -72,7 +72,7 @@ const subscriptionRound = (round, prompt, completion) => ({
 });
 const turn = (apiRounds, usage) => ({
   _turnStatus: 'completed', _turnSettlement: {},
-  model: 'claude-opus-5.5', providerId: 'sankuai',
+  model: 'claude-opus-5.5', providerId: 'example-corp',
   usage: usage || { prompt_tokens: 6316908, completion_tokens: 89470 },
   apiRounds,
 });
@@ -92,7 +92,7 @@ const subscriptionWithMeteredCompaction = [
   subscriptionRound(1, 40000, 900),
   subscriptionRound(2, 52000, 1100),
   { round: 'compaction-1', kind: 'compaction', model: 'claude-opus-5.5',
-    provider_id: 'sankuai', tag: 'COMPACTION-L2',
+    provider_id: 'example-corp', tag: 'COMPACTION-L2',
     usage: { prompt_tokens: 30000, completion_tokens: 800 } },
 ];
 

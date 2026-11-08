@@ -61,9 +61,9 @@ def _scope(world):
             'conversation_id': world.watchdog['conversationId'], 'binding_revision': world.watchdog['revision']}
 
 
-def _fail(world, conversation_id, turn, error=RATE_LIMIT, **kwargs):
+def _fail(world, conversation_id, turn, error=RATE_LIMIT, *, turn_id=None, **kwargs):
     from lib.router.watchdog.signals import report_turn_failure
-    return report_turn_failure(world.owner, conversation_id=conversation_id, turn_id='turn-' + turn,
+    return report_turn_failure(world.owner, conversation_id=conversation_id, turn_id=turn_id or 'turn-' + turn,
                                attempt_id='attempt-' + turn, error=error,
                                **({'dispatch': world.dispatch} | kwargs))
 
@@ -316,6 +316,62 @@ def test_router_notice_is_a_peer_input_refused_while_the_router_is_failing(world
     with pytest.raises(PermissionError, match='recovered'):
         _notify_router({'id': 't'}, _scope(world), {**arguments, 'idempotency_key': 'quota-2'},
                        dispatch=world.dispatch)
+
+
+def _settle_router_turn(world, command_id, status):
+    from lib.turn_lifecycle import create_turn_pair
+    owner, conversation = world.owner, world.router['conversationId']
+    pair = create_turn_pair(conversation, user_id=owner, command_id=command_id,
+                            input_projection={'content': f'owner input {command_id}'}, config={})
+    attempt_id = pair['attempt']['attemptId']
+    settlement = {'outcome': status, 'cause': 'generation_error' if status == 'failed' else 'test'}
+    if status == 'failed':
+        settlement['error'] = {'kind': 'internal', 'detail': 'inference_profile: invalid inference profile'}
+    world.client(write=True).command('turn.event.record', {
+        'attempt_id': attempt_id, 'user_id': owner, 'terminal': True, 'status': status,
+        'projection': {'content': '' if status == 'failed' else 'Router reply.'},
+        'settlement': settlement}, 'settle-' + command_id)
+    return pair['attempt']['turnId']
+
+
+def test_router_notice_resumes_after_a_later_turn_completes(world):
+    """An open failure signal must not describe the Router as still failing (2026-11-05 incident).
+
+    The Global Router failed to start at 04:52, recovered and completed nine turns, yet every
+    watchdog_notify_router was refused for seven hours because the signal stays open until the
+    Watchdog resolves it — which the refusal itself blocked it from doing.
+    """
+    from lib.router.watchdog.signals import FaultSignals
+    from lib.router.watchdog.tools import _notify_router
+    from lib.turn_lifecycle import get_turn
+    owner, conversation = world.owner, world.router['conversationId']
+    failed = _settle_router_turn(world, 'router-failed', 'failed')
+    _fail(world, conversation, 'r1', turn_id=failed)
+    [signal] = FaultSignals(owner).open_turn_failures(conversation)
+    arguments = {'message': 'The owner may need to re-authenticate the provider.', 'idempotency_key': 'notice-1'}
+    with pytest.raises(PermissionError, match='recovered'):
+        _notify_router({'id': 't'}, _scope(world), arguments, dispatch=world.dispatch)
+    world.woken.clear()  # the signal's own wake is not a Router notice
+
+    latest = _settle_router_turn(world, 'router-recovered', 'completed')
+    assert get_turn(conversation, latest, user_id=owner, include_projection=False)['status'] == 'completed'
+    result = _notify_router({'id': 't'}, _scope(world), arguments, dispatch=world.dispatch)
+    assert result['disposition'] == 'started'
+    [resolved] = FaultSignals(owner).resolve([signal['signalId']], 'already closed')
+    assert resolved['state'] == 'resolved' and latest in resolved['resolution']
+    assert FaultSignals(owner).open_turn_failures(conversation) == []
+
+
+def test_router_notice_still_refuses_a_latest_failed_turn(world):
+    from lib.router.watchdog.tools import _notify_router
+    owner, conversation = world.owner, world.router['conversationId']
+    failed = _settle_router_turn(world, 'router-failed-again', 'failed')
+    _fail(world, conversation, 'r2', turn_id=failed)
+    _settle_router_turn(world, 'router-recovered-then-failed', 'failed')
+    with pytest.raises(PermissionError, match='recovered'):
+        _notify_router({'id': 't'}, _scope(world),
+                       {'message': 'Still failing.', 'idempotency_key': 'notice-2'}, dispatch=world.dispatch)
+    assert len(world.woken) == 1  # only the signal's own wake
 
 
 def test_periodic_review_is_one_owner_controlled_scheduler_task(world):

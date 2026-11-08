@@ -21,8 +21,9 @@ class ExecutionService(ResidentService):
     record_format = RECORD_FORMAT
     host_module = HOST_MODULE
 
-    def stop(self, timeout: float = NATIVE_SERVICE_STOP_SECONDS) -> None:
-        super().stop(timeout)
+    def stop(self, timeout: float = NATIVE_SERVICE_STOP_SECONDS, *,
+             retire_failed_close: bool = False) -> str:
+        return super().stop(timeout, retire_failed_close=retire_failed_close)
 
     def enabled(self, environment: dict[str, str]) -> bool:
         """Managed personal composition; explicit topology retains its owner."""

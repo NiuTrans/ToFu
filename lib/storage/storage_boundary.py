@@ -11,6 +11,7 @@ import socket
 import subprocess
 
 from runtime_guards import pid_is_alive
+from runtime_path_policy import get_runtime_base
 
 
 _DRIVERS = frozenset({'sqlite3', 'psycopg', 'psycopg2'})
@@ -133,8 +134,8 @@ def _candidate_python_files(project_root: Path) -> set[str] | None:
     return candidates
 
 
-def _boundary_cache_path(project_root: Path) -> Path:
-    return project_root / 'data' / _BOUNDARY_CACHE_NAME
+def _boundary_cache_path() -> Path:
+    return Path(get_runtime_base()) / 'data' / _BOUNDARY_CACHE_NAME
 
 
 def _file_signature(path: Path) -> dict[str, int] | None:
@@ -151,11 +152,14 @@ def _file_signature(path: Path) -> dict[str, int] | None:
 
 def _read_boundary_cache(project_root: Path) -> dict[str, dict[str, object]]:
     try:
-        payload = json.loads(
-            _boundary_cache_path(project_root).read_text(encoding='utf-8'))
+        payload = json.loads(_boundary_cache_path().read_text(encoding='utf-8'))
     except (OSError, ValueError, TypeError):
         return {}
-    if not isinstance(payload, dict) or payload.get('version') != _BOUNDARY_CACHE_VERSION:
+    # One runtime data root can serve several source trees (checkouts that
+    # share the per-user base), so entries belong to the root that wrote them.
+    if (not isinstance(payload, dict)
+            or payload.get('version') != _BOUNDARY_CACHE_VERSION
+            or payload.get('root') != str(project_root)):
         return {}
     files = payload.get('files')
     return files if isinstance(files, dict) else {}
@@ -163,12 +167,13 @@ def _read_boundary_cache(project_root: Path) -> dict[str, dict[str, object]]:
 
 def _write_boundary_cache(project_root: Path,
                           entries: dict[str, dict[str, object]]) -> None:
-    path = _boundary_cache_path(project_root)
+    path = _boundary_cache_path()
     temporary = path.with_name(f'{path.name}.{os.getpid()}.tmp')
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary.write_text(json.dumps({
             'version': _BOUNDARY_CACHE_VERSION,
+            'root': str(project_root),
             'files': entries,
         }, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
         os.replace(temporary, path)

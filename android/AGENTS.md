@@ -30,4 +30,6 @@ origin/frame-scoped native browser channels. Diagnostics are owned by
 Use `./test-local.sh` for the fast JDK tiers, then `./gradlew test` when an
 Android SDK is available. Run `./gradlew :app:assembleDebug` for packaging
 changes and the focused root tests for API generation, APK URL, and workflow
-parity.
+parity. A change to a rendered native screen also needs
+`./gradlew :app:verifyPaparazziDebug`: plain `test` does not compare the
+screenshot goldens.

@@ -87,6 +87,92 @@ def test_stop_preserves_native_shutdown_failure(tmp_path, monkeypatch):
     assert service.record()['state'] == 'failed'
 
 
+def test_host_publishes_terminal_record_when_shutdown_raises(tmp_path, monkeypatch):
+    """A failed stop must still leave verifiable lifecycle evidence.
+
+    2026-11-06: the unreapable SIGKILL timeout escaped the host's finalizer
+    before it wrote its record. The manager then saw the previous 'ready'
+    state, reported an unconfirmed clean close, and latched the restart.
+    """
+    import argparse
+    import threading
+    from serverctl_pkg import native_storage_host as host
+    from server_manager import proc_start_ticks
+
+    (tmp_path / 'data').mkdir()
+    connection = tmp_path / 'data/native-storage-connection.json'
+    state_path = tmp_path / 'data/native-storage-service.json'
+    manager_read, manager_write = os.pipe()
+    lease_fd = os.open(tmp_path / 'service-lease', os.O_CREAT | os.O_RDWR, 0o600)
+    control = os.fstat(manager_read)
+    record = {
+        'format': host.RECORD_FORMAT, 'host': socket.gethostname(),
+        'projectPath': str(tmp_path), 'connectionFile': str(connection),
+        'serviceId': 'a' * 32, 'pid': os.getpid(),
+        'processStartTime': proc_start_ticks(os.getpid()),
+        'managerPid': os.getpid(),
+        'managerStartTime': proc_start_ticks(os.getpid()),
+        'managerControl': {
+            'fd': manager_write, 'device': control.st_dev,
+            'inode': control.st_ino,
+        },
+        'plan': {}, 'state': 'starting',
+    }
+    write_record(state_path, record)
+    args = argparse.Namespace(
+        service_id='a' * 32, manager_pid=os.getpid(),
+        manager_start=proc_start_ticks(os.getpid()),
+        manager_fd=manager_read, lease_fd=lease_fd,
+        state_file=str(state_path))
+
+    class FakeRuntime:
+        def __init__(self, supervisor):
+            self.supervisor = supervisor
+
+        def start(self):
+            return None
+
+        def status(self):
+            return {'state': 'starting', 'ready': False}
+
+        def stop(self, timeout=0.0):
+            raise subprocess.TimeoutExpired('native storage stop', timeout)
+
+    class FakeSupervisor:
+        def status(self):
+            return {'pid': None}
+
+    monkeypatch.setattr(host, 'prepare_plan', lambda supervisor: {})
+    monkeypatch.setattr('lib.storage.runtime.StorageRuntime', FakeRuntime)
+    previous_handlers = {
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+    }
+
+    def release_owner():
+        os.close(manager_write)
+
+    timer = threading.Timer(0.2, release_owner)
+    timer.start()
+    try:
+        assert host.serve(args, supervisor_factory=FakeSupervisor) == 0
+    finally:
+        timer.cancel()
+        for signal_number, handler in previous_handlers.items():
+            signal.signal(signal_number, handler)
+        os.environ.pop('TOFU_STORAGE_SERVICE_ID', None)
+        os.environ.pop('TOFU_STORAGE_SERVICE_STATE', None)
+        for descriptor in (manager_read, manager_write):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    final = json.loads(state_path.read_text(encoding='utf-8'))
+    assert final['state'] == 'failed'
+    assert 'TimeoutExpired' in final['error']
+
+
 def test_host_exit_cannot_reset_native_crash_budget_on_reconcile(tmp_path, monkeypatch):
     from server_manager import LifecycleManager, proc_start_ticks
     (tmp_path / 'data').mkdir()

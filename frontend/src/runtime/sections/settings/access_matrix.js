@@ -2,7 +2,7 @@
 /* ═══════════════════════════════════════════════════════════════════
    settings/access matrix — per-(credential × wire id) capability grid.
 
-   Some gateways (e.g. Meituan AIGC) give each credential a *different*
+   Some gateways (e.g. YourProvider AIGC) give each credential a *different*
    quota and a *different* set of accessible models. The flat model list
    can't express that: the v2 authority stores the grant as
    ``credential.authorization.models`` (an allow-list of ModelRefs), which
@@ -21,7 +21,7 @@
    keys from the owner-scoped secret store — the browser never sees them —
    and sends a tiny request to EVERY (credential × wire id) pair, granted
    or not: discovering reachable pairs the allow-list does not grant yet
-   is the matrix's whole point on gateways like Meituan. Progress is
+   is the matrix's whole point on gateways like YourProvider. Progress is
    persisted server-side under data/config/probe_cache/, so closing
    Settings (or restarting the server) never loses it — the UI re-attaches
    by provider id and keeps polling. Only "Retest" (force) discards the
@@ -339,13 +339,18 @@ function _mxStateChips(entry) {
  *  Pending rows render nothing — there is no catalog identity to describe. */
 function _mxMetaHtml(entry) {
   if (entry.pending) return '';
-  var capLabels = (typeof _MODEL_CAP_LABELS === 'object' && _MODEL_CAP_LABELS) || {};
+  var capLabel = typeof runtimeScope.modelCapabilityLabel === 'function'
+    ? runtimeScope.modelCapabilityLabel : function(cap) { return cap; };
   var caps = entry.capabilities.map(function(cap) {
     return '<span class="stg-cap ' + escapeHtml(cap) + '" title="' + escapeHtml(cap) + '">' +
-      escapeHtml(capLabels[cap] || cap) + '</span>';
+      escapeHtml(capLabel(cap)) + '</span>';
   }).join('');
+  // Media kinds (image/video/audio/speech) are described by media facts; a
+  // token context window says nothing about them.
+  var media = typeof runtimeScope.isMediaKind === 'function' && typeof runtimeScope.modelKind === 'function'
+    && runtimeScope.isMediaKind(runtimeScope.modelKind(entry.capabilities));
   var bits = '';
-  if (entry.offering.context_window) {
+  if (entry.offering.context_window && !media) {
     var ctxLabel = (typeof _modelRoutingContextLabel === 'function')
       ? _modelRoutingContextLabel(entry.offering.context_window)
       : String(entry.offering.context_window);
@@ -370,6 +375,14 @@ function _mxMetaHtml(entry) {
       (entry.catalogPrice
         ? '<span class="stg-v2-price-tag">' + escapeHtml(t('settings.matrixCatalogPrice')) + '</span>'
         : '') +
+    '</span>';
+  }
+  var mediaPrice = media && entry.mediaPricing && typeof runtimeScope.modelMediaPriceSummary === 'function'
+    ? runtimeScope.modelMediaPriceSummary(entry.mediaPricing) : '';
+  if (mediaPrice) {
+    bits += '<span class="stg-mx-meta-bit stg-mx-price" title="' + escapeHtml(t('settings.matrixMediaReferencePriceHint')) + '">' +
+      escapeHtml(mediaPrice) +
+      '<span class="stg-v2-price-tag">' + escapeHtml(t('settings.matrixCatalogPrice')) + '</span>' +
     '</span>';
   }
   if (!caps && !bits) return '';
@@ -837,19 +850,12 @@ function _rerenderMatrix(providerId) {
 
 // ── Background probe: start / poll / resume / apply ───────────────────────
 
-/** True when the offering has no chat surface (image_gen / embedding /
- *  transcription). Reads the shared taxonomy helper when available, else
- *  the same hardcoded fallback set it ships with. */
+/** True when the offering has no chat surface (image/video/audio generation,
+ *  speech, embedding, reranking). The shared taxonomy port is the only
+ *  classification; a harness without it fails open (treated as chat). */
 function _matrixModelIsNonChat(entry) {
-  if (!entry) return false;
-  if (typeof runtimeScope.isChatModel === 'function') {
-    return !runtimeScope.isChatModel({ capabilities: entry.capabilities });
-  }
-  var nonChat = ['image_gen', 'embedding', 'transcription', 'tts'];
-  for (var i = 0; i < entry.capabilities.length; i++) {
-    if (nonChat.indexOf(entry.capabilities[i]) >= 0) return true;
-  }
-  return false;
+  if (!entry || typeof runtimeScope.isChatModel !== 'function') return false;
+  return !runtimeScope.isChatModel({ capabilities: entry.capabilities });
 }
 
 /** True when the cell carries a verdict from the model's OWN modality

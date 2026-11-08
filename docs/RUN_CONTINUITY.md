@@ -12,6 +12,25 @@ decided direction with a named phase; each phase lands with its own tests and
 rewrites its section here from plan into contract in the same change. Git
 history retains the superseded plan text.
 
+## Durable worker recovery ordering
+
+**Problem:** API-independent conversation workers can retain an expired owner's
+lease while boot continuity inspects its Goal. Treating that still-running
+Attempt as a changed binding permanently refused a valid checkpoint continuation.
+**Decision:** boot continuity defers while the exact durable source binding awaits
+physical-exit settlement. After the current worker claim confirms process death
+and commits the interrupted Attempt plus unknown-result receipt, the worker calls
+the same continuity pass for that source Goal. The same accepted command ID,
+source cursor, native checkpoint preflight, original account and Stop/lane guards
+admit its successor. The issued application supplies native recovery policy
+explicitly outside HTTP context. No effects are re-entered on the old Attempt.
+**Alternative rejected:** changing a lease expiry into permission to replay the
+old invocation loses both file-effect evidence and fee authority. Recovery remains
+pending when external outcomes cannot be proved; it never creates a fresh budget.
+Verify `test_worker_exit_recovery`, the continuity suites and the public native
+Goal process-loss qualification, including one unchanged file publication and
+exact original-price fees across registered actors.
+
 ## Problem
 
 Self-evolution goals run for hours to days. Committed-effect recovery now spans

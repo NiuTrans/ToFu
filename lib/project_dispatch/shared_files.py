@@ -297,7 +297,7 @@ class ProjectSharedFiles:
                 binding, workspace = self._grant(task, principal, path)
                 root, checkpoint = workspace['workspace_path'], workspace.get('checkpoint_sha')
                 source.update(kind='files_grant', assignmentId=binding['assignmentId'],
-                              grantRevision=binding['revision'], taskId=task['id'])
+                              grantRevision=binding['revision'], taskId=workspace['task_id'])
             identity = _root_identity(root)
             status, content = _capture(root, path, identity, LIMITS['maxContentBytes'])
             if content is None:

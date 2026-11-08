@@ -54,7 +54,7 @@ def test_schema_isolation_model_failure_and_fallback_keep_exact_order():
             'emittedAt': 1_020,
             'spanId': 'model:attempt-a:1',
             'model': 'kimi-k3',
-            'providerId': 'sankuai',
+            'providerId': 'example-corp',
             'keyHint': '2208********5409',
             'status': 'failed',
             'errorKind': 'BadRequestError',
@@ -84,7 +84,7 @@ def test_schema_isolation_model_failure_and_fallback_keep_exact_order():
     assert isolated['action'] == 'omitted'
     assert isolated['parentSpanId'] == 'model:attempt-a:1'
     failed = timeline['entries'][1]
-    assert failed['providerId'] == 'sankuai'
+    assert failed['providerId'] == 'example-corp'
     assert failed['keyHint'] == '2208********5409'
     switched = timeline['entries'][2]
     assert (switched['fromModel'], switched['toModel']) == (
@@ -212,7 +212,7 @@ def test_request_complete_fields_carry_abort_error_url():
     from lib.tasks_pkg.manager._stream import _model_request_complete_fields
 
     fields = _model_request_complete_fields(
-        {'provider_id': 'sankuai'},
+        {'provider_id': 'example-corp'},
         status='aborted',
         finish_reason='',
         error=AbortedError(
@@ -230,7 +230,7 @@ def test_request_complete_fields_carry_abort_error_url():
     assert fields['errorUrl'] == 'https://x/v1/chat'
     # An abort without a bound URL emits no errorUrl at all.
     no_url = _model_request_complete_fields(
-        {'provider_id': 'sankuai'},
+        {'provider_id': 'example-corp'},
         status='aborted',
         finish_reason='',
         error=AbortedError('VLM PDF transcription aborted'),
@@ -244,7 +244,7 @@ def test_request_complete_fields_carry_abort_error_url():
     assert 'errorUrl' not in no_url
 
     redacted = _model_request_complete_fields(
-        {'provider_id': 'sankuai'}, status='aborted', finish_reason='',
+        {'provider_id': 'example-corp'}, status='aborted', finish_reason='',
         error=AbortedError('synthetic abort', url=(
             'https://user:synthetic-password@x/v1/chat?token=synthetic-token')),
         usage_value={}, span_id='model:attempt-a:1', model='kimi-k3',
@@ -256,7 +256,7 @@ def test_request_complete_fields_carry_abort_error_url():
 
     # Dispatch metadata's masked key hint reaches the wire as keyHint.
     hinted = _model_request_complete_fields(
-        {'provider_id': 'sankuai'}, status='failed', finish_reason='',
+        {'provider_id': 'example-corp'}, status='failed', finish_reason='',
         error=RuntimeError('boom'),
         usage_value={'_dispatch': {'key_hint': '2208********5409'}},
         span_id='model:attempt-a:1', model='kimi-k3',
@@ -294,7 +294,7 @@ def test_request_complete_fields_honor_fence_error_overrides():
     from lib.tasks_pkg.manager._stream import _model_request_complete_fields
 
     fields = _model_request_complete_fields(
-        {'provider_id': 'sankuai',
+        {'provider_id': 'example-corp',
          '_abort_reason': 'storage_authority_integrity'},
         status='failed',
         finish_reason='',
@@ -2109,7 +2109,7 @@ def test_stream_boundary_marks_returned_truncated_stream_failed(monkeypatch):
              'reasoning_content': 'unfinished'},
             'stop',
             {
-                '_dispatch': {'provider_id': 'sankuai', 'model': 'kimi-k3'},
+                '_dispatch': {'provider_id': 'example-corp', 'model': 'kimi-k3'},
                 '_missing_done': True,
                 '_stream_anomaly': True,
                 '_failure_stage': 'midstream_close',

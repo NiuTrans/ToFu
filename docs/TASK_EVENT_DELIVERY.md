@@ -17,6 +17,12 @@ evidence stays in its existing lane/recovery debt; no queue, timeout or extra
 shutdown worker is introduced. Verify
 `test_sync_compat_interpreter_exit_closes_event_delivery_before_join`.
 
+A registered child's Request Inspector lane borrows the current root worker
+claim and explicit owner for its durable append. These observations may drain
+after Stop; they never authorize a new effect. A missing or stale claim is
+rejected by storage just like root events. Verify the child Inspector claim
+specification across all semantic authorities and public Goal crash recovery.
+
 Detached structural graphs are charged once through their last queued,
 in-flight or lane-retained reference; each event also reports its private
 frame/text residency.

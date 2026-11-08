@@ -59,7 +59,7 @@ FUNCTION_LINE_BUDGETS = _unique_budgets(
     ('lib/tasks_pkg/handlers/project.py', '_handle_project_tool', 561),
     ('lib/tasks_pkg/manager/_events.py', '_append_event_ordered', 593),
     ('lib/tasks_pkg/manager/_stream.py', 'stream_llm_response', 655),
-    ('lib/tasks_pkg/tool_dispatch/_parse.py', 'parse_tool_calls', 630),
+    ('lib/tasks_pkg/tool_dispatch/_parse.py', 'parse_tool_calls', 621),
     ('packages/tofu-search/tofu_search/search/orchestrator.py', '_perform_web_search_impl', 660),
     ('scripts/rootless_terminal_bench_21.py', '_classify_trial', 645),
     ('tests/storage/test_native_task_terminal.py', 'test_real_native_route_commits_application_terminal', 782),

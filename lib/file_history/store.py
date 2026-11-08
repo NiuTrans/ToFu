@@ -168,6 +168,25 @@ def ensure_store(base_path: str) -> str:
             os.mkdir(directory)
         except FileExistsError:
             pass
+    # Self-ignore: the store is per-developer undo state, not project source.
+    # A nested ``.gitignore`` covers ``.tofu/file-history`` only (never the
+    # sibling ``.tofu/memories`` or ``.tofu/skills`` packages) and must not
+    # touch the repository's own ``.gitignore`` — adding a line there is an
+    # unrequested change to a user's tracked file. Without it the first
+    # ``git add -A`` commits the pre-edit backups into the user's repository
+    # (TB2.1 sanitize-git-repo failed on exactly this: the backups still held
+    # the secrets the agent had just scrubbed).
+    ignore = os.path.join(sd, '.gitignore')
+    if not os.path.exists(ignore):
+        try:
+            with open(ignore, 'w', encoding='utf-8') as f:
+                f.write(
+                    '# Tofu file-history is local undo state, never project source.\n'
+                    '*\n'
+                    '!.gitignore\n')
+        except OSError as e:
+            logger.debug('[FileHistory] could not create .gitignore at %s: %s',
+                         ignore, e)
     # Touch a marker file so casual ``ls`` sees the dir is intentional.
     readme = readme_path(base_path)
     if not os.path.exists(readme):

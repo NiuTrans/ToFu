@@ -30,6 +30,8 @@ from typing import Any
 import cffi
 
 _ffi = cffi.FFI()
+from .generated_commit_watch import CDEF as _COMMIT_WATCH_CDEF
+
 _ffi.cdef(
     """
     void* tofudb_embed_open(const char*, uint64_t, int64_t, const char*,
@@ -40,7 +42,7 @@ _ffi.cdef(
     intptr_t tofudb_embed_source_sha256(uint8_t*, size_t);
     void tofudb_embed_close(void*);
     void tofudb_embed_abandon(void*);
-    """
+    """ + _COMMIT_WATCH_CDEF
 )
 
 try:
@@ -118,6 +120,7 @@ class EmbeddedRuntime:
         self._handle = _ffi.NULL
         self._lifecycle = threading.Condition()
         self._active_calls = 0
+        self._watch_tokens = set()
         self._closing = False
         self._lib = _ffi.dlopen(str(library_path))
         error = _ffi.new("uint8_t[]", _ERROR_BUFFER_BYTES)
@@ -203,11 +206,13 @@ class EmbeddedRuntime:
                 "deadline_unix_ms": deadline_unix_ms,
             }
         )
+        return self._exchange_json(self._lib.tofudb_embed_execute, self._handle, request)
+
+    @staticmethod
+    def _exchange_json(execute, handle, request):
         out, capacity = _response_buffer()
         while True:
-            written = self._lib.tofudb_embed_execute(
-                self._handle, request, len(request), out, capacity
-            )
+            written = execute(handle, request, len(request), out, capacity)
             if written > capacity:
                 raise EmbeddedTransportError("embedded response exceeded supplied capacity")
             if written >= 0:
@@ -226,6 +231,35 @@ class EmbeddedRuntime:
                 raise EmbeddedTransportError(
                     f"embedded response allocation failed for {needed} bytes"
                 ) from error
+
+    def commit_watch(self, operation, cursor, *, deadline_unix_ms, cancellation=None):
+        """Borrow a native wait token until its exact cancellation borrower exits."""
+        from contextlib import nullcontext
+        with self._lifecycle:
+            if self._closing or self._handle == _ffi.NULL:
+                raise EmbeddedTransportError("embedded runtime is closed")
+            try:
+                token = self._lib.tofudb_embed_watch_open(self._handle)
+            except AttributeError as error:
+                raise EmbeddedTransportError("selected embedded library lacks commit watches") from error
+            if token == _ffi.NULL:
+                raise EmbeddedTransportError("embedded commit watch owner is unavailable")
+            self._active_calls += 1
+            self._watch_tokens.add(token)
+        try:
+            request = _dumps({'operation': operation, 'payload': {'cursor': cursor},
+                              'deadline_unix_ms': deadline_unix_ms})
+            binding = (cancellation.bind(lambda: self._lib.tofudb_embed_watch_cancel(token))
+                       if cancellation is not None else nullcontext())
+            with binding:
+                return self._exchange_json(self._lib.tofudb_embed_watch_execute, token, request)
+        finally:
+            with self._lifecycle:
+                self._watch_tokens.remove(token)
+                self._lib.tofudb_embed_watch_free(token)
+                self._active_calls -= 1
+                if self._closing and self._active_calls == 0:
+                    self._lifecycle.notify_all()
 
     @property
     def checkpoint_supported(self) -> bool:
@@ -289,6 +323,8 @@ class EmbeddedRuntime:
             if self._handle == _ffi.NULL:
                 return
             self._closing = True
+            for token in self._watch_tokens:
+                self._lib.tofudb_embed_watch_cancel(token)
             while self._active_calls:
                 self._lifecycle.wait()
             handle = self._handle

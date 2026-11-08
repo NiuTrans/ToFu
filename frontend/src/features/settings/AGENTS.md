@@ -44,6 +44,13 @@
   commands capture this opening before awaiting. Accepted auth writes survive
   close; committed routing refreshes preserve current drafts and credentials.
   `codex-shared-login.ts` captures separate commit and presentation callbacks.
+  Device observation is per provider; a card retires only its own.
+- `kimi-code-login.ts` owns the Kimi Code card (device sign-in, status,
+  sign-out). `subscription-plans.ts` owns the coding-plan key cards, one per
+  `subscription` provider template: Connect stages through the existing Provider
+  add command, Disconnect through `prepareProviderRemoval`. Start with
+  `tests/providers/test_subscription_settings_cards.py`, then the Kimi scenarios
+  of `test_settings_import_oauth_lifecycle.py`.
 - `speech-provider.ts` owns pure STT projection, activation and bundle policy;
   `speech.ts` owns form intent and view lifetime. Save commands enter the
   shared routing queue with explicit draft-persistence policy; no private

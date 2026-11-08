@@ -41,7 +41,6 @@ import os
 import threading
 import time
 import uuid
-import weakref
 from collections.abc import Mapping
 
 from lib.log import get_logger
@@ -70,8 +69,6 @@ _dispatch_lock = threading.Lock()
 # (a nested dispatch must never run), but a nested entry on the owning thread
 # can only time out, so it skips at once instead of stalling the outer turn.
 _dispatch_owner: int | None = None
-_background_batch_locks_guard = threading.Lock()
-_background_batch_locks = weakref.WeakValueDictionary()
 
 _BACKGROUND_BATCH_PROMPT = (
     'The background commands for the previous task have finished. Review '
@@ -79,16 +76,6 @@ _BACKGROUND_BATCH_PROMPT = (
     'the user one consolidated update.'
 )
 
-
-def _background_batch_lock_for(conv_id: str, user_id: int):
-    """Serialize one conversation's wake without retaining idle lock entries."""
-    key = (int(user_id), conv_id)
-    with _background_batch_locks_guard:
-        lock = _background_batch_locks.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _background_batch_locks[key] = lock
-        return lock
 
 def _priority_for_kind(kind: str) -> int:
     return turn_source_priority(kind)
@@ -900,97 +887,148 @@ def pending_background_command_injections(
 def dispatch_completed_background_batch(conv_id: str, *, user_id: int) -> str | None:
     """Start one completion turn after every known command has a durable result.
 
-    Passive receipts are the data; one workflow intent is the wake signal.
-    Existing queued work takes precedence and consumes the receipts itself.
-    The short lock coalesces simultaneous final command publications; the
-    ordinary dispatch lock still owns task creation and lease safety.
+    Passive receipts are the data and the wake is the turn itself; no queue row
+    stands in for it. The turn authority decides that the lane is idle in the
+    same transaction that creates the turn, so a lane busy in this process or
+    any other persists nothing: its live turn consumes the receipts at its next
+    round boundary and its settlement evaluates again. Existing queued work
+    takes precedence and consumes the receipts itself. The receipt set names
+    the turn command, so simultaneous evaluations converge on one turn.
     """
     if not conv_id:
         return None
-    with _background_batch_lock_for(conv_id, user_id):
-        from lib.tasks_pkg.background_commands import conversation_results_complete
-        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    from lib.tasks_pkg.background_commands import conversation_results_complete
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
 
-        if (not conversation_results_complete(conv_id=conv_id, user_id=user_id)
-                or any(task.get('convId') == conv_id
-                       and task.get('status') in ('pending', 'running')
-                       and not task.get('aborted')
-                       for task in chat_task_runtime.snapshot_owned(user_id=user_id))):
-            return None
-        receipts = _background_receipts(conv_id, user_id=user_id, max_items=None)
-        if not receipts:
-            return None
-        if next_dispatchable_turn(conv_id, user_id=user_id) is None:
-            from lib.turn_initiation import INITIATOR_PROACTIVE, stamp_initiator
-
-            receipt_ids = sorted(str(row['queueId']) for row in receipts)
-            queue_id = str(uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f'tofu:background-batch:{user_id}:{conv_id}:{":".join(receipt_ids)}',
-            ))
-            created_at_ms = max(int(row.get('timestamp') or 1)
-                                for row in receipts)
-            user_message = stamp_initiator({
-                'role': 'user', 'content': _BACKGROUND_BATCH_PROMPT,
-                'timestamp': created_at_ms,
-            }, INITIATOR_PROACTIVE)
-            from lib.background_command_delivery import completion_delivery_config
-            # Normalize even already-durable receipts from before this fix;
-            # their frozen publication identity and bytes remain untouched.
-            config = completion_delivery_config(receipts[0].get('config'))
-            from lib.background_command_delivery import settle_closed_dispatch_completion
-            if settle_closed_dispatch_completion(config, receipts, conv_id=conv_id, user_id=user_id):
+    # Work this process still runs for the conversation (its turn, or a child
+    # invocation under it) defers the wake. Its absence proves nothing about
+    # other processes; only the lane fence below can establish idleness.
+    if (not conversation_results_complete(conv_id=conv_id, user_id=user_id)
+            or any(task.get('convId') == conv_id
+                   and task.get('status') in ('pending', 'running')
+                   and not task.get('aborted')
+                   for task in chat_task_runtime.snapshot_owned(user_id=user_id))):
+        return None
+    receipts = _background_receipts(conv_id, user_id=user_id, max_items=None)
+    if not receipts:
+        return None
+    if next_dispatchable_turn(conv_id, user_id=user_id) is not None:
+        # Best-effort drain, never a blocking dispatch: this seam is reachable
+        # while the caller TRANSITIVELY holds the non-reentrant
+        # ``_dispatch_lock`` — ``dispatch_next_queued`` → ``_dispatch_queued_turn``
+        # → ``create_turn`` → ``_throttled_cleanup_old_tasks`` →
+        # ``cleanup_old_tasks`` → ``drain_idle_background_batches`` → here. An
+        # unbounded acquire in that shape self-deadlocks the owning thread
+        # (2026-09-28 boot wedge: startup background-command recovery froze the
+        # readiness gate at 'Storage recovery' for 15+ minutes). A zero bound
+        # turns the nested entry into the documented "lock busy — tick skips"
+        # outcome; the in-flight dispatch's completion hook (or the next
+        # maintenance tick) drains the queued work instead.
+        return dispatch_next_queued(conv_id, user_id=user_id, _wait=0)
+    receipt_ids = sorted(str(row['queueId']) for row in receipts)
+    batch_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f'tofu:background-batch:{user_id}:{conv_id}:{":".join(receipt_ids)}',
+    ))
+    from lib.background_command_delivery import (
+        completion_delivery_config, settle_closed_dispatch_completion,
+    )
+    # Normalize even already-durable receipts from before this fix;
+    # their frozen publication identity and bytes remain untouched.
+    config = completion_delivery_config(receipts[0].get('config'))
+    if settle_closed_dispatch_completion(config, receipts, conv_id=conv_id, user_id=user_id):
+        return None
+    trusted = None
+    if '_projectDispatchAdmission' in config:
+        from lib.project_dispatch.admission import TrustedDispatch
+        trusted = TrustedDispatch(config['_projectDispatchAdmission'])
+        assignment = trusted.checked()
+        if assignment['execution'] is not None:
+            from lib.conversation_sync.runtime import conversation_turn_commands
+            command_id = 'project-dispatch-background:' + batch_id
+            resumed = trusted.repository.get_attempt(
+                assignment['execution']['attemptId'])
+            if (isinstance(resumed, dict) and resumed.get('commandId') == command_id
+                    and resumed.get('status') not in ('pending', 'running')):
+                # This batch's one Continue already settled; replaying its
+                # command starts nothing. The receipts wait for the next turn.
                 return None
-            if '_projectDispatchAdmission' in config:
-                from lib.project_dispatch.admission import TrustedDispatch
-                trusted = TrustedDispatch(config['_projectDispatchAdmission'])
-                assignment = trusted.checked()
-                if assignment['execution'] is not None:
-                    from lib.conversation_sync.runtime import conversation_turn_commands
-                    command_id = 'project-dispatch-background:' + queue_id
-                    resumed = trusted.repository.get_attempt(
-                        assignment['execution']['attemptId'])
-                    if (isinstance(resumed, dict) and resumed.get('commandId') == command_id
-                            and resumed.get('status') not in ('pending', 'running')):
-                        # This batch's one Continue already settled; replaying its
-                        # command starts nothing. The receipts wait for the next turn.
-                        return None
-                    latest = trusted.repository.turn_get(
-                        conv_id, assignment['execution']['turnId'], user_id=user_id,
-                        include_projection=False)
-                    outcome = conversation_turn_commands.resume_turn(
-                        conv_id, assignment['execution']['turnId'], user_id, {
-                            'commandId': command_id,
-                            'operation': 'continue',
-                            'expectedProjectionRevision': latest['projectionRevision'],
-                            'config': config,
-                        }, request_started_at=time.time(),
-                        principal=trusted.principal, trusted_dispatch=trusted)
-                    if not outcome.value.get('aborted'):
-                        return outcome.value['attempt']['attemptId']
-            _queue_client(write=True).command('queue.enqueue', {
-                'conv_id': conv_id, 'user_id': int(user_id),
-                'queue_id': queue_id, 'kind': KIND_WORKFLOW,
-                'priority': _priority_for_kind(KIND_WORKFLOW),
-                'message': {
-                    'text': _BACKGROUND_BATCH_PROMPT,
-                    '_user_msg': user_message,
-                    '_backgroundBatchWake': receipt_ids,
-                },
-                'config': config, 'created_at_ms': created_at_ms,
-            }, command_id=queue_id)
-    # Best-effort wake, never a blocking dispatch: this seam is reachable
-    # while the caller TRANSITIVELY holds the non-reentrant
-    # ``_dispatch_lock`` — ``dispatch_next_queued`` → ``_dispatch_queued_turn``
-    # → ``create_turn`` → ``_throttled_cleanup_old_tasks`` →
-    # ``cleanup_old_tasks`` → ``drain_idle_background_batches`` → here. An
-    # unbounded acquire in that shape self-deadlocks the owning thread
-    # (2026-09-28 boot wedge: startup background-command recovery froze the
-    # readiness gate at 'Storage recovery' for 15+ minutes). A zero bound
-    # turns the nested entry into the documented "lock busy — tick skips"
-    # outcome; the in-flight dispatch's completion hook (or the next
-    # maintenance tick) drains the wake instead.
-    return dispatch_next_queued(conv_id, user_id=user_id, _wait=0)
+            latest = trusted.repository.turn_get(
+                conv_id, assignment['execution']['turnId'], user_id=user_id,
+                include_projection=False)
+            outcome = conversation_turn_commands.resume_turn(
+                conv_id, assignment['execution']['turnId'], user_id, {
+                    'commandId': command_id,
+                    'operation': 'continue',
+                    'expectedProjectionRevision': latest['projectionRevision'],
+                    'config': config,
+                }, request_started_at=time.time(),
+                principal=trusted.principal, trusted_dispatch=trusted)
+            if not outcome.value.get('aborted'):
+                return outcome.value['attempt']['attemptId']
+    return _start_background_batch_turn(
+        conv_id, receipts, batch_id, config, trusted, user_id=user_id)
+
+
+def _start_background_batch_turn(
+    conv_id: str,
+    receipts: list[dict],
+    batch_id: str,
+    config: dict,
+    trusted_dispatch,
+    *,
+    user_id: int,
+) -> str | None:
+    """Create the collective wake turn; a refused lane leaves nothing durable."""
+    from lib.conversation_sync.command_service import AttemptStartFailure
+    from lib.turn_initiation import INITIATOR_PROACTIVE, stamp_initiator
+    from lib.turn_lifecycle import LifecycleConflict, LifecycleNotFound
+
+    user_message = stamp_initiator({
+        'role': 'user', 'content': _BACKGROUND_BATCH_PROMPT,
+        'timestamp': max(int(row.get('timestamp') or 1) for row in receipts),
+    }, INITIATOR_PROACTIVE)
+    command_body = {
+        'commandId': f'background-batch:{batch_id}',
+        'inputTurn': user_message,
+        'config': config,
+        'laneId': 'main',
+        'kind': 'reply',
+        'actor': 'assistant',
+    }
+    try:
+        result = _submit_queued_turn_command(
+            conv_id, user_id, command_body, trusted_dispatch=trusted_dispatch)
+    except LifecycleConflict as exc:
+        logger.info(
+            '[Queue] background batch wake conv=%s stood down (%s); the lane '
+            'owner consumes the results', conv_id[:8], exc.code)
+        return None
+    except LifecycleNotFound:
+        return None
+    except AttemptStartFailure as exc:
+        # The command service settled the pair and attached resume options.
+        latest_turn = exc.latest_turn or {}
+        attempt_id = str(latest_turn.get('activeAttemptId')
+                         or latest_turn.get('turnId') or batch_id)
+        logger.warning(
+            '[Queue] background batch wake created but executor start failed '
+            'conv=%s attempt=%s — resume options ride the turn',
+            conv_id[:8], attempt_id[:8])
+        return attempt_id
+    if result.get('aborted'):
+        return None
+    if result.get('idempotentReplay'):
+        # This receipt set's wake already exists. A live one consumes the
+        # results at its next round; one that settled first (stopped or failed
+        # before its first model round) leaves them for the next turn. Either
+        # way the replay starts nothing and is not reported as a start.
+        return None
+    attempt_id = result['attempt']['attemptId']
+    logger.info('[Queue] background batch wake → attempt %s for conv=%s '
+                '(%d result(s))', attempt_id[:8], conv_id[:8], len(receipts))
+    _notify_conversation_changed(conv_id, user_id=user_id)
+    return attempt_id
 
 
 def drain_idle_background_batches() -> list[str]:
@@ -1267,6 +1305,24 @@ def _stamp_queued_turn_initiator(user_msg: dict, payload: dict) -> None:
         )
 
 
+def _notify_conversation_changed(conv_id: str, *, user_id: int) -> None:
+    """Open tabs hydrate and attach a turn this module started.
+
+    The conversation-change handler re-reads the authoritative snapshot.
+    """
+    try:
+        from lib.conversations import notify_conv_changed
+        from lib.turn_lifecycle import get_conversation_revision
+
+        notify_conv_changed(
+            conv_id,
+            rev=get_conversation_revision(conv_id, user_id=user_id),
+            user_id=user_id,
+        )
+    except Exception as e:
+        logger.debug("[Queue] conv-changed notify failed: %s", e)
+
+
 def _submit_queued_turn_command(
     conv_id: str,
     user_id,
@@ -1277,9 +1333,10 @@ def _submit_queued_turn_command(
 ) -> dict:
     """Submit through the shared application service and return its value.
 
-    This is the queue's single outbound port. Keeping it small makes lease and
-    ordering contracts independently testable without replacing task-manager
-    internals or starting model workers.
+    This is the module's single outbound port: queued turns and the collective
+    background wake both create their turns here. Keeping it small makes lease
+    and ordering contracts independently testable without replacing
+    task-manager internals or starting model workers.
     """
     from lib.conversation_sync.runtime import conversation_turn_commands
 
@@ -1314,6 +1371,14 @@ def _dispatch_queued_turn(
     from lib.conversation_sync.command_service import AttemptStartFailure
     from lib.turn_lifecycle import LifecycleConflict, LifecycleNotFound
 
+    if item.get('kind') == KIND_WORKFLOW and payload.get('_backgroundBatchWake'):
+        # Older releases persisted the collective wake as a dispatchable row,
+        # which outlived the receipts a busy lane's turn consumed. The wake is
+        # derived again from the remaining receipts (dispatch_completed_background_batch).
+        _finalize_queue_dispatch(conv_id, item['queueId'], user_id=user_id)
+        logger.info('[Queue] retired stored background batch wake %s conv=%s',
+                    str(item['queueId'])[:8], conv_id[:8])
+        return None
     if pre_built_user_msg:
         user_msg = dict(pre_built_user_msg)
     else:
@@ -1342,15 +1407,6 @@ def _dispatch_queued_turn(
             if payload.get(key):
                 user_msg[key] = payload[key]
     _stamp_queued_turn_initiator(user_msg, payload)
-    if item.get('kind') == KIND_WORKFLOW and payload.get('_backgroundBatchWake'):
-        from lib.background_command_delivery import (
-            completion_delivery_config, settle_closed_dispatch_completion,
-        )
-        config = completion_delivery_config(config)
-        receipts = _background_receipts(conv_id, user_id=user_id, max_items=None)
-        if settle_closed_dispatch_completion(config, receipts, conv_id=conv_id, user_id=user_id):
-            _finalize_queue_dispatch(conv_id, item['queueId'], user_id=user_id)
-            return None
 
     command_body = {
         # The queue row id keys idempotency: a crash between pair-create and
@@ -1385,13 +1441,7 @@ def _dispatch_queued_turn(
                 ).strip() or None,
             )
         else:
-            trusted = None
-            if (item.get('kind') == KIND_WORKFLOW and payload.get('_backgroundBatchWake')
-                    and '_projectDispatchAdmission' in config):
-                from lib.project_dispatch.admission import TrustedDispatch
-                trusted = TrustedDispatch(config['_projectDispatchAdmission'])
-            result = _submit_queued_turn_command(
-                conv_id, user_id, command_body, trusted_dispatch=trusted)
+            result = _submit_queued_turn_command(conv_id, user_id, command_body)
         if result.get("aborted"):
             # A Stop won the internal command's start window before a pair was
             # allocated. The durable row still owns the input; release it for
@@ -1521,19 +1571,7 @@ def _dispatch_queued_turn(
         conv_id[:8],
     )
 
-    # Notify clients so open tabs hydrate + attach the fresh attempt (the
-    # conversation-change handler re-reads the authoritative snapshot).
-    try:
-        from lib.conversations import notify_conv_changed
-        from lib.turn_lifecycle import get_conversation_revision
-
-        notify_conv_changed(
-            conv_id,
-            rev=get_conversation_revision(conv_id, user_id=user_id),
-            user_id=user_id,
-        )
-    except Exception as e:
-        logger.debug("[Queue] conv-changed notify failed: %s", e)
+    _notify_conversation_changed(conv_id, user_id=user_id)
 
     # The dispatch contract's return value is only ever logged/truth-tested
     # by callers — the attempt id is the honest public identity of the

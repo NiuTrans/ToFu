@@ -26,10 +26,10 @@ it('keeps a live switch visible before route settlement and after reload', () =>
     node.replaceChildren();
     const replay = JSON.parse(JSON.stringify(turn));
     replay.status = 'completed';
-    replay.source.projection.lastRoundUsage = { model: 'kimi-k3', resolvedModel: 'kimi-k3', providerId: 'sankuai' };
+    replay.source.projection.lastRoundUsage = { model: 'kimi-k3', resolvedModel: 'kimi-k3', providerId: 'example-corp' };
     renderComposerModelNotice(node, view(replay));
     expect(node.textContent).toContain('Automatically switched: gpt-6.1-sol → kimi-k3');
-    expect(node.textContent).toContain('Model: kimi-k3 · sankuai');
+    expect(node.textContent).toContain('Model: kimi-k3 · example-corp');
     node.replaceChildren();
     replay.metadata.fallback = undefined;
     renderComposerModelNotice(node, view(replay));

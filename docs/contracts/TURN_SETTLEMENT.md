@@ -28,21 +28,22 @@ a non-authoring `R<n>-REFUSED` round, retires its partial text and early tool
 work (`delta_reset(discard=true)`), and retries the round once on the
 configured fallback model.
 
-The fallback is NOT latched for the rest of the turn. The stale assumption
-"same-model resends usually refuse again" conflated re-sending the REFUSED
-request with trying the primary again on the NEXT round: a refusal fires on
-what the model is about to produce, so once the fallback's answer replaces
-the refused trajectory, the primary usually continues fine. The owner
-experiment (2026-10-26, conv mvkpayqrsm02t5) replayed the exact round-12
-post-fallback context onto claude-opus-5.5 through the production
-`/api/v4/chat/completions` surface with `disableModelFallback` and opus
-answered normally for 10+ rounds. So after ONE served fallback round the
-next round probes the primary (`stream.phase.refusalSwitchback`); a probe
-that ALSO refuses proves the trigger lives in the conversation, so the
-fallback latches for the rest of the turn instead of paying one refused
-attempt per round. Anthropic's sticky-routing recommendation is a cost
-optimization against a known-trigger request (fallback credit compensates
-the fallback model's cache write), not a permanent quality downgrade.
+After a usage-policy refusal the fallback is latched for the rest of the
+turn (Coordinator decision 2026-11-06, owner cost investigation). Every
+remaining round in that turn dispatches on the fallback directly; the next
+turn tries the primary again, because the context may have changed. Measured
+on 2026-11-05/06: the Global Router paid $97.75 for 41 refused attempts
+(24% of that window's spend), of which $36.21 were repeats inside the same
+turn; after a first refusal, 33 further primary attempts cost $92.00 and
+wrote 17.9M cache tokens, against 108 fallback rounds costing $25.91. Each
+probe re-billed a full primary prefix and alternated the two cache
+namespaces. The rejected alternative (2026-10-26, conv mvkpayqrsm02t5): one
+served fallback round followed by a switch-back probe
+(`stream.phase.refusalSwitchback`, the i18n key is retained for historical
+turns), latching only when the probe also refused — the primary usually
+continues on a new trajectory, but each probe and repeat refusal is a paid
+request. Anthropic's sticky-routing recommendation is a cost optimization
+against a known-trigger request, not a permanent quality downgrade.
 
 Without a distinct fallback (none configured, `disableModelFallback`, or
 already on it), or when the fallback refuses too, it settles without a
@@ -105,6 +106,25 @@ The full production shutdown test keeps a real native provider request and SSE
 consumer active, verifies joined exit and the reopened verdict, and rejects a
 new dispatch while the original usage is unknown, even if request config claims
 it is complete (`tests/server/test_native_production_shutdown.py`).
+
+The `server_shutdown` quiesce also closes turn admission for its process.
+Problem (2026-11-06): the quiesce aborted existing tasks but refused nothing
+new; killed background commands woke their conversations, a duplicate
+executor submission settled as `task_start_failed` (forfeiting its restart
+resume) and that settlement's hooks started two more turns during teardown.
+Decision: `create_turn`/`create_attempt` then refuse with the transient
+`lane_busy` before writing anything, so queue rows, background receipts and
+dispatch grants stay durable for the next generation; a task registered
+after the quiesce snapshot is born with the same `server_shutdown` cause; an
+executor refusal of a quiesced task settles as that interruption rather than
+a start failure. Only a starting application lifecycle reopens it, so an
+in-process restart is admitted again while a replacement process starts open.
+Alternatives
+rejected: a new conflict code makes the queue retire linked pairs
+permanently and needs handling at every producer; fencing the executor
+refuses after the Turn exists, which is the failure cascade itself;
+per-producer shutdown checks miss the next producer. Verify
+`tests/tasks_pkg/test_shutdown_quiesce.py`.
 
 Invocation guards stamp `_invocationStopReason` (`stalled` / `deadline`) and an
 internal error envelope before signaling physical abort. They settle as
@@ -470,11 +490,24 @@ user Stop. The session is durably restart-paused rather than terminated, and
 cooperative child cancellation does not publish a terminal cancellation or end
 a retained assignment. Startup alone does not authorize execution.
 
+Problem: the settlement drain of an attempt interrupted by that shutdown ran
+project-dispatch recovery and queued/background dispatch at once, so the
+stopping process started a Worker Continue that nothing quiesced; it ran until
+the process exited and could leave unsettled tool intents that block the
+resumed attempt. Decision: an attempt whose task carries
+`abort_reason=server_shutdown` starts no successor in the stopping process; the
+next process resumes it through startup recovery and redispatches queued input
+through its startup queue drain. Alternatives rejected: quiescing successors
+again re-creates the same race one step later; a process-wide shutdown flag adds
+state that a task-scoped cause already carries. Guard:
+`test_shutdown_interrupted_settlement_leaves_successors_to_startup_recovery`.
+
 For a Project-dispatch Worker, the already-authorized grant is the resume
 authority: startup recovery accepts an existing execution only when its attempt
 and Turn are both `interrupted` with `settlement.cause=server_restart`. It calls
 the ordinary Continue command in that same conversation, retaining the original
-transcript, grant, deterministic workspace task and checkout. The dispatch
+transcript, grant, workspace work id and checkout; under the durable worker the
+resumed attempt runs as its own task inside that checkout. The dispatch
 association follows the new attempt after exact predecessor/successor validation;
 its status, result, delivery and terminal Coordinator wake then use that attempt.
 Background completion uses this same resume rather than an unbound parallel turn.
@@ -553,10 +586,10 @@ Specs: `tests/swarm/test_swarm_turn_handoff.py`,
 
 A background command completion first commits one durable passive receipt row;
 the inbox twin only accelerates delivery to a still-running turn. One receipt
-does not itself authorize another model turn. When all known commands for the
-owner and conversation have finished and published, one collective workflow
-wake starts an idle conversation. Existing queued work takes precedence and
-consumes the receipts instead. The next turn rehydrates up to 32 receipts into
+does not itself authorize another model turn. When every command for the owner
+and conversation has finished and published, one collective wake turn starts an
+idle conversation. Existing queued work takes precedence and consumes the
+receipts instead. The next turn rehydrates up to 32 receipts into
 one inbox batch, including receipts left by a server restart; provider-
 consumption acknowledgement removes their rows.
 Problem: the live tool config can acquire process-private cache views that the storage JSON
@@ -567,11 +600,38 @@ queue would persist stale state and cross the turn authority boundary.
 Problem (idle continuation): dispatching every finished command as a workflow
 turn made late test completions produce vacuous assistant replies after the
 parent task was done. Decision: wait for every known command to publish, then
-enqueue one idempotent collective wake; startup and maintenance reconstruct
-missed wakes from durable receipts. A failed publication remains in the
-command registry and retries on the existing maintenance tick before its batch
-may wake. Alternative rejected: a fixed debounce alone, which can fire while
-a slower sibling is still running.
+start one collective wake turn whose command identity derives from the receipt
+set; startup and maintenance reconstruct missed wakes from durable receipts. A
+failed publication remains in the command registry and retries on the existing
+maintenance tick before its batch may wake. Alternative rejected: a fixed
+debounce alone, which can fire while a slower sibling is still running.
+Problem (cross-process wake): the API host and the resident execution host
+both run executors and background commands, and each registers only its own.
+Both scan every conversation in shared storage for wakes, so the execution host
+judged a conversation idle while the API host ran its turn, and judged its
+commands settled because it knew none of them. It persisted the wake as a
+workflow queue row that the turn authority refused with `lane_busy` on every
+drain; the live turn consumed the receipts, and the leftover row later started
+an empty "review the results" turn (2026-11-06: seven conversations, up to 98
+dispatch attempts each). Decision: the wake is the turn itself, never a queue
+row. The `turn.create_pair` lane fence decides idleness in the transaction that
+creates it, so a lane busy in any process persists nothing and the busy turn's
+settlement evaluates again. Command settledness reads this process's registry
+and the host's durable records (`data/background_commands/`), which exist from
+launch until settlement, so another process's unsettled command holds the
+wake. Work this process still runs for the conversation defers the wake but
+never establishes idleness. Wake rows stored by earlier releases are retired
+by the queue drain and re-derived from the remaining receipts. A wake that
+settled before consuming its results is final for that receipt set: replaying
+its command starts nothing, and the results wait for the next turn. Foreground
+commands handed off after the elapsed-time threshold keep no durable record,
+so only their own process holds the wake for them. Alternatives
+rejected: retiring a stale row at dispatch alone keeps persisting intent from
+a guess and keeps the refused-drain churn; a cross-process liveness channel or
+executor ownership on every Attempt is a storage-contract change for a fact the
+lane fence already owns; waking only from the process that launched the
+commands fails once a later turn runs in the other process. Specs:
+`tests/background/test_background_batch_dispatch.py`.
 
 Regression tests must separately observe signal acceptance, wait release, child
 exit, and authoritative terminal settlement. A fast HTTP response or a released

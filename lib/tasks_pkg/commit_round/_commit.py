@@ -179,6 +179,8 @@ def _run_commit_round_async(task: dict, project_path: str,
         logger.warning('[Task:%s] linear Git checkpoint settlement failed: %s',
                        tid, error, exc_info=True)
 
+    _save_written_lanes(task, tid)
+
     linear_event_fields = (
         {'linearGitCheckpoint': linear_checkpoint}
         if linear_checkpoint else {})
@@ -533,6 +535,18 @@ def _run_commit_round_async(task: dict, project_path: str,
     except Exception as e:
         logger.warning('[Task:%s] async make_snapshot failed: %s',
                        tid, e, exc_info=True)
+
+
+def _save_written_lanes(task: dict, tid: str) -> None:
+    """Save the uncommitted work of every lane this task wrote in, so its checkout stays reconstructible."""
+    try:
+        from lib.project_mod.lanes import save_task_lanes
+        saved = save_task_lanes(task)
+    except Exception as error:
+        logger.warning('[Task:%s] lane work save failed: %s', tid, error)
+        return
+    if saved:
+        logger.info('[Task:%s] lane work saved: %s', tid, saved)
 
 
 def _patch_turn_projection_with_file_list(task: dict, amend_evt: dict) -> None:

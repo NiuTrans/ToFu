@@ -263,6 +263,60 @@
         "cache_write": {"type": "number", "minimum": 0}
       }
     },
+    "mediaPriceRate": {
+      "description": "One official per-unit rate. unit is a media price unit of lib/model_info/capability_taxonomy MEDIA_PRICE_UNITS: per generated image, per second of generated video/audio, per generation request (one song or clip), per minute of input audio, or per million input characters.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "price"],
+      "properties": {
+        "unit": {"enum": ["per_image", "per_second", "per_request", "per_minute", "per_million_characters"]},
+        "price": {"type": "number", "minimum": 0},
+        "tier": {"description": "The size, quality, resolution or mode this rate applies to.", "type": "string", "minLength": 1, "maxLength": 128},
+        "estimated": {"description": "True when the creator publishes the amount as a per-unit estimate while billing by tokens.", "type": "boolean"}
+      }
+    },
+    "mediaPricing": {
+      "description": "Official media-unit prices of an image, video, audio or speech Model. Token prices stay in pricing; the units a Model may use follow its model kind.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "rates"],
+      "properties": {
+        "currency": {"enum": ["USD", "CNY"]},
+        "rates": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/mediaPriceRate"}}
+      }
+    },
+    "mediaModalities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {"enum": ["text", "image", "video", "audio"]}
+    },
+    "mediaProfile": {
+      "description": "Officially documented generation and recognition constraints of a media Model. Every field is optional; absence means undocumented, never unsupported.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input_modalities": {"$ref": "#/$defs/mediaModalities"},
+        "output_modalities": {"$ref": "#/$defs/mediaModalities"},
+        "sizes": {"description": "Accepted WIDTHxHEIGHT output sizes, or auto.", "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^([1-9][0-9]{1,4}x[1-9][0-9]{1,4}|auto)$"}},
+        "aspect_ratios": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[1-9][0-9]{0,2}:[1-9][0-9]{0,2}$"}},
+        "resolutions": {"description": "Named output resolutions such as 1K, 2K, 720p or 1080p.", "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 32}},
+        "durations_s": {"description": "Selectable output lengths in seconds.", "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true,
+          "items": {"type": "number", "exclusiveMinimum": 0, "maximum": 86400}},
+        "max_outputs": {"description": "Maximum images or clips per request.", "type": "integer", "minimum": 1, "maximum": 1000},
+        "native_audio": {"description": "Generated video carries a synchronized audio track.", "type": "boolean"},
+        "voices": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}},
+        "audio_formats": {"description": "Synthesized output formats, or accepted input formats for recognition.", "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z0-9]{1,16}$"}},
+        "max_input_chars": {"type": "integer", "minimum": 1},
+        "max_audio_bytes": {"description": "Largest accepted input audio upload.", "type": "integer", "minimum": 1}
+      }
+    },
     "creator": {
       "type": "object",
       "additionalProperties": false,
@@ -287,8 +341,8 @@
           "type": "object", "additionalProperties": false,
           "required": ["release_date", "checked_at", "source_urls"],
           "properties": {
-            "field_sources": {"type": "object", "maxProperties": 5,
-              "propertyNames": {"enum": ["release_date", "list_pricing", "inference_profile", "capabilities", "context_window"]},
+            "field_sources": {"type": "object", "maxProperties": 7,
+              "propertyNames": {"enum": ["release_date", "list_pricing", "inference_profile", "capabilities", "context_window", "media_pricing", "media_profile"]},
               "additionalProperties": {"type": "array", "minItems": 1, "maxItems": 8,
                 "items": {"type": "string", "maxLength": 2048, "pattern": "^https://"}}},
             "release_date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}(-[0-9]{2})?$"},
@@ -306,6 +360,10 @@
         "quality_rank": {"type": "number"},
         "list_pricing": {"$ref": "#/$defs/pricing"},
         "official_pricing": {"$ref": "#/$defs/pricing"},
+        "media_pricing": {"$ref": "#/$defs/mediaPricing"},
+        "official_media_pricing": {"description": "Read-only projection of maintained media prices while media_pricing is absent; stripped on write.", "$ref": "#/$defs/mediaPricing"},
+        "media_profile": {"$ref": "#/$defs/mediaProfile"},
+        "official_media_profile": {"description": "Read-only projection of the maintained media profile while media_profile is absent; stripped on write.", "$ref": "#/$defs/mediaProfile"},
         "release_date": {"type": "string", "pattern": "^\\d{4}-\\d{2}(-\\d{2})?$"},
         "lifecycle": {"enum": ["stable", "preview", "dated_snapshot", "retired"]}
       }

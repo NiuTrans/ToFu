@@ -1,0 +1,18 @@
+{
+  "format": "tofu.execution-command-control/v1",
+  "acknowledgementMilliseconds": 2000,
+  "acknowledgementSource": "Existing CommandHandoffControl.request two-second confirmation contract; shared end-to-end by local and remote controls, not a new timeout or retry budget.",
+  "methods": ["interrupt", "background"],
+  "requestFields": ["format", "serviceId", "token", "requestId", "ownerId", "method", "taskId", "params", "deadlineUnixMs"],
+  "responseFields": ["format", "requestId", "result", "error"],
+  "result": "null means no task for this authenticated owner. Otherwise interrupt returns a boolean interrupted and a positive integer pid only on success; background returns a boolean backgrounded. Either may include a string reason. Malformed or mismatched results never certify success.",
+  "transport": "One loopback connection per control request. A network-order u32 byte length precedes one UTF-8 JSON object. There is no automatic retry or detached accepted-work queue.",
+  "semantics": {
+    "authority": "A manager-owned execution incarnation publishes a private endpoint and rotating bearer secret in its existing protected process record. Only the authenticated API owner and exact task/round/tool-call identity reach the existing TaskRuntime command control owner. Hints, file existence and a task ID alone grant no authority.",
+    "interrupt": "Interrupt targets the currently live process occurrence by its PID stamp. No request remains queued to affect a later command.",
+    "background": "The existing command worker alone transfers its pipes and publishes the background handle. Delivery of a request is never reported as successful handoff.",
+    "failure": "Missing or stale execution incarnation, invalid authentication and malformed requests fail closed. Lost responses are unknown and never cause an automatic replay. Existing authoritative tool results resolve user-visible outcome.",
+    "lifecycle": "The execution application owns one listener. Closing withdraws admission and joins entered control callbacks before worker shutdown; cancelling a network observer never abandons physical callbacks.",
+    "retention": "Only current accepted connections and their callbacks are retained until joined. No durable task state, control ledger or second task registry is created."
+  }
+}

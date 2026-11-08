@@ -1085,7 +1085,7 @@
       ]
     },
     {
-      "creator_id": "meituan",
+      "creator_id": "yourprovider",
       "model_ids": [
         "LongCat-2.0"
       ],
@@ -1098,6 +1098,22 @@
         }
       },
       "evidence_url": "https://longcat.chat/platform/docs/api/chat.html"
+    },
+    {
+      "creator_id": "yourprovider",
+      "model_ids": [
+        "LongCat-2.5"
+      ],
+      "inference_profile": {
+        "source": "official",
+        "reasoning": {
+          "support": "supported",
+          "wire_format": "thinking_type",
+          "can_disable": true,
+          "supported_efforts": []
+        }
+      },
+      "evidence_url": "https://longcat.chat/platform/docs/api/model-params"
     },
     {
       "creator_id": "bytedance",

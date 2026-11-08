@@ -27,7 +27,7 @@ _API_MESSAGE_FIELDS = frozenset({
                                             # Anthropic proxy can re-attach a signed
                                             # thinking block to the assistant turn.
     'reasoning_details',                    # OpenRouter-style reasoning array — the
-                                            # OpenAI-compat shape the sankuai gateway
+                                            # OpenAI-compat shape the example-corp gateway
                                             # uses to round-trip a signed Claude
                                             # thinking block (reconstructed in build_body).
     'cache_control',                        # Anthropic prompt caching

@@ -66,6 +66,38 @@ def render_router_notice(watchdog_conversation_id: str, message: str, signal_ids
     return '\n'.join(lines)
 
 
+def _resolve_recovered_router_failures(owner: int, signals, failures: list[dict]) -> list[dict]:
+    """Close failed-Turn signals of a Router that has since completed a Turn (docs/ROUTER.md R7).
+
+    Only the Watchdog's own snapshot closed its failures, so a Router that recovered and went on
+    working kept every signal it had opened and was refused notice as "still failing" — and the
+    refusal itself told the Watchdog to resolve the signal before notifying. Recovery is read
+    from durable Turns, not from the model's say-so: the newest main-lane Turn completed and is
+    newer than the failed one. A still-failing, running or interrupted Router keeps its signals.
+    """
+    from lib.turn_lifecycle import LifecycleNotFound, get_turn, iter_turns_newest_first
+    conversation_id = failures[0]['subject']['conversationId']
+    latest = next(iter_turns_newest_first(conversation_id, user_id=owner), None)
+    if latest is None or latest.get('status') != 'completed' or latest.get('laneId', 'main') != 'main':
+        return failures
+    latest_ordinal = int(latest.get('ordinal') or 0)
+    remaining = []
+    for signal in failures:
+        try:
+            turn = get_turn(conversation_id, signal['subject']['turnId'], user_id=owner,
+                            include_projection=False)
+        except LifecycleNotFound:
+            remaining.append(signal)
+            continue
+        if (turn.get('laneId', 'main') != 'main' or int(turn.get('ordinal') or 0) >= latest_ordinal):
+            remaining.append(signal)
+            continue
+        signals.resolve([signal['signalId']],
+                        f'The Router recovered: main-lane Turn {latest["turnId"]} completed after the failed '
+                        f'Turn {turn["turnId"]} (ordinal {latest_ordinal} > {int(turn.get("ordinal") or 0)}).')
+    return remaining
+
+
 def _notify_router(task: dict, scope: dict, arguments: dict, *, dispatch=None) -> dict:
     from lib.router.binding import global_router
     from lib.turn_initiation import INITIATOR_PEER, stamp_initiator
@@ -80,7 +112,10 @@ def _notify_router(task: dict, scope: dict, arguments: dict, *, dispatch=None) -
     for signal_id in signal_ids:
         if signals.get(signal_id) is None:
             raise ValueError(f'Unknown Watchdog signal {signal_id}')
-    if signals.open_turn_failures(router['conversationId']):
+    failures = signals.open_turn_failures(router['conversationId'])
+    if failures:
+        failures = _resolve_recovered_router_failures(owner, signals, failures)
+    if failures:
         raise PermissionError('The Global Router\u2019s own latest turn failed and that signal is open: '
                               're-check until it has recovered and resolve the signal before notifying it')
     command_id = 'router-watchdog-notice:' + hashlib.sha256(json.dumps(

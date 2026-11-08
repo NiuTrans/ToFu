@@ -1,0 +1,156 @@
+{
+ "insert_task_ops_first_call": {
+  "A1|L": {
+   "replace": 72
+  },
+  "A1|M": {
+   "replace": 72
+  },
+  "A1|S": {
+   "replace": 72
+  },
+  "A2|L": {
+   "insert_after": 59,
+   "insert_before": 13
+  },
+  "A2|M": {
+   "insert_after": 54,
+   "insert_before": 18
+  },
+  "A2|S": {
+   "insert_before": 45,
+   "insert_after": 27
+  }
+ },
+ "ops_by_edit_type_first_call": {
+  "A1|delete": {
+   "replace": 108
+  },
+  "A1|insert": {
+   "replace": 216
+  },
+  "A1|multi": {
+   "replace": 207
+  },
+  "A1|replace": {
+   "replace": 108
+  },
+  "A2|delete": {
+   "replace": 105
+  },
+  "A2|insert": {
+   "insert_after": 140,
+   "insert_before": 76
+  },
+  "A2|multi": {
+   "insert_after": 75,
+   "replace": 114,
+   "insert_before": 19
+  },
+  "A2|replace": {
+   "replace": 108
+  }
+ },
+ "insert_anchor_o200k_median": {
+  "A1|L": [
+   19.0,
+   72
+  ],
+  "A1|M": [
+   12.0,
+   72
+  ],
+  "A1|S": [
+   5.0,
+   72
+  ],
+  "A2|L": [
+   18.0,
+   72
+  ],
+  "A2|M": [
+   9.5,
+   72
+  ],
+  "A2|S": [
+   3.0,
+   72
+  ],
+  "A3|L": [
+   22.5,
+   72
+  ],
+  "A3|M": [
+   15.0,
+   72
+  ],
+  "A3|S": [
+   10.0,
+   72
+  ]
+ },
+ "insert_content_o200k_median": {
+  "A1|L": [
+   30.5,
+   72
+  ],
+  "A1|M": [
+   26.0,
+   72
+  ],
+  "A1|S": [
+   9.0,
+   72
+  ],
+  "A2|L": [
+   10.5,
+   72
+  ],
+  "A2|M": [
+   12.0,
+   72
+  ],
+  "A2|S": [
+   3.0,
+   72
+  ],
+  "A3|L": [
+   37.0,
+   72
+  ],
+  "A3|M": [
+   29.0,
+   72
+  ],
+  "A3|S": [
+   16.0,
+   72
+  ]
+ },
+ "codex_context_lines_per_hunk": {
+  "median": 2,
+  "mean": 2.37,
+  "n_hunks": 767,
+  "share_ge3": 0.375
+ },
+ "finish_length_calls": {
+  "glm-5.3|A2": 4,
+  "glm-5.3|A3": 1,
+  "glm-5.3|A4": 4
+ },
+ "insert_anchor_alignment_first_call": {
+  "claude-opus-5": {
+   "aligned": 101,
+   "mid_line": 1,
+   "mid_line_final_ok": 1
+  },
+  "glm-5.3": {
+   "aligned": 96,
+   "mid_line": 2,
+   "mid_line_final_wrong": 2
+  },
+  "kimi-k3": {
+   "aligned": 99
+  }
+ }
+}

@@ -363,13 +363,18 @@ def _terminal_task(**extra):
     return task
 
 
-def test_switchback_probe_retries_primary_after_one_fallback_round(harness):
-    """After exactly one served fallback round, the next round probes the
-    primary again instead of staying stuck; a clean probe keeps the primary."""
+def test_refusal_fallback_stays_on_fallback_for_the_rest_of_the_turn(harness):
+    """A usage-policy refusal latches the fallback for the rest of the turn.
+
+    Every remaining round dispatches on the fallback directly: no probe on
+    the primary, no second refused attempt, and the fallback's own cache
+    prefix keeps extending. The next turn tries the primary again.
+    """
     harness['script'] = [
         _result('content_filter', content='Partial refused text', refusal=_REFUSAL),
         _result('stop', content='Fallback answer.'),   # round 6 served on kimi
-        _result('stop', content='Primary answer.'),    # round 7 probe on opus
+        _result('stop', content='More fallback.'),     # round 7 on kimi
+        _result('stop', content='Still fallback.'),    # round 8 on kimi
     ]
     task = _task()
     task['_fallback_kind'] = 'content_filter'
@@ -378,54 +383,36 @@ def test_switchback_probe_retries_primary_after_one_fallback_round(harness):
 
     first = _call(task, api_rounds=api_rounds)
     assert first['model'] == 'kimi-k3'
-    assert task['_fallback_served_rounds'] == 1
 
     second = _call(task, model='kimi-k3', round_num=7,
                    messages=[{'role': 'user', 'content': 'next'}],
                    api_rounds=api_rounds)
-    assert [m for m, _ in harness['streams']] == [
-        'claude-opus-5.5', 'kimi-k3', 'claude-opus-5.5']
-    assert second['model'] == 'claude-opus-5.5'
-    assert second['preset'] == 'claude-opus-5.5'
-    assert task.get('_refusal_switchback_ok') is True
-    assert '_fallback_model' not in task
-    assert any(e.get('detailKey') == 'stream.phase.refusalSwitchback'
-               for e in harness['events'])
-
-
-def test_switchback_probe_second_refusal_latches_fallback(harness):
-    """A probe that refuses again proves the trigger is in the conversation:
-    latch the fallback for the rest of the turn (no more paid probes)."""
-    harness['script'] = [
-        _result('content_filter', refusal=_REFUSAL),
-        _result('stop', content='Fallback answer.'),   # round 6 on kimi
-        _result('content_filter', refusal=_REFUSAL),   # round 7 probe refuses
-        _result('stop', content='Fallback again.'),    # round 7 re-served kimi
-    ]
-    task = _task()
-    task['_fallback_kind'] = 'content_filter'
-    task['_fallback_from'] = 'claude-opus-5.5'
-    api_rounds = []
-
-    _call(task, api_rounds=api_rounds)
-    second = _call(task, model='kimi-k3', round_num=7,
-                   messages=[{'role': 'user', 'content': 'next'}],
-                   api_rounds=api_rounds)
-
-    assert [m for m, _ in harness['streams']] == [
-        'claude-opus-5.5', 'kimi-k3', 'claude-opus-5.5', 'kimi-k3']
-    assert second['model'] == 'kimi-k3'
-    assert task['_refusal_switchback_failed'] is True
-    # A THIRD round must not probe again: the latch keeps the fallback.
-    harness['script'] = [_result('stop', content='Still fallback.')]
     third = _call(task, model='kimi-k3', round_num=8,
                   messages=[{'role': 'user', 'content': 'more'}],
                   api_rounds=api_rounds)
-    assert [m for m, _ in harness['streams']][-1] == 'kimi-k3'
-    assert third['model'] == 'kimi-k3'
-    # The refused probe was billed as a non-authoring attempt, not silently.
-    refused = [r for r in api_rounds if r['tag'] == 'R8-REFUSED']
-    assert len(refused) == 1 and refused[0]['responseAuthoring'] is False
+
+    assert [m for m, _ in harness['streams']] == ['claude-opus-5.5'] + ['kimi-k3'] * 3
+    assert second['model'] == third['model'] == 'kimi-k3'
+    assert second['preset'] == 'medium'
+    assert not any(e.get('detailKey') == 'stream.phase.refusalSwitchback'
+                   for e in harness['events'])
+    # The only refused attempt in the whole turn is the original one.
+    assert [row['tag'] for row in api_rounds
+            if str(row['tag']).endswith('-REFUSED')] == ['R7-REFUSED']
+
+
+def test_next_turn_tries_the_primary_after_a_refused_previous_turn(harness):
+    """Stickiness is turn-scoped state on the task, not a model demotion."""
+    task = _task()
+    task['_fallback_kind'] = 'content_filter'
+    task['_fallback_from'] = 'claude-opus-5.5'
+    harness['script'] = [_result('stop', content='Primary answer.')]
+
+    result = _call(task, model='claude-opus-5.5', round_num=0, api_rounds=[])
+
+    assert [m for m, _ in harness['streams']] == ['claude-opus-5.5']
+    assert result['model'] == 'claude-opus-5.5'
+    assert result['preset'] == 'medium'
 
 
 def test_refusal_settles_truncated_with_its_own_cause_and_typed_error(harness):

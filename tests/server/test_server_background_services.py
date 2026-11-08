@@ -27,9 +27,11 @@ def test_persisted_configuration_precedes_network_owned_services(monkeypatch):
     import lib.research.api as research_api
     import lib.slides.api as slides_api
     import routes
-    from lib.automations import runtime as automation_runtime
+    from lib.durable_worker import runtime as automation_runtime
+    from lib.conversation_sync import delivery_runtime
 
     calls: list[str] = []
+    monkeypatch.setattr(delivery_runtime, 'ensure_started', lambda app: calls.append('delivery'))
     monkeypatch.setattr(automation_runtime, 'ensure_workers_started', lambda *args, **kwargs: False)
     monkeypatch.setattr(
         background_services,
@@ -67,7 +69,7 @@ def test_persisted_configuration_precedes_network_owned_services(monkeypatch):
 
     # Only the readiness-critical owners stay on the phase-7 path; the
     # best-effort sweeps/probes run after the readiness gate opens.
-    assert calls == ['routes', 'proxy', 'key']
+    assert calls == ['routes', 'proxy', 'key', 'delivery']
 
     start_deferred_background_services(
         SimpleNamespace(extensions={}),
@@ -78,7 +80,7 @@ def test_persisted_configuration_precedes_network_owned_services(monkeypatch):
             'PYTEST_CURRENT_TEST': '1',
         },
     )
-    assert calls == ['routes', 'proxy', 'key', 'netpath']
+    assert calls == ['routes', 'proxy', 'key', 'delivery', 'netpath']
 
 
 
@@ -166,3 +168,27 @@ def test_action_resume_obeys_worker_role_and_preview_fence(monkeypatch,role,read
     if read_only:env['TOFU_DISTRIBUTED_PREVIEW_MODE']='read-only'
     start_deferred_background_services(SimpleNamespace(extensions={}),process_role=role,environ=env)
     assert calls==(['actions'] if role in ('all','worker') and not read_only else [])
+
+
+def test_environment_launch_fact_precedes_readiness_and_the_probe_follows_it(monkeypatch):
+    from lib.tools import environment_capabilities as environment
+
+    probes = []
+    monkeypatch.setattr(environment, '_snapshot', None)
+    monkeypatch.setattr(environment, 'probe_environment',
+                        lambda environ, *, local_kernel: probes.append(local_kernel) or {})
+    app = SimpleNamespace(extensions={'tofu_local_kernel': {'host': '127.0.0.1:43567'}})
+    preview = {'TOFU_DEPLOYMENT_MODE': 'distributed',
+               'TOFU_DISTRIBUTED_PREVIEW_MODE': 'read-only'}
+    start_background_services(
+        app, process_role='scheduler',
+        load_saved_proxy_config=lambda: None, bootstrap_personal_key=lambda: None,
+        logger=logging.getLogger('test.environment-launch-fact'), environ=preview)
+    assert probes == [], 'the readiness path records the launch fact, probing nothing'
+
+    start_deferred_background_services(
+        app, process_role='scheduler',
+        logger=logging.getLogger('test.environment-probe'), environ={})
+    assert probes == [True], 'one probe after readiness, with local-kernel mode'
+    assert environment.environment_snapshot().local_kernel is True
+    assert probes == [True]

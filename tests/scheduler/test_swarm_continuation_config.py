@@ -191,7 +191,7 @@ def test_timer_and_proactive_keep_their_existing_builder_and_overrides(dispatch,
         dispatch.conv_id, {'content': 'Scheduled work', marker: True}, tools,
         user_id=7, command_id='timer:1', config_overrides={'schedulerEnabled': False})
     assert result.disposition == 'started'
-    expected = build_task_config(tools, dispatch.settings)
+    expected = build_task_config(tools, dispatch.settings, owner=7)
     expected['schedulerEnabled'] = False
     assert dispatch.calls[-1]['config'] == expected
 

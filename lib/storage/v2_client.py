@@ -710,12 +710,20 @@ class StorageV2Client:
                                   command_id=None, deadline_unix_ms=deadline_unix_ms)
 
     def worker_watch(self, *, cursor, deadline_unix_ms, cancellation=None):
-        """Wait for authority-committed queue/control changes without a DB read."""
+        """Wait for committed worker changes without a semantic DB read."""
         from lib.storage.generated_worker_control import WATCH_OPERATION
+        return self._commit_watch(WATCH_OPERATION, cursor, deadline_unix_ms, cancellation)
+
+    def conversation_watch(self, *, cursor, deadline_unix_ms, cancellation=None):
+        """Wait for committed conversation changes without a semantic DB read."""
+        from lib.storage.generated_worker_control import CONVERSATION_WATCH_OPERATION
+        return self._commit_watch(CONVERSATION_WATCH_OPERATION, cursor, deadline_unix_ms, cancellation)
+
+    def _commit_watch(self, operation, cursor, deadline_unix_ms, cancellation):
         remaining = deadline_unix_ms / 1000 - time.time()
         if remaining <= 0:
-            raise StorageError('database_timeout', 'Worker watch deadline elapsed')
-        return self._request_once(WATCH_OPERATION, {'cursor': cursor}, timeout=remaining,
+            raise StorageError('database_timeout', 'Commit watch deadline elapsed')
+        return self._request_once(operation, {'cursor': cursor}, timeout=remaining,
                                   command_id=None, deadline_unix_ms=deadline_unix_ms,
                                   cancellation=cancellation)
 

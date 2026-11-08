@@ -51,6 +51,7 @@ class SessionManagerLoginRetryTest {
         }
         override suspend fun touchLastUsed(id: Long, timestamp: Long): Int = 1
         override suspend fun setAuthType(id: Long, authType: AuthType): Int = 1
+        override suspend fun pinSshHostKey(id: Long, host: String, port: Int, sha256: String): Int = 0
     }
 
     private fun profile(baseUrl: String, authType: AuthType = AuthType.CODE_SERVER_PASSWORD) =
@@ -96,7 +97,8 @@ class SessionManagerLoginRetryTest {
     @Test
     fun transport_error_retries_with_bounded_backoff() = runTest {
         // Nothing listens on port 1 → every attempt fails fast at connect.
-        val p = profile("http://127.0.0.1:1/proxy/15000/")
+        // (localhost: 127.0.0.1 is This phone's own kernel host and refused up front.)
+        val p = profile("http://localhost:1/proxy/15000/")
         var requests = 0
         val counting = OkHttpClient.Builder()
             .addInterceptor { chain -> requests++; chain.proceed(chain.request()) }

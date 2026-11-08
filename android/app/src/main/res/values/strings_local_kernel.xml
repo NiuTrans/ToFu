@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Local kernel (runtime/LocalKernelService) -->
+    <string name="local_kernel_channel_name">Local kernel</string>
+    <string name="local_kernel_channel_description">Shown while Tofu runs on this phone</string>
+    <string name="approval_channel_name">Approval needed</string>
+    <string name="approval_channel_description">An agent on this phone is waiting for your approval</string>
+    <string name="local_kernel_running">Tofu is running on this phone</string>
+    <string name="local_kernel_starting">Starting Tofu on this phone…</string>
+    <string name="local_kernel_stopping">Stopping Tofu on this phone…</string>
+    <string name="local_kernel_action_open">Open</string>
+    <string name="local_kernel_action_stop">Stop</string>
+    <string name="local_kernel_not_available">Not available in this build</string>
+    <string name="local_kernel_failed_title">Tofu stopped on this phone</string>
+    <string name="local_kernel_failed_install">Could not install the local runtime: %1$s</string>
+    <string name="local_kernel_failed_secret">The local kernel\'s key cannot be read: %1$s</string>
+    <string name="local_kernel_failed_launch">Could not start the local kernel: %1$s</string>
+    <string name="local_kernel_failed_usage">The local kernel rejected its launch settings (exit status 2).</string>
+    <string name="local_kernel_failed_protocol">The local kernel did not follow its launch protocol: %1$s</string>
+    <string name="local_kernel_safe_mode">Tofu crashed %1$d times within 2 minutes and was not restarted. Open Tofu to start it again.</string>
+    <string name="local_kernel_killed_title">Android stopped Tofu\'s processes</string>
+    <string name="local_kernel_killed_guidance_developer_option">This is most likely Android\'s limit on app child processes. In Settings → System → Developer options, turn on “Disable child process restrictions”, then open Tofu and start it again.</string>
+    <string name="local_kernel_killed_guidance_device_config">This is most likely Android\'s limit on app child processes. To raise it, connect a computer with adb and run:\nadb shell \"/system/bin/device_config set_sync_disabled_for_tests persistent; /system/bin/device_config put activity_manager max_phantom_processes 2147483647\"\nThen open Tofu and start it again.</string>
+    <string name="local_kernel_killed_guidance_restart">Open Tofu and start it again.</string>
+</resources>

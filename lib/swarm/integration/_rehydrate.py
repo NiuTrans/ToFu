@@ -262,6 +262,10 @@ def _continue_execution_parent(config: dict, task: dict) -> dict:
     return parent
 
 
+#: Storage resolves exactly these task ids as durable roots (worker_root_for_task).
+_DURABLE_ROOT_PREFIX = 'conversation-attempt:'
+
+
 def _rehydrate_one(sess: dict, *, resume_task: dict | None = None,
                    tool_list: list | None = None) -> bool:
     """Serialize startup/Continue recovery without holding registry locks over I/O."""
@@ -270,8 +274,61 @@ def _rehydrate_one(sess: dict, *, resume_task: dict | None = None,
         return _rehydrate_one_locked(sess, resume_task=resume_task, tool_list=tool_list)
 
 
+def _session_owner_task(sess: dict) -> str:
+    """The task whose worker claim owns a retained session's births."""
+    config = sess.get('config')
+    parent_cfg = config.get('parent_cfg') if isinstance(config, dict) else None
+    recorded = parent_cfg.get('_swarmParentTaskId') if isinstance(parent_cfg, dict) else None
+    return str(recorded or sess.get('task_id') or sess.get('swarm_key') or '')
+
+
+def _claim_swarm_key(context) -> str:
+    from lib.swarm.integration._config import swarm_key_for
+    return swarm_key_for({'convId': str(context.claim.payload.get('conversationId') or '')})
+
+
+def _owning_job_unfinished(task_id: str, *, user_id: int) -> bool:
+    from lib.storage import get_storage_client
+    from lib.storage.generated_worker_job_contract import WORKER_TERMINAL_STATES
+    job = get_storage_client().query('worker_job.get', {'task_id': task_id, 'user_id': user_id})
+    return job is not None and job.get('status') not in WORKER_TERMINAL_STATES
+
+
+def detached_swarm_unfinished(context) -> bool:
+    """True while this claim's retained session has not finished its driver.
+
+    The session marks its durable row terminated only when its driver ends
+    without a restart suspension, so this holds even when shutdown suspended
+    the session before the attempt's hold first looked.
+    """
+    from lib.swarm import persistence
+    sess = persistence.load_session(_claim_swarm_key(context), required=True)
+    return (sess is not None and sess.get('status') == 'running'
+            and _session_owner_task(sess) == context.claim.task_id)
+
+
+def resume_detached_swarm_for_claim(context) -> bool:
+    """Resume the detached session that this reclaimed attempt job owns.
+
+    Every birth under a durable attempt needs its current claim, so startup
+    leaves such a session to the attempt's unfinished worker job: after
+    takeover the new claim resumes it and holds it
+    (``turn_handoff.hold_detached_swarm``).
+    """
+    from lib.swarm import persistence
+    from lib.swarm.restart_recovery import recovery_lock
+    key = _claim_swarm_key(context)
+    with recovery_lock(key):
+        if _get_session(key) is not None:
+            return False
+        sess = persistence.load_session(key, required=True)
+        if sess is None:
+            return False
+        return _rehydrate_one_locked(sess, worker_context=context)
+
+
 def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
-                          tool_list: list | None = None) -> bool:
+                          tool_list: list | None = None, worker_context=None) -> bool:
     """Rebuild + resume a single persisted session under the launch stripe."""
     swarm_key = sess.get('swarm_key', '')
     if not swarm_key:
@@ -306,6 +363,23 @@ def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
         return False
     conv_id = sess.get('conv_id', '') or ''
     task_id = sess.get('task_id', '') or swarm_key
+    owner_task_id = _session_owner_task(sess)
+    if worker_context is not None:
+        if (resume_task is not None or owner_task_id != worker_context.claim.task_id
+                or conv_id != worker_context.claim.payload.get('conversationId')
+                or worker_context.principal.require_owner(
+                    context='durable swarm host') != owner_user_id):
+            return False
+    elif resume_task is None and owner_task_id.startswith(_DURABLE_ROOT_PREFIX):
+        if _owning_job_unfinished(owner_task_id, user_id=owner_user_id):
+            logger.info('[Swarm:%s] detached work of durable attempt %s waits for that '
+                        'attempt\'s worker claim; startup does not resume it',
+                        swarm_key, owner_task_id)
+            return False
+        # No claim will ever resume it. Startup still delivers undelivered
+        # results; a worker that needs a new birth fails with the claim refusal.
+        logger.warning('[Swarm:%s] the worker job of durable attempt %s has finished; '
+                       'recovering its retained session without a claim', swarm_key, owner_task_id)
 
     if resume_task is not None:
         from lib.tasks_pkg.manager import task_user_id
@@ -417,6 +491,15 @@ def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
             logger.warning('[Swarm:%s] restart workspace authority unavailable: %s; '
                            'retained checkpoints remain inspectable', swarm_key, error)
             return False
+        if worker_context is not None:
+            # The claim's principal is the spawning attempt's exact identity.
+            recorded = execution_context.get('_principalContext')
+            if (recorded is not None
+                    and PrincipalContext.from_payload(recorded) != worker_context.principal):
+                logger.warning('[Swarm:%s] durable principal differs from its attempt claim; '
+                               'retained checkpoints remain inspectable', swarm_key)
+                return False
+            execution_context['_principalContext'] = worker_context.principal.to_payload()
     output_dir = _resolve_output_dir(task_id)
 
     push_conv_id = conv_id
@@ -462,6 +545,9 @@ def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
         execution_parent = {'id': task_id, 'convId': conv_id, '_userId': owner_user_id,
             '_tenant_id': principal.tenant_id, '_principalContext': principal.to_payload(),
             'config': parent_cfg, **execution_context}
+        if worker_context is not None:
+            execution_parent.update(id=worker_context.claim.task_id,
+                                    _conversationWorkerContext=worker_context)
         source = config.get('requirement_source')
         if 'requirement_source' not in config and parent_cfg.get('_swarmParentTurnId'):
             source = dict(owner=owner_user_id, tenant=str(principal.tenant_id or ''),
@@ -474,6 +560,9 @@ def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
         if resume_task is not None:
             return continue_recovery_allowed(
                 sess, resume_task, user_id=owner_user_id, allow_parent_completion=True)
+        if worker_context is not None and (
+                worker_context.cancellation_requested or worker_context.authority_lost):
+            return False
         return _recovery_allowed(sess, user_id=owner_user_id)
 
     def before_agent_admission():

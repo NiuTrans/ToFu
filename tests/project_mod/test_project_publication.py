@@ -241,6 +241,76 @@ def test_checkpoint_scope_denies_outside_write_paths_without_partial_delivery(re
     assert (root / 'base.txt').read_text() == 'base\n'
 
 
+def whole_project(authority):
+    authority.assignment['request']['profile'] = {
+        'mode': 'project', 'tools': ['read_files', 'write_file', 'run_command'],
+        'readPaths': ['.'], 'writePaths': ['.'], 'maxToolCalls': 8}
+
+
+@pytest.mark.parametrize('change', ['new', 'rename'])
+def test_whole_project_delivers_nested_trees_named_like_runtime_roots(repo, authority, change):
+    # A project grant's runtime trees are the root's data/logs/uploads only
+    # (git_checkpoint_policy.FORBIDDEN_CHECKPOINT_ROOTS); nested packages are source.
+    root, _, _ = repo
+    whole_project(authority)
+    if change == 'rename':
+        (root / 'pkg/model_info/data').mkdir(parents=True)
+        (root / 'pkg/model_info/data/catalog.json').write_text('{}\n')
+        git(root, 'add', '-A')
+        git(root, 'commit', '-m', 'nested catalog')
+    work = workspace(repo, authority)
+    if change == 'new':
+        expected = ['pkg/data/x.kt', 'pkg/model_info/data/x.json',
+                    # Tracked trees named like build output are project source too.
+                    'docs/report/build/deck/pages/01.page', 'crate/target/notes.md', 'web/dist/app.js']
+        for path in expected:
+            (work / path).parent.mkdir(parents=True, exist_ok=True)
+            (work / path).write_text('nested source\n')
+    else:
+        # Rename detection is off, so the old path is fenced as a deletion too.
+        (work / 'pkg/site_packs/data').mkdir(parents=True)
+        (work / 'pkg/model_info/data/catalog.json').rename(work / 'pkg/site_packs/data/catalog.json')
+        expected = ['pkg/site_packs/data/catalog.json']
+    authority.publish()
+    result = automatic_settle(repo)
+    assert result['state'] == 'delivered', result.get('reason')
+    for path in expected:
+        assert (root / path).exists()
+    if change == 'rename':
+        assert not (root / 'pkg/model_info/data/catalog.json').exists()
+
+
+@pytest.mark.parametrize('path', ['data/x', 'logs/x', 'uploads/x', '.env', 'pkg/.env.local', '.env.example'])
+def test_whole_project_refuses_root_runtime_trees_and_credentials(repo, authority, path):
+    root, _, _ = repo
+    whole_project(authority)
+    work = workspace(repo, authority)
+    (work / path).parent.mkdir(parents=True, exist_ok=True)
+    (work / path).write_text('must not publish\n')
+    # A project Worker can commit in its own checkout; publication still fences it.
+    git(work, 'add', '-f', '--', path)
+    git(work, '-c', 'user.name=Worker', '-c', 'user.email=worker@example.invalid',
+        'commit', '-q', '-m', 'worker commit')
+    authority.publish()
+    result = automatic_settle(repo)
+    assert result['state'] == 'blocked', result.get('reason')
+    assert result['reason'] == 'project_publication_write_scope_exceeded'
+    assert not (root / path).exists()
+
+
+@pytest.mark.parametrize('path', ['allowed/data/x.kt', 'allowed/build/x.page'])
+def test_file_grant_publication_still_refuses_nested_runtime_and_build_names(repo, authority, path):
+    root, _, _ = repo
+    work = workspace(repo, authority)
+    (work / path).parent.mkdir(parents=True)
+    (work / path).write_text('file grants stay fenced\n')
+    authority.publish()
+    result = automatic_settle(repo)
+    assert result['state'] == 'blocked', result.get('reason')
+    assert result['reason'] == 'project_publication_write_scope_exceeded'
+    assert not (root / path).exists()
+
+
 def test_lost_receipt_recovery_rechecks_live_authority(repo, authority):
     root, _, _ = repo
     work = workspace(repo, authority)

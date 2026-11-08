@@ -46,6 +46,19 @@ def _settled_outcome(context, attempt, *, task=None):
         raise WorkerDomainSettlementUnknown('Conversation invocation has no terminal Turn receipt')
     if task is not None and task.get('_terminalPersistencePending'):
         raise WorkerDomainSettlementUnknown('Conversation terminal persistence is still pending')
+    if attempt.get('startedAt') is None:
+        from lib.storage.generated_worker_job_contract import WORKER_EXECUTION_CONFIG_KEY
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+        if (status not in ('failed', 'interrupted')
+                or WORKER_EXECUTION_CONFIG_KEY in (attempt.get('config') or {})
+                or task is not None or chat_task_runtime.get(context.claim.task_id) is not None):
+            raise WorkerDomainSettlementUnknown('Unentered conversation has inconsistent execution evidence')
+        # No executor or effect boundary was entered. Its terminal Turn is the
+        # complete domain receipt; inventing a task result/exit witness would
+        # falsely claim a physical invocation existed.
+        return WorkerJobOutcome(status='cancelled' if status == 'interrupted' else 'failed',
+            result_ref=context.claim.task_id, replay_cursor=context.replay_cursor,
+            error={} if status == 'interrupted' else {'code': 'task_start_failed', 'retryable': False})
     from lib.storage import get_storage_client
     result = get_storage_client().query('task_results.replay_get', {
         'key': context.claim.task_id,
@@ -78,14 +91,25 @@ def _settled_outcome(context, attempt, *, task=None):
     )
 
 
-def execute_claimed_attempt(context, payload):
+def execute_claimed_attempt(context, payload, *, application=None):
     """Run one accepted invocation in the claim owner's physical thread.
 
     A transport replay may reuse a settled result only with the known carrier's
     physical-exit evidence. An entered attempt is an unknown effect frontier
     until the existing domain recovery owner proves it; neither an expired
     lease nor missing process-local task proves that a call is safe to repeat.
+    Detached Swarm work the attempt spawned keeps this claim after its Turn
+    settles: the job releases only once that work has ended, outside the
+    attempt dispatch stripe (``swarm/turn_handoff.own_detached_swarm``).
     """
+    outcome, resume_detached = _run_claimed_attempt(context, payload, application=application)
+    from lib.swarm.turn_handoff import own_detached_swarm
+    own_detached_swarm(context, resume=resume_detached)
+    return outcome
+
+
+def _run_claimed_attempt(context, payload, *, application=None):
+    """Return the settled outcome and whether takeover should resume detached work."""
     from lib.turn_lifecycle import attempt_dispatch_lock, get_attempt, mark_task_started
     if not isinstance(context, WorkerExecutionContext):
         raise TypeError('conversation execution requires WorkerExecutionContext')
@@ -94,10 +118,16 @@ def execute_claimed_attempt(context, payload):
     with attempt_dispatch_lock(context.claim.task_id):
         owner, attempt, turn = _accepted(context, payload)
         if attempt['status'] != 'pending':
+            if attempt.get('startedAt') is None:
+                return _settled_outcome(context, attempt), False
             from lib.conversation_sync.worker_recovery import recover_exited_attempt
             task = chat_task_runtime.get(context.claim.task_id)
             attempt = recover_exited_attempt(context, attempt, turn, task=task)
-            return _settled_outcome(context, attempt, task=task)
+            outcome = _settled_outcome(context, attempt, task=task)
+            if not context.cancellation_requested:
+                from lib.goal_runs.worker_recovery import resume_after_worker_exit
+                resume_after_worker_exit(context, attempt, application=application)
+            return outcome, not context.cancellation_requested
         if turn.get('currentAttemptId') != attempt['attemptId']:
             raise WorkerProtocolError('conversation attempt was superseded before execution')
         from lib.conversation_sync.command_service import restore_accepted_attempt_config
@@ -109,6 +139,12 @@ def execute_claimed_attempt(context, payload):
             attempt_id=attempt['attemptId'], turn_id=turn['turnId'], principal=principal)
         if chat_task_runtime.get(task_id) is not None:
             raise WorkerDomainSettlementUnknown('Conversation already has a physical task carrier')
+        from lib.project_dispatch.admission import KEY, TrustedDispatch
+        if KEY in config:
+            # Recovery can enqueue before the accepting coordinator finishes
+            # binding. Its captured grant authorizes the same idempotent
+            # association; binding still precedes preparation and task birth.
+            TrustedDispatch(config[KEY]).continue_execution(turn['turnId'], attempt['attemptId'])
 
         # Commit entry BEFORE translation, prompt hooks, workspace preparation
         # or any other potentially external effect in the common start path.
@@ -137,18 +173,22 @@ def execute_claimed_attempt(context, payload):
         from lib.conversation_sync.task_start import start_conversation_attempt_executor
         accepted_at = (attempt.get('config') or {}).get(
             ATTEMPT_DISPATCH_REQUEST_STARTED_AT_MS_CONFIG_KEY, attempt['createdAt'])
+        abort_after_ts = float(accepted_at) / 1000
+        if config.get('_goalRecoverySourceRunId') and config.get('_goalRecoveryAbortAfterTs'):
+            abort_after_ts = min(abort_after_ts, float(config['_goalRecoveryAbortAfterTs']))
         try:
             identity, reason = start_conversation_attempt_executor(
-                turn['conversationId'], config, abort_after_ts=float(accepted_at) / 1000,
-                on_task_registered=registered, worker_context=context)
+                turn['conversationId'], config, abort_after_ts=abort_after_ts,
+                on_task_registered=registered, worker_context=context,
+                **({'application': application} if application is not None else {}))
             if identity != task_id or reason is not None:
                 raise WorkerDomainSettlementUnknown('Conversation executor startup did not settle')
-        except BaseException:
+        except BaseException as error:
             from lib.conversation_sync.worker_recovery import retain_preparation_exit
-            retain_preparation_exit(context, entered, turn)
+            retain_preparation_exit(context, entered, turn, error=error, config=config)
             raise
         settled = get_attempt(attempt['attemptId'], user_id=owner, include_execution_config=True)
-        return _settled_outcome(context, settled, task=registered_task)
+        return _settled_outcome(context, settled, task=registered_task), False
 
 
 def settle_claimed_failure(context, payload, error):
@@ -158,15 +198,28 @@ def settle_claimed_failure(context, payload, error):
     from lib.conversation_sync.worker_recovery import recover_exited_attempt
     context.checkpoint(allow_cancelled=True)
     with attempt_dispatch_lock(context.claim.task_id):
-        _owner, attempt, turn = _accepted(context, payload)
+        owner, attempt, turn = _accepted(context, payload)
         if attempt.get('startedAt') is None:
-            raise WorkerDomainSettlementUnknown('Conversation entry remains unconfirmed') from error
+            from lib import turn_lifecycle as turns
+            from lib.conversation_sync.command_service import executor_start_error_envelope
+            if attempt['status'] == 'pending':
+                envelope = executor_start_error_envelope(error, attempt.get('config') or {})
+                carrier = dict(turn.get('projection') or {})
+                carrier.update(id=context.claim.task_id, convId=attempt['conversationId'],
+                    _attemptId=attempt['attemptId'], _turnId=attempt['turnId'], _userId=owner,
+                    _principalContext=context.principal.to_payload(), _conversationWorkerContext=context,
+                    config=dict(attempt.get('config') or {}), status='error', error=envelope,
+                    finishReason='error')
+                turns.record_task_event(carrier, {'type': 'error', 'error': envelope})
+                attempt = turns.get_attempt(attempt['attemptId'], user_id=owner,
+                                            include_execution_config=True)
+            return _settled_outcome(context, attempt)
         task = chat_task_runtime.get(context.claim.task_id)
         attempt = recover_exited_attempt(context, attempt, turn, task=task)
         return _settled_outcome(context, attempt, task=task)
 
 
-def conversation_registration():
+def conversation_registration(*, application=None):
     """Register the common invocation and its fenced domain recovery ports.
 
     Cross-authority entry, descendants, model/tool admission, Stop, physical
@@ -174,7 +227,9 @@ def conversation_registration():
     unprovable outcome remains unconfirmed, never a fresh invocation.
     """
     from lib.durable_worker import WorkerKindRegistration, WorkerKindSafety
-    return WorkerKindRegistration('conversation-attempt', execute_claimed_attempt,
+    from functools import partial
+    handler = partial(execute_claimed_attempt, application=application)
+    return WorkerKindRegistration('conversation-attempt', handler,
         WorkerKindSafety(True, True, True, True), cancel_handler=cancel_claimed_attempt,
         failure_handler=settle_claimed_failure)
 
@@ -186,7 +241,6 @@ def cancel_claimed_attempt(context, payload):
     settle through its original task or the existing domain recovery owner.
     """
     from lib.turn_lifecycle import attempt_dispatch_lock, get_attempt, record_task_event
-    from lib.conversation_sync.execution_identity import restore_execution_identity
     from lib.tasks_pkg.worker_binding import worker_task_identity
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
     if not isinstance(context, WorkerExecutionContext):
@@ -203,7 +257,9 @@ def cancel_claimed_attempt(context, payload):
             return _settled_outcome(context, attempt, task=task)
         if attempt['status'] == 'pending':
             config = dict(attempt.get('config') or {}, _turnOwnerUserId=owner)
-            principal, _attended = restore_execution_identity(config)
+            # Stop drains accepted work; it never reauthorizes the grant that
+            # may have been revoked since admission.
+            principal = context.principal
             worker_task_identity(context, conversation_id=turn['conversationId'],
                 attempt_id=attempt['attemptId'], turn_id=turn['turnId'],
                 principal=principal, allow_cancelled=True)

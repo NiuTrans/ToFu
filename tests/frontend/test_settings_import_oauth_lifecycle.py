@@ -20,6 +20,8 @@ def settings_oauth_bundle(tmp_path_factory):
         'populatePreferencesTab': 'features/memory/preferences',
         'populateToolsInventory': 'features/settings/tools-inventory',
         'captureOAuthPanel': 'features/settings/oauth-panel-lifetime',
+        'kimiCodeLogin': 'features/settings/kimi-code-login',
+        'subscriptionPlans': 'features/settings/subscription-plans',
         'captureMcpSettingsReads, notifyMcpSettingsVisibility, refreshMcpSettingsAfterWrite': 'features/settings/mcp-settings-reads',
         'createMcpCommands': 'features/settings/mcp-commands',
         'createMcpToolSelection': 'features/settings/mcp-tool-selection',
@@ -48,7 +50,9 @@ const dom = new JSDOM(`<!doctype html><body><div id="settingsModal" class="open"
  <button id="oauthCodexLoginBtn"></button><button id="oauthCodexDeviceBtn"></button>
  <span id="oauthCodexStatus"></span><div id="oauthCodexManual"></div>
  <input id="oauthCodexManualUrl"><input id="oauthCodexAuthUrl">
- <button id="oauthCodexResetBtn"></button></div></body>`, {url:'http://localhost'});
+ <button id="oauthCodexResetBtn"></button>
+ <span id="oauthKimiStatus"></span><button id="oauthKimiLoginBtn"></button><button id="oauthKimiLogoutBtn"></button>
+ <div id="oauthKimiDevice"><code id="oauthKimiDeviceCode"></code><a id="oauthKimiDeviceLink"></a></div></div></body>`, {url:'http://localhost'});
 for (const name of ['window','document','localStorage','HTMLElement','HTMLInputElement',
  'HTMLSelectElement','HTMLButtonElement','HTMLTextAreaElement','AbortController','AbortSignal']) {
  global[name] = name === 'window' ? dom.window : dom.window[name];
@@ -130,6 +134,7 @@ async function oauthScenario(){
  const confirmation=deferred();global.showConfirm=()=>confirmation.promise;
  global.t=(key)=>key;global.renderCodexSharedLogin=()=>{};
  global.captureOAuthPanel=built.captureOAuthPanel;
+ global.kimiCodeLogin=built.kimiCodeLogin;global.subscriptionPlans=built.subscriptionPlans;
  global.Api={oauth:{status:options=>{writes++;return pending.promise;},
   loginPost:()=>{writes++;return pending.promise;},resetOfferConsume:()=>{writes++;return pending.promise;},
   logoutPost:()=>{writes++;return pending.promise;}}};
@@ -170,6 +175,26 @@ async function oauthScenario(){
   await tick();assert.equal(intervals.size,1,'a pending status projection resumes device observation');
   _updateOAuthCard('codex',{status:'waiting_callback',device:{user_code:'ABC'}});
   assert.equal(intervals.size,1,'rendering the same device state keeps one observer');
+  retire();assert.equal(intervals.size,0);
+ } else if(SCENARIO==='oauth_device_polls_per_provider'){
+  _updateOAuthCard=originalRender;
+  const reads=[];Api.oauth.status=()=>new Promise(resolve=>reads.push(resolve));
+  const device={user_code:'KIMI-1',verification_url:'https://example.invalid/kimi'};
+  bridge.Api={oauth:{deviceLoginPost:async()=>({ok:true,status:200,json:async()=>({status:'started',...device})})}};
+  await _kimiDeviceLogin();assert.equal(intervals.size,1,'a Kimi device flow starts its observer');
+  for(const timer of intervals.values()) timer.fn();await tick();
+  reads.shift()({codex:{status:'not_started'},kimi:{status:'waiting_callback',device}});await tick();
+  assert.equal(intervals.size,1,'an idle Codex card cannot retire the Kimi device observer');
+  for(const timer of intervals.values()) timer.fn();await tick();
+  reads.shift()({codex:{status:'not_started'},kimi:{status:'completed',authenticated:true,model_count:5}});await tick();
+  assert.equal(intervals.size,0);assert.equal(catalog.length,1,'a completed Kimi sign-in refreshes the catalogue');
+ } else if(SCENARIO==='oauth_kimi_device_resume'){
+  _updateOAuthCard=originalRender;
+  _loadOAuthStatus();await tick();
+  pending.resolve({codex:{status:'not_started'},kimi:{status:'waiting_callback',
+    device:{user_code:'KIMI-2',verification_url:'https://example.invalid/kimi'}}});
+  await tick();assert.equal(intervals.size,1,'a reopened card resumes a pending Kimi device observation');
+  assert.equal(byId('oauthKimiDeviceCode').textContent,'KIMI-2');
   retire();assert.equal(intervals.size,0);
  } else if(SCENARIO==='oauth_repoll_budget'){
   Api.oauth.status=async()=>{writes++;return {codex:{reset_offer:{refreshing:true}}};};
@@ -248,6 +273,7 @@ main().catch(error=>{console.error(error);process.exitCode=1;dom.window.close();
     'oauth_exchange_retired', 'oauth_exchange_params', 'oauth_status_invalidated',
     'oauth_popup_cleanup', 'oauth_device_resume', 'oauth_repoll_budget',
     'oauth_device_fallback_retired', 'oauth_reset_single_confirmation',
+    'oauth_device_polls_per_provider', 'oauth_kimi_device_resume',
 ])
 def test_import_oauth_presentation_lifetime(settings_oauth_bundle, scenario):
     bindings = {'ROOT': str(ROOT), 'BUILT': str(settings_oauth_bundle), 'SCENARIO': scenario,

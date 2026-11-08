@@ -57,9 +57,11 @@ def test_dead_worker_preserves_output_and_unknown_accounting_without_replay(
     outcome = execute_claimed_attempt(context, context.claim.payload)
     assert outcome.status == 'failed'
     attempt = turns.get_attempt(pair['attempt']['attemptId'], user_id=owner)
-    assert attempt['status'] == 'failed'
+    assert attempt['status'] == 'interrupted'
     turn = turns.get_turn(pair['turn']['conversationId'], pair['turn']['turnId'], user_id=owner)
     assert turn['projection']['content'] == pair['turn']['projection']['content']
+    assert turn['settlement']['cause'] == 'server_restart'
+    assert turn['settlement']['error']['code'] == 'worker_effect_outcome_unknown'
     result = factory().query('task_results.replay_get', {
         'key': context.claim.task_id, 'user_id': owner, 'include_metadata': True})
     assert result['metadata']['usageComplete'] is False

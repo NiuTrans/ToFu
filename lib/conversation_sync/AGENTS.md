@@ -7,9 +7,13 @@ generated contract bindings. Read `contracts/conversation_sync_v3.yaml` and
 `docs/contracts/CONVERSATION_SYNC_V3.md`.
 
 `worker_execution.py` rebuilds claimed attempts through the common task start
-path and joins execution before reporting settlement. Entered effects require
+path and joins execution before reporting settlement, then keeps the claim for
+the attempt's detached Swarm outside the dispatch stripe
+(`swarm/turn_handoff.own_detached_swarm`). Entered effects require
 recovery evidence; the adapter grants no automatic replay. Its typed registration
-joins the common durable service; ordinary admission cutover is separate. Verify
+joins the common durable service. `worker_dispatch.py` is ordinary admission's
+atomic binding/enqueue boundary; no HTTP executor is constructed. Verify
+`tests/conversation/test_durable_default_dispatch.py`,
 `tests/conversation/test_durable_attempt_execution.py` and
 the cross-authority worker publication contract in `docs/STORAGE.md`.
 `worker_control.py` carries the first acknowledged cancellation cause and
@@ -34,6 +38,12 @@ the common executor tests; this owner never re-enters a model or tool.
   Hints invalidate; they never contain or write authoritative state.
 
 ## Verification
+
+`delivery_runtime.py` owns the single request-process conversation commit watch.
+It feeds `broker.py` scoped invalidations or all-scope invalidation after a gap;
+it never writes content or grants access. Start before request readiness and
+join before storage shutdown. Verify `test_conversation_delivery_runtime.py`
+and `tests/storage/test_conversation_control.py` across authorities.
 
 Run `npm run check:conversation-sync`, the focused
 `test_conversation_sync_v3*` tests, and relevant Sidecar turn-operation tests.

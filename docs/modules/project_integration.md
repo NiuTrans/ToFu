@@ -52,11 +52,12 @@ Workspace admission reads the nearest checkout binding through the shared metada
 - Task admission pins the selected branch once and resolves its committed baseline after accepting the input tree. Two matching working-tree observations pin dirty/untracked context; subsequent HEAD/branch movement does not invalidate those bytes. Every observation refreshes the private index seed and ignore membership, including newly committed ignored files, while publication excludes borrowed dirty input changes against the accepted committed baseline. Existing owner/task registrations resolve before capture, including lost-ACK retries.
 - **Problem:** bounded HEAD retries still fail under frequent concurrent commits, and rebuilding indexes/commits on every observation wastes I/O and creates unused Git objects. **Decision:** reuse one private index, compare tree IDs directly, and create at most one accepted input commit. Normal admission uses no writer lease; after three changing content observations, the existing cancellable stable-read lease and tool admission wait policy fence cooperative writers for only two captures. Git materialization and storage registration run after release. Non-cooperating content changes still refuse safely; cancellation retires the index directory without registration. **Alternatives rejected:** accepting one unchecked capture loses consistency; retrying the model/task repeats unrelated work; long checkout locks serialize healthy writers; ignoring a new HEAD index seed loses newly tracked ignored files; keeping the initial commit as publication base misattributes concurrent committed edits as borrowed WIP. Specifications: source snapshot cases in `tests/storage/test_integration_delivery.py`.
 - Source HEAD/index stay intact, including unborn branches; existing registrations win. Readonly/non-Git/transient execution stays unchanged.
-- **Problem:** a clean canonical checkout still ran the repeated private-index capture even though its selected commit is already the exact accepted input. **Decision:** the first capture remains the mandatory boundary that observes the first content change; the following confirmation observation uses `status --porcelain=v1 -z --untracked-files=all` plus `ls-files -v` (no assume-unchanged or skip-worktree entries) and reuses the selected tree, eliminating the second whole-tree capture and its `add`/`write-tree` on clean sources. Cancellation and the selected-branch reread stay in place; dirty/untracked or flagged inputs, including a tree that changes during capture, keep the full private-index capture and churn fence. **Alternatives rejected:** skipping the first capture cannot observe a change that lands in the boundary itself; status alone can hide flagged working bytes; caching or configuration knobs go stale or limit work. On a clean real 12,646-file checkout on this FUSE volume (three alternating pairs), source snapshot median went 5.378 s → 4.296 s and full workspace preparation 11.946 s → 7.330 s. **Specification:** `test_clean_source_workspace_reuses_selected_commit_without_repeated_capture`; dirty, flagged, ignore-rule, concurrent-commit and publication parity remain in `test_integration_delivery.py` and `test_integration_snapshot_index.py`.
+- **Problem (2026-11-07):** on a network volume a snapshot's cost is the number of working-tree walks, each one `lstat` round trip per tracked file; production snapshots of the 12,875-file canonical checkout took 4–25 min with each walk at 20–140 s. A dirty source cost at least seven walks: every capture ran `diff` and `ls-files --others` for path validation plus `add -A`, and every confirmation added a `status` clean check before the next capture. **Decision:** `add -A` into the private index is a capture's only walk; forbidden-path validation then reads that index (`diff --cached --name-only --diff-filter=ACMRT` against the parent, or `ls-files` without one), which holds exactly the added, modified and newly untracked paths. Every observation is one capture: a clean source captures exactly the selected tree, so the separate `status`/`ls-files -v` clean path is gone and flagged entries stay covered by the unborrowed private index. Two agreeing observations and the churn fence are unchanged; snapshots now cost two walks, with the second only `lstat`-ing through the private index's stat cache. A refused capture leaves only unreferenced loose objects for ordinary Git GC; the writer index is still never written. **Alternatives rejected:** keeping the status clean path costs a walk to save a stat-only `add`; Git's untracked cache serves only status-shaped walks and needs repository configuration; validating before staging requires the two extra walks this removes. Paired measurement on the live dirty checkout (four alternating process runs, including identical process start-up): median 14.7 s → 8.8 s. **Specification:** `test_snapshot_walks_the_working_tree_once_per_observation` and `test_capture_refuses_forbidden_paths_without_touching_the_writer_index` in `test_integration_snapshot_index.py`; clean-source reuse, dirty, flagged, ignore-rule, concurrent-commit and publication parity remain in `test_integration_delivery.py` and the same file.
 
 - **Problem:** plain `read-tree` discards stat data from the reused private index, forcing unchanged tracked content to be hashed again. **Decision:** seed with index-only single-tree merge (`read-tree -m -i`) so matching entries retain stat data while membership still follows the fresh parent. Index-only mode avoids rejecting legitimate concurrent working-tree edits as an unsafe checkout. Git still checks changed/racy entries; two equal observations and the existing churn fence remain mandatory. **Alternatives rejected:** keeping stale membership loses ignore/HEAD changes; skipping the second observation weakens input consistency; ordinary merge mode refuses concurrent dirty changes. Real-Git parity tests cover changes, deletion, ignore rules, concurrent commits, modes and symlinks in `tests/storage/test_integration_snapshot_index.py`. A controlled same-volume 150-file/150 MB benchmark of two full captures (including preflight and tree writes) reduced median time from 1.208 s to 0.716 s, about 41%; this does not predict live end-to-end latency. Startup profiling uses paired `[TaskStartupTiming]` start/complete anchors and bounded `tofu_task_startup_stage_seconds` labels. Workspace provisioning, root discovery/identity/binding, snapshot, private-index seed/add/tree, snapshot commit, materialization, lock waits and registration/persistence are distinct stages. Nested spans inherit only allowlisted log identity via a context-local scope that resets on success or failure; IDs and file contents never become metric labels. Durations are inclusive: do not sum parent workspace binding with its child stages. A start without completion identifies the blocked boundary; tests cover nested identity restoration and separate-thread isolation.
 - **Problem:** isolated admission refused healthy work when the input snapshot was slow (2026-10-26: `[Spawn] Executor rejected task a1c0feca before worker entry: git add failed: ... timed out after 90.0 seconds`). Dispatched file grants (and `isolated` mode) snapshot the canonical checkout, HEAD plus every uncommitted and untracked non-ignored file, through a private index (`GIT_INDEX_FILE`) because Git cannot commit working bytes without an index. The first observation started from an empty private index without stat data, so `add -A` re-read and hashed every tracked file: 11,460 files / 229.8 MB on the shared BeeGFS FUSE checkout. In the 2026-10-26 log the first `add` of each of 13 admissions took 10.4-21.9 s (one 90.2 s timeout); later observations, which reuse stat data, took 1.3-4.2 s at admission; task-end delivery captures, which also began from an empty index, took up to 39.8 s and share the fix. Untracked trees were not the cost: `data/` (task worktrees), `logs/` and dependency trees are ignored and the untracked walk takes about 1.2 s. While the volume was contended (validation 11.4 s instead of about 2.5 s) the rehash passed the fixed 90 s wall-clock deadline (30 s for the other snapshot commands) and binding failed before worker entry. The snapshot never staged anything in the writer index, but its porcelain `git diff` validation rewrote that index (stat refresh under `index.lock`) whenever it met stat-only changes. **Decision:** a first observation copies the writer index through one descriptor, keeping that version's mtime for Git's racy-entry check, before the single-tree `read-tree -m -i`, so `add -A` hashes only changed files; an index with assume-unchanged or skip-worktree entries is not borrowed, because those bits survive the reseed and would hide working bytes. The conflict check reads the writer index with `ls-files`, which never writes it; path validation now follows seeding and runs on the private index. Whole-tree snapshot commands (`ls-files`, `read-tree`, `diff`, `add`, `write-tree`) have no total deadline: `lib/project_mod/activity_supervised_process.py` renews a 90 s stall window (`GIT_STALL_SECONDS` in `lib/git_runtime.py`, a `fixed`-class constant, never derived from hardware or tree size) whenever any thread of the Git process tree executed, read from kernel scheduler counters (per-thread faults, CPU time and context switches in procfs; psutil elsewhere). A tree blocked on an unresponsive volume shows no change, is retired through `process_group` and fails admission with "made no progress"; owner Stop is observed while it waits. Ref reads that admission depends on share the same window (next decision); ref and object writes (`update-ref`, `commit-tree`) keep their fixed deadlines. Read-only phase benchmark on the live checkout (158 changed and 53 untracked files, `add --dry-run`, four alternating rounds): first observation 10.2-15.9 s became 2.5-2.7 s, its `add` 8.9-14.8 s became 1.2-1.4 s; this is a phase measurement, not an end-to-end latency claim. **Alternatives rejected:** a larger or tree-scaled deadline still refuses slow healthy work; no deadline lets a hung mount hold the worker forever; output-renewed windows (worktree materialization) need progress lines that `add`, `diff` and `ls-files` never print; the untracked cache serves only `git status`-shaped walks and needs repository configuration; scoping `add` to `diff-index` output re-implements `add -A` membership rules (deletions, modes, embedded repositories, ignore changes) for the saving the borrowed stat cache already gives; deferring the snapshot past worker entry leaves the first rounds without their bound root and still needs liveness. A command that keeps executing without progress (a busy loop) is not detected; Stop still retires it. Specifications: `tests/storage/test_integration_snapshot_liveness.py` (fake slow and hung Git under dilated deadlines, Stop), `tests/storage/test_integration_snapshot_index.py` (only changed files are hashed; the writer index stays byte- and mtime-identical) and `tests/project_mod/test_activity_supervised_process.py`.
 - **Problem:** task start failed whenever the shared checkout volume paused a constant-size Git read past a fixed deadline, before any model call (2026-11-03: `task_start_failed` "Command [... 'rev-parse', '--show-toplevel', '--git-common-dir'] timed out after 10 seconds"; `logs/error.log` holds 155 such timeouts for about two dozen tasks between 15:24 and 19:44, logged by task-end workspace delivery, including for tasks whose start had failed the same way, and none in the retained logs back to 2026-10-31; also the gate's 30 s `rev-parse --verify <ref>^{tree}`). These reads normally take about 0.1 s (live samples of 120 and 240 reads: median 0.11-0.13 s, maximum 3.9 s), so the failures are intermittent volume stalls, not slow work: a stalled `rev-parse` waits on the volume exactly like a whole-tree `add`. Starting the child outside the checkout does not avoid them: sampled at the same instants, `-C <checkout>` and `--git-dir=<metadata>` reads had the same latency (median 0.11 s, p99 1.1-1.3 s, every slow instant slow in both). **Decision:** every harness Git read that task admission or workspace identity depends on runs under `run_activity_supervised` with the shared `GIT_STALL_SECONDS` window and no total deadline: `workspace_delivery._checkout`/`_has_commit` (through `_checkout_git`), `workspace_policy.resolve_workspace_mode`, and integration `_repo_root`, `_common_dir`, `_rev`, the admission `symbolic-ref`, the index `--git-path` read and the gate's tree read. Worker binding passes the task's Stop (`aborted`/`abort_event`) as the cancellation, so Stop retires a blocked read and surfaces as `AbortedError`, never as a binding failure; only a whole window in which no Git thread ran fails, with "made no progress". Per-call cost is unchanged (local repository, 60 alternating `--git-dir` identity reads per arm: median 3.9 ms fixed-deadline vs 4.1 ms supervised). **Alternatives rejected:** a larger fixed deadline still fails a healthy start on a longer pause; retrying replays a command whose stall says nothing about the next attempt and still needs a bound; caching identity would let a moved or deleted checkout keep its old authority. Specifications: `tests/tasks_pkg/test_workspace_identity_liveness.py` (slow, hung and Stopped identity/policy reads under dilated windows), `tests/tasks_pkg/test_workspace_identity_latency.py` and `tests/storage/test_integration_snapshot_liveness.py`.
+- **Problem:** task-end delivery resolves the same identity through `delivery._canonical` (`rev-parse` plus `worktree list --porcelain`, which reads every registered worktree), and those reads still ran under `_git`'s default 30 s deadline. On 2026-11-06, under host load and about 256 registered worktrees, 57 such listings timed out; completed Workers' terminal intent stayed unacknowledged (131 retries logged), so no checkpoint was registered and their Coordinator could not review them. **Decision:** the delivery identity reads (`_canonical`, `bind_task_workspace`'s `merge-base`/`symbolic-ref`), the no-delta and retired-placeholder checks, `_worktree_inventory` and the reviewed-delivery commit's reads use the same stall window. **Alternatives rejected:** a larger deadline fails on a longer pause; deriving the main checkout from the common directory instead of listing worktrees changes identity for non-standard layouts. Specification: `test_identity_reads_outlast_a_wall_clock_deadline`.
 - **Problem:** holding repository admission across a slow checkout serialized unrelated tasks and made lock waits uncancellable. **Decision:** a cross-process destination lifecycle lock covers capture, detached metadata creation, private checkout, registration ACK reconciliation and rollback. Only shared input-ref updates and `worktree add --no-checkout` take repository admission; private checkout never holds it. Both lock waits poll cancellation every 50 ms. Same-task retries recheck registration before capture; ambiguous registration/child retirement retains bytes. Discard takes destination admission before publication admission; optional cleanup skips an active destination without waiting (including when already under repository admission), avoiding lock-order inversion. Persistent lock inodes are never unlinked while waiters may reference them. **Alternatives rejected:** simply dropping the repo lock races same-task retries/cleanup; keeping it through checkout throttles independent tasks; background retries duplicate ownership. Tests in `test_integration_delivery.py` hold one real-Git checkout at a barrier and require another task to finish before release, with same-task retry/discard, cancellable destination/repo waits and lost-ACK/WIP checks. No executor, queue, waiter thread or in-memory lock registry is added; one bounded lock FD is held per active admission, plus the brief repo-lock FD. Paired startup stages now split snapshot observations, metadata/checkout, registration and repository/destination wait versus hold; explicit worker identity is inherited only within the timing scope. Tool admission separately records registry wait, lockfile I/O, local condition sleep and cross-process backoff, so an inclusive admission total is never reported as pure contention. Candidate/reconcile/promotion transactions still retain their authority/CAS fences; no lock is removed merely because it appears in a slow total.
 - **Problem:** a fixed 90-second `worktree add` wall-clock deadline kills healthy large/slow-volume checkouts before worker entry. **Decision:** controlled creation installs detached metadata with `--no-checkout`, then force-checks out only that fresh, unregistered destination with explicit progress (also on old Git). `lib/project_mod/worktree_process.py` drains one bounded 8 KiB diagnostic tail; increasing completed-file counts with a fixed positive total renew a 90-second stall window. Noise/repeated counts do not renew it. Cancellation is observed during materialization; POSIX groups retire through the existing process-group owner before rollback. Hooks are disabled per invocation, not in repository configuration. No Git write is replayed and no shared-checkout fallback exists. Existing/ambiguous registrations survive; cleanup errors remain secondary evidence rather than masking the startup cause. Materialization timing is logged without contents. `worktree_checkout_policy.checkout_worker_config` defaults fresh checkout concurrency to every effective CPU from the shared cached launch probe, minimum one; memory never narrows it. It reads effective configuration in the new destination, preserving explicit `checkout.workers`, conditional/worktree config and Git's small-tree threshold; it never persists config or moves durable WIP to ephemeral storage. Probe failure is lean; config-read failure leaves Git policy unchanged. Children exist only during the supervised checkout and share its process-group cancellation/retirement. A controlled 1,200-file FUSE benchmark measured serial checkout 3.59–3.87 s versus 0.89–0.95 s at the host's 63-CPU default; this is a phase benchmark, not a production end-to-end latency claim. Real-Git tests in `test_worktree_checkout_policy.py` check actual worker spawning, content/mode/symlink parity, hooks and the small-tree fast path. **Alternatives rejected:** increasing a fixed deadline still misclassifies large trees; ephemeral-volume relocation risks WIP/restart durability; model retries replay admission instead of fixing it. Tests: `test_git_worktree_process.py` and admission cases in `test_integration_delivery.py`.
 - **Problem:** on a loaded host a healthy checkout failed admission with `WorktreeRetirementUnproven: Worktree exited; writer retirement unproven: output pipe remains held` (`test_source_snapshot_retries_content_changes_with_one_private_index`, 2026-10-27, beside 32 busy loops at load about 200). After retiring the owned group, teardown gave the output reader 0.2 s to reach EOF, stopped it, joined 0.5 s more, and read a reader that had not yet been scheduled as an escaped pipe holder. **Decision:** after retirement the reader is stopped and joined without a deadline (its reads are non-blocking, so it leaves within one iteration), and teardown proves closure itself with a non-blocking drain: EOF means every writer is gone; EAGAIN, or more than the 1 MiB a retired pipe can buffer, means a writer outside the owned group still holds it, which stays `WorktreeRetirementUnproven` and preserves the destination. **Alternatives rejected:** longer join deadlines (still a scheduling bet); `POLLHUP` on the read end (not portable across POSIX pipes); waiting for the escaped holder to exit (hangs teardown). Specifications: `test_late_reader_after_exit_is_not_mistaken_for_a_pipe_holder` (the reader observes EOF 1.5 s late) and `test_escaped_pipe_holder_cannot_hang_teardown` (teardown returns while the holder still runs).
@@ -186,6 +187,25 @@ Only writable configured source roots authorize creation. Structured code paths 
 
 Terminal intent precedes evidence release. Failed/cancelled/stopped outcomes revoke publication;
 checkpoint/undo evidence remains. Background commands and child agents fence capture.
+
+**Restart is not a task outcome.** Problem: a server restart quiesces running tasks
+(`_abort_reason='server_shutdown'`) and restart recovery marks unsettled task results
+`interrupted`; delivery read both as `cancelled`/`failed`. Both storage authorities make such a
+denial irreversible for the workspace generation, and a resumed project Worker keeps its
+deterministic workspace task identity, so the resumed attempt's completion was preserved, never
+published (2026-11-06: the Router, hygiene and TB2.1 lanes). Decision: `workspace_outcome`
+(`lib/tasks_pkg/workspace_delivery.py`) reads the abort cause through the canonical verdict;
+`SYSTEM_RECOVERY` evidence, or restart recovery's durable `interrupted` status, is `interrupted`.
+That receipt is not a denial: it stays `working` and is never captured, preserved or published;
+the receiver skips it and the next attempt of the task settles it. `build_result_meta` persists
+`_abort_reason`, so boot recovery replays read the same cause. User Stop and failures stay
+sticky, and Project Brain work statuses keep `task_outcome`. Alternatives rejected: letting a
+later completion lift a recorded denial, which weakens the storage authorities' irreversible
+revocation; skipping settlement at shutdown, which loses the intent restart recovery needs.
+Receipts denied before this change are not repaired in place: a fresh assignment re-carries
+their retained checkpoint. Specifications: `test_restart_interrupted_delivery.py`,
+`test_terminal_settlement_reads_the_abort_cause`, and the startup cases in
+`test_workspace_delivery_events.py`.
 Successful automatic settlement immediately merges baseline-to-checkpoint changes into the
 current canonical workspace, including borrowed dirty inputs and compatible concurrent edits.
 A private index computes the merge; no validation checkout or release gate delays delivery.
@@ -194,6 +214,41 @@ preserves real index/HEAD, unrelated WIP and branch history; conflicts block wit
 publication. Unborn branches need no bootstrap commit. Durable recovery refs and target-byte
 comparison reconcile lost ACKs without replay. Candidate/stable refs remain unchanged;
 [delivery contract](../CONTINUOUS_DELIVERY.md) defines receipts, retry and commit independence.
+
+**Reviewed project deliveries become commits.** Problem: working-tree delivery leaves a
+task's bytes uncommitted, and turning them into history was left to the opt-in linear
+checkpoint, which captures the whole shared checkout (every writer's uncommitted bytes),
+verifies the entire stable-to-checkpoint delta and refuses whenever the checkout changes
+during capture. In a checkout many conversations edit, that never succeeds: on 2026-11-07
+`refs/tofu/stable` had not moved since 2026-11-03 (732 commits behind HEAD), none of 67
+delivered Worker results had fully reached the branch, and 155 of the checkout's 175 dirty
+source files were byte-identical to delivered checkpoints. Owners saw nothing landed, later
+Workers borrowed those bytes as input, and landings that touched them conflicted.
+Decision: in a repository that opted into automatic commits (`tofu.linearCheckpoint`), a
+delivered project-dispatch result whose Coordinator review authorizes publication is
+committed as exactly its registered baseline-to-checkpoint delta (the repair pair for a
+repaired delivery) by `task_delta_delivery.commit_delivered_task_delta`, called from the
+delivery receiver's recovery pass. The delta merges onto committed HEAD in a private index;
+holding Git's `index.lock`, the branch, a clean operation state and the index entries of
+the delta's paths (at HEAD, or already at the delivery) are rechecked, only those entries
+move to the new commit, then the branch moves by compare-and-swap (index first, like Git
+and `git_land`). No checkout file is written, so concurrent and borrowed uncommitted edits
+stay uncommitted on top. A delta that needs bytes HEAD lacks (it built on borrowed
+uncommitted input) or conflicts with committed history is acknowledged `entangled` with
+bounded conflict paths and stays delivered as working-tree bytes. A busy index, a moved
+branch, staged edits on a delta path or an operation in progress record no
+acknowledgement, so the next pass retries; a contained checkpoint or an already-present
+delta is acknowledged without a new commit. The acknowledgement is the existing
+`origin.deliveryCheckpoint`; the commit names the Worker's own commits and carries
+`Tofu-Task`, `Tofu-Checkpoint` and `Tofu-Assignment` trailers. The Coordinator's review
+is this commit's verification, as an agent's own verification is for `git_land`; other
+isolated tasks keep the whole-workspace checkpoint and its gates. Alternatives rejected:
+committing the merged working-tree bytes (commits other writers' and borrowed edits);
+gating each delivery on the whole stable-to-checkpoint delta (the measured failure);
+landing through `git_land`'s working-tree merge (rewrites files the delivery already wrote
+and refuses on borrowed bytes the task legitimately built on); committing without the
+opt-in (automatic commits are never a surprise default). Specification:
+`tests/project_mod/test_reviewed_delivery_commit.py`.
 
 **A checkpoint already contained in the target is delivered, not a delta to replay.**
 Problem: a Worker that lands its own work with `git_land` can name the resulting merge as its
@@ -328,6 +383,132 @@ and would hide edits until task end; untracking generated bundles is a packaging
 conflict the three-way merge already resolves; a merge driver cannot see the merged sources.
 Residual race: a write to the same file between revalidation and its atomic rename is lost, as with
 `git merge`. Specification: `tests/project_mod/test_git_land_script.py`.
+
+### Landing verification
+
+**Problem (measured 2026-11-07).** A landing proved only that the merge was textually clean;
+nothing verified the merged result. Between 11-01 and 11-07 the current branch's first-parent
+history took 436 merges (and 23 direct commits); in 34% of those merges a branch living at the
+same time changed the same source file, and in 43 the current branch had moved 20 or more
+commits under the branch (up to 113). An SZZ sample of 70 fix commits found 11 whose fixed
+lines came from two or more branches landed within 72 hours of each other, plus fix-on-fix
+chains in one area (three batch-wake fixes within 37 hours; five fixes to the lines of one
+Coordinator sidebar change within hours of it landing). The
+execution-cutover branch overlapped at least eight concurrent branches on the same files and
+landed with stubbed seams; every Worker then failed with a task identity mismatch. Agents that
+did rerun tests after merging could not tell regressions from the dozens of tests already
+failing on the current branch.
+
+**Decision (2026-11-07 revision).** Every merge, a fast-forward included, is verified in a
+private checkout before anything is written (`lib/project_mod/landing_verification.py`):
+fast-forwarding happens whenever a lane merged the current branch first, so skipping them
+left most combined results untested. Only the test files the merged tree can affect run:
+
+- **Selection by impact records, not by static closure.** The recorder
+  (`lib/project_mod/impact_recorder.py`, a pytest plugin using `sys.monitoring` and an
+  audit hook, one callback per function per test file) notes per test file which code units
+  executed, which functions ran during module imports (they build registries and tables),
+  which fixtures it used, which files it read and which directories it listed, whether it
+  started an unobserved program (anything but git outside the repository) or forked, and its
+  collected/executed/failing node ids. `lib/project_mod/impact_selection.py` maps that to
+  Git blobs and to units per Python file (module bodies separately from each function body,
+  by AST, so moves and comments change nothing). Its semantic cache owner,
+  `lib/storage_authority_sql/impact_cache.py`, stores records in one SQLite file beside the
+  warm merge checkout, invalidated when the project interpreter's environment changes. A
+  recorded file runs when an executed unit, a module body, a file it read, a directory it
+  listed or a conftest in its chain changed, or when it failed and the current branch differs
+  from its recorded run. Functions it never executed do not affect it. An unrecorded file
+  keeps the repository's static selection; a blast-radius change keeps the whole selection;
+  an opaque file counts every byte it references. A file whose collected node ids did not
+  all execute is never recorded, so a crashed worker cannot install a partial dependency set.
+- **A warm checkout and cached selector index.** `merge_checkout` keeps one private checkout
+  per repository on its fast local root (in the Git directory when placement declines),
+  holds it only while one landing merges and tests, and resets and cleans it for the next
+  landing while keeping `__pycache__` and the dependency links. A landing that finds it in
+  use gets a temporary checkout instead of waiting. Cold collection of 30 test files took
+  127 s versus 30 s warm (2026-11-07); the checkout is a reconstructible cache and owns no
+  durable state.
+- **Failure attribution as before, plus tip outcomes from records.** A failure on the merged
+  tree runs again at the current branch tip unless a record still describing the tip already
+  decides it; a failure there too is preexisting and never blocks. The rest rerun on the
+  merged tree: a failure that reproduces refuses the landing with its test ids and output
+  tail, one that does not reproduce is reported as flaky. A runner that cannot start on the
+  merged tree but does at the tip is a regression; one that cannot start on either side, or
+  a repository without a selector, lands with a printed reason, because only reproduced
+  evidence is attributable to a landing. An interrupted landing retires its whole test
+  session (`process_group`).
+
+Verification takes no lock across landings: when the current branch moves during it, the
+new merge is verified again, and the records of the run just made keep that to the test files
+the new commits affect. `python3 -m lib.project_mod.landing_verification record [PATH ...]`
+records runs at the current branch tip ahead of landings, which also re-checks everything the
+selection skips. **Known blind spot:** a test observing a module-level value of a module it
+neither imports nor executes code in (for example a registry entry another module adds at
+import) is rerun only when its own dependencies change; the full recording runs are the
+counter-measure. **Measured (2026-11-07):** the earlier version of this gate took 260–506 s
+per landing; see the figures below.
+
+**Cache ownership.** Problem: SQLite imports and SQL in the verification modules made
+the production storage-boundary gate refuse startup. Decision: the SQL storage package
+owns the reconstructible cache's connection, schema, codecs and transactions; project code
+supplies records and Git-blob fingerprints through `ImpactCache` and catches
+`ImpactCacheError`. This local verification cache never opens an application authority or
+depends on its backend or availability. The existing file, schema version and row format
+are preserved, including environment invalidation and atomic record batches. Alternatives
+rejected: exempting project modules from the startup guard, putting repository test evidence
+in the user's database, or discarding recorded runs to change formats.
+
+**Alternatives rejected.** A serialized merge queue or per-module lock: the owner rejected
+waits on 2026-10-28, and independent landings would queue behind each other's test runs.
+Running the whole suite: the current branch carries known failures and a full run costs tens
+of minutes on this host, for evidence the selector already scopes. Blocking on any failure:
+every landing would inherit the current branch's red tests and flakes. Verifying only
+textually overlapping files: semantic conflicts (a contract changed in one file, a caller
+added in another) share no file. Selecting by the static import closure: measured on this
+repository, the median test file's closure is 2,552 of 8,589 Python files and nearly every
+landing selects the whole suite, because a few core modules reach almost everything.
+Verifying by the verdict of an older merge onto a different tip: the records make
+re-verification cheap and exact instead. A bypass flag: under pressure it becomes the
+default path. Specifications: `tests/project_mod/test_landing_verification.py` (a trunk
+change that breaks the branch, a branch that breaks a concurrent trunk test, a fast-forward
+landing, preexisting failures answered from records, flaky failures, an unrecorded change,
+no selector, a warm checkout kept across landings, a terminated landing), the
+recorder/selection specs in `tests/project_mod/test_impact_selection.py` (serial and xdist)
+and the two `test_git_land_*` suites.
+
+### Lanes
+
+**Problem.** Every session paid for its own full checkout on the network volume (57–164 s
+measured; 1.4 s of it was just registering a worktree, 3.5–6 s the checkout on local disk,
+and parallel checkout workers did not help), then threw it away. Because that was slow, the
+shared checkout doubled as trunk, workspace, delivery target and server source, and
+uncommitted work in it leaked into every isolated task's input. **Decision.** `scripts/lane.py`
+creates one **lane** (a branch plus a warm checkout on fast local storage) per unit of work;
+`lib/project_mod/lanes.py` owns placement, recycling, saving and restoring. A new lane takes
+the checkout a landed lane left behind when one is available and rewrites only the files
+that differ (0.29 s measured for a branch switch in an existing checkout). A lane keeps its
+durable state in Git: the branch's commits and, after every task that wrote in it, a
+work-in-progress commit at `refs/tofu/lanes/<branch>` (the branch never moves), so a lost
+checkout is rebuilt by `lane.py restore`. Placement is the new `PURPOSE_LANES` of
+`serverctl_pkg/local_placement.py`: it shares the operator's `TOFU_LOCAL_WORKSPACES` switch
+but defaults to `on`, because lane checkouts are reconstructible; temporary directories stay
+refused, and when nothing is selected lanes fall back to `.tofu/worktrees`. Landing retires
+a clean lane as a spare only into the directory new lanes come from (an earlier placement
+or the fallback would otherwise accumulate spares nobody claims) and drops the lane's saved
+work; a lane with uncommitted or untracked files is kept. Dependency links are made only
+where the repository ignores them as files: a directory-only ignore pattern does not cover
+a symlink, so `/.venv/` and `node_modules/` became `/.venv` and `node_modules`, and a
+worktree's links can no longer be committed. **Alternatives rejected.** A pre-created pool:
+creating a checkout in the background competes with every running test and adds a lifecycle
+for one 3–6 s first-creation cost. Reflinks and hardlinks: a hardlinked tree cannot be edited
+independently, and the overlay does not reflink. `lane.py list` shows every lane with its
+divergence and uncommitted files. Specifications: `tests/project_mod/test_lanes.py` and the
+lane purpose case in `tests/server/test_local_placement.py`.
+
+After a landing, `git_land` reports which conversations' unlanded work changes the landed
+files and leaves each of them a notice through the
+[integration radar](conversations_project_brain.md#integration-radar); the landed
+checkout's radar records are retired.
 ## Gate policy
 
 Candidate gates validate the exact publication tree: `git diff --check`;
@@ -407,6 +588,8 @@ pip installs stay local and new packages retain their workspace. Node package li
 Recorded bridge directories and Python/test caches are reconstructible; source dependencies are never deleted.
 No new worker/queue is added. A private 1,000-file × 1 KiB measurement took 0.262s to create and 0.205s to settle/reclaim a no-change workspace, retaining zero clones; this is a fixture, not a latency cap.
 Git objects/checkpoint refs and owner-scoped receipts retain evidence after clone reclamation. One origin acknowledgement records source retirement and recovered opt-in checkpointing; missing ACKs and transient contention use the existing worker. Acknowledged cold rows require no filesystem scans or heartbeat writes.
+
+Frontend toolchain caches stay in their checkout. **Problem:** every `node_modules` entry was linked, including the caches Vite and Vitest write on each run (Vite's `.vite` dependency cache and `.vite-temp` config bundles, Vitest's `.vitest-cache`), so a frontend build or test in any task checkout wrote into the source checkout. **Decision:** the preparer never links those names (`NODE_TOOL_CACHE_DIRECTORIES` in `workspace_runtime.py`); the toolchain creates them in the task checkout's real `node_modules` on first use, and reclamation counts them as reconstructible like the links, so a checkout that built still reclaims. Checkouts prepared before this keep their links until retired. **Alternatives rejected:** configuring each tool's cache location reaches only projects Tofu configures, and Vite places `.vite-temp` beside the nearest `node_modules` regardless; copying the source caches spends work on checkouts that never build. Specification: `test_lazy_workspace_runtime_keeps_frontend_tool_caches_in_the_task_checkout` in `tests/storage/test_integration_delivery.py`.
 
 Git scans bound active/problem rows; terminal history uses stored metadata. Status is cached with mutation invalidation; event detail is bounded.
 Unregistered/prunable worktree counts remain visible.

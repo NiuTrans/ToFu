@@ -2,9 +2,9 @@
  * 大象 Settings thread list: every thread of the account in one list that
  * scales to many groups (docs/CHANNELS.md C2, C6).
  * Responsibility: search by name or key, a mode filter with counts, a
- * one-click mode choice and a reply-policy select per thread (none for an
- * ignored thread, which gets no replies), selection with bulk mode / reply
- * changes, and per-thread write ordering: a thread's writes
+ * one-click mode choice, a reply-policy select and the owner's note per thread
+ * (none for an ignored thread, which gets no replies; C11), selection with bulk
+ * mode / reply changes, and per-thread write ordering: a thread's writes
  * run in order, its controls show the last acknowledged view once they
  * settle, and a failure restores that view and stays beside its row.
  * Choosing a thread kind's default stores null (follow the default). Search,
@@ -12,8 +12,8 @@
  * stays the authority for every thread, and a re-read keeps them.
  * Entry points: createDxThreadList; compareThreads and threadTitle (shared
  * with the command chat picker).
- * Dependencies: tofu-ui factories, the shared channel view, i18n and the
- * generated wire DTOs.
+ * Dependencies: tofu-ui factories, the shared channel view, the note field
+ * (dx-assistant.ts), i18n and the generated wire DTOs.
  */
 import { t } from '../../i18n';
 import {
@@ -23,7 +23,8 @@ import { CHANNEL_DEFAULT_MODE_BY_KIND, CHANNEL_DEFAULT_REPLY_POLICY } from '../.
 import type {
   ChannelThreadUpdate, ChannelThreadView, ConfigurableThreadMode, ReplyPolicy, ThreadKind, ThreadMode,
 } from '../../api/channels.generated';
-import { card, chip, element, empty, feedback, hint } from './channel-settings-view';
+import { card, chip, element, empty, feedback, hint, timeText } from './channel-settings-view';
+import { noteField } from './dx-assistant';
 
 export interface DxThreadListPorts {
   update: (key: string, update: ChannelThreadUpdate) => Promise<ChannelThreadView>;
@@ -49,12 +50,16 @@ interface Row {
   reply: HTMLSelectElement | null;
   replyField: HTMLElement | null;
   meta: HTMLElement;
+  /** The owner's note under the controls, its editor toggle and the open editor. */
+  note: HTMLElement | null;
+  noteToggle: HTMLButtonElement | null;
+  editor: HTMLElement | null;
   pending: number;
   chain: Promise<unknown>;
 }
 
 const MODES: ConfigurableThreadMode[] = ['watch', 'mentions', 'ignore'];
-const REPLY_POLICIES: ReplyPolicy[] = ['draft', 'auto', 'never'];
+const REPLY_POLICIES: ReplyPolicy[] = ['notify', 'draft', 'auto', 'never'];
 const FILTERS: Filter[] = ['all', ...MODES];
 const DEFAULT = 'default';
 
@@ -102,11 +107,7 @@ export function compareThreads(a: ChannelThreadView, b: ChannelThreadView): numb
 }
 
 function lastEventText(thread: ChannelThreadView): string {
-  if (!thread.lastEventAtMs) return '';
-  const time = new Intl.DateTimeFormat(document.documentElement.lang || undefined,
-                                       { dateStyle: 'medium', timeStyle: 'short' })
-    .format(new Date(thread.lastEventAtMs));
-  return t('settings.dx.lastEvent', { time });
+  return thread.lastEventAtMs ? t('settings.dx.lastEvent', { time: timeText(thread.lastEventAtMs) }) : '';
 }
 
 function busy(control: HTMLButtonElement, label: string): () => void {
@@ -258,9 +259,57 @@ export function createDxThreadList(ports: DxThreadListPorts): DxThreadList {
   function syncRow(row: Row): void {
     for (const [mode, input] of row.modes) input.checked = row.thread.mode === mode;
     if (row.reply) row.reply.value = row.thread.replyPolicy;
-    // An ignored thread delivers nothing, so there is no reply to choose a policy for.
-    if (row.replyField) row.replyField.hidden = row.thread.mode === 'ignore';
+    // An ignored thread delivers nothing, so there is no reply to choose a policy or write a note for.
+    const ignored = row.thread.mode === 'ignore';
+    if (row.replyField) row.replyField.hidden = ignored;
+    if (row.noteToggle) row.noteToggle.hidden = ignored;
+    if (row.editor) row.editor.hidden = ignored;
+    if (row.note) {
+      const { note } = row.thread;
+      row.note.textContent = note ? t('settings.dx.note.value', { note }) : '';
+      row.note.title = note;
+      row.note.hidden = !note || ignored || row.editor !== null;
+    }
     row.meta.replaceChildren(...meta(row.thread));
+  }
+
+  function closeEditor(row: Row): void {
+    row.editor?.remove();
+    row.editor = null;
+    row.noteToggle?.setAttribute('aria-expanded', 'false');
+    syncRow(row);
+  }
+
+  /** The note editor under the row; saving queues behind the thread's other writes. */
+  function openEditor(row: Row): void {
+    const field = noteField({
+      label: t('settings.dx.note.label'), hint: t('settings.dx.note.hint'),
+      placeholder: t('settings.dx.note.placeholder'), value: row.thread.note,
+    });
+    const actions = element('div', 'channel-actions');
+    const save = createButton({
+      label: t('settings.dx.noteSave'), variant: 'primary', size: 'sm',
+      onClick: () => {
+        const note = field.input.value.trim();
+        const restore = busy(save, ports.pendingLabel);
+        void write(row, { note: note || null }).then((error) => {
+          if (!ports.isCurrent() || row.editor !== editor) return;
+          restore();
+          if (error) feedback(actions, ports.failure(error));
+          else closeEditor(row);
+        });
+      },
+    });
+    actions.append(save, createButton({
+      label: t('common.cancel'), variant: 'ghost', size: 'sm', onClick: () => closeEditor(row),
+    }));
+    const editor = element('div', 'dx-thread-note-editor');
+    editor.append(field.el, actions);
+    row.editor = editor;
+    row.el.appendChild(editor);
+    row.noteToggle?.setAttribute('aria-expanded', 'true');
+    syncRow(row);
+    field.input.focus();
   }
 
   function meta(thread: ChannelThreadView): Node[] {
@@ -338,7 +387,7 @@ export function createDxThreadList(ports: DxThreadListPorts): DxThreadList {
     const metaLine = element('div', 'dx-thread-meta');
     const controls = element('div', 'dx-thread-controls');
     const row: Row = { thread, el, pick: null, modes: new Map(), reply: null, replyField: null, meta: metaLine,
-                       pending: 0, chain: Promise.resolve() };
+                       note: null, noteToggle: null, editor: null, pending: 0, chain: Promise.resolve() };
     if (thread.isCommandChat) {
       el.classList.add('dx-thread-row--command');
       head.append(element('div', 'dx-thread-name', threadTitle(thread)), metaLine);
@@ -385,8 +434,19 @@ export function createDxThreadList(ports: DxThreadListPorts): DxThreadList {
     row.reply.addEventListener('change', () => {
       writeFromRow(row, replyUpdate(row.reply!.value as ReplyPolicy));
     });
-    controls.append(mode, reply.el);
-    el.append(head, controls);
+    const noteToggle = createButton({
+      label: t('settings.dx.note.edit'), variant: 'ghost', size: 'sm',
+      onClick: () => {
+        if (row.editor) closeEditor(row);
+        else openEditor(row);
+      },
+    });
+    noteToggle.setAttribute('aria-expanded', 'false');
+    noteToggle.setAttribute('aria-label', `${t('settings.dx.note.edit')} · ${threadTitle(thread)}`);
+    row.noteToggle = noteToggle;
+    row.note = element('p', 'dx-thread-note');
+    controls.append(mode, reply.el, noteToggle);
+    el.append(head, controls, row.note);
     syncRow(row);
     return row;
   }

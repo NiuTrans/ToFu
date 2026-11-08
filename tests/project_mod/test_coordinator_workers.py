@@ -30,8 +30,16 @@ def runtime(base_runtime, monkeypatch):
     # request is the authority; the adapter must not forge a human API principal.
     r.task['_principalContext']['scopes'] = []
     r.turns['coordinator-turn'] = {'conversationId': 'coordinator', 'turnId': 'coordinator-turn',
-        'actor': 'assistant', 'parentTurnId': 'human-turn'}
+        'actor': 'assistant', 'parentTurnId': 'human-turn',
+        'currentAttemptId': 'coordinator-attempt', 'projectionRevision': 3}
     r.turns['human-turn'] = r.c.turn
+    # The wait's cross-process steer observation reads its own live Turn.
+    def turn_get(conv, turn_id, **kw):
+        row = deepcopy(r.turns.get(turn_id))
+        if isinstance(row, dict) and kw.get('include_projection') is False:
+            row.pop('projection', None)
+        return row
+    monkeypatch.setattr('lib.turn_lifecycle.get_turn', turn_get)
     r.attempts['coordinator-attempt'] = {'conversationId': 'coordinator', 'turnId': 'coordinator-turn',
         'attemptId': 'coordinator-attempt', 'taskId': r.task['id'], 'status': 'running', 'createdAt': 1_000_000,
         'config': deepcopy(r.task['config'])}
@@ -960,6 +968,93 @@ def test_parallel_live_tools_share_one_account_but_uncertain_effect_blocks_more(
     assert saved[0]['phase'] == 'executor_returned' and saved[1]['phase'] == 'intent'
 
 
+def _restart_continuation(r, task, row, *, resume_source=True, attempt_id='resumed-attempt'):
+    """The Worker's attempt is restart-paused; Continue accepts and binds its successor."""
+    from lib.project_dispatch import admission
+    old = row['execution']
+    r.attempts[old['attemptId']]['status'] = 'interrupted'
+    r.turns[old['turnId']].update(status='interrupted', settlement={
+        'cause': 'server_restart', 'resumeOptions': [{'operation': 'continue', 'anchor': {}}]})
+    trusted = admission.TrustedDispatch(r.c.repo.admission(row['id']))
+    r.attempts[attempt_id] = {'conversationId': task['convId'], 'turnId': old['turnId'],
+        'attemptId': attempt_id, 'taskId': task['id'], 'status': 'running'}
+    trusted.continue_execution(old['turnId'], attempt_id)
+    config = trusted.capture({}, 7, trusted.principal, task['convId'])
+    config['_turnOwnerUserId'] = 7
+    if resume_source:
+        config.update(_turnOperation='continue', _resumeSource={
+            'attemptId': old['attemptId'], 'taskId': task['id'],
+            'status': 'interrupted', 'cause': 'server_restart'})
+    return {'id': task['id'], 'convId': task['convId'], 'config': config, 'status': 'running',
+            '_userId': 7, '_principalContext': task['_principalContext'], '_attended': False,
+            '_turnId': old['turnId'], '_attemptId': attempt_id,
+            'abort_event': threading.Event(), 'usage': {}}
+
+
+def test_restart_continue_keeps_counting_the_worker_tool_reservations(runtime):
+    from lib.project_dispatch import admission
+    from tests.project_mod.test_coordinator_request_budget import bind
+    r = runtime
+    bind(r)
+    task, row = _worker_task(r)
+    assert row['request']['delegation']['policy']['requestBudgetId']
+    for _ in range(2):
+        assert task['_executionBudget'].reserve_tool(task) is None
+    spent = r.c.repo.read(row['id'])['toolReservations']
+    # The ledger's root is the assignment's work id, shared by every physical attempt.
+    assert spent['count'] == 2 and spent['rootTaskId'] == row['execution']['taskId']
+    resumed = _restart_continuation(r, task, row)
+    admission.bind_account(resumed)
+    assert r.c.repo.read(row['id'])['toolReservations'] == spent
+    assert resumed['_executionBudget'].reserve_tool(resumed) is None
+    assert r.c.repo.read(row['id'])['toolReservations'] == {**spent, 'count': 3}
+    assert not resumed.get('aborted')
+
+
+def test_a_new_physical_account_still_cannot_replenish_worker_tool_reservations(runtime):
+    from lib.llm.llm_errors import AbortedError
+    from lib.project_dispatch import admission
+    from tests.project_mod.test_coordinator_request_budget import bind
+    r = runtime
+    bind(r)
+    task, row = _worker_task(r)
+    assert task['_executionBudget'].reserve_tool(task) is None
+    spent = r.c.repo.read(row['id'])['toolReservations']
+    fresh = _restart_continuation(r, task, row, resume_source=False)
+    with pytest.raises(AbortedError, match='cannot be replenished'):
+        admission.bind_account(fresh)
+    assert r.c.repo.read(row['id'])['toolReservations'] == spent
+
+
+def test_each_restart_generation_continues_the_one_worker_tool_account_once(runtime):
+    """The stored counter is the only offset: the restored budget ordinals continue it.
+
+    Counting a stored reservation both as an adopted offset and as a restored
+    ordinal would skip ordinals, and restarting the occurrence ordinal would
+    collide with the previous generation's tool rows.
+    """
+    from lib.project_dispatch import admission
+    from tests.project_mod.test_coordinator_request_budget import _run_tool, bind
+    r = runtime
+    bind(r)
+    task, row = _worker_task(r)
+    worker = task
+    for generation in range(3):
+        if generation:
+            worker = _restart_continuation(r, task, r.c.repo.read(row['id']),
+                                           attempt_id=f'restart-generation-{generation}')
+            admission.bind_account(worker)
+        _run_tool(worker, f'call-{generation}')
+        assert not worker.get('aborted')
+    stored = r.c.repo.read(row['id'])
+    counter = stored['toolReservations']
+    assert counter == {'rootTaskId': stored['execution']['taskId'],
+                       'accountNonce': counter['accountNonce'], 'count': 3}
+    assert [(item['tool_ordinal'], item['tool_call_id'], item['account_nonce'], item['phase'])
+            for item in stored['toolAttempts']] == [
+        (number + 1, f'call-{number}', counter['accountNonce'], 'executor_returned') for number in range(3)]
+
+
 def test_worker_cannot_enlarge_its_frozen_capability_config(runtime):
     from lib.project_dispatch import admission
     from lib.llm.llm_errors import AbortedError
@@ -1066,6 +1161,18 @@ def test_unisolatable_root_refuses_before_any_worker_conversation_or_grant(runti
     assert not (repository / 'nested' / '.git').exists()
 
 
+def test_a_coordinator_without_a_model_is_refused_without_retry_advice(runtime):
+    """Tool assembly records the Coordinator's own model for its continuations. A request
+    running without one issues no Worker; the refusal names that cause and, being
+    deterministic and effect-free, does not advise retrying the same key."""
+    r = runtime
+    capture_worker_policy(r.task, r.task['config'], [{'function': {'name': 'run_command'}}], '')
+    refused = r.call('delegate_project_work', **r.args)
+    assert 'has no model' in refused['error'], refused
+    assert refused['execution_started'] is False and 'instead of retrying' in refused['recovery']
+    assert not r.created and not r.calls and not r.c.repo.list()
+
+
 def test_accepted_delegation_replays_without_rechecking_the_root(runtime, monkeypatch):
     from lib.conversations import coordinator_workers as workers
     r = runtime
@@ -1129,7 +1236,7 @@ def _delivery_receipts(r, monkeypatch):
     def workspace_get(project, task_id, *, user_id):
         for identity, receipt in list(receipts.items()):
             row = r.c.repo.read(identity)
-            if r.attempts[row['execution']['attemptId']]['taskId'] == task_id:
+            if row['execution']['taskId'] == task_id:
                 return {'task_id': task_id, 'user_id': user_id, 'project_root': project,
                         'origin': {admission.KEY: r.c.repo._admission(row), 'delivery': dict(receipt)}}
         return None
@@ -1304,10 +1411,76 @@ def test_notification_before_durable_settlement_rechecks_promptly_and_cheaply(ru
 def _pending_input_instruction(*pending):
     # One instruction for every input that ends a wait: it names the Workers to wait on next.
     return ('New input is waiting for you and arrives right after this result: a human message or steer, '
-            'a project message, or a background completion. Workers keep running; still pending: '
+            'a project message, or a background completion. The waiting list names its kind, source and '
+            'preview. Workers keep running; still pending: '
             + ', '.join(pending) + '. Answer or act on that input first, then call await_project_workers '
             'again with only the pending assignment IDs and the same wait_for. Ending a wait for input is not '
             'failure.')
+
+
+@pytest.mark.parametrize('source', ['router', 'channel', 'typed'])
+def test_steer_committed_by_another_process_during_the_wait_ends_it_and_names_its_source(
+        runtime, monkeypatch, coordinator_inbox, source):
+    """2026-11-06: an owner forward accepted by the API process while the
+    Coordinator executes in the execution process left the wait blind. The
+    durable steer record on the live Turn is the cross-process delivery."""
+    from lib.agent_core import admission
+    r = runtime; subscribed = _subscriptions(monkeypatch)
+    monkeypatch.setattr(coordinator_workers, '_DURABLE_RECHECK_SECONDS', 0.2)
+    worker = r.call('delegate_project_work', **r.args)
+    thread, result = _await_in_thread(r, assignment_ids=[worker['assignment_id']], timeout_seconds=30)
+    assert subscribed(worker['task_id'])
+    origin = {'initiator': 'human'}
+    if source == 'router':
+        origin['forwardedFrom'] = {'conversationId': 'router-conv', 'turnId': 'owner-turn'}
+    elif source == 'channel':
+        origin['channel'] = {'channel': 'dx', 'thread': 'dx:gid:1'}
+    author = {'actor': 'human', 'text': 'Answer me first', 'origin': origin}
+    # turn.steer.commit in the other process: one pending record, next revision.
+    r.turns['coordinator-turn'].update(projectionRevision=4, projection={'_userSteerInjects': [
+        {'blockId': 'injection:user-steer:router-forward:x', 'commandId': 'router-forward:x',
+         'previews': [{'text': 'Answer me first'}], 'deliveryState': 'pending', 'author': author}]})
+    sent = time.monotonic()
+    thread.join(5)
+    assert not thread.is_alive() and result, 'a cross-process steer never ended the wait'
+    value, elapsed = result[0]
+    assert value['wait'] == 'pending_input' and elapsed < 5, value
+    assert value['workers'][0]['status'] == 'running'
+    assert value['instruction'] == _pending_input_instruction(worker['assignment_id'])
+    assert value['waiting'] == [{'kind': 'human', 'preview': 'Answer me first', 'source': {
+        'router': 'Global Router forward', 'channel': 'dx channel',
+        'typed': 'typed in this conversation'}[source]}]
+    assert worker['task_id'] not in admission._term_callbacks
+    assert time.monotonic() - sent < 5
+    # The next round boundary delivers it once, with its committed author.
+    from lib.tasks_pkg.orchestrator._swarm_inbox import drain_and_inject_inbox
+    messages = [{'role': 'user', 'content': 'go'}]
+    drain_and_inject_inbox(task=r.task, messages=messages, round_num=5, tid='coordinator')
+    assert messages[-1]['content'].count('Answer me first') == 1
+    assert [item['steerAuthor'] for item in r.task['_steer_inject_pending']] == [author]
+    messages = [{'role': 'user', 'content': 'go'}]
+    drain_and_inject_inbox(task=r.task, messages=messages, round_num=6, tid='coordinator')
+    assert len(messages) == 1, 'a committed steer was delivered twice'
+    assert not coordinator_inbox.pending_items('coordinator', modes=['user-steer'])
+
+
+def test_project_message_during_the_wait_names_its_id(runtime, monkeypatch, coordinator_inbox):
+    from lib.agent_core import admission
+    r = runtime
+    monkeypatch.setattr(coordinator_workers, '_DURABLE_RECHECK_SECONDS', 0.2)
+    worker = r.call('delegate_project_work', **r.args)
+    arguments = {'assignment_ids': [worker['assignment_id']], 'timeout_seconds': 30}
+    subscribed = _subscriptions(monkeypatch)
+    thread, result = _await_in_thread(r, **arguments)
+    assert subscribed(worker['task_id'])
+    question = _worker_message(worker, 'named-question')
+    thread.join(5)
+    assert not thread.is_alive() and result
+    value, _ = result[0]
+    assert value['wait'] == 'pending_input'
+    assert value['waiting'] == [{'kind': 'project_message', 'source': worker['conversation_id'],
+                                 'id': question['id'], 'preview': 'Which API version should this target?'}]
+    assert worker['task_id'] not in admission._term_callbacks
 
 
 @pytest.fixture

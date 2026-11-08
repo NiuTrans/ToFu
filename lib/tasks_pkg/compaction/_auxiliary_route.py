@@ -9,7 +9,8 @@ runs under that admission (``SummaryTransport``).
 """
 from lib.tasks_pkg.compaction._summary_routing import (
     _number, _tokens, _project_cost, _project_route_cost)
-from lib.model_routing.dispatch_adapter import candidate_route_identity as route_identity
+from lib.model_routing.dispatch_adapter import (
+    candidate_route_identity as route_identity, issued_route_identity)
 
 _RESOURCE_KINDS = {'oauth', 'subscription', 'local_identity'}
 _RANKING = 'paid_api_then_resource_cost_aa'
@@ -101,13 +102,17 @@ def select_auxiliary_route(result, profiles, *, owner, tenant, input_tokens,
     health = existing_owner_health_registry(owner, tenant)
 
     if parent_route_identities:
+        if any(identity.get('revision') != authority.revision for identity in parent_route_identities):
+            result['reason'] = 'parent_route_changed'
+            return result
         resource_parents = []
         for identity in parent_route_identities:
             selection = NativeModelSelection(model=None, provider_offering=ProviderOfferingRef(
                 identity['providerId'], identity['offeringId']))
             witnessed = [candidate for candidate in compiler.compile(selection, policy=RoutePolicy(
                 required_capabilities=frozenset({'text'})))
-                if route_identity(candidate, authority.revision) == identity]
+                if (issued_route_identity(candidate, boundary, authority.revision)
+                    if 'owner_user_id' in identity else route_identity(candidate, authority.revision)) == identity]
             if len(witnessed) != 1:
                 result['reason'] = 'parent_route_changed'
                 return result

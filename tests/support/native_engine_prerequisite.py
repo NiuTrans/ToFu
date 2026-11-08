@@ -17,11 +17,11 @@ import pytest
 
 @contextlib.contextmanager
 def inherited_engine_refusal_skips():
-    from serverctl_pkg.native_engine import EnginePreparationError
+    from serverctl_pkg.native_engine import EngineAdmissionRefusedError
 
     try:
         yield
-    except EnginePreparationError as exc:
+    except EngineAdmissionRefusedError as exc:
         if os.environ.get('TOFU_TEST_TOFUDB_BIN'):
             raise
         pytest.skip(

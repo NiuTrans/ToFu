@@ -19,7 +19,11 @@
 
 import { featureRegistry } from '../../feature-registry';
 import { escapeHtml } from '../../html-safety';
-import type { ModelRoutingInferenceProfile } from '../../api/api-v1-model-routing.generated';
+import type {
+  ModelRoutingInferenceProfile,
+  ModelRoutingMediaPricing,
+  ModelRoutingMediaProfile,
+} from '../../api/api-v1-model-routing.generated';
 
 interface ModelCatalogPricing {
   input?: unknown;
@@ -43,6 +47,10 @@ interface ModelCatalogModel {
   registration_issues?: string[];
   list_pricing?: ModelCatalogPricing;
   official_pricing?: ModelCatalogPricing;
+  media_pricing?: ModelRoutingMediaPricing;
+  official_media_pricing?: ModelRoutingMediaPricing;
+  media_profile?: ModelRoutingMediaProfile;
+  official_media_profile?: ModelRoutingMediaProfile;
   lifecycle?: unknown;
 }
 
@@ -74,6 +82,10 @@ type ModelCatalogGlobals = Window & {
 
 function globals(): ModelCatalogGlobals {
   return featureRegistry as unknown as ModelCatalogGlobals;
+}
+
+function detach<T>(value: T | undefined): T | undefined {
+  return value === undefined ? undefined : structuredClone(value);
 }
 
 /** Search text staged by the page's search box (data-tofu-action-input in
@@ -149,6 +161,12 @@ function renderModelCatalogTab(): void {
         registration_state: model.registration_state, registration_issues: model.registration_issues,
         list_pricing: copyPricing(pricing),
         official_pricing: copyPricing(official),
+        // Media facts are Model facts (registered, else the maintained
+        // read-only projection); detached so the feature cannot edit drafts.
+        media_pricing: detach(model.media_pricing),
+        official_media_pricing: detach(model.official_media_pricing),
+        media_profile: detach(model.media_profile),
+        official_media_profile: detach(model.official_media_profile),
         lifecycle: model.lifecycle,
       };
     }),

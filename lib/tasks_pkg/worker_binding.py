@@ -1,8 +1,10 @@
 """Bind a claimed conversation job to the existing invocation and Turn owners.
 
 Entry points: worker_task_identity before registration, bind_conversation_worker
-after registration, publication_arguments at domain writes. Only an explicitly
-injected WorkerExecutionContext grants a claim; configuration is never a port.
+after registration, publication_arguments at domain writes, and
+share/inherit_conversation_worker for parent carriers and children. Only an
+explicitly injected WorkerExecutionContext grants a claim; configuration is
+never a port.
 The invocation control scope propagates cancellation to models/tools/children
 and is joined by the physical worker. Storage still revalidates each write.
 """
@@ -91,12 +93,16 @@ def admit_model_dispatch(task, context):
             if error.code == 'database_conflict':
                 # Read the existing authoritative verdict only to distinguish
                 # human Stop from lost execution ownership; this grants nothing.
-                from lib.durable_worker import StorageWorkerJobStore
-                import time
-                context.observe_claim_state(StorageWorkerJobStore().claim_state(
-                    context.claim, now_ms=time.time_ns() // 1_000_000))
-                context.checkpoint()
+                _observe_current_claim(context)
             raise
+        if result is None and task.get('id') != context.claim.task_id:
+            # A detached Swarm descendant outlives its settled root Turn while
+            # the spawning attempt's job still holds this claim
+            # (swarm/turn_handoff.hold_detached_swarm). The settled Attempt can
+            # no longer acknowledge entry, so admit only on the current,
+            # unstopped claim itself.
+            _observe_current_claim(context)
+            return
         if (not isinstance(result, dict) or result.get('status') != 'running'
                 or result.get('taskId') != context.claim.task_id
                 or result.get('attemptId') != context.claim.payload['attemptId']):
@@ -106,6 +112,33 @@ def admit_model_dispatch(task, context):
         raise AbortedError(str(error)) from error
     except (WorkerLeaseLost, StorageError) as error:
         raise ModelAdmissionRefused('Model execution authority ended') from error
+
+
+def _observe_current_claim(context):
+    from lib.durable_worker import StorageWorkerJobStore
+    import time
+    context.observe_claim_state(StorageWorkerJobStore().claim_state(
+        context.claim, now_ms=time.time_ns() // 1_000_000))
+    context.checkpoint()
+
+
+def share_conversation_worker(parent, carrier):
+    """Lend the parent's root claim to a parent-shaped carrier of the same task.
+
+    Swarm sessions and wave assignments build their own parent dicts. A birth
+    under a durable attempt is refused without that attempt's current claim,
+    and the carrier keeps the parent's exact task, owner and conversation, so
+    it gains nothing the parent did not already hold.
+    """
+    context = parent.get('_conversationWorkerContext')
+    if context is None:
+        return
+    if not isinstance(context, WorkerExecutionContext):
+        raise TypeError('invalid conversation worker context')
+    if (carrier.get('id') != parent.get('id') or carrier.get('convId') != parent.get('convId')
+            or carrier.get('_userId') != parent.get('_userId')):
+        raise ValueError('Worker claim carrier differs from its parent identity')
+    carrier['_conversationWorkerContext'] = context
 
 
 def inherit_conversation_worker(parent, child):

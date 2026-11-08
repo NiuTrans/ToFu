@@ -242,7 +242,7 @@ def mint_routed_slot_group(
         with stage("mint"):
             _prepare_and_publish_group(
                 repository, boundary, selection, candidates, pin_id=pin_id,
-                owner_tag=owner_tag, handles=handles,
+                revision=authority.revision, owner_tag=owner_tag, handles=handles,
                 runnable_candidates=runnable_candidates,
                 initialization_errors=initialization_errors,
                 resolved_secrets=resolved_secrets,
@@ -268,6 +268,7 @@ def _prepare_and_publish_group(
     candidates: list[RouteCandidate],
     *,
     pin_id: str,
+    revision: int,
     owner_tag: str,
     handles: list[EphemeralSlotHandle],
     runnable_candidates: list[RouteCandidate],
@@ -364,6 +365,7 @@ def _prepare_and_publish_group(
         slot.route_deployment_id = candidate.deployment["deployment_id"]
         slot.route_connection_id = candidate.connection["connection_id"]
         slot.route_credential_id = credential["credential_id"]
+        slot.route_witness = MappingProxyType(issued_route_identity(candidate, boundary, revision))
         from .serving_locality import candidate_is_local_inference
         slot.local_inference = candidate_is_local_inference(candidate)
         slot.max_output_tokens = int(

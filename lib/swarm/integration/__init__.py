@@ -93,6 +93,7 @@ from lib.swarm.integration._state import (  # noqa: E402,F401
     stop_swarm_agent,
     stop_swarm_cleanup_timer,
     list_active_swarms,
+    sessions_holding_parent,
     swarm_cleanup_snapshot,
     task_has_running_agents,
 )
@@ -117,7 +118,9 @@ from lib.swarm.integration._tools import (  # noqa: E402,F401
 from lib.swarm.integration._rehydrate import (  # noqa: E402,F401
     _rebuild_tool_list,
     _rehydrate_one,
+    detached_swarm_unfinished,
     rehydrate_swarms_on_startup,
+    resume_detached_swarm_for_claim,
 )
 
 __all__ = [
@@ -139,6 +142,7 @@ __all__ = [
     '_background_cleanup', '_start_cleanup_timer',
     '_get_session', '_set_session', '_remove_session', 'add_session_alias',
     'get_active_session', 'get_swarm_status', 'list_active_swarms',
+    'sessions_holding_parent',
     'abort_swarm', 'stop_swarm_agent', 'stop_swarm_cleanup_timer',
     'swarm_cleanup_snapshot',
     # Auto-continue
@@ -148,4 +152,5 @@ __all__ = [
     '_handle_get_agent_result', '_handle_artifact_tool', '_await_from_disk',
     # Rehydration
     '_rebuild_tool_list', '_rehydrate_one', 'rehydrate_swarms_on_startup',
+    'resume_detached_swarm_for_claim', 'detached_swarm_unfinished',
 ]

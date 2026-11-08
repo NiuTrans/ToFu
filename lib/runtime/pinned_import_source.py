@@ -34,6 +34,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 import importlib.machinery
 import importlib.util
+import hashlib
 import itertools
 import linecache
 import os
@@ -47,6 +48,20 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 _PACKAGE_INIT = '__init__.py'
+
+
+def source_identity(sources: Iterable[tuple[str, bytes]]) -> dict:
+    """Hash path-ordered executable sources for preparation and retained pins."""
+    identity = hashlib.sha256()
+    count = 0
+    for path, content in sources:
+        name = path.encode()
+        identity.update(len(name).to_bytes(8, 'little'))
+        identity.update(name)
+        identity.update(len(content).to_bytes(8, 'little'))
+        identity.update(content)
+        count += 1
+    return {'sourceSha256': identity.hexdigest(), 'sourceFiles': count}
 
 
 class _Pin:
@@ -167,6 +182,7 @@ class PinnedImportSource:
         self._packages: set[str] = set()
         self._sweeps: list[threading.Thread] = []
         self._lock = threading.Lock()
+        self._frozen = False
 
     def install(self) -> None:
         """Insert the finder ahead of PathFinder and pin the source in use."""
@@ -193,7 +209,34 @@ class PinnedImportSource:
         for sweep in sweeps:
             sweep.join()
 
+    def freeze(self) -> dict:
+        """Pin the complete executable generation before resident admission.
+
+        Ordinary API users retain lazy package adoption and explicit reload.
+        The independent execution owner cannot acquire code from a later API
+        checkout, including packages it has never imported. The returned digest
+        describes retained bytes, so composition can compare its prepared plan.
+        """
+        self.join()
+        sources = sorted({os.path.abspath(path) for root in self._roots
+                          for path in _importable_sources(root, recurse=True, ignore_errors=False)})
+        for path in sources:
+            if path not in self._pins:
+                pin = _read_pin(path)
+                if pin is None:
+                    raise RuntimeError(f'Could not pin execution source: {path}')
+                self._pins.setdefault(path, pin)
+            for root in self._roots:
+                relative = os.path.relpath(path, root)
+                parts = relative.split(os.sep)
+                if len(parts) > 1 and parts[0] != '..':
+                    self._packages.add(parts[0])
+        self._frozen = True
+        return source_identity((path, pin.source()) for path, pin in sorted(self._pins.items()))
+
     def find_spec(self, fullname, path=None, target=None):
+        if self._frozen:
+            return self._frozen_spec(fullname, path)
         if target is not None:
             # importlib.reload asks for the checkout's current source.
             return None
@@ -211,6 +254,29 @@ class PinnedImportSource:
                 pin = self._pins.get(os.path.abspath(origin))
                 if pin is not None:
                     return self._spec(fullname, origin, pin, locations)
+        return None
+
+    def _frozen_spec(self, fullname, path):
+        top, _, tail = fullname.partition('.')
+        if tail and top not in self._packages:
+            return None
+        entries = path if path is not None else sys.path
+        name = fullname.rpartition('.')[2]
+        for entry in entries:
+            directory = os.path.abspath(entry or os.getcwd())
+            if path is None and directory not in self._roots:
+                continue
+            location = os.path.join(directory, name)
+            for origin, locations in ((os.path.join(location, _PACKAGE_INIT), [location]),
+                                      (location + '.py', None)):
+                pin = self._pins.get(origin)
+                if pin is not None:
+                    return self._spec(fullname, origin, pin, locations)
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+        if spec is not None and spec.origin:
+            origin = os.path.abspath(spec.origin)
+            if any(origin.startswith(root + os.sep) for root in self._roots):
+                raise ModuleNotFoundError(f'Module {fullname} is outside the prepared execution generation')
         return None
 
     def _top_level(self, name, spec):

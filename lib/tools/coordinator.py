@@ -1,5 +1,7 @@
 """Model-visible dispatch-only Coordinator tools; handlers reuse existing owners."""
 
+from lib.router.contract import schema as _router_schema
+
 
 def _tool(name, description, properties, required):
     return {'type': 'function', 'function': {
@@ -29,6 +31,10 @@ COORDINATOR_TOOLS = [
           'does not need expected_revision. Never send a synthetic human message or approve '
           'a human question. Project Coordinators control their project; the Global Router can control any owned '
           'conversation. An automatic continuation may control only its original request dispatched Workers. '
+          'Global Router only: when your current request has no owner message of its own (a standing instruction '
+          'or a nonhuman notice), pass owner_delegation with the reason and the owner trigger to act under the '
+          'delegation the owner granted you ("Act for me"); it allows continue, checkpoint_resume and stop, never '
+          'regenerate, and is recorded in the owner\'s audit log. '
           'After a lost response, retry identical arguments and idempotency_key. Acceptance is not completion.',
           {'conversation_id': {'type': 'string', 'minLength': 1},
            'turn_id': {'type': 'string', 'minLength': 1},
@@ -36,6 +42,7 @@ COORDINATOR_TOOLS = [
            'action': {'type': 'string', 'enum': ['continue', 'checkpoint_resume', 'regenerate', 'stop']},
            'expected_revision': {'type': 'integer', 'minimum': 1},
            'resume_anchor': {'type': 'object', 'description': 'Exact anchor from settlement.resumeOptions.'},
+           'owner_delegation': _router_schema('ownerDelegationAuthority'),
            'idempotency_key': {'type': 'string', 'minLength': 1, 'maxLength': 200}},
           ['conversation_id', 'turn_id', 'attempt_id', 'action', 'idempotency_key']),
     _tool('create_conversation',
@@ -160,7 +167,8 @@ for _name, _definition, _description in (
      'pending when the call started settles (wait=progress names the IDs still pending; review the settled '
      'evidence, then call again with those IDs), at once with wait=settled when every selected worker has '
      'already settled, with wait=pending_input when a human message, steer, new project message or background '
-     'completion is waiting for you (answer or act on it first, then call again with the pending IDs it names), or '
+     'completion is waiting for you (its waiting list names each input\'s kind, source and preview; answer or act '
+     'on it first, then call again with the pending IDs it names), or '
      'with wait=timeout. timeout_seconds (default and maximum 1800) is otherwise honored in full, '
      'so one long wait replaces several short ones. With wait_for=delivery a worker settles at canonical '
      'delivery, at a blocked, failed or preserved delivery (act on its delivery.reason instead of waiting '
@@ -204,6 +212,18 @@ for _name, _definition, _description in (
     ('router_instruction_cancel', 'instructionCancel',
      'Cancel a standing instruction when the owner asks. Later events can no longer apply it; work already '
      'forwarded continues under its Project Router.'),
+    ('restart_server', 'restartServer',
+     'Restart the Tofu server for the owner, under the delegation the owner granted you in Tofu ("Act for me"). '
+     'Use it only when the owner asks for a restart: name their message (source_turn_id, or source_steer_id for '
+     'one sent while you reply) or an active standing instruction that covers it, and give the reason. It takes '
+     'the Settings restart path, detached from your turn: the frontend is built first and the old server stops '
+     'only if that succeeds. It refuses while a protected step (a git_land landing or an export) runs, and while '
+     'other conversations run unless the owner asked to restart anyway (interrupt_running_conversations=true; '
+     'they resume with Continue). Without the grant it refuses and nothing is pending: tell the owner to turn on '
+     '"Act for me" in your header or to restart in Settings. The grant lets you act for the owner, never speak '
+     'for them: it answers no question and approves no prompt meant for the owner. Every call is in the owner\'s '
+     'audit log; a retry with the same idempotency_key never restarts twice, and your own turn may be '
+     'interrupted by the restart and resume afterwards.'),
 ):
     _schema = _router_arguments(_definition)
     ROUTER_TOOL_SCHEMAS.append(_tool(_name, _description, _schema['properties'], _schema['required']))

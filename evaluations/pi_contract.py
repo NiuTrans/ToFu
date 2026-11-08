@@ -133,7 +133,8 @@ def guest_models_config(*, base_url: str, model: str, context_tokens: int,
     }}}
 
 
-def guest_shell_command(*, home: str, model: str, thinking: str, log_dir: str = GUEST_LOG_DIR) -> str:
+def guest_shell_command(*, home: str, model: str, thinking: str, log_dir: str = GUEST_LOG_DIR,
+                        extensions: tuple[str, ...] = ()) -> str:
     """Harbor's single Pi invocation; Pi's exit code is the program's exit code.
 
     Harbor runs ``pi --print --mode json --session-dir /logs/agent/pi/sessions
@@ -142,7 +143,8 @@ def guest_shell_command(*, home: str, model: str, thinking: str, log_dir: str = 
     instruction follows ``--`` (Pi rejects a prompt starting with ``-`` as an
     unknown option, e.g. TB2.1 ``pytorch-model-recovery``), so every task is
     delivered. A run that ends at the output-token limit is scored as it ended;
-    the evaluation never resumes or nudges the agent.
+    the evaluation never resumes or nudges the agent. Each of ``extensions`` is
+    loaded with ``--extension``.
     """
     if thinking not in PI_CLI_THINKING_LEVELS:
         raise ValueError('Pi thinking level must be one of ' + ', '.join(PI_CLI_THINKING_LEVELS))
@@ -150,6 +152,8 @@ def guest_shell_command(*, home: str, model: str, thinking: str, log_dir: str = 
     agent_dir, session_dir = f'{log_dir}/pi/agent', f'{log_dir}/pi/sessions'
     base = [node, f'{home}/{PI_CLI}', '--print', '--mode', 'json', '--session-dir', session_dir,
             '--provider', catalog_provider(model), '--model', model, '--thinking', thinking]
+    for extension in extensions:
+        base += ['--extension', extension]
     run = shlex.join(base + ['--']) + ' "$(< ' + shlex.quote(f'{log_dir}/instruction.md') + ')"'
     events = shlex.quote(f'{log_dir}/{GUEST_EVENTS_FILE}')
     sink = (' < /dev/null 2> ' + shlex.quote(f'{log_dir}/{GUEST_STDERR_FILE}')

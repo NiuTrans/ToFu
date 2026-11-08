@@ -125,10 +125,15 @@ def configure_application(
     # adapter that can inspect a legacy request body. Once v4 cutover is armed,
     # every v1/v3 request receives the same 426 without parsing old payloads or
     # being replaced by an earlier body-size response.
+    # A local kernel's Host fence precedes every other gate, so a foreign
+    # authority gets the same 403 during boot as after it.
+    from routes.api_v1.auth import local_kernel_host_fence
+
     configure_api_version_policy(app)
     register_request_lifecycle(
         app,
-        before_storage_write_fence=(legacy_api_upgrade_before_request,),
+        before_storage_write_fence=(
+            local_kernel_host_fence, legacy_api_upgrade_before_request),
         distributed_preview_read_only=distributed_preview_read_only,
     )
     policy = body_policy or build_http_body_policy()
@@ -160,14 +165,13 @@ def configure_application(
     app.after_request(attach_rate_headers)
     app.teardown_request(release_browser_poll_admission_on_teardown)
 
-    # Settings → 数据库 panel: feed the idle detector and start its tiny
-    # maintenance scheduler (idle benchmark + dual-path backup). Fully
-    # guarded: a panel failure must never break request serving.
+    # Settings → 数据库 panel: feed its activity clock. The maintenance thread
+    # itself belongs to the serving lifespan (registered background services).
+    # Fully guarded: a panel failure must never break request serving.
     try:
         from lib.database_panel import maintenance as _database_panel_maintenance
 
         app.before_request(_database_panel_maintenance.note_http_activity)
-        _database_panel_maintenance.start_maintenance()
     except Exception as exc:  # noqa: BLE001
         logger.warning('database panel maintenance unavailable: %s: %s',
                        type(exc).__name__, str(exc)[:200])

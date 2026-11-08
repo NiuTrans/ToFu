@@ -383,7 +383,7 @@ fn online_collector_reclaims_across_expedited_epochs_while_foreground_traffic_co
     // rotations than a test can afford, so they exercise scan load only.)
     let temporary = block_shard(directory.path()).join(format!(
         ".new-{}",
-        uuid::Uuid::from_bytes([0x6c; 16]).simple()
+        uuid::Uuid::from_bytes([0x6c; 16]).hyphenated()
     ));
     std::fs::write(&temporary, vec![0x2a_u8; ABANDONED_TEMPORARY_BYTES]).unwrap();
 

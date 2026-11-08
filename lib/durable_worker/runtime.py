@@ -20,7 +20,7 @@ def _storage(*, write=False):
 
 
 def create_service(*, client_factory=_storage, registry=None, max_workers=None,
-                   now_ms=None, environ=None):
+                   now_ms=None, environ=None, application=None):
     from runtime_guards import UNLIMITED, resolve_resource_budget
     from lib.automations.worker_registration import registrations
     from lib.conversation_sync.worker_execution import conversation_registration
@@ -32,7 +32,8 @@ def create_service(*, client_factory=_storage, registry=None, max_workers=None,
     if now_ms is None:
         now_ms = lambda: time.time_ns() // 1_000_000
     kinds = (*registrations(client_factory=client_factory, registry=registry,
-                            now_ms=now_ms, policy=policy), conversation_registration())
+                            now_ms=now_ms, policy=policy),
+             conversation_registration(application=application))
     control = PrincipalContext.system(subject_id='durable-worker:' + uuid.uuid4().hex,
                                       scopes={policy['controlScope']})
     return DurableWorkerService(principal=control, client_factory=client_factory,
@@ -45,7 +46,7 @@ def ensure_workers_started(app, *, environ=None):
     with _composition_lock:
         service = app.extensions.get(key)
         if service is None or service.snapshot()['state'] in {'stopped', 'failed'}:
-            service = create_service(environ=environ)
+            service = create_service(environ=environ, application=app)
             app.extensions[key] = service
         return service.start()
 

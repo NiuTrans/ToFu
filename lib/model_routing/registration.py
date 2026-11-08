@@ -12,7 +12,15 @@ import math
 import json
 from urllib.parse import urlsplit
 
+from lib.model_info.capability_taxonomy import media_price_units_for
+from lib.model_info.media_facts import media_pricing_unit_issues
+
 from .domain import ModelRef, ModelRoutingError, normalize_document, public_projection
+
+# Facts registration evidence may cite (registration_metadata.field_sources).
+REGISTRATION_FACT_FIELDS = frozenset({
+    'release_date', 'list_pricing', 'inference_profile', 'capabilities',
+    'context_window', 'media_pricing', 'media_profile'})
 
 
 def validate_registration_metadata(model: dict) -> None:
@@ -42,7 +50,7 @@ def validate_registration_metadata(model: dict) -> None:
         if len(set(urls)) != len(urls):
             raise ValueError()
         sources = metadata.get('field_sources', {})
-        if not isinstance(sources, dict) or set(sources) - {'release_date', 'list_pricing', 'inference_profile', 'capabilities', 'context_window'}:
+        if not isinstance(sources, dict) or set(sources) - REGISTRATION_FACT_FIELDS:
             raise ValueError()
         for values in sources.values():
             if not isinstance(values, list) or not 1 <= len(values) <= 8 or any(value not in urls for value in values):
@@ -78,8 +86,21 @@ def registration_missing_fields(model: dict) -> list[str]:
     price = model.get('list_pricing')
     if price is None:
         price = model.get('official_pricing')
-    if not _valid_price(price) and model['model_id'] not in MODEL_PRICING:
-        missing.append('list_pricing.input/output/currency/unit')
+    # Media kinds may bill in media units instead of tokens: a price per
+    # image, second, request, minute or million characters is evidence-grade
+    # pricing for them (registered media_pricing or the maintained catalog's
+    # official_media_pricing). Chat, embedding and reranking need tokens.
+    media_units = media_price_units_for(model.get('capabilities'))
+    media_price = model.get('media_pricing') or model.get('official_media_pricing')
+    media_priced = bool(media_units) and bool(media_price) and not media_pricing_unit_issues(
+        media_price, model.get('capabilities'))
+    if not _valid_price(price) and model['model_id'] not in MODEL_PRICING and not media_priced:
+        missing.append('list_pricing.input/output/currency/unit' if not media_units else
+                       'list_pricing.input/output/currency/unit or media_pricing ('
+                       + '/'.join(sorted(media_units)) + ')')
+    stray_units = media_pricing_unit_issues(model.get('media_pricing'), model.get('capabilities'))
+    if stray_units:
+        missing.append('media_pricing units do not apply to this model kind: ' + ', '.join(stray_units))
     if not model.get('capabilities'):
         missing.append('capabilities')
     reasoning = model.get('inference_profile', {}).get('reasoning', {})

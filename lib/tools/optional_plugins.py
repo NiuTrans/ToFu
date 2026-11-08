@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 from lib.log import get_logger
+from lib.tools.environment_capabilities import BROWSER, NODE
 from lib.tools.registry._plugins import resolve_enabled_plugins
 from lib.tools.registry._spec import ToolContext, ToolSpec, all_specs
 logger = get_logger(__name__)
@@ -226,6 +227,13 @@ def build_optional_specs() -> list[ToolSpec]:
                  }),
                  # These inspect mutable project files or host capabilities.
                  cacheable_tools=frozenset(),
+                 # HyperFrames is a Node CLI whose check and render boot a
+                 # headless Chromium. env_check stays callable to diagnose and
+                 # bootstrap the chain.
+                 environment_requirements_by_name={
+                     'motion_video_check': frozenset({NODE, BROWSER}),
+                     'motion_video_render': frozenset({NODE, BROWSER}),
+                 },
                  unchanged_receipt_tools=frozenset({
                      'motion_video_env_check', 'motion_video_storyboard_check',
                      'motion_video_probe',

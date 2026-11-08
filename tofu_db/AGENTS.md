@@ -25,6 +25,13 @@ forget does not release a durable lease. Whole Goal claim/handoff commands reuse
 this port; only explicit identical successful group delivery may retrieve its
 existing IDs before first member use. No automatic retry is added to the client.
 Package remains application-independent.
+`EmbeddedRuntime.commit_watch` uses the generated commit-watch ABI from
+`contracts/worker_control_v1.json` (`scripts/gen_worker_control.py`). Each native
+token is freed after execution and cancellation borrowers leave; runtime close
+cancels tokens before joining calls. It shares the authority condition with
+daemon watches and never polls, opens sockets or writes semantic state. Verify
+`test_embedded_runtime_lifecycle.py` and the actual embedded supervisor watch
+specifications in `tests/storage/test_storage_v2_embedded_client.py`.
 Verify optional acceleration with `tests/tofudb/test_tofudb_crc_accelerator.py`.
 Verify the protocol with `tests/storage/test_storage_public_boundary.py`,
 `tests/tofudb/test_tofudb_v2_client.py`, `tests/storage/test_storage_v2_client.py`, and the native

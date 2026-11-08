@@ -19,14 +19,14 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from quart import Blueprint
+from quart import Blueprint, current_app
 
 from lib.api_v4 import raw_success_response
 from lib.api_response import (
     api_bad_request, api_conflict, api_created, api_error, api_not_found, api_ok,
     api_payload,
 )
-from lib.log import audit_log, get_logger
+from lib.log import LOG_DIR, audit_log, get_logger
 from lib.logging_pkg.log_policy import stream_backup_count, stream_max_bytes
 from lib.logging_pkg.log_record_values import text_value, sanitize_value
 from lib.logging_pkg.log_retention import append_bytes_locked, copytruncate_if_oversize
@@ -383,6 +383,19 @@ def _caller_bridge_token_count(
 _BRIDGE_SCOPE = 'agents:bridge'
 
 
+def _local_kernel_pairing_refusal():
+    """Devices dial the server they pair with; a local kernel is loopback-only.
+
+    No machine other than the phone can reach it, so pairing codes are neither
+    minted nor exchanged there.
+    """
+    if current_app.extensions.get('tofu_local_kernel') is None:
+        return None
+    return api_conflict(
+        'This local kernel listens on loopback only, so no device can pair with it.',
+        source='api_v1.desktop.local_kernel')
+
+
 # ── One-file zero-config agent installer ─────────────────────────────
 # The pairing-code and ZIP UX are RETIRED. The panel now downloads one
 # directly runnable personalized .exe. Its fixed NSIS trailer carries
@@ -393,9 +406,6 @@ _BRIDGE_SCOPE = 'agents:bridge'
 # /proxy/<port> prefix, then SSO-401 for a cookieless client) polls a
 # wall forever — access.log showed ZERO agent requests while the panel
 # waited for a pairing code that could never be redeemed.
-
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))
 
 _LOOPBACK_HOSTS = frozenset({'127.0.0.1', 'localhost', '::1'})
 
@@ -825,7 +835,7 @@ def desktop_agent_installer():
 # again as mandatory defense in depth; text is capped at _DIAG_MAX_CHARS.
 # The file uses the shared
 # stream policy rather than growing once per authenticated paste forever.
-_DIAG_LOG = os.path.join(_REPO_ROOT, 'logs', 'desktop_client_diag.log')
+_DIAG_LOG = os.path.join(LOG_DIR, 'desktop_client_diag.log')
 _DIAG_MAX_CHARS = 200_000
 _DIAG_LIST_LIMIT = 20
 _DIAG_WRITE_LOCK = threading.Lock()
@@ -1089,6 +1099,9 @@ async def desktop_pair_code_mint():
     to this user's account — no bearer, no bridge secret. The panel
     renders the code big with a copy button and a 5-minute countdown.
     """
+    refusal = _local_kernel_pairing_refusal()
+    if refusal is not None:
+        return refusal
     from lib.desktop.pairing import (
         _CODE_TTL_S, PairingIdentity, mint_code, pending_codes,
     )
@@ -1132,6 +1145,9 @@ async def desktop_pair():
     bound to the code's minting user, saves it as its remote
     attachment, and starts polling.
     """
+    refusal = _local_kernel_pairing_refusal()
+    if refusal is not None:
+        return refusal
     from quart import request
     from lib.api_keys import create_key
     from lib.desktop.pairing import (consume_code,

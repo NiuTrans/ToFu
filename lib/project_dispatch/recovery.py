@@ -121,8 +121,12 @@ def recover_project_dispatch(owner: int, project: str, *, recipient_id=None, coo
             # A revoked/rebound/stale or unavailable grant must not starve the
             # remaining assignments. Never mutate/replenish its budget here.
             stats['failed'] += 1
-            logger.debug('[ProjectDispatch] recovery skipped unavailable grant owner=%s '
-                         'assignment=%s', owner, assignment.get('id'), exc_info=True)
+            # The watchdog drops typed refusals, so this line is their only trace;
+            # anything else also keeps its traceback.
+            logger.warning('[ProjectDispatch] recovery skipped unavailable grant owner=%s '
+                           'assignment=%s: %s: %s', owner, assignment.get('id'),
+                           type(error).__name__, error,
+                           exc_info=not isinstance(error, (PermissionError, ValueError)))
             from lib.router.watchdog.signals import report_recovery_failure
             report_recovery_failure(owner, project, error, assignment=assignment)
     if any(row['request'].get('delegation', {}).get('policy', {}).get('continuation') for row in rows):

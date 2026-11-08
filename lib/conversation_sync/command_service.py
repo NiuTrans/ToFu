@@ -240,6 +240,70 @@ def attempt_start_error_envelope(
     )
 
 
+def executor_start_error_envelope(exc, config):
+    """One actionable startup cause for local and durable execution owners."""
+    from lib.model_routing.domain import ModelRoutingError
+
+    if isinstance(exc, ModelRoutingError):
+        model_ref = config.get("modelRef")
+        # Provider-scoped pending selections ({provider_id, offering_id})
+        # carry no model_id; the request name the user picked is config.model.
+        model = str((model_ref.get("model_id") if isinstance(model_ref, Mapping) else None)
+                    or config.get("model") or "")
+        if exc.kind == "model_route_unavailable":
+            envelope = make_envelope(
+                "task_start_failed",
+                detail="model_route_unavailable: no authorized, healthy Deployment satisfies the request.",
+                model=model,
+                context="turn-start",
+                source="conversation-turn-command",
+                hint=("请在模型设置中检查该模型的凭据授权、部署启用状态和所需能力，"
+                      "或切换到可用模型后重试。\n"
+                      "Check credential authorization, enabled deployments and required "
+                      "capabilities in model settings, or select an available model and retry."),
+            )
+        elif exc.kind == "model_registration_incomplete":
+            envelope = make_envelope(
+                "task_start_failed",
+                detail=("model_registration_incomplete: the selected model's registration "
+                        "metadata or a deployment's inference profile is incomplete, so no "
+                        "route was admitted."),
+                model=model,
+                context="turn-start",
+                source="conversation-turn-command",
+                raw=str(exc),
+                hint=("该模型已注册但某个部署的注册/推理资料不完整（如推理档位无法编译到"
+                      "声明的线上格式）。请在模型设置中查看该模型各部署的 registration_issues，"
+                      "补全或禁用损坏的部署后重试。\n"
+                      "The model is registered but one of its deployments has incomplete "
+                      "registration/inference metadata (e.g. reasoning efforts that cannot "
+                      "compile to the declared wire format). Open Model settings, inspect the "
+                      "model's per-deployment registration_issues, then complete or disable the "
+                      "broken deployment and retry."),
+            )
+        elif exc.kind == "model_identity_pending":
+            envelope = make_envelope(
+                "task_start_failed",
+                detail=("model_identity_pending: the selected model's identity is still "
+                        "pending confirmation on every provider, so no route was admitted."),
+                model=model,
+                context="turn-start",
+                source="conversation-turn-command",
+                raw=str(exc),
+                hint=("该模型身份尚未在任何服务商上确认。请在模型设置中确认该模型的身份/"
+                      "服务商映射后重试。\n"
+                      "The model's identity is not yet confirmed on any provider. Confirm the "
+                      "model identity / provider mapping in Model settings, then retry."),
+            )
+        else:
+            envelope = attempt_start_error_envelope(exc)
+            if model and not envelope.get("model"):
+                envelope = dict(envelope, model=model)
+    else:
+        envelope = attempt_start_error_envelope(exc)
+    return envelope
+
+
 def _capture_task_principal_tenant(config,user_id,principal):
     """Stamp accepted identity; public config can never supply this field."""
     return capture_execution_identity(config, user_id, principal)
@@ -299,6 +363,20 @@ def restore_accepted_attempt_config(turn, attempt, *, user_id):
     return config
 
 
+def _refuse_turn_after_shutdown_quiesce() -> None:
+    """Background producers outlive the shutdown quiesce; nothing new starts.
+
+    ``lane_busy`` is the transient refusal every producer already defers on:
+    queue rows are released, receipts and dispatch grants stay durable, and
+    the next process generation dispatches them. A distinct code would make
+    the queue retire a linked pair permanently instead.
+    """
+    from lib.tasks_pkg.manager import task_admission_closed
+    if task_admission_closed():
+        raise LifecycleConflict(
+            'lane_busy', 'The server is stopping; this turn starts after the restart.')
+
+
 class ConversationTurnCommandService:
     """Apply command DTOs with explicit owner identity and injected gateways."""
 
@@ -307,7 +385,7 @@ class ConversationTurnCommandService:
         *,
         build_user_message: BuildUserMessage,
         was_aborted_after: WasAbortedAfter,
-        start_task: StartTask,
+        start_task: StartTask | None = None,
         mutate_file_changes: MutateFileChanges | None = None,
         retain_attachments: RetainAttachments | None = None,
     ) -> None:
@@ -334,6 +412,7 @@ class ConversationTurnCommandService:
         trusted_usage_recovery_revision: int | None = None,
         trusted_dispatch=None,
     ) -> CommandOutcome:
+        _refuse_turn_after_shutdown_quiesce()
         data = dict(body)
         command_id = str(data.get("commandId") or "")
         if not command_id:
@@ -737,6 +816,7 @@ class ConversationTurnCommandService:
                     runtime_config,
                     {},
                     abort_after_ts=abort_after_ts,
+                    recovered=True,
                 )
             except AttemptStartFailure:
                 # The application service already settled this attempt with a
@@ -876,6 +956,7 @@ class ConversationTurnCommandService:
             result.setdefault('idempotentReplay', False)
             result['streamCursor'] = int(result['attempt'].get('lastEventSeq') or 0)
             return CommandOutcome(_public_result(result))
+        _refuse_turn_after_shutdown_quiesce()
         config = data.get("config") or {}
 
         if not isinstance(config, Mapping):
@@ -1429,12 +1510,17 @@ class ConversationTurnCommandService:
         *,
         abort_after_ts: float | None,
         execution_clock: ExecutionClock | None = None,
+        recovered: bool = False,
     ) -> None:
         if not result.get("_needsStart"):
             return
         attempt_id = str((result.get("attempt") or {}).get("attemptId") or "")
         if not attempt_id:
             raise RuntimeError("Accepted attempt is missing its identity")
+        if self._start_task is None:
+            from lib.conversation_sync.worker_dispatch import dispatch_accepted_attempt
+            dispatch_accepted_attempt(attempt_id, user_id=user_id)
+            return
         if request_config.get('_goalRecoverySourceRunId') and request_config.get('_goalRecoveryAbortAfterTs'):
             abort_after_ts = min(abort_after_ts or time.time(),
                                  float(request_config['_goalRecoveryAbortAfterTs']))
@@ -1446,6 +1532,7 @@ class ConversationTurnCommandService:
                 request_data,
                 abort_after_ts=abort_after_ts,
                 execution_clock=execution_clock,
+                recovered=recovered,
             )
 
     def _start_accepted_attempt_serialized(
@@ -1457,6 +1544,7 @@ class ConversationTurnCommandService:
         *,
         abort_after_ts: float | None,
         execution_clock: ExecutionClock | None = None,
+        recovered: bool = False,
     ) -> None:
         """Claim, bind, and launch while this process owns the attempt stripe."""
         turn = result["turn"]
@@ -1489,6 +1577,11 @@ class ConversationTurnCommandService:
 
         try:
             config = restore_accepted_attempt_config(turn, attempt, user_id=user_id)
+            if recovered:
+                # Recovery may win the claim before a project delegation binds
+                # this attempt; it holds no delegation authority in memory.
+                from lib.project_dispatch.admission import continue_recovered_execution
+                continue_recovered_execution(config, turn["turnId"], attempt["attemptId"])
             task_id, error_response = self._start_task(
                 turn["conversationId"],
                 config,
@@ -1507,65 +1600,7 @@ class ConversationTurnCommandService:
                 "Attempt %s executor startup raised before task binding",
                 str(attempt["attemptId"])[:16],
             )
-            from lib.model_routing.domain import ModelRoutingError
-
-            if isinstance(exc, ModelRoutingError):
-                model_ref = config.get("modelRef")
-                # Provider-scoped pending selections ({provider_id, offering_id})
-                # carry no model_id; the request name the user picked is config.model.
-                model = str((model_ref.get("model_id") if isinstance(model_ref, Mapping) else None)
-                            or config.get("model") or "")
-                if exc.kind == "model_route_unavailable":
-                    envelope = make_envelope(
-                        "task_start_failed",
-                        detail="model_route_unavailable: no authorized, healthy Deployment satisfies the request.",
-                        model=model,
-                        context="turn-start",
-                        source="conversation-turn-command",
-                        hint=("请在模型设置中检查该模型的凭据授权、部署启用状态和所需能力，"
-                              "或切换到可用模型后重试。\n"
-                              "Check credential authorization, enabled deployments and required "
-                              "capabilities in model settings, or select an available model and retry."),
-                    )
-                elif exc.kind == "model_registration_incomplete":
-                    envelope = make_envelope(
-                        "task_start_failed",
-                        detail=("model_registration_incomplete: the selected model's registration "
-                                "metadata or a deployment's inference profile is incomplete, so no "
-                                "route was admitted."),
-                        model=model,
-                        context="turn-start",
-                        source="conversation-turn-command",
-                        raw=str(exc),
-                        hint=("该模型已注册但某个部署的注册/推理资料不完整（如推理档位无法编译到"
-                              "声明的线上格式）。请在模型设置中查看该模型各部署的 registration_issues，"
-                              "补全或禁用损坏的部署后重试。\n"
-                              "The model is registered but one of its deployments has incomplete "
-                              "registration/inference metadata (e.g. reasoning efforts that cannot "
-                              "compile to the declared wire format). Open Model settings, inspect the "
-                              "model's per-deployment registration_issues, then complete or disable the "
-                              "broken deployment and retry."),
-                    )
-                elif exc.kind == "model_identity_pending":
-                    envelope = make_envelope(
-                        "task_start_failed",
-                        detail=("model_identity_pending: the selected model's identity is still "
-                                "pending confirmation on every provider, so no route was admitted."),
-                        model=model,
-                        context="turn-start",
-                        source="conversation-turn-command",
-                        raw=str(exc),
-                        hint=("该模型身份尚未在任何服务商上确认。请在模型设置中确认该模型的身份/"
-                              "服务商映射后重试。\n"
-                              "The model's identity is not yet confirmed on any provider. Confirm the "
-                              "model identity / provider mapping in Model settings, then retry."),
-                    )
-                else:
-                    envelope = attempt_start_error_envelope(exc)
-                    if model and not envelope.get("model"):
-                        envelope = dict(envelope, model=model)
-            else:
-                envelope = attempt_start_error_envelope(exc)
+            envelope = executor_start_error_envelope(exc, config)
             self._fail_attempt_start(attempt, user_id, envelope)
             raise AttemptStartFailure(get_turn(
                 turn["conversationId"], turn["turnId"], user_id=user_id
@@ -1652,8 +1687,37 @@ class ConversationTurnCommandService:
             command_id = str(data.get("commandId") or "")
             attempt_id = str((conflict.turn or {}).get("currentAttemptId") or "")
             committed: dict[str, Any] | None = None
+            from lib.tasks_pkg.committed_steers import executes_attempt_here
             if not attempt_id:
                 steer_fallback_reason = "no_live_attempt"
+            elif not executes_attempt_here(attempt_id, user_id=user_id):
+                # Another server process executes this attempt. A wakeup in
+                # this process's inbox would reach nobody there (or a later,
+                # unrelated turn here); the committed record alone reaches its
+                # executor (lib.tasks_pkg.committed_steers).
+                try:
+                    receipt = commit_user_steer(
+                        conversation_id,
+                        attempt_id,
+                        command_id=command_id,
+                        text=steer_text,
+                        user_id=user_id,
+                        images=steer_images or None,
+                        author=author,
+                    )
+                    if isinstance(receipt, Mapping):
+                        committed = dict(receipt)
+                        logger.info(
+                            "Conversation %s steer %s committed for attempt %s, which "
+                            "another server process executes",
+                            conversation_id, command_id, attempt_id,
+                        )
+                    else:
+                        steer_fallback_reason = "commit_not_persisted"
+                except LifecycleConflict:
+                    steer_fallback_reason = "steer_window_closed"
+                except LifecycleNotFound:
+                    steer_fallback_reason = "attempt_gone"
             else:
                 try:
                     enqueued, committed_value = enqueue_after_durable_commit(

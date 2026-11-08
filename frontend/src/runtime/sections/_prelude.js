@@ -149,6 +149,7 @@ import { createPreferenceActionsController } from '../features/memory/preference
 import { createProjectCoordinationSurface } from '../features/project-coordination-surface';
 import { createGlobalRouterEntry } from '../features/global-router';
 import { createRouterWatchdogEntry } from '../features/router-watchdog';
+import { createRouterOwnerDelegation } from '../features/router-owner-delegation';
 import { createSameTaskReadJoin } from '../features/project-coordination-read-join';
 import { createCoordinatorConversationGroups } from '../features/coordinator-conversation-group';
 
@@ -1203,7 +1204,10 @@ const {
   applyCapabilityTaxonomy,
   getChatExcludedCaps,
   getKnownCapabilities,
+  getModelKinds,
   isChatModel,
+  isMediaKind,
+  modelKind,
 } = modelCapabilityTaxonomy;
 // Temporary retained/lazy compatibility ports. The controller and its state
 // stay module-private; the fallback snapshot cannot mutate controller state.
@@ -1211,6 +1215,11 @@ runtimeScope.applyCapabilityTaxonomy = applyCapabilityTaxonomy;
 runtimeScope.getChatExcludedCaps = getChatExcludedCaps;
 runtimeScope.getKnownCapabilities = getKnownCapabilities;
 runtimeScope.isChatModel = isChatModel;
+// Kind ports read the same server-projected controller: the lazy Settings
+// model catalog groups by kind, the retained supply matrix picks media facts.
+runtimeScope.getModelKinds = getModelKinds;
+runtimeScope.isMediaKind = isMediaKind;
+runtimeScope.modelKind = modelKind;
 runtimeScope.CHAT_EXCLUDED_CAPS_FALLBACK = [
   ...CHAT_EXCLUDED_CAPS_FALLBACK,
 ];

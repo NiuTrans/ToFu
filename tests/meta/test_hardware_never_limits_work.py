@@ -239,11 +239,14 @@ def test_memory_admission_knobs_stay_retired():
     assert not set(RETIRED_KNOBS) & set(SETTINGS)
     advertised = [ROOT / '.env.example', ROOT / 'docker-compose.yml',
                   ROOT / 'contracts/config_knobs_v1.json']
+    # One read and comment strip per source, not one per knob: ten passes over
+    # every runtime file on the FUSE checkout outlasted the per-test timeout.
+    texts = {path: _runtime_text(path) for path in RUNTIME_SOURCES}
     hits = sorted(
         f'{path}: {knob}'
-        for path in RUNTIME_SOURCES
+        for path, text in texts.items()
         for knob in RETIRED_KNOBS
-        if knob in _runtime_text(path)
+        if knob in text
     ) + sorted(
         f'{path.relative_to(ROOT)}: {knob}'
         for path in advertised

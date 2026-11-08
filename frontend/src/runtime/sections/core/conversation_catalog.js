@@ -120,6 +120,46 @@ function _mergeCatalogRow(local, row) {
   return bodyChanged;
 }
 
+/* The sidebar busy projection (streaming dot / "answering" tag) derives
+ * exclusively from client-side Turn state. A hard refresh holds that state
+ * only for hydrated conversations, so every other live conversation read
+ * idle until it was opened by hand. The server stamps `busy` on catalog
+ * rows whose task registry still has live work (list_running_tasks); wake
+ * exactly those shells the client does not already know are busy, so
+ * hydration replays the running Turns and reconnects their attempt
+ * streams — the same recovery a manual open performs. Every catalog merge
+ * (full list, folder, older page, Coordinator worker page) applies it; the
+ * in-flight set is per conversation so a wake for one page never swallows
+ * another page's busy rows. */
+const _serverBusyWakesInFlight = new Set();
+function _wakeServerBusyConversations(rows) {
+  const turnStore = runtimeScope.ConversationTurnStore;
+  if (!turnStore?.wakeConversation) return;
+  const targets = [];
+  for (const row of rows || []) {
+    if (!row?.busy || !row.id || _serverBusyWakesInFlight.has(row.id)) continue;
+    const conv = conversations.find((item) => item?.id === row.id);
+    if (!conv) continue;
+    if (typeof convIsBusy === 'function' && convIsBusy(conv)) continue;
+    targets.push(conv);
+  }
+  if (!targets.length) return;
+  for (const conv of targets) _serverBusyWakesInFlight.add(conv.id);
+  runWithConcurrency(
+    targets,
+    (conv) => Promise.resolve(turnStore.wakeConversation(conv))
+      .catch((error) => debugLog(
+        `[conversation-catalog] busy wake failed for ${conv.id.slice(0, 8)}: ${error?.message || error}`,
+        'warn',
+      )),
+    DEFAULT_ASYNC_POOL_CONCURRENCY,
+  ).then(() => {
+    if (typeof renderConversationList === 'function') renderConversationList();
+  }).finally(() => {
+    for (const conv of targets) _serverBusyWakesInFlight.delete(conv.id);
+  });
+}
+
 /** Merge any folder/pagination/catalog rows through the same shell rules. */
 function mergeConversationCatalogRows(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return 0;
@@ -138,6 +178,7 @@ function mergeConversationCatalogRows(rows) {
     localById.set(shell.id, shell);
     added++;
   }
+  _wakeServerBusyConversations(rows);
   return added;
 }
 
@@ -198,50 +239,11 @@ function _applyAuthoritativeConversationCatalogRows(rows, totalCount) {
 
   conversations.sort(_convSorter);
   renderConversationList();
-  _wakeServerBusyConversations(serverRows);
   /* Empty storage shells are intentionally reclaimed after boot, so only
    * sidebar-visible rows participate in later 304 snapshot validation. */
   return serverRows
     .filter((row) => _catalogTurnCount(row) > 0)
     .map((row) => row.id);
-}
-
-/* The sidebar busy projection (streaming dot / "answering" tag) derives
- * exclusively from client-side Turn state. A hard refresh holds that state
- * only for hydrated conversations, so every other live conversation read
- * idle until it was opened by hand. The server stamps `busy` on catalog
- * rows whose task registry still has live work (list_running_tasks); wake
- * exactly those shells the client does not already know are busy, so
- * hydration replays the running Turns and reconnects their attempt
- * streams — the same recovery a manual open performs. */
-let _serverBusyWakeInFlight = false;
-function _wakeServerBusyConversations(rows) {
-  if (_serverBusyWakeInFlight) return;
-  const turnStore = runtimeScope.ConversationTurnStore;
-  if (!turnStore?.wakeConversation) return;
-  const targets = [];
-  for (const row of rows || []) {
-    if (!row?.busy || !row.id) continue;
-    const conv = conversations.find((item) => item?.id === row.id);
-    if (!conv) continue;
-    if (typeof convIsBusy === 'function' && convIsBusy(conv)) continue;
-    targets.push(conv);
-  }
-  if (!targets.length) return;
-  _serverBusyWakeInFlight = true;
-  runWithConcurrency(
-    targets,
-    (conv) => Promise.resolve(turnStore.wakeConversation(conv))
-      .catch((error) => debugLog(
-        `[conversation-catalog] busy wake failed for ${conv.id.slice(0, 8)}: ${error?.message || error}`,
-        'warn',
-      )),
-    DEFAULT_ASYNC_POOL_CONCURRENCY,
-  ).then(() => {
-    if (typeof renderConversationList === 'function') renderConversationList();
-  }).finally(() => {
-    _serverBusyWakeInFlight = false;
-  });
 }
 
 function _catalogContainsEveryAppliedRow(conversationIds) {

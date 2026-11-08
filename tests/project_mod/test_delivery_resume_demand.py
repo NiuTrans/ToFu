@@ -230,3 +230,29 @@ def test_delivery_state_hints_name_catalog_commands():
     kinds = {operation['name']: operation['kind'] for operation in catalog['operations']}
     assert 'integration.workspace.set_meta' in delivery.DELIVERY_STATE_OPERATIONS
     assert {kinds.get(name) for name in delivery.DELIVERY_STATE_OPERATIONS} == {'command'}
+
+
+@pytest.mark.parametrize('executor', ['conversation-attempt:resumed', None])
+def test_working_recovery_reads_the_executing_attempt_and_settles_the_work_id(monkeypatch, executor):
+    """A Worker checkout is keyed by its assignment; the verdict belongs to the attempt in it."""
+    from types import SimpleNamespace
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    reads, settled = [], []
+    monkeypatch.setattr(chat_task_runtime, 'get', lambda task_id: reads.append(('live', task_id)))
+
+    def query(operation, payload):
+        reads.append((operation, payload['key']))
+        return {'status': 'interrupted'}
+
+    monkeypatch.setattr('lib.storage.get_storage_client', lambda **kw: SimpleNamespace(query=query))
+    monkeypatch.setattr(delivery, 'settle_task_workspace', lambda path, task_id, **kw: settled.append(
+        (path, task_id, kw['outcome'])) or {'state': 'working', 'taskOutcome': kw['outcome']})
+    origin = {'delivery': {'state': 'working'}}
+    if executor:
+        origin['executorTaskId'] = executor
+    row = {'task_id': 'project-worker:assignment', 'user_id': 7, 'workspace_path': '/managed/worker',
+           'project_root': ROOT, 'origin': origin}
+    delivery._recover_working_registration(row)
+    verdict = executor or 'project-worker:assignment'
+    assert reads == [('live', verdict), ('task_results.replay_get', verdict)]
+    assert settled == [('/managed/worker', 'project-worker:assignment', 'interrupted')]

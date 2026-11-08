@@ -217,17 +217,10 @@ def call_configured_fallback(
                 fallback_from=original_model,
             )
 
-            # Count served fallback rounds so the switch-back probe above
-            # fires after exactly one good answer, not on the first retry.
-            # The success return must not leak the probe's `model` back to
-            # the loop: the result below still carries _FALLBACK_MODEL, so
-            # _llm_round_call keeps rs.model on the fallback and the NEXT
-            # round re-enters this function, where the probe rebuilds the
-            # body for the primary BEFORE any dispatch.
-            if isinstance(e, ModelRefusalError):
-                task['_fallback_served_rounds'] = (
-                    int(task.get('_fallback_served_rounds') or 0) + 1
-                )
+            # A refusal fallback stays on the fallback model for the rest of
+            # this turn: the loop keeps rs.model on the fallback, so the next
+            # round dispatches there directly instead of paying another
+            # refused attempt and a fresh primary cache write.
             return {
                 'assistant_msg': assistant_msg,
                 'finish_reason': finish_reason,

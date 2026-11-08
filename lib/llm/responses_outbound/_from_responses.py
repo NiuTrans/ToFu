@@ -74,7 +74,8 @@ def responses_response_to_openai(data: object,
                    else 'response failed')
         code = (raw_code if isinstance(raw_code, str) and raw_code
                 else 'response_failed')
-        if code == 'invalid_encrypted_content':
+        from lib.llm.llm_errors import invalid_encrypted_content_error_object
+        if invalid_encrypted_content_error_object(err):
             from lib.llm.llm_errors import InvalidEncryptedContentError
             failure = InvalidEncryptedContentError(param=err.get('param'))
             logger.warning('[Responses] non-stream response failed: %s', failure.code)

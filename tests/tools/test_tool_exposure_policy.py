@@ -42,7 +42,7 @@ EAGER = frozenset({
     'finish_project_request', 'get_project_assignment', 'get_project_workers',
     'report_to_user', 'request_user_decision', 'review_project_work', 'update_task_progress',
     'get_router_projects', 'route_to_project', 'router_instruction_cancel',
-    'router_instruction_create', 'router_instruction_list',
+    'router_instruction_create', 'router_instruction_list', 'restart_server',
     'channel_configure_thread', 'channel_outbox', 'channel_outbox_approve',
     'channel_read', 'channel_send', 'channel_subscribe', 'channel_threads',
     'channel_unsubscribe',

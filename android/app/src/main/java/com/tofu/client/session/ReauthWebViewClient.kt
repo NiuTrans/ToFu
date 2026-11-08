@@ -13,6 +13,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.tofu.client.data.AuthType
 import com.tofu.client.data.Profile
+import java.io.ByteArrayInputStream
 
 /**
  * Detects session expiry inside the WebView and silently re-establishes it.
@@ -197,6 +198,12 @@ class ReauthWebViewClient(
         val uri = request.url
         val url = uri.toString()
         if (request.isForMainFrame) diagnostics?.record("I", "WebNavigation", "navigate gesture=${request.hasGesture()} interactive=$interactiveAuth url=${ClientReport.safeUrl(url)}")
+        if (!LocalKernelCookie.webViewMayLoad(profile, url)) {
+            // A tapped link opens in the real browser, which holds no credential; nothing else loads.
+            if (request.isForMainFrame && request.hasGesture()) onExternalUrl?.invoke(uri)
+            else diagnostics?.record("W", "WebNavigation", "blocked a load of the local kernel's host: ${ClientReport.safeUrl(url)}")
+            return true
+        }
         if (request.isForMainFrame && isExternalOrigin(uri) && !request.hasGesture()) {
             // A gateway redirect enters browser-owned authentication immediately.
             beginInteractiveAuth()
@@ -237,6 +244,19 @@ class ReauthWebViewClient(
             return true
         }
         return false
+    }
+
+    /**
+     * The local kernel's credential is a cookie for 127.0.0.1 and cookies
+     * ignore the port: nothing but the front LOCAL kernel's own origin may be
+     * requested there, or a page could hand the secret to another listener
+     * ([LocalKernelCookie.webViewMayLoad]). Every other request proceeds.
+     */
+    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+        val url = request.url.toString()
+        if (LocalKernelCookie.webViewMayLoad(profile, url)) return null
+        diagnostics?.record("W", "WebRequest", "blocked a request to the local kernel's host: ${ClientReport.safeUrl(url)}")
+        return WebResourceResponse("text/plain", "utf-8", 403, "Forbidden", emptyMap(), ByteArrayInputStream(ByteArray(0)))
     }
 
     /**

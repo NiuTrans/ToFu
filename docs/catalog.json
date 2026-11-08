@@ -575,7 +575,9 @@
     "docs/TOFUDB_ONLINE_GC.md",
     "docs/contracts/ARTIFACT_REVIEW.md",
     "docs/contracts/WORKING_FACTS.md",
-    "docs/contracts/TOOL_RESULT_QUERY.md"
+    "docs/contracts/TOOL_RESULT_QUERY.md",
+    "docs/ANDROID_LOCAL_KERNEL.md",
+    "docs/ANDROID_KERNELS.md"
   ],
   "domain_maps": [
     "docs/modules/auth_providers_billing.md",
@@ -643,7 +645,8 @@
     "docs/runbooks/CODEX_ACCOUNT_USAGE.md",
     "docs/contracts/EXECUTION_ACCOUNT_CONTINUITY.md",
     "docs/NATIVE_REPOSITORY_DISCOVERY.md",
-    "docs/MEDIA_SOURCE_ADMISSION.md"
+    "docs/MEDIA_SOURCE_ADMISSION.md",
+    "docs/DSH_GO_ANDROID_ANALYSIS.md"
   ],
   "operator_guides": [
     "docs/INSTALL.md",

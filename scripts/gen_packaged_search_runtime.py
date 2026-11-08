@@ -12,6 +12,7 @@ OWNERS = {
     'tofu_workers/resources.py': 'generated_resources.py',
     'lib/project_mod/process_group.py': 'generated_process_groups.py',
     'lib/paper/builds/pdf_validation_limits.py': 'generated_process_lifetime.py',
+    'lib/search/url_blocklist.py': 'generated_url_blocklist.py',
 }
 
 

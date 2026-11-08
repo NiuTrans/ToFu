@@ -637,6 +637,47 @@ def _reset_global_config():
         _config._global_config = saved
 
 
+# ─── Task admission isolation ──────────────────────────────────────────
+@pytest.fixture(autouse=True)
+def _isolate_task_admission():
+    """A shutdown quiesce closes task admission for its process; reopen it.
+
+    Only touches the registry when some test already imported it.
+    """
+    try:
+        yield
+    finally:
+        registry = sys.modules.get('lib.tasks_pkg.manager._registry')
+        if registry is not None:
+            registry.reopen_task_admission()
+
+
+# ─── Prompt-cache TTL isolation ──────────────────────────────────────────
+@pytest.fixture(autouse=True)
+def _isolate_prompt_cache_ttl():
+    """The extended-TTL flag and the per-task TTL latch are process globals.
+
+    Cache suites assign ``lib.CACHE_EXTENDED_TTL`` and latch task ids
+    directly; one that "restored" the flag to True left every later test on
+    its worker sending 1h markers, so pinned request digests drifted. Only
+    already-imported modules are touched, as in route-health isolation.
+    """
+    lib_module = sys.modules.get('lib')
+    flag = getattr(lib_module, 'CACHE_EXTENDED_TTL', None)
+    latch = sys.modules.get('lib.tasks_pkg.cache_tracking._ttl')
+    latched = dict(latch._ttl_latch) if latch is not None else {}
+    try:
+        yield
+    finally:
+        if flag is not None:
+            lib_module.CACHE_EXTENDED_TTL = flag
+        latch = sys.modules.get('lib.tasks_pkg.cache_tracking._ttl')
+        if latch is not None:
+            with latch._ttl_latch_lock:
+                latch._ttl_latch.clear()
+                latch._ttl_latch.update(latched)
+
+
 # ─── Learned route-health isolation ────────────────────────────────────
 @pytest.fixture(autouse=True)
 def _isolate_owner_route_health():
@@ -655,6 +696,28 @@ def _isolate_owner_route_health():
         yield
     finally:
         _reset()
+
+
+# ─── Environment-capability isolation ───
+@pytest.fixture(autouse=True)
+def _host_independent_environment_capabilities(monkeypatch):
+    """Tool exposure in tests never depends on this host's executables.
+
+    Assembly withholds tools whose declared capability the process snapshot
+    lacks (CI runners have no Playwright Chromium, for example). Every test
+    starts from a snapshot with every capability present, and a refresh
+    event re-probes to the same result. Tests of the snapshot itself replace
+    this state (``tests/tools/test_environment_capabilities.py``).
+    """
+    from lib.tools import environment_capabilities as environment
+
+    monkeypatch.setattr(environment, '_snapshot',
+                        environment.EVERY_CAPABILITY_AVAILABLE)
+    monkeypatch.setattr(environment, '_stale', False)
+    monkeypatch.setattr(environment, '_stale_reason', '')
+    monkeypatch.setattr(environment, '_local_kernel', False)
+    monkeypatch.setattr(environment, 'probe_environment',
+                        lambda environ, *, local_kernel: {})
 
 
 # ─── Configured-slot switch isolation ──────────────────────────────────

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { projectRestartHealth, restartPhaseProgress } from './restart-observation';
+import { projectRestartHealth, restartPhaseProgress, restartWaitNotice } from './restart-observation';
 
 describe('restart health authority', () => {
   it('does not mistake the accepting process or an early listener for completion', () => {
@@ -15,6 +15,12 @@ describe('restart health authority', () => {
   });
   it('keeps older health endpoints usable', () => {
     expect(projectRestartHealth({ok:true}, null)).toMatchObject({kind:'ready'});
+  });
+  it('reports an outage only after nothing has answered for the slow window', () => {
+    expect(restartWaitNotice(60, 60, 180)).toBeNull();
+    expect(restartWaitNotice(400, 0, 180)).toBe('slow');
+    expect(restartWaitNotice(400, 179, 180)).toBe('slow');
+    expect(restartWaitNotice(400, 181, 180)).toBe('unreachable');
   });
   it('projects the running phase without extrapolating to a later phase', () => {
     expect(restartPhaseProgress({status:'running',phaseTotal:9,currentPhase:{index:3,key:'storage_sidecar'}})).toEqual({key:'storage_sidecar',pct:20+76*2/9});

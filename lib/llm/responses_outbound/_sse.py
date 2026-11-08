@@ -852,6 +852,11 @@ class ResponsesSSETranslator:
                    or (event if etype == 'error' else {}))
             if not isinstance(err, dict):
                 err = {}
+            from lib.llm.llm_errors import invalid_encrypted_content_error_object
+            if invalid_encrypted_content_error_object(err):
+                # A code-less gateway rewrap keeps only the provider sentence;
+                # restore the code the exact classifier reads.
+                err = {**err, 'code': 'invalid_encrypted_content'}
             raw_code = err.get('code')
             raw_message = err.get('message')
             code = raw_code if isinstance(raw_code, str) and raw_code else etype

@@ -18,13 +18,8 @@ def continuation(flask_client, monkeypatch):
     seed_conversation(conv_id, user_id=1, settings={'model': 'gpt-4o'})
     started = []
 
-    def start(conv_id, config, **kwargs):
-        task_id = 'timer-executor-' + uuid.uuid4().hex
-        started.append(task_id)
-        kwargs['on_task_registered'](task_id)
-        return task_id, None
-
-    monkeypatch.setattr(task_start, 'start_conversation_attempt_executor', start)
+    from tests.support.conversation_workers import observe_admissions
+    observe_admissions(monkeypatch, lambda admitted: started.append(admitted['taskId']))
     timer = create_timer(user_id=1, conv_id=conv_id,
                          check_instruction='Verify completion',
                          continuation_message='Read the result', poll_interval=3600)

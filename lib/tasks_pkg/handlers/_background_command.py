@@ -44,6 +44,7 @@ from lib.project_mod.foreground_command_slots import (
     retire_handoff_control,
 )
 from lib.tools.poll import AUTO_BACKGROUND_AFTER_S
+from lib.tasks_pkg.generated_command_control import ACKNOWLEDGEMENT_SECONDS
 
 logger = get_logger(__name__)
 
@@ -109,15 +110,19 @@ class CommandHandoffControl:
             self._result['reason'] = reason
         self._resolved.set()
 
-    def request(self, *, round_num: int, tool_call_id: str) -> dict[str, Any]:
+    def request(self, *, round_num: int, tool_call_id: str,
+                deadline_unix_ms: int | None = None) -> dict[str, Any]:
         if round_num != self.round_num or tool_call_id != self.tool_call_id:
             # The task slot names its newest command; a concurrent sibling
             # call answers for itself.
             sibling = handoff_control_for(self.task, round_num, tool_call_id)
             if sibling is None or sibling is self:
                 return {'backgrounded': False, 'reason': 'command_changed'}
-            return sibling.request(round_num=round_num, tool_call_id=tool_call_id)
+            return sibling.request(round_num=round_num, tool_call_id=tool_call_id,
+                                   deadline_unix_ms=deadline_unix_ms)
         with self._lock:
+            if deadline_unix_ms is not None and deadline_unix_ms <= time.time_ns() // 1_000_000:
+                raise TimeoutError('Command control expired before handoff request')
             if self._finished:
                 return {'backgrounded': False, 'reason': 'no_active_command'}
             if self.pid is None or not foreground_pid_is_live(self.task, self.pid):
@@ -142,7 +147,9 @@ class CommandHandoffControl:
             self._requested_pid = self.pid
         # The handoff owner checks at 100 ms intervals. The bounded wait gives
         # an honest refusal if Stop/completion wins the race.
-        self._resolved.wait(2)
+        remaining = ACKNOWLEDGEMENT_SECONDS if deadline_unix_ms is None else min(
+            ACKNOWLEDGEMENT_SECONDS, max(0, deadline_unix_ms / 1000 - time.time()))
+        self._resolved.wait(remaining)
         with self._lock:
             return dict(self._result or {'backgrounded': False, 'reason': 'handoff_pending'})
 

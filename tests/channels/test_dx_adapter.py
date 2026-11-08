@@ -1,12 +1,14 @@
 """大象 adapter: normalization, catch-up replay, live ingest, sender port (C1, C6)."""
 import json
+import os
 import queue
+import sys
 import threading
 
 import pytest
 
 from lib.channels.dx.adapter import (
-    DxAdapter, event_from_history, event_from_live, svr_time_from_mid, thread_from_session,
+    DxAdapter, DxBridge, event_from_history, event_from_live, svr_time_from_mid, thread_from_session,
 )
 from lib.channels.model import OUTBOX_MARKER_FIELD, PROVIDER_LIMITS, ThreadKey
 from tests.channels.conftest import OWNER, OWNER_UID, ROUTER
@@ -98,6 +100,7 @@ class FakeBridge:
         self.sessions, self.history = sessions, history
         self.requests = []
         self.returncode = None
+        self.refusal = ''
         self.sends = []
 
     def request(self, op, **args):
@@ -234,6 +237,22 @@ def test_bridge_status_lines_are_surfaced(channel, status, state):
     bridge.returncode = 43 if status == 'kicked' else 3
     assert adapter.outcome()[0] == state
     assert channel.account('dx')['status']['state'] == state
+
+
+@pytest.mark.parametrize('code, state', [(1, 'disconnected'), (42, 'needs_login')])
+def test_session_outcome_names_the_launcher_refusal(store, tmp_path, code, state):
+    # The launcher refuses before the bridge runs: its public envelope on stderr,
+    # then (exit 42) dx-tofu.sh's own hint line.
+    envelope = {'ok': False, 'error_code': 'SSO_SESSION_CONFIGURATION', 'error': 'refused before login'}
+    script = ('import json, sys\nprint(json.dumps(%r), file=sys.stderr)\n'
+              'print("dx-tofu: hint", file=sys.stderr)\nsys.exit(%d)\n') % (envelope, code)
+    bridge = DxBridge([sys.executable, '-c', script], env=dict(os.environ), cwd=str(tmp_path))
+    adapter = DxAdapter(OWNER, store=store, bridge_factory=lambda owner: bridge)
+    adapter.start()
+    assert adapter.stop(5)
+    outcome, detail = adapter.outcome()
+    assert outcome == state and f'{code}' in detail
+    assert detail.endswith('SSO_SESSION_CONFIGURATION: refused before login')
 
 
 def test_sender_port_sends_markdown_with_the_outbox_marker(channel):

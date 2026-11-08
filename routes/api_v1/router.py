@@ -3,9 +3,11 @@
 Wire shapes are owned by contracts/router_v1.schema.json. Owner identity comes
 from the shared authentication boundary; every handler calls one router owner
 (lib.router.binding, lib.router.instructions, ProjectCoordinationRepository,
-lib.router.watchdog) and maps its typed result. POST requires an Idempotency-Key; the operations
+lib.router.watchdog, the owner delegation in lib.lifecycle_approval) and maps
+its typed result. POST requires an Idempotency-Key; the operations
 themselves are idempotent (deterministic provisioning, set-to-value, pause,
-resume, cancel).
+resume, cancel, grant, revoke). Granting the owner delegation is the one
+human-UI-only write (auth.human_ui_provenance, docs/ROUTER.md R9).
 """
 from __future__ import annotations
 
@@ -40,6 +42,9 @@ _TYPED_FAILURES = (PermissionError, RouterHomeUnavailable, StorageError, ValueEr
 
 def _typed_error(error: Exception):
     from lib.storage import http_status_for_storage_error
+    if getattr(error, 'code', None) == 'owner_delegation_unavailable':
+        return api_typed_error('storage_unavailable', status=503, detail=str(error),
+                               source='api_v1.router.owner_delegation', retryable=True)
     if isinstance(error, PermissionError):
         return api_typed_error('permission', status=403, detail=str(error), source='api_v1.router')
     if isinstance(error, RouterHomeUnavailable):
@@ -242,6 +247,51 @@ def router_watchdog_review():
             raise PermissionError('Open the Watchdog before configuring its review')
         configure_review(owner, data, principal=request_principal())
         return api_ok(_watchdog_state(owner, binding))
+    except _TYPED_FAILURES as error:
+        return _typed_error(error)
+
+
+@api_v1_router_bp.route('/api/v1/router/owner-delegation', methods=['GET'])
+@require_scope('conversations')
+@api_meta(summary="Read the owner's delegation to their main coordinator and its audit log",
+          tags=['router'], scope='conversations')
+def router_owner_delegation_read():
+    try:
+        from lib.router.owner_delegation import owner_delegation_state
+        return api_ok(owner_delegation_state(_owner()))
+    except _TYPED_FAILURES as error:
+        return _typed_error(error)
+
+
+@api_v1_router_bp.route('/api/v1/router/owner-delegation', methods=['POST'])
+@require_scope('admin')
+@api_meta(summary="Grant or revoke the main coordinator's delegation to act for the owner",
+          description=('Granting needs the owner acting in the Tofu UI (the UI session, or the loopback '
+                       'open-mode UI, with same-origin browser evidence); API keys, scripts and agents get '
+                       '403. The grant names the current main coordinator and covers restarts and '
+                       'Continue/Stop of sessions (docs/ROUTER.md R9). Any authenticated owner request '
+                       'revokes it at once.'),
+          tags=['router'], scope='admin', request_body=request_body('ownerDelegationRequest'))
+def router_owner_delegation():
+    try:
+        _idempotency_key()
+        data = parse('ownerDelegationRequest')
+        owner = _owner()
+        from lib import lifecycle_approval
+        from lib.router.binding import global_router
+        from lib.router.owner_delegation import owner_delegation_state
+        from .auth import human_ui_provenance, request_provenance
+        if data['granted']:
+            provenance = human_ui_provenance()
+            router = global_router(owner, create=False)
+            if router['availability'] != 'available':
+                raise PermissionError('Open the main coordinator before granting it your delegation')
+            lifecycle_approval.set_delegation(owner, True, provenance=provenance, grantee={
+                'kind': 'global_router', 'conversationId': router['conversationId'],
+                'bindingRevision': router['revision'], 'tenant': request_principal().tenant_id})
+        else:
+            lifecycle_approval.set_delegation(owner, False, grantee=None, provenance=request_provenance())
+        return api_ok(owner_delegation_state(owner))
     except _TYPED_FAILURES as error:
         return _typed_error(error)
 

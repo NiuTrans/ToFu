@@ -1,4 +1,8 @@
-import type { ModelRoutingInferenceProfile } from '../../api/api-v1-model-routing.generated';
+import type {
+  ModelRoutingInferenceProfile,
+  ModelRoutingMediaPricing,
+  ModelRoutingMediaProfile,
+} from '../../api/api-v1-model-routing.generated';
 
 /**
  * Model-routing v2 presentation types for the Settings model catalog.
@@ -37,6 +41,11 @@ export interface OfficialModel {
   list_pricing?: ModelPricing;
   /** Official-table price stamped by public_projection while list_pricing is absent. */
   official_pricing?: ModelPricing;
+  /** Registered media-unit prices; ``official_media_*`` are read-only projections. */
+  media_pricing?: ModelRoutingMediaPricing;
+  official_media_pricing?: ModelRoutingMediaPricing;
+  media_profile?: ModelRoutingMediaProfile;
+  official_media_profile?: ModelRoutingMediaProfile;
   lifecycle?: 'stable' | 'preview' | 'dated_snapshot' | 'retired';
 }
 
@@ -76,6 +85,8 @@ export interface ModelCatalogRow {
   displayName: string;
   brand: string;
   capabilities: string[];
+  /** Task family from the server-projected taxonomy (``chat`` by default). */
+  kind: string;
   contextWindow: number;
   registeredQualityRank: number | null;
   releaseDate: string | null;
@@ -83,6 +94,9 @@ export interface ModelCatalogRow {
   registrationIssues?: string[];
   aa: AaScore | null;
   pricing: ModelPricing | null;
+  /** Registered media prices, else the maintained official projection. */
+  mediaPricing: ModelRoutingMediaPricing | null;
+  mediaProfile: ModelRoutingMediaProfile | null;
   lifecycle: OfficialModel['lifecycle'];
 }
 

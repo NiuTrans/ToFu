@@ -89,10 +89,14 @@ def test_account_threads_and_outbox_round_trip(app, store):
                                origin={'kind': 'tool', 'conversationId': ROUTER, 'turnId': 't'})
         listing = (await (await client.get('/api/v4/channels/outbox', headers=headers)).get_json())['data']
         _validate(listing, 'OutboxPage')
-        assert [item['state'] for item in listing['items']] == ['draft']
+        # The draft, and its notice to the owner's command chat (C11).
+        assert [(item['thread'], item['state']) for item in listing['items']] == [
+            ('dx:gid:4242', 'queued'), ('dx:uid:2002', 'draft')]
+        notice = listing['items'][0]
+        assert notice['origin']['kind'] == 'draft_notice' and draft.view()['approvalCode'] in notice['text']
         # Each channel's Settings tab lists only its own items, like its thread page.
         dx_only = await client.get('/api/v4/channels/outbox?channel=dx', headers=headers)
-        assert [item['id'] for item in (await dx_only.get_json())['data']['items']] == [draft.id]
+        assert [item['id'] for item in (await dx_only.get_json())['data']['items']] == [notice['id'], draft.id]
         github_only = await client.get('/api/v4/channels/outbox?channel=github', headers=headers)
         assert (await github_only.get_json())['data']['items'] == []
         assert (await client.get('/api/v4/channels/outbox?channel=mail', headers=headers)).status_code == 400
@@ -103,7 +107,37 @@ def test_account_threads_and_outbox_round_trip(app, store):
         approved = await client.post(f'/api/v4/channels/outbox/{draft.id}/approve', headers=headers)
         item = (await approved.get_json())['data']
         _validate(item, 'OutboxItemView')
-        assert item['state'] == 'queued'
+        assert item['state'] == 'queued' and item['decision']['by'] == 'owner_settings'
         assert (await client.post(f'/api/v4/channels/outbox/{draft.id}/discard', headers=headers)).status_code == 200
         assert (await client.post('/api/v4/channels/outbox/missing/approve', headers=headers)).status_code == 404
+    asyncio.run(exercise())
+
+
+def test_the_notification_robot_is_saved_and_removed_through_the_account_route(app, store, vault, monkeypatch):
+    """PUT admits every ChannelAccountUpdate field: the robot's secret is verified, kept in the vault only."""
+    probed = []
+    monkeypatch.setattr('lib.channels.dx.robot.check_credentials',
+                        lambda client_id, secret: probed.append((client_id, secret)))
+    headers = {'X-Test-Owner': str(OWNER)}
+    secret = 'fake-robot-secret-route-0001'  # synthetic, never a real credential
+    entry = f'channel.u{OWNER}.dx.robot'
+
+    async def exercise():
+        client = app.test_client()
+        saved = await client.put('/api/v4/channels/dx', headers=headers,
+                                 json={'robot': {'clientId': 'fake-robot-client', 'secret': secret}})
+        body = await saved.get_data(as_text=True)
+        assert saved.status_code == 200, body
+        assert secret not in body
+        view = (await saved.get_json())['data']
+        _validate(view, 'ChannelAccountView')
+        assert view['robot']['clientId'] == 'fake-robot-client' and view['robot']['credentialName'] == entry
+        assert view['robot']['managed'] is True and view['robot']['error'] is None
+        assert probed == [('fake-robot-client', secret)] and vault.get_entry(entry) == secret
+        refused = await client.put('/api/v4/channels/dx', headers=headers,
+                                   json={'robot': {'clientId': 'fake-robot-client', 'secret': secret, 'extra': 1}})
+        assert refused.status_code == 400
+        removed = await client.put('/api/v4/channels/dx', headers=headers, json={'robot': None})
+        assert removed.status_code == 200
+        assert (await removed.get_json())['data']['robot'] is None and vault.get_entry(entry) is None
     asyncio.run(exercise())

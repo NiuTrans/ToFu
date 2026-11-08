@@ -6,8 +6,10 @@
   "name": "LongCat",
   "base_url": "https://api.longcat.chat/openai/v1",
   "catalog_mode": "curated",
-  "catalog_source": {"url": "https://longcat.chat/platform/docs/zh/", "checked_at": "2026-09-08"},
+  "catalog_source": {"url": "https://longcat.chat/platform/docs/zh/", "checked_at": "2026-11-06"},
   "offering_recipes": [
+    {"model_id": "LongCat-2.5", "capabilities": ["text", "vision", "thinking", "cheap"], "context_window": 1048576,
+     "pricing": {"input": 0.276, "output": 1.105, "cacheWriteMul": 1.00, "cacheReadMul": 0.02, "name": "LongCat-2.5"}},
     {"model_id": "LongCat-2.0", "capabilities": ["text"], "context_window": 1000000}
   ]
 }

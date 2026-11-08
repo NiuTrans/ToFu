@@ -20,7 +20,7 @@ from lib.scheduler._shared import build_task_config
 
 
 def test_forwards_conversation_translation_settings():
-    config = build_task_config({}, {'autoTranslate': True, 'uiLang': 'en'})
+    config = build_task_config({}, {'autoTranslate': True, 'uiLang': 'en'}, owner=7)
     assert config['autoTranslate'] is True
     assert config['uiLang'] == 'en'
 
@@ -28,14 +28,14 @@ def test_forwards_conversation_translation_settings():
 def test_tools_config_takes_precedence():
     config = build_task_config(
         {'autoTranslate': False, 'uiLang': 'ja'},
-        {'autoTranslate': True, 'uiLang': 'en'},
+        {'autoTranslate': True, 'uiLang': 'en'}, owner=7,
     )
     assert config['autoTranslate'] is False
     assert config['uiLang'] == 'ja'
 
 
 def test_defaults_match_canonical_off():
-    config = build_task_config({}, {})
+    config = build_task_config({}, {}, owner=7)
     assert config['autoTranslate'] is False
     assert config['uiLang'] == ''
 
@@ -45,9 +45,9 @@ def test_resolvers_read_the_forwarded_config():
     incremental gate resolve from ``task['config']`` alone."""
     from lib.conv_config import resolve_auto_translate, resolve_translate_target
 
-    config = build_task_config({}, {'autoTranslate': True, 'uiLang': 'en'})
+    config = build_task_config({}, {'autoTranslate': True, 'uiLang': 'en'}, owner=7)
     assert resolve_auto_translate(config) is True
     assert resolve_translate_target(config) == 'English'
-    off = build_task_config({}, {})
+    off = build_task_config({}, {}, owner=7)
     assert resolve_auto_translate(off) is False
     assert resolve_translate_target(off) == 'Chinese'

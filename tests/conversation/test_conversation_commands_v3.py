@@ -9,18 +9,14 @@ from __future__ import annotations
 
 import pytest
 
+from tests.support.conversation_workers import worker_attempts as worker_attempts
+
 
 pytestmark = [pytest.mark.api, pytest.mark.auth_mode("open")]
 pytest_plugins = ('tests._chat_sidecar',)
 CONVERSATION_ID = "conv-command-api"
 
 
-def _registered_start(task_id: str):
-    def start(*args, **kwargs):
-        kwargs["on_task_registered"](task_id)
-        return task_id, None
-
-    return start
 
 
 @pytest.fixture()
@@ -40,6 +36,7 @@ def _create_path(conversation_id: str = CONVERSATION_ID) -> str:
 
 
 def test_accepted_attempt_freezes_authenticated_tenant_and_discards_config_claim(
+    worker_attempts,
     flask_client,conversation_command_db,monkeypatch,
 ):
     from lib.identity import PrincipalContext
@@ -49,11 +46,6 @@ def test_accepted_attempt_freezes_authenticated_tenant_and_discards_config_claim
     principal=PrincipalContext.user(subject_id='tenant-key',owner_user_id=1,
         tenant_id='authenticated-tenant',scopes={'chat'})
     monkeypatch.setattr(routes,'_request_principal',lambda:principal)
-    captured=[]
-    def start(conversation_id,config,**kwargs):
-        captured.append(dict(config));kwargs['on_task_registered']('tenant-bound-task')
-        return 'tenant-bound-task',None
-    monkeypatch.setattr(runtime,'start_conversation_attempt_executor',start)
     response=flask_client.post(_create_path(),json={'commandId':'tenant-create',
         'config':{'_turnPrincipalTenantId':'forged-tenant'},
         'message':{'role':'user','content':'Owned task'}})
@@ -62,7 +54,7 @@ def test_accepted_attempt_freezes_authenticated_tenant_and_discards_config_claim
     assert 'config' not in get_attempt(attempt['attemptId'],user_id=1)
     frozen=get_attempt(attempt['attemptId'],user_id=1,include_execution_config=True)['config']
     assert frozen['_turnPrincipalTenantId']=='authenticated-tenant'
-    assert captured[0]['_turnPrincipalTenantId']=='authenticated-tenant'
+    assert worker_attempts.config(attempt['attemptId'])['_turnPrincipalTenantId']=='authenticated-tenant'
 
 
 def _append_settled(flask_client, command_id: str, actor: str, content: str):
@@ -83,15 +75,11 @@ def _append_settled(flask_client, command_id: str, actor: str, content: str):
 
 
 def test_busy_lane_queue_returns_real_pair_and_cancel_deletes_it(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     import lib.conversation_sync.task_start as task_start_runtime
 
-    monkeypatch.setattr(
-        task_start_runtime,
-        "start_conversation_attempt_executor",
-        _registered_start("active-queue-fence"),
-    )
     active = flask_client.post(_create_path(), json={
         "commandId": "queue-fence-active",
         "inputTurn": {"content": "hold the lane"},
@@ -166,20 +154,12 @@ def test_busy_lane_queue_returns_real_pair_and_cancel_deletes_it(
 
 
 def test_regenerate_rebinds_plan_turn_identity_to_normalized_target_mode(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     from lib.turn_lifecycle import get_turn, read_events, record_task_event
     import lib.conversation_sync.task_start as task_start_runtime
 
-    task_ids = iter(("plan-task", "standard-task"))
-    monkeypatch.setattr(
-        task_start_runtime,
-        "start_conversation_attempt_executor",
-        lambda _conv_id, _config, **kwargs: (
-            (task_id := next(task_ids)),
-            kwargs["on_task_registered"](task_id),
-        )[0:2],
-    )
     created_response = flask_client.post(_create_path(), json={
         "commandId": "plan-create",
         "inputTurn": {"content": "design this"},
@@ -191,10 +171,9 @@ def test_regenerate_rebinds_plan_turn_identity_to_normalized_target_mode(
         "planner", "plan"
     )
     first_attempt_id = created["attempt"]["attemptId"]
-    assert record_task_event({
+    assert worker_attempts.publish({
         "_attemptId": first_attempt_id,
         "_userId": 1,
-        "id": "plan-task",
         "status": "done",
         "finishReason": "stop",
         "content": "the plan",
@@ -230,6 +209,7 @@ def test_regenerate_rebinds_plan_turn_identity_to_normalized_target_mode(
 
 
 def test_create_retry_settle_and_same_turn_regenerate(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     from lib.turn_lifecycle import (
@@ -240,16 +220,8 @@ def test_create_retry_settle_and_same_turn_regenerate(
     )
     import lib.conversation_sync.task_start as task_start_runtime
 
-    task_ids = iter(("command-task-1", "command-task-2"))
-    starts = []
 
-    def fake_start(conv_id, config, **kwargs):
-        task_id = next(task_ids)
-        starts.append((task_id, dict(config)))
-        kwargs["on_task_registered"](task_id)
-        return task_id, None
 
-    monkeypatch.setattr(task_start_runtime, "start_conversation_attempt_executor", fake_start)
     body = {
         "commandId": "lost-ack-command",
         "inputTurn": {"content": "hello"},
@@ -274,8 +246,7 @@ def test_create_retry_settle_and_same_turn_regenerate(
     assert retry["idempotentReplay"] is True
     assert retry["turn"]["turnId"] == turn_id
     assert retry["attempt"]["attemptId"] == attempt_id
-    assert len(starts) == 1
-    assert starts[0][1]["excludeLast"] is True
+    assert worker_attempts.config(attempt_id)["excludeLast"] is True
     context = build_api_messages(
         CONVERSATION_ID, turn_id, {"excludeLast": True}, user_id=1)
     assert context[-1]["role"] == "user"
@@ -284,7 +255,6 @@ def test_create_retry_settle_and_same_turn_regenerate(
     task = {
         "_attemptId": attempt_id,
         "_userId": 1,
-        "id": "command-task-1",
         "status": "done",
         "finishReason": "stop",
         "content": "answer",
@@ -293,7 +263,7 @@ def test_create_retry_settle_and_same_turn_regenerate(
         "model": "gpt-4o",
         "config": {"model": "gpt-4o"},
     }
-    assert record_task_event(task, {"type": "done", "finishReason": "stop"})
+    assert worker_attempts.publish(task, {"type": "done", "finishReason": "stop"})
     latest = next(
         turn for turn in list_turns(CONVERSATION_ID, user_id=1)["turns"]
         if turn["turnId"] == turn_id
@@ -346,19 +316,17 @@ def test_create_retry_settle_and_same_turn_regenerate(
     assert regenerated["submittedTurn"]["projectionRevision"] == (
         submitted_turn["projectionRevision"] + 1
     )
-    assert len(starts) == 2
 
     task.update(status="running", content="stale overwrite")
-    assert record_task_event(task, {"type": "delta", "content": "stale"}) is False
+    assert worker_attempts.publish(task, {"type": "delta", "content": "stale"}) is False
 
 
 def test_stale_attempt_returns_latest_authoritative_turn(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     import lib.conversation_sync.task_start as task_start_runtime
 
-    monkeypatch.setattr(
-        task_start_runtime, "start_conversation_attempt_executor", _registered_start("conflict-task"))
     created = flask_client.post(_create_path(), json={
         "commandId": "create-conflict-turn",
         "inputTurn": {"content": "hello"},
@@ -380,47 +348,43 @@ def test_stale_attempt_returns_latest_authoritative_turn(
     assert payload["latestTurn"]["turnId"] == turn["turnId"]
 
 
-def test_start_failure_is_terminal_actionable_and_idempotent(
+def test_worker_start_failure_is_terminal_actionable_and_idempotent(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     import lib.conversation_sync.task_start as task_start_runtime
 
-    starts = []
 
-    def fail_start(*args, **kwargs):
-        starts.append(True)
-        return None, object()
 
-    monkeypatch.setattr(task_start_runtime, "start_conversation_attempt_executor", fail_start)
     body = {
         "commandId": "start-failure-command",
         "inputTurn": {"content": "hello"},
         "config": {"model": "gpt-4o"},
     }
     response = flask_client.post(_create_path(), json=body)
-    assert response.status_code == 500
-    payload = response.get_json()
-    assert payload["error"]["kind"] == "task_start_failed"
-    assert payload["error"]["retryable"] is True
-    assert payload["error"]["hint"]
-    assert payload["latestTurn"]["status"] == "failed"
-    assert payload["latestTurn"]["settlement"]["error"]["kind"] == \
-        "task_start_failed"
+    assert response.status_code == 200
+    accepted = response.get_json()
+    assert accepted['attempt']['status'] == 'pending'
+    worker_attempts.fail(accepted['attempt']['attemptId'], RuntimeError('Executor configuration refused'))
+    from lib.turn_lifecycle import get_turn
+    latest = get_turn(CONVERSATION_ID, accepted['turn']['turnId'], user_id=1)
+    assert latest["status"] == "failed"
+    error = latest["settlement"]["error"]
+    assert error["kind"] == "task_start_failed"
+    assert error["hint"]
 
     retry = flask_client.post(_create_path(), json=body).get_json()
     assert retry["idempotentReplay"] is True
-    assert retry["turn"]["turnId"] == payload["latestTurn"]["turnId"]
-    assert starts == [True]
+    assert retry["turn"]["turnId"] == latest["turnId"]
 
 
 def test_abort_targets_named_attempt_and_commits_terminal_event(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     from lib.turn_lifecycle import get_turn, read_events
     import lib.conversation_sync.task_start as task_start_runtime
 
-    monkeypatch.setattr(
-        task_start_runtime, "start_conversation_attempt_executor", _registered_start("abort-task"))
     created = flask_client.post(_create_path(), json={
         "commandId": "abort-only-this-attempt",
         "inputTurn": {"content": "hello"},
@@ -432,6 +396,7 @@ def test_abort_targets_named_attempt_and_commits_terminal_event(
     response = flask_client.post(f"/api/v4/attempts/{attempt_id}/abort")
     assert response.status_code == 200
     assert response.get_json()["attemptId"] == attempt_id
+    worker_attempts.cancel(attempt_id)
     turn = get_turn(CONVERSATION_ID, turn_id, user_id=1)
     assert turn["status"] == "interrupted"
     assert turn["settlement"]["cause"] == "user_abort"
@@ -441,14 +406,13 @@ def test_abort_targets_named_attempt_and_commits_terminal_event(
 
 
 def test_first_command_creates_conversation_and_turns_atomically(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     from lib.turn_lifecycle import list_turns
     import lib.conversation_sync.task_start as task_start_runtime
 
     fresh_id = "fresh-command-conversation"
-    monkeypatch.setattr(
-        task_start_runtime, "start_conversation_attempt_executor", _registered_start("first-task"))
     from tests._seed import delete_conversation
     delete_conversation(fresh_id)
 
@@ -473,6 +437,7 @@ def test_first_command_creates_conversation_and_turns_atomically(
 
 
 def test_settled_turn_command_creates_and_appends_typed_image_documents(
+    worker_attempts,
     flask_client, conversation_command_db,
 ):
     from lib.turn_lifecycle import list_turns
@@ -534,13 +499,12 @@ def test_settled_turn_command_creates_and_appends_typed_image_documents(
 
 
 def test_lane_and_delete_commands_use_stable_turn_identity(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     from lib.turn_lifecycle import list_turns, record_task_event
     import lib.conversation_sync.task_start as task_start_runtime
 
-    monkeypatch.setattr(
-        task_start_runtime, "start_conversation_attempt_executor", _registered_start("lane-task"))
     created = flask_client.post(_create_path(), json={
         "commandId": "lane-parent-command",
         "inputTurn": {"content": "anchor"},
@@ -562,10 +526,9 @@ def test_lane_and_delete_commands_use_stable_turn_identity(
     assert deleted_lane.status_code == 200
     assert deleted_lane.get_json()["deletedLaneId"] == lane_id
 
-    assert record_task_event({
+    assert worker_attempts.publish({
         "_attemptId": created["attempt"]["attemptId"],
         "_userId": 1,
-        "id": "lane-task",
         "status": "done",
         "finishReason": "stop",
         "content": "done",
@@ -582,13 +545,12 @@ def test_lane_and_delete_commands_use_stable_turn_identity(
     assert list_turns(CONVERSATION_ID, user_id=1)["turns"] == []
 
 
-def _settle_attempt(attempt_id: str, task_id: str, content: str = "done") -> None:
+def _settle_attempt(worker_attempts, attempt_id: str, task_id: str, content: str = "done") -> None:
     from lib.turn_lifecycle import record_task_event
 
-    assert record_task_event({
+    assert worker_attempts.publish({
         "_attemptId": attempt_id,
         "_userId": 1,
-        "id": task_id,
         "status": "done",
         "finishReason": "stop",
         "content": content,
@@ -623,27 +585,21 @@ def _regenerate(flask_client, turn, command_id: str):
 
 
 def test_regenerate_truncates_lane_tail_atomically(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     from lib.storage import get_storage_client
     from lib.turn_lifecycle import list_turns
     import lib.conversation_sync.task_start as task_start_runtime
 
-    task_ids = iter(("tail-task-1", "tail-task-2", "tail-task-3", "tail-task-4"))
 
-    def fake_start(conv_id, config, **kwargs):
-        task_id = next(task_ids)
-        kwargs["on_task_registered"](task_id)
-        return task_id, None
 
-    monkeypatch.setattr(
-        task_start_runtime, "start_conversation_attempt_executor", fake_start)
     first = _create_pair(flask_client, "tail-command-1", "one")
-    _settle_attempt(first["attempt"]["attemptId"], "tail-task-1")
+    _settle_attempt(worker_attempts, first["attempt"]["attemptId"], "tail-task-1")
     second = _create_pair(flask_client, "tail-command-2", "two")
-    _settle_attempt(second["attempt"]["attemptId"], "tail-task-2")
+    _settle_attempt(worker_attempts, second["attempt"]["attemptId"], "tail-task-2")
     third = _create_pair(flask_client, "tail-command-3", "three")
-    _settle_attempt(third["attempt"]["attemptId"], "tail-task-3")
+    _settle_attempt(worker_attempts, third["attempt"]["attemptId"], "tail-task-3")
 
     tail_ids = {
         second["submittedTurn"]["turnId"], second["turn"]["turnId"],
@@ -695,22 +651,16 @@ def test_regenerate_truncates_lane_tail_atomically(
 
 
 def test_regenerate_with_live_tail_turn_fails_closed(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     from lib.turn_lifecycle import list_turns
     import lib.conversation_sync.task_start as task_start_runtime
 
-    task_ids = iter(("live-tail-task-1", "live-tail-task-2"))
 
-    def fake_start(conv_id, config, **kwargs):
-        task_id = next(task_ids)
-        kwargs["on_task_registered"](task_id)
-        return task_id, None
 
-    monkeypatch.setattr(
-        task_start_runtime, "start_conversation_attempt_executor", fake_start)
     first = _create_pair(flask_client, "live-tail-command-1", "one")
-    _settle_attempt(first["attempt"]["attemptId"], "live-tail-task-1")
+    _settle_attempt(worker_attempts, first["attempt"]["attemptId"], "live-tail-task-1")
     second = _create_pair(flask_client, "live-tail-command-2", "two")
 
     target = next(
@@ -733,27 +683,18 @@ def test_regenerate_with_live_tail_turn_fails_closed(
 
 
 def test_regenerate_truncates_branch_lanes_rooted_in_the_tail(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     from lib.turn_lifecycle import list_turns
     import lib.conversation_sync.task_start as task_start_runtime
 
-    task_ids = iter((
-        "branch-tail-task-1", "branch-tail-task-2",
-        "branch-tail-task-3", "branch-tail-task-4",
-    ))
 
-    def fake_start(conv_id, config, **kwargs):
-        task_id = next(task_ids)
-        kwargs["on_task_registered"](task_id)
-        return task_id, None
 
-    monkeypatch.setattr(
-        task_start_runtime, "start_conversation_attempt_executor", fake_start)
     first = _create_pair(flask_client, "branch-tail-command-1", "one")
-    _settle_attempt(first["attempt"]["attemptId"], "branch-tail-task-1")
+    _settle_attempt(worker_attempts, first["attempt"]["attemptId"], "branch-tail-task-1")
     second = _create_pair(flask_client, "branch-tail-command-2", "anchor")
-    _settle_attempt(second["attempt"]["attemptId"], "branch-tail-task-2")
+    _settle_attempt(worker_attempts, second["attempt"]["attemptId"], "branch-tail-task-2")
 
     lane_response = flask_client.post(
         f"{_create_path()}/{second['submittedTurn']['turnId']}/lanes",
@@ -767,7 +708,7 @@ def test_regenerate_truncates_branch_lanes_rooted_in_the_tail(
     lane_id = lane_response.get_json()["lane"]["laneId"]
     branch = _create_pair(
         flask_client, "branch-tail-command-3", "branch", laneId=lane_id)
-    _settle_attempt(branch["attempt"]["attemptId"], "branch-tail-task-3")
+    _settle_attempt(worker_attempts, branch["attempt"]["attemptId"], "branch-tail-task-3")
 
     target = next(
         turn for turn in list_turns(CONVERSATION_ID, user_id=1)["turns"]
@@ -786,6 +727,7 @@ def test_regenerate_truncates_branch_lanes_rooted_in_the_tail(
 
 
 def test_only_completed_plan_task_mints_executable_plan_authority(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     import lib.conversation_sync.task_start as task_start_runtime
@@ -827,11 +769,6 @@ def test_only_completed_plan_task_mints_executable_plan_authority(
     assert forged.status_code == 200
     assert "planExecution" not in forged.get_json()["turn"]["projection"]
 
-    monkeypatch.setattr(
-        task_start_runtime,
-        "start_conversation_attempt_executor",
-        _registered_start("plan-provenance-task"),
-    )
     created = flask_client.post(_create_path(), json={
         "commandId": "create-real-plan-turn",
         "inputTurn": {
@@ -862,10 +799,9 @@ def test_only_completed_plan_task_mints_executable_plan_authority(
     assert settings["imageGenMode"] is False
     assert settings["activeFlow"] == ""
 
-    assert record_task_event({
+    assert worker_attempts.publish({
         "_attemptId": created["attempt"]["attemptId"],
         "_userId": 1,
-        "id": "plan-provenance-task",
         "status": "done",
         "finishReason": "stop",
         "content": (
@@ -900,6 +836,7 @@ def test_only_completed_plan_task_mints_executable_plan_authority(
 
 
 def test_execute_plan_fresh_context_is_exact_durable_and_idempotent(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     import lib.conversation_sync.task_start as task_start_runtime
@@ -915,15 +852,8 @@ def test_execute_plan_fresh_context_is_exact_durable_and_idempotent(
         "</proposed_plan>",
     )
     proposed = source["projection"]["proposedPlan"]
-    starts = []
 
-    def fake_start(conv_id, config, **kwargs):
-        starts.append(dict(config))
-        kwargs["on_task_registered"]("plan-execution-task")
-        return "plan-execution-task", None
 
-    monkeypatch.setattr(
-        task_start_runtime, "start_conversation_attempt_executor", fake_start)
     body = {
         "commandId": "execute-fresh-plan",
         "expectedProjectionRevision": source["projectionRevision"],
@@ -941,13 +871,13 @@ def test_execute_plan_fresh_context_is_exact_durable_and_idempotent(
     assert handoff["sourceProjectionRevision"] == source["projectionRevision"]
     assert handoff["planId"] == proposed["planId"]
     assert handoff["contextMode"] == "fresh"
-    assert starts[0]["planMode"] is False
-    assert starts[0]["humanGuidanceEnabled"] is True
+    assert worker_attempts.config(accepted["attempt"]["attemptId"])["planMode"] is False
+    assert worker_attempts.config(accepted["attempt"]["attemptId"])["humanGuidanceEnabled"] is True
 
     messages = build_api_messages(
         CONVERSATION_ID,
         accepted["turn"]["turnId"],
-        starts[0],
+        worker_attempts.config(accepted["attempt"]["attemptId"]),
         user_id=1,
     )
     assert len(messages) == 1
@@ -963,10 +893,10 @@ def test_execute_plan_fresh_context_is_exact_durable_and_idempotent(
         f"{_create_path()}/{source['turnId']}/plan/execute", json=body)
     assert replay.status_code == 200
     assert replay.get_json()["idempotentReplay"] is True
-    assert len(starts) == 1
 
 
 def test_execute_plan_current_context_keeps_prior_turns(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     import lib.conversation_sync.task_start as task_start_runtime
@@ -981,15 +911,8 @@ def test_execute_plan_current_context_keeps_prior_turns(
         "<proposed_plan>\nDo the current-context work.\n</proposed_plan>",
     )
     proposed = source["projection"]["proposedPlan"]
-    starts = []
 
-    def fake_start(conv_id, config, **kwargs):
-        starts.append(dict(config))
-        kwargs["on_task_registered"]("current-plan-task")
-        return "current-plan-task", None
 
-    monkeypatch.setattr(
-        task_start_runtime, "start_conversation_attempt_executor", fake_start)
     accepted = flask_client.post(
         f"{_create_path()}/{source['turnId']}/plan/execute",
         json={
@@ -1001,13 +924,14 @@ def test_execute_plan_current_context_keeps_prior_turns(
         },
     ).get_json()
     messages = build_api_messages(
-        CONVERSATION_ID, accepted["turn"]["turnId"], starts[0], user_id=1)
+        CONVERSATION_ID, accepted["turn"]["turnId"], worker_attempts.config(accepted["attempt"]["attemptId"]), user_id=1)
     assert messages[0]["content"] == "keep this context marker"
     assert messages[-1]["role"] == "user"
     assert "Do the current-context work." in messages[-1]["content"]
 
 
 def test_execute_plan_uses_the_expanded_branch_lane_context(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     import lib.conversation_sync.task_start as task_start_runtime
@@ -1024,17 +948,8 @@ def test_execute_plan_uses_the_expanded_branch_lane_context(
     )
     assert lane_response.status_code == 200
     lane_id = lane_response.get_json()["lane"]["laneId"]
-    starts = []
-    task_ids = iter(("branch-planner-task", "branch-plan-task"))
 
-    def fake_start(conv_id, config, **kwargs):
-        starts.append(dict(config))
-        task_id = next(task_ids)
-        kwargs["on_task_registered"](task_id)
-        return task_id, None
 
-    monkeypatch.setattr(
-        task_start_runtime, "start_conversation_attempt_executor", fake_start)
     planned = flask_client.post(_create_path(), json={
         "commandId": "create-branch-plan",
         "inputTurn": {"content": "plan this branch"},
@@ -1043,10 +958,9 @@ def test_execute_plan_uses_the_expanded_branch_lane_context(
         "parentTurnId": parent["turnId"],
     }).get_json()
     assert planned["turn"]["actor"] == "planner"
-    assert record_task_event({
+    assert worker_attempts.publish({
         "_attemptId": planned["attempt"]["attemptId"],
         "_userId": 1,
-        "id": "branch-planner-task",
         "status": "done",
         "finishReason": "stop",
         "content": (
@@ -1071,7 +985,7 @@ def test_execute_plan_uses_the_expanded_branch_lane_context(
     assert accepted["submittedTurn"]["laneId"] == lane_id
     assert accepted["turn"]["laneId"] == lane_id
     messages = build_api_messages(
-        CONVERSATION_ID, accepted["turn"]["turnId"], starts[1], user_id=1)
+        CONVERSATION_ID, accepted["turn"]["turnId"], worker_attempts.config(accepted["attempt"]["attemptId"]), user_id=1)
     assert messages[0]["role"] == "user"
     assert "branch anchor context" in messages[0]["content"]
     # The planner turn rides as its own assistant message (actor=planner),
@@ -1083,6 +997,7 @@ def test_execute_plan_uses_the_expanded_branch_lane_context(
 
 
 def test_execute_plan_rejects_a_mismatched_plan_identity_before_start(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     import lib.conversation_sync.task_start as task_start_runtime
@@ -1092,12 +1007,6 @@ def test_execute_plan_rejects_a_mismatched_plan_identity_before_start(
         "identity-plan-source",
         "planner",
         "<proposed_plan>\nUse the accepted identity.\n</proposed_plan>",
-    )
-    starts = []
-    monkeypatch.setattr(
-        task_start_runtime,
-        "start_conversation_attempt_executor",
-        lambda *args, **kwargs: starts.append(True),
     )
     response = flask_client.post(
         f"{_create_path()}/{source['turnId']}/plan/execute",
@@ -1111,10 +1020,10 @@ def test_execute_plan_rejects_a_mismatched_plan_identity_before_start(
     )
     assert response.status_code == 409
     assert response.get_json()["error"]["kind"] == "stale_projection"
-    assert starts == []
 
 
 def test_execute_plan_rejects_source_after_lane_advanced(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     import lib.conversation_sync.task_start as task_start_runtime
@@ -1127,12 +1036,6 @@ def test_execute_plan_rejects_source_after_lane_advanced(
     )
     _append_settled(
         flask_client, "later-discussion", "human", "please revise it")
-    starts = []
-    monkeypatch.setattr(
-        task_start_runtime,
-        "start_conversation_attempt_executor",
-        lambda *args, **kwargs: starts.append(True),
-    )
     response = flask_client.post(
         f"{_create_path()}/{source['turnId']}/plan/execute",
         json={
@@ -1145,10 +1048,10 @@ def test_execute_plan_rejects_source_after_lane_advanced(
     )
     assert response.status_code == 409
     assert response.get_json()["error"]["kind"] == "lane_advanced"
-    assert starts == []
 
 
 def test_storage_timeouts_keep_retryable_taxonomy(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     from lib.storage.errors import StorageError
@@ -1193,6 +1096,7 @@ def test_storage_timeouts_keep_retryable_taxonomy(
 
 
 def test_oversize_turn_is_actionable_413(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch,
 ):
     from lib.storage.errors import StorageError
@@ -1218,6 +1122,7 @@ def test_oversize_turn_is_actionable_413(
 
 
 def test_chat_acceptance_freezes_private_workspace_without_persisting_attachment(
+    worker_attempts,
     flask_client, conversation_command_db, monkeypatch, tmp_path,
 ):
     import lib.conversation_sync.task_start as task_start
@@ -1226,12 +1131,6 @@ def test_chat_acceptance_freezes_private_workspace_without_persisting_attachment
     from lib.conversations.repository import get_conversation
 
     monkeypatch.setattr(workspace, 'get_runtime_base', lambda: str(tmp_path))
-    captured = []
-    def start(conversation_id, config, **kwargs):
-        captured.append(dict(config))
-        kwargs['on_task_registered']('automatic-workspace-task')
-        return 'automatic-workspace-task', None
-    monkeypatch.setattr(task_start, 'start_conversation_attempt_executor', start)
     body = {'commandId': 'automatic-workspace-command',
             'config': {'chatMode': 'chat', 'projectPath': '',
                        'projectPaths': [], 'readOnlyPaths': [],
@@ -1244,11 +1143,10 @@ def test_chat_acceptance_freezes_private_workspace_without_persisting_attachment
                          include_execution_config=True)['config']
     assert frozen['_conversationWorkspace']['ownerUserId'] == 1
     assert frozen['_conversationWorkspace']['conversationId'] == CONVERSATION_ID
-    assert frozen['projectPath'] == captured[0]['projectPath']
+    assert frozen['projectPath'] == worker_attempts.config(attempt['attemptId'])['projectPath']
     assert not __import__('pathlib').Path(frozen['projectPath']).exists()
     saved = get_conversation(CONVERSATION_ID, user_id=1, include_messages=False)
     assert not saved.metadata.get('settings', {}).get('projectPath')
     replay = flask_client.post(_create_path(), json=body)
     assert replay.status_code == 200
     assert replay.get_json()['attempt']['attemptId'] == attempt['attemptId']
-    assert len(captured) == 1

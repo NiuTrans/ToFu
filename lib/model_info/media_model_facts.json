@@ -1,0 +1,670 @@
+{
+  "contract_version": "tofu.media-model-facts/v1",
+  "description": "Developer-maintained official media facts per exact Creator/Model identity, validated by lib/model_info/media_facts.py against contracts/model_routing_v2.schema.json (mediaPricing, mediaProfile). Read-only projections only: public_projection stamps official_media_pricing / official_media_profile while an owner registered none. Prices are USD list prices; estimated=true marks a per-unit amount the creator publishes while billing by tokens. Retired or shut-down models are not listed.",
+  "models": [
+    {
+      "creator_id": "openai",
+      "model_id": "gpt-image-2.5-sunburst",
+      "kind": "image_generation",
+      "media_profile": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["image"],
+        "sizes": ["1024x1024", "1536x1024", "1024x1536", "auto"],
+        "max_outputs": 10
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst.md",
+        "https://developers.openai.com/api/docs/guides/image-generation.md",
+        "https://developers.openai.com/api/reference/resources/images/methods/generate.md"
+      ],
+      "notes": "Token-priced only (text in $5, image in $8, image out $30 per 1M tokens); OpenAI publishes no per-image amount. Custom WIDTHxHEIGHT sizes are also accepted: 16px multiples, 1:3-3:1, edge <= 3840px."
+    },
+    {
+      "creator_id": "openai",
+      "model_id": "gpt-image-2",
+      "kind": "image_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_image", "price": 0.006, "tier": "1024x1024 \u00b7 low", "estimated": true},
+          {"unit": "per_image", "price": 0.005, "tier": "1024x1536 \u00b7 low", "estimated": true},
+          {"unit": "per_image", "price": 0.005, "tier": "1536x1024 \u00b7 low", "estimated": true},
+          {"unit": "per_image", "price": 0.053, "tier": "1024x1024 \u00b7 medium", "estimated": true},
+          {"unit": "per_image", "price": 0.041, "tier": "1024x1536 \u00b7 medium", "estimated": true},
+          {"unit": "per_image", "price": 0.041, "tier": "1536x1024 \u00b7 medium", "estimated": true},
+          {"unit": "per_image", "price": 0.211, "tier": "1024x1024 \u00b7 high", "estimated": true},
+          {"unit": "per_image", "price": 0.165, "tier": "1024x1536 \u00b7 high", "estimated": true},
+          {"unit": "per_image", "price": 0.165, "tier": "1536x1024 \u00b7 high", "estimated": true}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["image"],
+        "sizes": ["1024x1024", "1536x1024", "1024x1536", "2048x2048", "2048x1152", "3840x2160", "2160x3840", "auto"],
+        "max_outputs": 10
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/guides/image-generation.md",
+        "https://developers.openai.com/api/docs/pricing.md",
+        "https://developers.openai.com/api/docs/models/gpt-image-2.md",
+        "https://developers.openai.com/api/reference/resources/images/methods/generate.md"
+      ],
+      "notes": "Per-image amounts are the guide's output-only costs; billing is by tokens (text in $5, image in $8, image out $30 per 1M)."
+    },
+    {
+      "creator_id": "openai",
+      "model_id": "gpt-image-1.5",
+      "kind": "image_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_image", "price": 0.009, "tier": "1024x1024 \u00b7 low", "estimated": true},
+          {"unit": "per_image", "price": 0.013, "tier": "1024x1536 \u00b7 low", "estimated": true},
+          {"unit": "per_image", "price": 0.013, "tier": "1536x1024 \u00b7 low", "estimated": true},
+          {"unit": "per_image", "price": 0.034, "tier": "1024x1024 \u00b7 medium", "estimated": true},
+          {"unit": "per_image", "price": 0.05, "tier": "1024x1536 \u00b7 medium", "estimated": true},
+          {"unit": "per_image", "price": 0.05, "tier": "1536x1024 \u00b7 medium", "estimated": true},
+          {"unit": "per_image", "price": 0.133, "tier": "1024x1024 \u00b7 high", "estimated": true},
+          {"unit": "per_image", "price": 0.2, "tier": "1024x1536 \u00b7 high", "estimated": true},
+          {"unit": "per_image", "price": 0.2, "tier": "1536x1024 \u00b7 high", "estimated": true}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["image", "text"],
+        "sizes": ["1024x1024", "1536x1024", "1024x1536", "auto"],
+        "max_outputs": 10
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-image-1.5.md",
+        "https://developers.openai.com/api/docs/guides/image-generation.md",
+        "https://developers.openai.com/api/docs/pricing.md",
+        "https://developers.openai.com/api/reference/resources/images/methods/generate.md",
+        "https://developers.openai.com/api/docs/deprecations.md"
+      ],
+      "notes": "Deprecated; OpenAI shuts it down on 2026-12-01. Billed by tokens (text in $5, image in $8, text out $10, image out $32 per 1M)."
+    },
+    {
+      "creator_id": "openai",
+      "model_id": "gpt-image-1-mini",
+      "kind": "image_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_image", "price": 0.005, "tier": "1024x1024 \u00b7 low", "estimated": true},
+          {"unit": "per_image", "price": 0.006, "tier": "1024x1536 \u00b7 low", "estimated": true},
+          {"unit": "per_image", "price": 0.006, "tier": "1536x1024 \u00b7 low", "estimated": true},
+          {"unit": "per_image", "price": 0.011, "tier": "1024x1024 \u00b7 medium", "estimated": true},
+          {"unit": "per_image", "price": 0.015, "tier": "1024x1536 \u00b7 medium", "estimated": true},
+          {"unit": "per_image", "price": 0.015, "tier": "1536x1024 \u00b7 medium", "estimated": true},
+          {"unit": "per_image", "price": 0.036, "tier": "1024x1024 \u00b7 high", "estimated": true},
+          {"unit": "per_image", "price": 0.052, "tier": "1024x1536 \u00b7 high", "estimated": true},
+          {"unit": "per_image", "price": 0.052, "tier": "1536x1024 \u00b7 high", "estimated": true}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["image"],
+        "sizes": ["1024x1024", "1536x1024", "1024x1536", "auto"],
+        "max_outputs": 10
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-image-1-mini.md",
+        "https://developers.openai.com/api/docs/guides/image-generation.md",
+        "https://developers.openai.com/api/docs/pricing.md",
+        "https://developers.openai.com/api/reference/resources/images/methods/generate.md",
+        "https://developers.openai.com/api/docs/deprecations.md"
+      ],
+      "notes": "Deprecated; OpenAI shuts it down on 2026-12-01. Billed by tokens (text in $2, image in $2.50, image out $8 per 1M)."
+    },
+    {
+      "creator_id": "openai",
+      "model_id": "tts-1",
+      "kind": "speech_synthesis",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [{"unit": "per_million_characters", "price": 15.0, "tier": "input text characters"}]
+      },
+      "media_profile": {
+        "input_modalities": ["text"],
+        "output_modalities": ["audio"],
+        "voices": ["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"],
+        "audio_formats": ["mp3", "opus", "aac", "flac", "wav", "pcm"],
+        "max_input_chars": 4096
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/tts-1.md",
+        "https://developers.openai.com/api/docs/pricing.md",
+        "https://developers.openai.com/api/docs/guides/text-to-speech.md",
+        "https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create.md"
+      ],
+      "notes": "Deprecated; OpenAI shuts it down on 2027-01-06."
+    },
+    {
+      "creator_id": "openai",
+      "model_id": "tts-1-hd",
+      "kind": "speech_synthesis",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [{"unit": "per_million_characters", "price": 30.0, "tier": "input text characters"}]
+      },
+      "media_profile": {
+        "input_modalities": ["text"],
+        "output_modalities": ["audio"],
+        "voices": ["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"],
+        "audio_formats": ["mp3", "opus", "aac", "flac", "wav", "pcm"],
+        "max_input_chars": 4096
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/tts-1-hd.md",
+        "https://developers.openai.com/api/docs/pricing.md",
+        "https://developers.openai.com/api/docs/guides/text-to-speech.md",
+        "https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create.md"
+      ],
+      "notes": "Deprecated; OpenAI shuts it down on 2027-01-06."
+    },
+    {
+      "creator_id": "openai",
+      "model_id": "gpt-4o-mini-tts",
+      "kind": "speech_synthesis",
+      "media_profile": {
+        "input_modalities": ["text"],
+        "output_modalities": ["audio"],
+        "voices": ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse", "marin", "cedar"],
+        "audio_formats": ["mp3", "opus", "aac", "flac", "wav", "pcm"],
+        "max_input_chars": 4096
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-4o-mini-tts.md",
+        "https://developers.openai.com/api/docs/guides/text-to-speech.md",
+        "https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create.md"
+      ],
+      "notes": "Token-priced only (text in $0.60, audio out $12 per 1M tokens). Deprecated; OpenAI shuts it down on 2027-01-06."
+    },
+    {
+      "creator_id": "openai",
+      "model_id": "whisper-1",
+      "kind": "speech_recognition",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [{"unit": "per_minute", "price": 0.006, "tier": "input audio"}]
+      },
+      "media_profile": {
+        "input_modalities": ["audio"],
+        "output_modalities": ["text"],
+        "audio_formats": ["flac", "mp3", "mp4", "mpeg", "mpga", "m4a", "ogg", "wav", "webm"],
+        "max_audio_bytes": 26214400
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/whisper-1.md",
+        "https://developers.openai.com/api/docs/pricing.md",
+        "https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create.md",
+        "https://developers.openai.com/api/docs/guides/speech-to-text.md"
+      ],
+      "notes": "The 25 MB upload limit is read as 25 MiB, the same ceiling lib/transcription applies. Deprecated; OpenAI shuts it down on 2027-02-26."
+    },
+    {
+      "creator_id": "openai",
+      "model_id": "gpt-4o-transcribe",
+      "kind": "speech_recognition",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [{"unit": "per_minute", "price": 0.006, "tier": "input audio", "estimated": true}]
+      },
+      "media_profile": {
+        "input_modalities": ["audio", "text"],
+        "output_modalities": ["text"],
+        "audio_formats": ["flac", "mp3", "mp4", "mpeg", "mpga", "m4a", "ogg", "wav", "webm"],
+        "max_audio_bytes": 26214400
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/pricing.md",
+        "https://developers.openai.com/api/docs/models/gpt-4o-transcribe.md",
+        "https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create.md",
+        "https://developers.openai.com/api/docs/guides/speech-to-text.md"
+      ],
+      "notes": "Billed by tokens (audio in $2.50, text out $10 per 1M); the per-minute amount is OpenAI's estimate. Deprecated; OpenAI shuts it down on 2027-02-26."
+    },
+    {
+      "creator_id": "openai",
+      "model_id": "gpt-4o-mini-transcribe",
+      "kind": "speech_recognition",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [{"unit": "per_minute", "price": 0.003, "tier": "input audio", "estimated": true}]
+      },
+      "media_profile": {
+        "input_modalities": ["audio", "text"],
+        "output_modalities": ["text"],
+        "audio_formats": ["flac", "mp3", "mp4", "mpeg", "mpga", "m4a", "ogg", "wav", "webm"],
+        "max_audio_bytes": 26214400
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/pricing.md",
+        "https://developers.openai.com/api/docs/models/gpt-4o-mini-transcribe.md",
+        "https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create.md",
+        "https://developers.openai.com/api/docs/guides/speech-to-text.md"
+      ],
+      "notes": "Billed by tokens (audio in $1.25, text out $5 per 1M); the per-minute amount is OpenAI's estimate. Deprecated; OpenAI shuts it down on 2027-02-26."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "gemini-3.1-flash-image",
+      "kind": "image_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_image", "price": 0.045, "tier": "0.5K \u00b7 Standard", "estimated": true},
+          {"unit": "per_image", "price": 0.067, "tier": "1K \u00b7 Standard", "estimated": true},
+          {"unit": "per_image", "price": 0.101, "tier": "2K \u00b7 Standard", "estimated": true},
+          {"unit": "per_image", "price": 0.151, "tier": "4K \u00b7 Standard", "estimated": true}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image", "video"],
+        "output_modalities": ["image", "text"],
+        "aspect_ratios": ["1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9"],
+        "resolutions": ["0.5K", "1K", "2K", "4K"]
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-image",
+        "https://ai.google.dev/gemini-api/docs/image-generation"
+      ],
+      "notes": "Nano Banana 2. Billed by tokens (image out $60 per 1M); per-image amounts are Google's stated equivalents."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "gemini-3-pro-image",
+      "kind": "image_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_image", "price": 0.134, "tier": "1K/2K \u00b7 Standard", "estimated": true},
+          {"unit": "per_image", "price": 0.24, "tier": "4K \u00b7 Standard", "estimated": true}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["image", "text"],
+        "aspect_ratios": ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
+        "resolutions": ["1K", "2K", "4K"]
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-3-pro-image",
+        "https://ai.google.dev/gemini-api/docs/image-generation"
+      ],
+      "notes": "Nano Banana Pro. Billed by tokens (image out $120 per 1M); per-image amounts are Google's stated equivalents. Accepts up to 14 reference images."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "gemini-2.5-flash-image",
+      "kind": "image_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_image", "price": 0.039, "tier": "1K \u00b7 Standard", "estimated": true},
+          {"unit": "per_image", "price": 0.0195, "tier": "1K \u00b7 Batch/Flex", "estimated": true},
+          {"unit": "per_image", "price": 0.0702, "tier": "1K \u00b7 Priority", "estimated": true}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["image", "text"],
+        "aspect_ratios": ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
+        "resolutions": ["1K"]
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-image",
+        "https://ai.google.dev/gemini-api/docs/image-generation"
+      ],
+      "notes": "Billed by tokens (image out $30 per 1M, 1290 tokens per image). Deprecated; Google shuts it down on 2027-03-15."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "gemini-nano-banana-2.1",
+      "kind": "image_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_image", "price": 0.0336, "tier": "1K \u00b7 Standard", "estimated": true},
+          {"unit": "per_image", "price": 0.0504, "tier": "2K \u00b7 Standard", "estimated": true},
+          {"unit": "per_image", "price": 0.113, "tier": "4K \u00b7 Standard", "estimated": true},
+          {"unit": "per_image", "price": 0.0168, "tier": "1K \u00b7 Batch", "estimated": true},
+          {"unit": "per_image", "price": 0.0252, "tier": "2K \u00b7 Batch", "estimated": true},
+          {"unit": "per_image", "price": 0.0567, "tier": "4K \u00b7 Batch", "estimated": true}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image", "video"],
+        "output_modalities": ["image", "text"],
+        "aspect_ratios": ["1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9"],
+        "resolutions": ["1K", "2K", "4K"]
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-nano-banana-2.1",
+        "https://ai.google.dev/gemini-api/docs/image-generation"
+      ],
+      "notes": "Billed by tokens (image out $30 per 1M); per-image amounts are Google's stated equivalents."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "gemini-3.1-flash-lite-image",
+      "kind": "image_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_image", "price": 0.0336, "tier": "1K \u00b7 Standard", "estimated": true},
+          {"unit": "per_image", "price": 0.0168, "tier": "1K \u00b7 Batch", "estimated": true}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image", "video"],
+        "output_modalities": ["image", "text"],
+        "aspect_ratios": ["1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
+        "resolutions": ["1K"]
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite-image"
+      ],
+      "notes": "Nano Banana 2 Lite. Billed by tokens (image out $30 per 1M); per-image amounts are Google's stated equivalents."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "veo-3.1-generate-001",
+      "kind": "video_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_second", "price": 0.4, "tier": "720p/1080p \u00b7 with audio"},
+          {"unit": "per_second", "price": 0.6, "tier": "4K \u00b7 with audio"},
+          {"unit": "per_second", "price": 0.2, "tier": "720p/1080p \u00b7 video only"},
+          {"unit": "per_second", "price": 0.4, "tier": "4K \u00b7 video only"}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["video"],
+        "aspect_ratios": ["16:9", "9:16"],
+        "resolutions": ["720p", "1080p", "4K"],
+        "durations_s": [4, 6, 8],
+        "max_outputs": 4,
+        "native_audio": true
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://cloud.google.com/vertex-ai/generative-ai/pricing?hl=en",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/provisioned-throughput/supported-models?hl=en",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/veo/3-1-generate?hl=en",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions?hl=en"
+      ],
+      "notes": "Gemini Enterprise Agent Platform (Vertex AI) only; the Gemini API Veo ids are shut down. The price table prints '/ 1 count'; provisioned throughput meters Veo in output video seconds, so the rates are per second."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "veo-3.1-fast-generate-001",
+      "kind": "video_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_second", "price": 0.1, "tier": "720p \u00b7 with audio"},
+          {"unit": "per_second", "price": 0.12, "tier": "1080p \u00b7 with audio"},
+          {"unit": "per_second", "price": 0.3, "tier": "4K \u00b7 with audio"},
+          {"unit": "per_second", "price": 0.08, "tier": "720p \u00b7 video only"},
+          {"unit": "per_second", "price": 0.1, "tier": "1080p \u00b7 video only"},
+          {"unit": "per_second", "price": 0.25, "tier": "4K \u00b7 video only"}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["video"],
+        "aspect_ratios": ["16:9", "9:16"],
+        "resolutions": ["720p", "1080p"],
+        "durations_s": [4, 6, 8],
+        "max_outputs": 4,
+        "native_audio": true
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://cloud.google.com/vertex-ai/generative-ai/pricing?hl=en",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/provisioned-throughput/supported-models?hl=en",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/veo/3-1-generate?hl=en",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions?hl=en"
+      ],
+      "notes": "Agent Platform only. The model doc lists 720p/1080p output while the price table also prices 4K; per-second unit as for veo-3.1-generate-001."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "veo-3.1-lite-generate-001",
+      "kind": "video_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_second", "price": 0.05, "tier": "720p \u00b7 with audio"},
+          {"unit": "per_second", "price": 0.08, "tier": "1080p \u00b7 with audio"},
+          {"unit": "per_second", "price": 0.03, "tier": "720p \u00b7 video only"},
+          {"unit": "per_second", "price": 0.05, "tier": "1080p \u00b7 video only"}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text"],
+        "output_modalities": ["video"],
+        "aspect_ratios": ["16:9", "9:16"],
+        "resolutions": ["720p", "1080p"],
+        "durations_s": [4, 6, 8],
+        "max_outputs": 4,
+        "native_audio": true
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://cloud.google.com/vertex-ai/generative-ai/pricing?hl=en",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/veo/3-1-generate?hl=en"
+      ],
+      "notes": "Agent Platform preview. Its modality table lists text input only although its capability list mentions image-to-video; per-second unit as for veo-3.1-generate-001."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "gemini-omni-1.2-flash",
+      "kind": "video_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_second", "price": 0.023, "tier": "360p", "estimated": true},
+          {"unit": "per_second", "price": 0.07, "tier": "720p \u00b7 with audio", "estimated": true},
+          {"unit": "per_second", "price": 0.104, "tier": "1080p \u00b7 upsampled", "estimated": true},
+          {"unit": "per_second", "price": 0.209, "tier": "4K \u00b7 upsampled", "estimated": true}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image", "video"],
+        "output_modalities": ["video", "text"],
+        "aspect_ratios": ["16:9", "9:16"],
+        "resolutions": ["360p", "720p", "1080p", "4K"],
+        "durations_s": [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        "native_audio": true
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-omni-flash",
+        "https://ai.google.dev/gemini-api/docs/omni",
+        "https://ai.google.dev/gemini-api/docs/video"
+      ],
+      "notes": "Served through the Interactions API; Google's replacement for the Gemini API Veo ids. Billed by output tokens ($12 per 1M video tokens); per-second amounts are Google's stated effective prices."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "gemini-omni-1.1-flash",
+      "kind": "video_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [{"unit": "per_second", "price": 0.1, "tier": "720p", "estimated": true}]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image", "video"],
+        "output_modalities": ["video"],
+        "resolutions": ["360p", "720p", "1080p", "4K"],
+        "durations_s": [3, 4, 5, 6, 7, 8, 9, 10]
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-omni-flash"
+      ],
+      "notes": "Billed by output tokens ($17.50 per 1M video tokens). From 2026-12-03 Google routes its requests to gemini-omni-1.2-flash at 1.2 rates."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "gemini-3.8-flash-tts",
+      "kind": "speech_synthesis",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_second", "price": 0.000225, "tier": "output audio \u00b7 through 2026-12-31", "estimated": true},
+          {"unit": "per_second", "price": 0.00045, "tier": "output audio \u00b7 from 2027-01-01", "estimated": true}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text"],
+        "output_modalities": ["audio"],
+        "voices": ["Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede", "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba", "Despina", "Erinome", "Algenib", "Rasalgethi", "Laomedeia", "Achernar", "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat"],
+        "audio_formats": ["wav", "l16", "mulaw", "alaw"]
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash-tts",
+        "https://ai.google.dev/gemini-api/docs/speech-generation"
+      ],
+      "notes": "Billed by tokens (text in $0.50, audio out $9 per 1M through 2026-12-31; doubled from 2027-01-01). Per-second amounts convert Google's per-10s equivalents."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "gemini-3.8-flash-lite-tts",
+      "kind": "speech_synthesis",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [
+          {"unit": "per_second", "price": 0.00015, "tier": "output audio \u00b7 through 2026-12-31", "estimated": true},
+          {"unit": "per_second", "price": 0.0003, "tier": "output audio \u00b7 from 2027-01-01", "estimated": true}
+        ]
+      },
+      "media_profile": {
+        "input_modalities": ["text"],
+        "output_modalities": ["audio"],
+        "voices": ["Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede", "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba", "Despina", "Erinome", "Algenib", "Rasalgethi", "Laomedeia", "Achernar", "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat"],
+        "audio_formats": ["wav", "l16", "mulaw", "alaw"]
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash-lite-tts",
+        "https://ai.google.dev/gemini-api/docs/speech-generation"
+      ],
+      "notes": "Billed by tokens (text in $0.50, audio out $6 per 1M through 2026-12-31). Per-second amounts convert Google's per-10s equivalents."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "lyria-3.5",
+      "kind": "audio_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [{"unit": "per_request", "price": 0.08, "tier": "full song"}]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["audio", "text"],
+        "audio_formats": ["mp3", "wav"]
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models/lyria-3.5",
+        "https://ai.google.dev/gemini-api/docs/music-generation"
+      ],
+      "notes": "Text output carries the lyrics. Songs last a couple of minutes and are steered by the prompt, so no fixed durations are listed."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "lyria-3-pro-preview",
+      "kind": "audio_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [{"unit": "per_request", "price": 0.08, "tier": "full song"}]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["audio", "text"],
+        "max_outputs": 1,
+        "audio_formats": ["mp3"]
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models/lyria-3-pro-preview",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/lyria/lyria-3?hl=en"
+      ],
+      "notes": "Preview; Google recommends lyria-3.5."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "lyria-3-clip-preview",
+      "kind": "audio_generation",
+      "media_pricing": {
+        "currency": "USD",
+        "rates": [{"unit": "per_request", "price": 0.04, "tier": "30 s clip"}]
+      },
+      "media_profile": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["audio", "text"],
+        "durations_s": [30],
+        "max_outputs": 1,
+        "audio_formats": ["mp3"]
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/models/lyria-3-clip-preview",
+        "https://ai.google.dev/gemini-api/docs/music-generation",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/lyria/lyria-3?hl=en"
+      ],
+      "notes": "Preview; every clip is 30 seconds."
+    },
+    {
+      "creator_id": "google",
+      "model_id": "lyria-002",
+      "kind": "audio_generation",
+      "media_profile": {
+        "input_modalities": ["text"],
+        "output_modalities": ["audio"],
+        "max_outputs": 4,
+        "audio_formats": ["wav"]
+      },
+      "checked_at": "2026-11-06",
+      "source_urls": [
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/lyria/lyria-002?hl=en",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/google-models?hl=en"
+      ],
+      "notes": "Agent Platform only. Its price row ('$0.06 / 1 count') does not define the count, so no media price is recorded. Clips are at most 32.8 s."
+    }
+  ]
+}

@@ -53,7 +53,7 @@ def test_policy_is_decided_once_at_enqueue(channel, records):
     _policy(channel, OTHER, 'never')
     command = _enqueue(channel, COMMAND, 'to me')
     auto = _enqueue(channel, GROUP, 'to group')
-    draft = _enqueue(channel, 'dx:uid:2002', 'to person')  # default policy: draft
+    draft = _enqueue(channel, 'dx:uid:2002', 'to person')  # default policy notify: a draft
     assert (command.state, auto.state, draft.state) == ('queued', 'queued', 'draft')
     with pytest.raises(ChannelError) as refused:
         _enqueue(channel, OTHER, 'never sent')
@@ -157,11 +157,12 @@ def test_draft_approval_queues_and_discard_removes(channel):
     drop = _enqueue(channel, 'dx:uid:2002', 'discard me')
     sender = Sender()
     outbox.execute(OWNER, sender, channel='dx', store=channel)
-    assert sender.sent == []
+    # Nothing reaches the person; the owner gets one notice per draft (C11).
+    assert [thread for thread, _, _, _ in sender.sent] == [COMMAND, COMMAND]
     assert outbox.approve(OWNER, keep.id, store=channel).state == 'queued'
     assert outbox.discard(OWNER, drop.id, store=channel).state == 'discarded'
     outbox.execute(OWNER, sender, channel='dx', store=channel)
-    assert [text for _, text, _, _ in sender.sent] == [f'{DISCLOSURE_LABEL} approve me']
+    assert [text for thread, text, _, _ in sender.sent if thread != COMMAND] == [f'{DISCLOSURE_LABEL} approve me']
     assert outbox.approve(OWNER, keep.id, store=channel).state == 'sent'  # idempotent
     with pytest.raises(ChannelError):
         outbox.discard(OWNER, keep.id, store=channel)

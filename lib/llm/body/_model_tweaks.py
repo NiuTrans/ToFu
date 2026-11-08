@@ -93,7 +93,7 @@ def _assistant_text(content) -> str:
 def _inject_claude_reasoning_details(messages: list, model: str) -> None:
     """Rebuild OpenRouter-style ``reasoning_details`` on replayed Claude turns.
 
-    The sankuai OpenAI-compat gateway streams a Claude thinking block as
+    The example-corp OpenAI-compat gateway streams a Claude thinking block as
     ``reasoning_content`` text + a separate ``reasoning_details`` chunk
     carrying the opaque ``signature``.  On a follow-up request (Continue, or
     just the next tool-loop turn) the gateway requires that signed thinking

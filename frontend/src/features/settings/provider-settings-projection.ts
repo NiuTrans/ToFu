@@ -8,6 +8,7 @@ import type {
   ModelRoutingCredentialMetadata,
   ModelRoutingDeployment,
   ModelRoutingDocument,
+  ModelRoutingMediaPricing,
   ModelRoutingModel,
   ModelRoutingOffering,
   ModelRoutingPricing,
@@ -24,6 +25,8 @@ interface ModelMetadata {
   readonly modelNames: Record<string, string>;
   readonly modelReleaseDates: Record<string, string>;
   readonly modelListPricing: Record<string, ModelRoutingPricing>;
+  /** Registered media prices, else the maintained official projection. */
+  readonly modelMediaPricing: Record<string, ModelRoutingMediaPricing>;
   readonly modelLifecycles: Record<string, ModelRoutingModel['lifecycle']>;
 }
 
@@ -59,15 +62,18 @@ function catalogMetadata(models: ReadonlyArray<ModelRoutingModel>): ModelMetadat
   const modelNames: ModelMetadata['modelNames'] = {};
   const modelReleaseDates: ModelMetadata['modelReleaseDates'] = {};
   const modelListPricing: ModelMetadata['modelListPricing'] = {};
+  const modelMediaPricing: ModelMetadata['modelMediaPricing'] = {};
   const modelLifecycles: ModelMetadata['modelLifecycles'] = {};
   for (const model of models) {
     const key = (model.creator_id || '') + '::' + (model.model_id || '');
     modelNames[key] = model.display_name || model.model_id;
     if (model.release_date) modelReleaseDates[key] = model.release_date;
     if (model.list_pricing) modelListPricing[key] = model.list_pricing;
+    const mediaPricing = model.media_pricing || model.official_media_pricing;
+    if (mediaPricing) modelMediaPricing[key] = mediaPricing;
     if (model.lifecycle) modelLifecycles[key] = model.lifecycle;
   }
-  return {modelNames, modelReleaseDates, modelListPricing, modelLifecycles};
+  return {modelNames, modelReleaseDates, modelListPricing, modelMediaPricing, modelLifecycles};
 }
 
 function deploymentsByAccess(
@@ -142,6 +148,8 @@ export interface ProviderSupplyRow {
   readonly releaseDate: string;
   readonly pricing: ModelRoutingPricing | null;
   readonly catalogPrice: boolean;
+  /** The Model's media reference price; Offerings carry no media price. */
+  readonly mediaPricing: ModelRoutingMediaPricing | null;
   readonly wireIds: ReadonlyArray<string>;
   readonly deploymentByWire: Readonly<Record<string, number>>;
   readonly capabilities: ReadonlyArray<string>;
@@ -180,6 +188,7 @@ export function providerSupplyRows(context: ProviderSettingsContext | null): Pro
       releaseDate: pending ? '' : (context.modelReleaseDates[modelKey] || ''),
       pricing: pending ? null : (offering.actual_pricing || context.modelListPricing[modelKey] || null),
       catalogPrice: !pending && !offering.actual_pricing && !!context.modelListPricing[modelKey],
+      mediaPricing: pending ? null : (context.modelMediaPricing[modelKey] || null),
       wireIds: [...wireIds], deploymentByWire,
       capabilities: (offering.capabilities || []).slice(),
     });

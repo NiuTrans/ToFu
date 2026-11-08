@@ -21,6 +21,7 @@ from logging.handlers import RotatingFileHandler
 
 from lib.logging_pkg.log_policy import LOG_FILE_MODE, stream_backup_count, stream_max_bytes
 from lib.logging_pkg.log_record_values import text_value, sanitize_value
+from lib.logging_pkg.log_shared_rotation import SharedRotationMixin
 
 
 SCHEMA_VERSION = 1
@@ -41,7 +42,7 @@ _TRACE_PATTERNS = (
 )
 
 
-class _PrivateRotatingFileHandler(RotatingFileHandler):
+class _PrivateRotatingFileHandler(SharedRotationMixin, RotatingFileHandler):
     """Keep each newly opened incident inode private across rollovers."""
 
     def _open(self):

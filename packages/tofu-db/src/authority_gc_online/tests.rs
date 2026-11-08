@@ -853,6 +853,54 @@ fn an_epoch_ending_at_ninety_percent_of_the_catalog_ceiling_keeps_the_minimum_in
     );
 }
 
+/// docs/TOFUDB_BLOCK_READ_PATH.md, "Published catalog location table": the
+/// first table needs no authority hold. While a foreground holder keeps the
+/// mutex, every epoch's capture defers, yet the driver publishes the table of
+/// the installed catalog (live 2026-11-07 the capture deferred twice and the
+/// authority's table appeared only after five minutes).
+#[test]
+fn driver_publishes_the_first_catalog_location_table_while_epochs_defer() {
+    use crate::block::BlockId;
+    use crate::payload_manifest::{PayloadManifest, PayloadSegmentReference};
+    let (_vfs, database) = authority();
+    let blocks = {
+        let mut guard = database.lock().unwrap();
+        let blocks = guard.block_store_shared();
+        let store = blocks.payload_segment_store().unwrap();
+        let payloads: std::collections::BTreeMap<BlockId, Vec<u8>> = (0..8)
+            .map(|index| format!("first-table-{index}").into_bytes())
+            .map(|payload| (BlockId::for_payload(&payload), payload))
+            .collect();
+        let created = store
+            .create(uuid::Uuid::from_u128(41), payloads.keys().copied().collect(), |id| Ok(payloads[&id].clone()))
+            .unwrap();
+        let reference =
+            PayloadSegmentReference::new(created.metadata(), created.first_block_id(), created.last_block_id()).unwrap();
+        guard.engine_mut_for_test()
+            .publish_payload_manifest_for_test(PayloadManifest::new(vec![reference]).unwrap())
+            .unwrap();
+        blocks
+    };
+    assert!(blocks.published_catalog_locations_for_test().is_none());
+    let mut collector = OnlineGarbageCollector::with_min_epoch_interval(test_budget(), Duration::from_millis(25));
+    collector.defer_first_epoch(Duration::from_millis(500));
+    let driver =
+        OnlineGarbageCollectionDriver::start_with_collector(&database, collector, false).unwrap();
+    let observer = driver.observer();
+    let foreground = database.lock().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while blocks.published_catalog_locations_for_test().is_none() || observer.metrics().deferred_epochs == 0 {
+        assert!(std::time::Instant::now() < deadline, "no first table while the capture defers");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (publication, table) = blocks.published_catalog_locations_for_test().unwrap();
+    assert_eq!(publication, blocks.installed_catalog_publication_for_test());
+    assert_eq!(table.located_blocks(), 8);
+    assert_eq!(observer.metrics().marks_built, 0, "no epoch got past its capture");
+    drop(foreground);
+    driver.stop_and_join().unwrap();
+}
+
 #[test]
 fn driver_runs_epochs_and_reports_health() {
     let (_vfs, database) = authority();

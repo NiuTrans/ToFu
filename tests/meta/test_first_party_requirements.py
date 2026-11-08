@@ -34,7 +34,7 @@ def _distributions() -> dict[str, tuple[str, dict]]:
 
 def test_first_party_requirements_admit_the_checkout_versions():
     distributions = _distributions()
-    assert {'tofu-environments', 'tofu-meituan-environments'} <= distributions.keys()
+    assert {'tofu-environments', 'tofu-yourprovider-environments'} <= distributions.keys()
     excluded = []
     for path, project in distributions.values():
         requirements = list(project.get('dependencies') or [])

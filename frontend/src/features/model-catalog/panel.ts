@@ -10,10 +10,28 @@
 
 import './model-catalog.css';
 import { brandIconHtml } from '../../core/model-brand-icons';
+import {
+  createModelCapabilityTaxonomy,
+  type ModelCapabilityTaxonomy,
+} from '../../core/model-capability-taxonomy';
+import { featureRegistry } from '../../feature-registry';
 import { _i18nLang, t } from '../../i18n';
 import { modelPricePresentation } from '../settings/model-price-localization';
 import { fetchAaScores, refreshAaScores, saveAaKey } from './api';
-import { buildVendorGroups, countAaScoredModels } from './model';
+import {
+  capabilityLabel,
+  formatMediaRate,
+  kindGlyph,
+  kindLabel,
+  mediaFactLines,
+  mediaPriceSummary,
+} from './kinds';
+import {
+  buildVendorGroups,
+  countAaScoredModels,
+  countModelKinds,
+  filterGroupsByKind,
+} from './model';
 import { createReasoningEditor } from '../settings/reasoning-editor';
 import type { ModelRoutingInferenceProfile } from '../../api/api-v1-model-routing.generated';
 import {
@@ -42,6 +60,18 @@ let aaBusy = false;
 let aaGuideOpen = false;
 let aaError = '';
 let aaRequestGeneration = 0;
+/** Selected kind chip; null shows every kind. */
+let kindFilter: string | null = null;
+
+type KindTaxonomy = Pick<ModelCapabilityTaxonomy, 'modelKind' | 'isMediaKind' | 'getModelKinds'>;
+const fallbackTaxonomy: KindTaxonomy = createModelCapabilityTaxonomy();
+
+/** The composition's server-projected taxonomy, else the compiled fallback. */
+function taxonomy(): KindTaxonomy {
+  const live = featureRegistry as unknown as Partial<KindTaxonomy>;
+  return typeof live.modelKind === 'function' && typeof live.isMediaKind === 'function'
+    && typeof live.getModelKinds === 'function' ? live as KindTaxonomy : fallbackTaxonomy;
+}
 
 function container(): HTMLElement | null {
   return document.getElementById('stgModelCatalog');
@@ -349,10 +379,12 @@ function renderModel(row: ModelCatalogRow, editors: Map<string, HTMLElement>): H
     else openModels.delete(identity);
   });
 
+  const media = taxonomy().isMediaKind(row.kind);
   const summary = element('summary', 'stg-mc-model-head');
   const title = element('div', 'stg-mc-model-title');
   title.innerHTML = brandIconHtml(row.brand, 21);
   title.appendChild(element('strong', 'stg-mc-model-name', row.displayName));
+  if (row.kind !== 'chat') title.appendChild(renderKindBadge(row.kind));
   const brief = element('div', 'stg-mc-model-brief');
   if (row.registrationState && row.registrationState !== 'ready') {
     const state = element('span', 'stg-mc-meta', t(row.registrationState === 'disabled'
@@ -360,24 +392,33 @@ function renderModel(row: ModelCatalogRow, editors: Map<string, HTMLElement>): H
     state.title = (row.registrationIssues ?? []).join('; ');
     brief.appendChild(state);
   }
+  // The AA Intelligence Index scores conversation models only.
   const intelligence = row.aa?.intelligence;
-  if (intelligence !== null && intelligence !== undefined) {
+  if (row.kind === 'chat' && intelligence !== null && intelligence !== undefined) {
     const score = element('span', 'stg-mc-score', `AA ${Number(intelligence.toFixed(1))}`);
     score.title = t('modelCatalog.aa.scoreMatched', {
       score: Number(intelligence.toFixed(1)),
       name: row.aa?.aa_name || row.displayName,
     });
     brief.appendChild(score);
-  } else {
+  } else if (row.kind === 'chat') {
     brief.appendChild(element('span', 'stg-mc-score na', 'AA —'));
   }
-  const context = element('span', 'stg-mc-meta', formatContextWindow(row.contextWindow));
-  context.title = '上下文窗口';
+  // A media kind is described by its media facts; a token context window
+  // says nothing about an image, video or speech model.
+  if (!media) {
+    const context = element('span', 'stg-mc-meta', formatContextWindow(row.contextWindow));
+    context.title = '上下文窗口';
+    brief.appendChild(context);
+  }
   const release = element('span', 'stg-mc-meta', row.releaseDate || '—');
   release.title = '发布时间';
-  const price = element('span', 'stg-mc-meta', formatPricingCompact(row.pricing));
-  price.title = '输入 / 输出 · 每 1M tokens';
-  brief.append(context, release, price);
+  const mediaPrice = media
+    ? mediaPriceSummary(row.mediaPricing, (value) => formatPrice(value, row.mediaPricing?.currency))
+    : null;
+  const price = element('span', 'stg-mc-meta', mediaPrice ?? formatPricingCompact(row.pricing));
+  price.title = mediaPrice ? t('modelCatalog.media.priceTitle') : '输入 / 输出 · 每 1M tokens';
+  brief.append(release, price);
   const caret = element('span', 'stg-mc-caret');
   caret.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5"/></svg>';
   summary.append(title, brief, caret);
@@ -389,7 +430,7 @@ function renderModel(row: ModelCatalogRow, editors: Map<string, HTMLElement>): H
     renderMetric('生命周期', row.lifecycle || 'stable'),
   );
   detail.appendChild(facts);
-  if (row.aa) {
+  if (row.aa && row.kind === 'chat') {
     detail.appendChild(element(
       'p',
       'stg-mc-score-source',
@@ -404,14 +445,24 @@ function renderModel(row: ModelCatalogRow, editors: Map<string, HTMLElement>): H
     const capabilities = element('div', 'stg-mc-capabilities');
     capabilities.appendChild(element('span', 'stg-mc-cap-label', '模型能力'));
     for (const capability of row.capabilities) {
-      capabilities.appendChild(element('span', 'stg-mc-cap', capability));
+      const chip = element('span', 'stg-mc-cap', capabilityLabel(capability));
+      chip.title = capability;
+      capabilities.appendChild(chip);
     }
     detail.appendChild(capabilities);
   }
-  const boundary = element('p', 'stg-mc-boundary');
-  boundary.textContent = t('modelCatalog.aa.modelBoundary');
-  detail.appendChild(boundary);
-  if (stageReasoning) {
+  const factLines = mediaFactLines(row.mediaProfile);
+  if (factLines.length) detail.appendChild(renderMediaFacts(factLines));
+  if (row.mediaPricing?.rates.length) detail.appendChild(renderMediaPrices(row));
+  // Media generators rarely reason; offer the editor only when the Model
+  // declares reasoning support so image/speech rows stay free of noise.
+  const reasoningApplies = !media || row.inferenceProfile?.reasoning?.support === 'supported';
+  if (reasoningApplies) {
+    const boundary = element('p', 'stg-mc-boundary');
+    boundary.textContent = t('modelCatalog.aa.modelBoundary');
+    detail.appendChild(boundary);
+  }
+  if (stageReasoning && reasoningApplies) {
     const previous = editors.get(identity);
     const editor = previous?.dataset.profileStamp === JSON.stringify(row.inferenceProfile ?? {})
       ? previous : createReasoningEditor({
@@ -430,6 +481,80 @@ function renderModel(row: ModelCatalogRow, editors: Map<string, HTMLElement>): H
   }
   card.append(summary, detail);
   return card;
+}
+
+function renderKindBadge(kind: string): HTMLElement {
+  const badge = element('span', 'stg-mc-kind-badge');
+  badge.dataset.kind = kind;
+  badge.innerHTML = kindGlyph(kind);
+  badge.appendChild(element('span', undefined, kindLabel(kind)));
+  return badge;
+}
+
+function renderMediaFacts(lines: ReturnType<typeof mediaFactLines>): HTMLElement {
+  const section = element('section', 'stg-mc-media');
+  section.appendChild(element('strong', 'stg-mc-media-title', t('modelCatalog.media.specTitle')));
+  const facts = element('dl', 'stg-mc-media-facts');
+  for (const line of lines) {
+    const row = element('div', 'stg-mc-media-fact');
+    row.append(element('dt', undefined, line.label), element('dd', undefined, line.value));
+    facts.appendChild(row);
+  }
+  section.appendChild(facts);
+  return section;
+}
+
+function renderMediaPrices(row: ModelCatalogRow): HTMLElement {
+  const pricing = row.mediaPricing!;
+  const section = element('section', 'stg-mc-media');
+  section.appendChild(element('strong', 'stg-mc-media-title', t('modelCatalog.media.priceTitle')));
+  const table = element('table', 'stg-mc-media-prices');
+  const body = element('tbody');
+  for (const rate of pricing.rates) {
+    const line = element('tr');
+    line.append(
+      element('th', undefined, rate.tier || '—'),
+      element('td', undefined, formatMediaRate(rate, (value) => formatPrice(value, pricing.currency))),
+    );
+    body.appendChild(line);
+  }
+  table.appendChild(body);
+  section.appendChild(table);
+  if (pricing.rates.some((rate) => rate.estimated)) {
+    section.appendChild(element('p', 'stg-mc-media-note', t('modelCatalog.media.estimatedNote')));
+  }
+  return section;
+}
+
+function renderKindFilter(counts: Map<string, number>): HTMLElement {
+  const bar = element('div', 'stg-mc-kind-bar');
+  bar.setAttribute('role', 'group');
+  bar.setAttribute('aria-label', t('modelCatalog.kindFilter'));
+  const chip = (kind: string | null, label: string, count: number) => {
+    const active = kindFilter === kind;
+    const button = element('button', `stg-mc-kind-chip${active ? ' is-active' : ''}`);
+    button.type = 'button';
+    button.setAttribute('aria-pressed', String(active));
+    if (kind) {
+      button.dataset.kind = kind;
+      button.innerHTML = kindGlyph(kind);
+    }
+    button.append(element('span', undefined, label),
+      element('span', 'stg-mc-kind-chip-count', String(count)));
+    button.addEventListener('click', () => {
+      kindFilter = active ? null : kind;
+      render();
+    });
+    return button;
+  };
+  let total = 0;
+  for (const count of counts.values()) total += count;
+  bar.appendChild(chip(null, t('modelCatalog.kindAll'), total));
+  for (const kind of taxonomy().getModelKinds()) {
+    const count = counts.get(kind.id);
+    if (count) bar.appendChild(chip(kind.id, kindLabel(kind.id), count));
+  }
+  return bar;
 }
 
 function renderVendorTile(group: VendorGroup, active: boolean): HTMLButtonElement {
@@ -501,11 +626,14 @@ function render(): void {
     root.appendChild(element('p', 'stg-mc-state', '正在加载模型目录…'));
     return;
   }
-  const allGroups = buildVendorGroups(activeDocument, activeAa?.scores ?? {});
-  const groups = filteredGroups(allGroups);
+  const allGroups = buildVendorGroups(activeDocument, activeAa?.scores ?? {}, taxonomy().modelKind);
+  const kindCounts = countModelKinds(allGroups);
+  if (kindFilter && !kindCounts.has(kindFilter)) kindFilter = null;
+  const groups = filteredGroups(filterGroupsByKind(allGroups, kindFilter));
   const input = document.getElementById('stgModelCatalogSearch') as HTMLInputElement | null;
   if (input && input.value !== searchQuery) input.value = searchQuery;
-  if (!searchQuery) {
+  // AA scores and the cost frontier describe conversation models.
+  if (!searchQuery && (!kindFilter || kindFilter === 'chat')) {
     root.appendChild(renderAaSource(countAaScoredModels(allGroups)));
     if (allGroups.length) root.appendChild(renderParetoEntry(allGroups));
   }
@@ -513,6 +641,7 @@ function render(): void {
     root.appendChild(element('p', 'stg-mc-state', '尚未登记官方模型。'));
     return;
   }
+  if (kindCounts.size > 1) root.appendChild(renderKindFilter(kindCounts));
 
   const count = groups.reduce((total, group) => total + group.models.length, 0);
   root.appendChild(element('div', 'stg-mc-count',
@@ -569,6 +698,7 @@ export function destroyModelCatalogPanel(): void {
   stageReasoning = undefined;
   searchQuery = '';
   openVendorId = null;
+  kindFilter = null;
   openModels.clear();
   aaRequestGeneration += 1;
   activeAa = null;

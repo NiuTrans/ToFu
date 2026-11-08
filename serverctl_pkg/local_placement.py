@@ -36,24 +36,31 @@ import time
 PURPOSE_RUNTIME = 'runtime-replica'
 PURPOSE_NATIVE_BUILD = 'native-build'
 PURPOSE_WORKSPACES = 'task-workspaces'
+PURPOSE_LANES = 'agent-lanes'
 PURPOSE_INDEXES = 'reconstructible-indexes'
 PURPOSE_NATIVE_AUTHORITY = 'native-authority'
 MODE_KNOBS = {
     PURPOSE_RUNTIME: 'TOFU_RUNTIME_REPLICA',
     PURPOSE_NATIVE_BUILD: 'TOFU_RUNTIME_REPLICA',
     PURPOSE_WORKSPACES: 'TOFU_LOCAL_WORKSPACES',
+    PURPOSE_LANES: 'TOFU_LOCAL_WORKSPACES',
     PURPOSE_INDEXES: 'TOFU_INDEX_FASTPATH',
     PURPOSE_NATIVE_AUTHORITY: 'TOFU_DB_FASTPATH',
 }
 # Runtime replicas are reconstructible caches and place themselves. Task
 # checkouts hold uncommitted work, so moving them off the data volume is an
-# operator decision. The native authority front holds acknowledged commits
-# behind an asynchronous shadow: ``auto`` relocates it only onto proven
-# persistent local volumes, and the native admission still decides.
+# operator decision. Agent lanes keep their durable state in Git (branch
+# commits plus a work-in-progress commit saved after every task that wrote in
+# them), so their checkouts are reconstructible and default to ``on``; the
+# shared knob still lets an operator turn both off. The native authority front
+# holds acknowledged commits behind an asynchronous shadow: ``auto`` relocates
+# it only onto proven persistent local volumes, and the native admission still
+# decides.
 DEFAULT_MODES = {
     PURPOSE_RUNTIME: 'auto',
     PURPOSE_NATIVE_BUILD: 'auto',
     PURPOSE_WORKSPACES: 'off',
+    PURPOSE_LANES: 'on',
     PURPOSE_INDEXES: 'auto',
     PURPOSE_NATIVE_AUTHORITY: 'auto',
 }
@@ -61,11 +68,12 @@ _ROOT_LEAVES = {
     PURPOSE_RUNTIME: 'runtime-replicas',
     PURPOSE_NATIVE_BUILD: 'native-builds',
     PURPOSE_WORKSPACES: 'workspaces',
+    PURPOSE_LANES: 'lanes',
     PURPOSE_INDEXES: 'indexes',
     PURPOSE_NATIVE_AUTHORITY: 'native-authority',
 }
 # Purposes whose placed tree holds durable or in-progress state, not a cache.
-_DURABLE_PURPOSES = frozenset({PURPOSE_WORKSPACES, PURPOSE_NATIVE_AUTHORITY})
+_DURABLE_PURPOSES = frozenset({PURPOSE_WORKSPACES, PURPOSE_LANES, PURPOSE_NATIVE_AUTHORITY})
 
 MIN_SPEEDUP = 3.0
 # Local disks answer an uncached lookup in single-digit microseconds; network
@@ -604,7 +612,7 @@ def main(argv: list[str] | None = None) -> int:
     source = arguments[0] if arguments else str(Path(__file__).resolve().parent.parent)
     report = {purpose: choose_local_root(source, purpose, create=False).as_status()
               for purpose in (PURPOSE_RUNTIME, PURPOSE_NATIVE_BUILD, PURPOSE_WORKSPACES,
-                              PURPOSE_INDEXES, PURPOSE_NATIVE_AUTHORITY)}
+                              PURPOSE_LANES, PURPOSE_INDEXES, PURPOSE_NATIVE_AUTHORITY)}
     print(json.dumps({'source': _resolved(source), **report}, indent=2, sort_keys=True))
     return 0
 

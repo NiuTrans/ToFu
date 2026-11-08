@@ -133,7 +133,7 @@ def run_boot_continuity_pass(
     if not rows or not auto_resume_enabled(environ):
         summary['skipped'] = len(rows)
         return summary
-    if runtime is None:
+    if runtime is None and not resume_for_created_by:
         logger.warning('[Continuity] pass missing runtime/run-service wiring')
         summary['skipped'] = len(rows)
         return summary
@@ -154,6 +154,9 @@ def run_boot_continuity_pass(
     for row in rows:
         run_id = str(row.get('run_id') or '')
         if not run_id or row.get('created_by') not in auto_created_by:
+            summary['skipped'] += 1
+            continue
+        if runtime is None and row.get('created_by') not in (resume_for_created_by or {}):
             summary['skipped'] += 1
             continue
         source_issued = False

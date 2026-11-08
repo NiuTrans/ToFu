@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `skip_domains` entries are URL rules, not netloc substrings: a host covers
+  itself and its subdomains on a label boundary (`x.com` no longer refuses
+  `dropbox.com`); `host/path` is a path prefix; `*` is one path segment,
+  `**` any number of segments and `*` inside a segment matches within it
+  (`*/**/*mirror*` refuses a segment containing `mirror` on every host; a
+  bare `*` is ignored). The fetch gate, one-hop deepening and search listings
+  apply the same rule (`generated_url_blocklist.py`, exported from the host's
+  `lib/search/url_blocklist.py`), so a refused URL never reaches the model as
+  a listing, snippet or page.
 - Overlay/navigation cleanup matches component class names only: the
   bracketed part of a class token (Tailwind arbitrary values such as
   `pt-[calc(10rem+var(--banner-height))]`) is a CSS value, not a name. The

@@ -19,6 +19,7 @@ from requests.adapters import HTTPAdapter
 
 from tofu_search.config import get_config
 from tofu_search.fetch.request_budget import FETCH_RETRY_LIMIT, FetchRetry
+from tofu_search.generated_url_blocklist import blocked_url
 
 # Suppress InsecureRequestWarning for SSL-fallback retries
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -753,10 +754,11 @@ def _should_fetch(url, diag=None):
         if not p.netloc:
             logger.debug('[Fetch] Skipping URL with no netloc: %.80s', url)
             return _refuse('bad_url', 'URL has no host component.')
-        if any(s in p.netloc.lower() for s in get_config().skip_domains):
+        skipped = blocked_url(url, get_config().skip_domains)
+        if skipped:
             return _refuse('skip_domain',
-                           'Host %r is on the skip-domains list (JS/social app that '
-                           'yields no extractable text).' % p.netloc)
+                           'URL is on the search.skip_domains blocklist '
+                           '(entry %r). Remove that entry to fetch it.' % skipped)
         # ── SSRF guard: reject hosts that resolve to internal addresses ──
         if get_config().block_private_addresses and not _host_is_safe(p.hostname or ''):
             logger.warning('[Fetch] Skipped (SSRF guard, internal address): %s', url[:80])

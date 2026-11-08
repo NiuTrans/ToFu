@@ -177,7 +177,9 @@ def advanced_compact(messages: list, conv_id: str = '',
 
     if not (task or {}).get('aborted'):
         from lib.tasks_pkg.context_composer.checklist import carry_checklist_through_compaction
-        carry_checklist_through_compaction(messages, task)
+        carry_checklist_through_compaction(
+            messages, task,
+            protected_count=0 if ignore_cache_prefix else cache_prefix_count)
 
     if saved > 0 or ctx.edit.removed_messages:
         logger.info('[AdvCompact] conv=%s  steps=%s  ~%d tokens saved, '

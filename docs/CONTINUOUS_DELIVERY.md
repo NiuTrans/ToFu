@@ -115,12 +115,38 @@ bytes of task-delta paths. Unrelated edits/index/history changes do not invalida
 a resolved patch. Git preflights the complete patch again during application;
 conflicts never leave markers or partially publish siblings. External writers
 that ignore cooperative leases remain outside the transaction guarantee.
+
+**Problem (CR/CRLF corruption):** the delta and resolved patches were captured
+through `integration_control._git` with `subprocess.run(..., text=True)` and
+written with `Path.write_text`. Python's universal-newline decoding rewrites
+every `\r\n` and bare `\r` in the captured diff to `\n`. A file whose content
+carries carriage returns (vLLM progress-bar serving logs) produced a hunk whose
+header line count no longer matched its body, so `git apply` either failed with
+`corrupt patch at line N` or silently published only the first line; CRLF files
+lost every `\r`. Strict text decoding also rejected non-UTF-8 content.
+**Decision:** patches travel as bytes end to end. `_git` gained a `binary` mode
+(raw capture, no newline translation, no UTF-8 decode); the delta, resolved and
+conflict-repair patch captures and writes use it, and the final `git apply`
+passes `--binary`. Delivery Git invocations pin `-c core.autocrlf=false` so a
+user's personal Git configuration cannot translate bytes between the index and
+the working tree. The published working-tree bytes equal the checkpoint blob
+byte for byte. **Alternatives rejected:** translating CR/CRLF back after capture
+(re-derives content that the diff already destroyed and cannot recover bare
+`\r`); shelling `git apply` only for non-text files (the corruption is in the
+patch transport, not the file type); leaving text mode and relying on `--3way`
+blob fallback (the corrupted hunk still fails to apply to the original blob).
+Specifications: `tests/project_mod/test_task_delta_byte_fidelity.py` (add CR,
+add CRLF, modify CRLF, modify-with-CR, dirty canonical CR target).
+
 Background commands and child agents must retire before checkpoint capture.
 Failed/cancelled/stopped tasks preserve their source and checkpoint, never publish.
 Existing candidate/stable/linear checkpoint release gates remain independent.
 Confirmed working-tree delivery reaches the existing opt-in linear checkpoint
 from the commit round. If delivery finishes later, the existing recovery worker
-runs the same checkpoint owner. No opt-in means no automatic commit; configured
+runs the same checkpoint owner. A Coordinator-reviewed project delivery is the
+exception: the recovery worker commits exactly its own delta onto the current
+branch, without the whole-workspace capture ([project integration](modules/project_integration.md#task-owned-canonical-delivery),
+"Reviewed project deliveries become commits"). No opt-in means no automatic commit; configured
 verification, staged-content preservation and coalesced-workspace attribution
 remain unchanged. Pending, failed and explicit candidate receipts cannot borrow
 this authority. One `origin.deliveryCheckpoint` acknowledgement ends recovery;

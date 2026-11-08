@@ -66,6 +66,9 @@ const ZH_FLAT = {};
   });
 })(JSON.parse(fs.readFileSync(process.argv[4], 'utf8')), '');
 global.t = key => Object.prototype.hasOwnProperty.call(ZH_FLAT, key) ? ZH_FLAT[key] : key;
+// The Settings composition injects the typed presentation owner's labels
+// (features/model-catalog/kinds.ts): shared modelCapability.<tag> copy.
+global.modelCapabilityLabel = cap => global.t('modelCapability.' + cap);
 global._brandSvg = () => '<i></i>';
 global._detectBrand = () => 'generic';
 global.__alerts = [];
@@ -174,6 +177,42 @@ def _run_harness(tmp_path, scenario: str) -> dict:
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_matrix_media_rows_show_media_reference_price_not_token_context(tmp_path):
+    """An image Model row is described by its media price, not a context."""
+    out = _run_harness(
+        tmp_path,
+        r"""
+  // Composition ports: the server-projected taxonomy and the typed price owner.
+  global.modelKind = caps => caps.includes('image_gen') ? 'image_generation' : 'chat';
+  global.isMediaKind = kind => kind === 'image_generation';
+  global.modelMediaPriceSummary = pricing =>
+    'from ' + pricing.currency + ' ' + Math.min(...pricing.rates.map(rate => rate.price)) + '/image';
+  global._stgModelRouting.models.push(
+    { creator_id: 'meta', model_id: 'painter', display_name: 'Painter',
+      capabilities: ['image_gen'], context_window: 4096,
+      official_media_pricing: { currency: 'USD', rates: [
+        { unit: 'per_image', price: 0.08, tier: 'hd' },
+        { unit: 'per_image', price: 0.04, tier: 'standard' }] } });
+  global._stgModelRouting.offerings.push(
+    { offering_id: 'off-paint', provider_access_id: 'p1-access',
+      identity_state: 'confirmed', model: { creator_id: 'meta', model_id: 'painter' },
+      enabled: true, stale: false, capabilities: ['image_gen'], context_window: 4096,
+      priority: 0 });
+  out.html = _renderAccessMatrix('p1');
+""",
+    )
+    html = out["html"]
+    locale = json.loads(ZH_LOCALE.read_text())
+    painter = html[html.index('data-id="painter"'):]
+    painter = painter[:painter.index('</tr>')]
+    assert 'title="image_gen">' + locale['modelCapability.image_gen'] + '</span>' in painter
+    assert 'from USD 0.04/image' in painter
+    assert locale['settings.matrixMediaReferencePriceHint'] in painter
+    assert locale['settings.matrixContextLabel'] + ' 4K' not in painter
+    # A chat row keeps its token context.
+    assert locale['settings.matrixContextLabel'] + ' 500' in html
 
 
 def test_stage_catalog_models_ship_routable_supply(tmp_path):

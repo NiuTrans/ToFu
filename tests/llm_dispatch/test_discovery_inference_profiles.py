@@ -42,6 +42,37 @@ def test_models_path_and_unknown_reasoning(transport, protocol, suffix):
     assert 'thinking_default' not in rows[0]
 
 
+@pytest.mark.parametrize('model_id, task', [
+    ('whisper-large-v3', 'transcription'),
+    ('Doubao-Seed-ASR-2.0', 'transcription'),
+    ('gpt-4o-mini-tts', 'tts'),
+    ('speech-02-hd', 'tts'),
+    ('veo-3.1-generate-001', 'video_gen'),
+    ('doubao-seedance-1-0-pro-250528', 'video_gen'),
+    ('wan2.2-i2v-plus', 'video_gen'),
+    ('wan2.1-image-to-video', 'video_gen'),
+    ('lyria-3.5', 'audio_gen'),
+    ('imagen-4.0-generate-001', 'image_gen'),
+    ('doubao-seedream-4-0-250828', 'image_gen'),
+    ('Qwen3-Reranker-0.6B', 'reranking'),
+    ('text-embedding-3-large', 'embedding'),
+])
+def test_bare_catalog_ids_keep_their_task_family(model_id, task):
+    """A /models row without declared capabilities still proves no optional
+    feature, but its unmistakable task family never becomes a chat 'text'."""
+    assert _infer_capabilities(model_id, {'id': model_id}) == {task}
+    assert _infer_capabilities(model_id) == {task}
+
+
+@pytest.mark.parametrize('model_id', [
+    'gpt-5.6', 'claude-opus-5-5', 'gemini-3-pro-preview', 'qwen3-omni-flash',
+    'gpt-4o-audio-preview', 'deepseek-v4', 'kimi-k3', 'qwen-vl-max',
+])
+def test_chat_ids_are_not_mistaken_for_media_models(model_id):
+    assert _infer_capabilities(model_id, {'id': model_id}) == {'text'}
+    assert 'text' in _infer_capabilities(model_id)
+
+
 def test_explicit_capabilities_not_unioned():
     assert _infer_capabilities('gpt-5-reasoning-vision', {'capabilities': ['CUSTOM']}) == {'CUSTOM'}
     assert _infer_capabilities('qwen3', {'capabilities': []}) == set()

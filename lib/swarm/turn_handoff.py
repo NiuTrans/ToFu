@@ -2,8 +2,10 @@
 
 ``prepare_swarm_turn_end`` detaches work before the parent commits its terminal
 Turn; ``resume_swarm_after_turn`` closes the last-inbox-drain/settlement race
-AFTER that commit. This adapter owns no queue, retry budget or lifecycle state:
-the session/inbox retain child evidence and integration owns continuation policy.
+AFTER that commit. ``own_detached_swarm`` keeps a durable spawning attempt's
+worker claim live for that detached work after its Turn settles. This adapter
+owns no queue, retry budget or lifecycle state: the session/inbox retain child
+evidence and integration owns continuation policy.
 """
 
 from __future__ import annotations
@@ -102,3 +104,54 @@ def resume_swarm_after_turn(task: dict, *, user_id: int) -> None:
         return
     if session.on_settled is not None:
         session.on_settled()
+
+
+def own_detached_swarm(context, *, resume: bool) -> None:
+    """Keep the spawning attempt's claim for its detached work, then release it.
+
+    Called by the conversation worker after the attempt's outcome is known and
+    outside its dispatch stripe. ``resume`` is the takeover case: the session
+    retained by a previous owner restarts under this claim first. Neither step
+    may change the attempt's already settled outcome; a failure leaves the
+    retained checkpoints inspectable and releases the claim.
+    """
+    try:
+        if resume:
+            from lib.swarm.integration import resume_detached_swarm_for_claim
+            resume_detached_swarm_for_claim(context)
+        hold_detached_swarm(context)
+    except Exception:
+        logger.error('[Swarm] detached work of %s could not keep its worker claim',
+                     context.claim.task_id, exc_info=True)
+
+
+def hold_detached_swarm(context) -> None:
+    """Return once no live session can still run or birth work under this attempt.
+
+    Every birth, checkpoint and model admission of a durable attempt's
+    descendants requires that attempt's current claim, and a swarm outlives
+    its parent Turn (``prepare_swarm_turn_end``). So the attempt's worker job
+    stays claimed until those sessions terminate. Its Stop reaches them through
+    the session's cancellation observer (``MasterOrchestrator``). Work left
+    unfinished when this process shuts down keeps the job unfinished: the
+    worker shutdown that follows defers this claim, and the next owner resumes
+    the retained session (``resume_detached_swarm_for_claim``). Shutdown may
+    suspend a session before this attempt first looks, so the retained row,
+    not the live registry, decides that (``detached_swarm_unfinished``).
+    """
+    from lib.swarm.integration import detached_swarm_unfinished, sessions_holding_parent
+    import lib.tasks_pkg.manager as manager
+    while sessions := sessions_holding_parent(context.claim.task_id):
+        for session in sessions:
+            session.wait_terminated()
+    if context.shutdown_event is None or not manager.task_admission_closed():
+        return
+    try:
+        unfinished = detached_swarm_unfinished(context)
+    except Exception:
+        # Deferring is always safe at shutdown: the next owner decides again.
+        logger.warning('[Swarm] retained session of %s is unreadable at shutdown; '
+                       'deferring its claim', context.claim.task_id, exc_info=True)
+        unfinished = True
+    if unfinished:
+        context.shutdown_event.wait()

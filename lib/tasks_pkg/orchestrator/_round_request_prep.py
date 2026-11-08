@@ -142,9 +142,8 @@ def build_round_request(task, rs, messages, tool_list, *,
     from lib.llm.cache_affinity import CACHE_AFFINITY_SCOPE_KEY
     from lib.tasks_pkg.invocation import invocation_affinity_id
     body[CACHE_AFFINITY_SCOPE_KEY] = invocation_affinity_id(task)
-    # The refusal switch-back probe rebuilds the body for the primary model
-    # and must inherit the round's real depth (a max-depth conversation must
-    # not silently downgrade to the route default on the probe round).
+    # A rebuilt fallback request inherits the round's real depth (a max-depth
+    # conversation must not silently downgrade to the route default there).
     body['_thinking_depth'] = thinking_depth
     # Private transport metadata for the durable Request Inspector archive.
     # ``prepare_request`` removes it at the same boundary as every other

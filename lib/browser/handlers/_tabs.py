@@ -139,6 +139,10 @@ def _handle_navigate(fn_args, runtime):
     url = fn_args.get('url')
     if not url:
         return 'Error: url is required.'
+    from lib.search.url_access import blocked_url_message
+    refusal = blocked_url_message(url)
+    if refusal:
+        return refusal
     tab_id = None
     if not fn_args.get('newTab'):
         tab_id = resolve_work_tab(

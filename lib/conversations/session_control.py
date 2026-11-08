@@ -2,8 +2,10 @@
 
 Entry points: inspect_session, control_session and execute_session_tool. Binding
 admission is shared with coordinator_tools; source authority uses project
-delegation. Queries and commands reuse conversation_sync/turn_lifecycle, never
-an executor, route, database or synthetic human message.
+delegation, or for the Global Router the owner's delegation
+(lib.router.owner_delegation, docs/ROUTER.md R9). Queries and commands reuse
+conversation_sync/turn_lifecycle, never an executor, route, database or
+synthetic human message.
 """
 from __future__ import annotations
 
@@ -88,8 +90,13 @@ def inspect_session(scope, arguments):
     }
 
 
-def control_session(task, scope, arguments):
-    """Resume the exact accepted execution, or stop its exact current Attempt."""
+def control_session(task, scope, arguments, *, acting_principal=None):
+    """Resume the exact accepted execution, or stop its exact current Attempt.
+
+    ``acting_principal`` replaces the current request's source principal only
+    for the owner's delegation (``lib.router.owner_delegation``): it stands in
+    for the owner's message and never becomes the target's execution identity.
+    """
     from lib.conversation_sync.execution_identity import restore_execution_identity
     from lib.conversation_sync.runtime import conversation_turn_commands
     from lib.project_dispatch.admission import KEY, TrustedDispatch, repository_for
@@ -106,8 +113,8 @@ def control_session(task, scope, arguments):
     expected = arguments.get('expected_revision')
     if action != 'stop' and (type(expected) is not int or expected < 1):
         raise ValueError('expected_revision must be the observed Turn projectionRevision')
-    principal, _, _ = source_for_task(ProjectDispatchRepository(
-        scope['user_id'], scope['project_path']), task)
+    principal = acting_principal or source_for_task(ProjectDispatchRepository(
+        scope['user_id'], scope['project_path']), task)[0]
     owner = scope['user_id']
     turn = get_turn(conversation_id, turn_id, user_id=owner, include_projection=False)
     attempt = get_attempt(attempt_id, user_id=owner, include_execution_config=True)
@@ -182,12 +189,18 @@ def execute_session_tool(task, scope, name, arguments):
     from lib.turn_lifecycle import LifecycleConflict, LifecycleNotFound
 
     try:
-        result = (inspect_session(scope, arguments) if name == 'get_conversation_status'
-                  else control_session(task, scope, arguments))
+        if name == 'get_conversation_status':
+            result = inspect_session(scope, arguments)
+        elif arguments.get('owner_delegation') is not None:
+            from lib.router.owner_delegation import delegated_conversation_control
+            result = delegated_conversation_control(task, scope, arguments, control=control_session)
+        else:
+            result = control_session(task, scope, arguments)
     except (PermissionError, ValueError, KeyError, LifecycleNotFound,
             ConversationSyncNotFound, LifecycleConflict, BadRequest, StorageError) as error:
         result = {'error': str(error), 'code': getattr(error, 'code', 'session_control_refused'),
-                  'execution_started': None if name == 'control_conversation' else False,
+                  'execution_started': getattr(error, 'execution_started',
+                                               None if name == 'control_conversation' else False),
                   'recovery': 'Read get_conversation_status. After an uncertain command ACK, retry unchanged '
                               'arguments with the same idempotency_key; never select a new Attempt silently.'}
         if isinstance(error, LifecycleConflict) and error.turn:

@@ -159,7 +159,10 @@ def _create_chat_task(
     config = (restricted_task_config(config or {}) if execution_profile
               else dict(config or {}))
     config['userId'] = owner_user_id
-    if prepared_task_id is None and '_projectDispatchWorkspaceTaskId' in config:
+    # Only an unclaimed start adopts a project grant's workspace task id; a
+    # worker claim alone names the physical task.
+    if (prepared_task_id is None and worker_context is None
+            and '_projectDispatchWorkspaceTaskId' in config):
         prepared_task_id = config['_projectDispatchWorkspaceTaskId']
     task_id = prepared_task_id or str(uuid.uuid4())
     if worker_context is not None:
@@ -286,6 +289,10 @@ def _create_chat_task(
         # '_force_rotate_pair' is set transiently by analyse_stream_result
         # and consumed (cleared) by stream_llm_response on the next call.
     })
+    if _shutdown_admission_closed.is_set():
+        # Registered after the shutdown quiesce snapshot (or reset by the
+        # initialization above): settle as the same restart interruption.
+        _mark_shutdown_quiesced(task, time.time(), 'server_shutdown')
     if worker_context is not None:
         from lib.tasks_pkg.worker_binding import bind_conversation_worker
         try:
@@ -881,7 +888,11 @@ def list_running_tasks(
         exclude_conv_id: When set, live tasks belonging to this conversation
             are omitted (the caller triggering the restart doesn't count its
             own conversation against itself).
-        user_id: When set, only tasks owned by this user are counted. The
+        user_id: When set, only tasks owned by this user are counted. Without
+            it (the restart guards), live protected steps
+            (``lib.runtime.protected_steps``: git_land, export) are listed
+            too, as ``protected-step:<id>`` entries with an empty ``convId``
+            and their ``protectedStep`` kind. The
             sidebar busy projection is owner-scoped, so it must never light a
             dot for another user's conversation.
 
@@ -943,6 +954,17 @@ def list_running_tasks(
         prior = by_key.get(key)
         if prior is None or created < prior[0]:
             by_key[key] = (created, entry)
+    if user_id is None:
+        # Landings and exports of the served checkout run outside any
+        # conversation (terminal, background command, another agent); a
+        # restart during one boots a half-landed tree (protected_steps.py).
+        from lib.runtime.protected_steps import active_protected_steps
+        for step in active_protected_steps():
+            by_key[('protected-step', step['id'])] = (step['startedAt'], {
+                'taskId': 'protected-step:' + step['id'], 'convId': '',
+                'elapsed': round(now - step['startedAt'], 1), 'protectedStep': step['kind'],
+                'marker': step['path'],
+            })
     return [entry for _created, entry in by_key.values()]
 
 
@@ -1137,6 +1159,31 @@ def abort_running_tasks_for_conv(
                 '[Manager] conv=%s supersede-abort notify skipped: %s',
                 conv_id[:8], _ne)
     return aborted
+# Closed by the shutdown quiesce. Background producers keep running until their
+# owners stop them, and a turn they start would only be killed by the teardown
+# that follows. Only a starting application lifecycle reopens it.
+_shutdown_admission_closed = threading.Event()
+
+
+def task_admission_closed() -> bool:
+    """True while this process shuts its application down; no new turn starts."""
+    return _shutdown_admission_closed.is_set()
+
+
+def reopen_task_admission() -> None:
+    """Open admission for an application lifecycle starting in this process."""
+    _shutdown_admission_closed.clear()
+
+
+def _mark_shutdown_quiesced(task, abort_time: float, reason: str) -> None:
+    task['aborted'] = True
+    task['_abort_timestamp'] = abort_time
+    task['_abort_reason'] = reason
+    abort_event = task.get('abort_event')
+    if abort_event is not None:
+        abort_event.set()
+
+
 def quiesce_running_tasks(reason: str = 'server_shutdown') -> int:
     """Signal every pending/running task to abort at server shutdown.
 
@@ -1152,30 +1199,30 @@ def quiesce_running_tasks(reason: str = 'server_shutdown') -> int:
     Best-effort, never raises. Returns the count of tasks newly marked aborted.
     """
     aborted = 0
+    if reason == 'server_shutdown':
+        # Close before the snapshot: a task registered concurrently is either
+        # in it or marks itself at registration.
+        _shutdown_admission_closed.set()
+        # Suspend swarms before their workers see the abort below; otherwise a
+        # session whose last worker stops first settles as finished, and the
+        # restart cannot resume it.
+        try:
+            from lib.swarm.integration._state import suspend_swarms_for_restart
+            suspend_swarms_for_restart()
+        except Exception as e:
+            logger.warning('[Manager] swarm suspension for shutdown failed: %s', e)
     try:
         abort_time = time.time()
-
-        def _mark_quiesced(task):
-            task['aborted'] = True
-            task['_abort_timestamp'] = abort_time
-            task['_abort_reason'] = reason
-            abort_event = task.get('abort_event')
-            if abort_event is not None:
-                abort_event.set()
-
         aborted = len(chat_task_runtime.update_matching(
             predicate=lambda task: (
                 task.get('status') in ('pending', 'running')
                 and not task.get('aborted')
             ),
-            updater=_mark_quiesced,
+            updater=lambda task: _mark_shutdown_quiesced(task, abort_time, reason),
         ))
     except Exception as e:
         logger.warning('[Manager] quiesce_running_tasks failed: %s', e)
         return aborted
-    if reason == 'server_shutdown':
-        from lib.swarm.integration._state import suspend_swarms_for_restart
-        suspend_swarms_for_restart()
     if aborted:
         logger.info('[Manager] Quiesced %d running task(s) for shutdown (reason=%s)',
                     aborted, reason)

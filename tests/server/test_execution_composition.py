@@ -25,7 +25,11 @@ def services(tmp_path, monkeypatch):
     monkeypatch.setattr(manager._execution, 'ensure',
                         lambda plan, env: calls.append(('ensure-execution', dict(env))) or '')
     monkeypatch.setattr(manager._native_storage, 'stop', lambda: calls.append(('stop-storage', {})))
-    monkeypatch.setattr(manager._execution, 'stop', lambda: calls.append(('stop-execution', {})))
+    monkeypatch.setattr(manager._execution, 'stop',
+                        lambda **options: calls.append(('stop-execution', options)) or '')
+    monkeypatch.setattr(
+        manager, '_wait_for_stopped_sidecar_release',
+        lambda: calls.append(('wait-storage-lease', {})) or {'held': False})
     return manager, calls
 
 
@@ -60,7 +64,50 @@ def test_storage_upgrade_joins_execution_before_releasing_storage(services, monk
     monkeypatch.setattr(manager._native_storage, 'needs_replacement', lambda *args, **kwargs: True)
     manager._ensure_resident_services({}, {'storage': 2}, {'execution': 2})
     assert [name for name, _ in calls] == [
-        'stop-execution', 'stop-storage', 'ensure-storage', 'ensure-execution']
+        'stop-execution', 'stop-storage', 'wait-storage-lease',
+        'ensure-storage', 'ensure-execution']
+
+
+def test_storage_replacement_defers_while_the_authority_lease_is_held(
+        services, monkeypatch):
+    """A departed host's unreapable daemon keeps the lease; do not spawn into it."""
+    manager, calls = services
+    lease = {'held': True, 'kind': 'storage_authority_sql', 'pid': 4321,
+             'holderVerified': True, 'label': 'Tofu-DB'}
+    monkeypatch.setattr(manager._native_storage, 'needs_replacement', lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        manager, '_wait_for_stopped_sidecar_release',
+        lambda: calls.append(('wait-storage-lease', {})) or lease)
+    monkeypatch.setattr(manager._native_storage, 'owns_lease', lambda value: False)
+    with pytest.raises(existing.sm._StorageLeaseStillHeld, match='still held'):
+        manager._ensure_resident_services({}, {'storage': 2}, None)
+    assert [name for name, _ in calls] == [
+        'stop-execution', 'stop-storage', 'wait-storage-lease']
+    assert 'ensure-storage' not in [name for name, _ in calls]
+
+
+def test_blocked_storage_lease_defers_spawn_without_latching_crashloop(
+        services, monkeypatch):
+    manager, calls = services
+    lease = {'held': True, 'kind': 'storage_authority_sql', 'pid': 4321,
+             'holderVerified': True, 'label': 'Tofu-DB'}
+    monkeypatch.setattr(
+        manager, '_ensure_resident_services',
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            existing.sm._StorageLeaseStillHeld(lease)))
+    result = manager._spawn(
+        'manager-restart',
+        prepared_environment={'TOFU_PROJECT_PATH': manager.project},
+        prepared_storage_plan={'storage': 2},
+        prepared_execution_plan=None,
+        reset_failed_storage=True)
+    assert result['ok'] is False
+    assert result['blockedByStorageLease'] is True
+    assert result['waitingForMaintenance'] is False
+    assert manager._state['observed'] == 'conflict'
+    assert manager._state['storageBlocker']['pid'] == 4321
+    assert manager._state['storageBlocker']['resumeSource'] == 'manager-restart'
+    assert 'holds the storage lease' in manager._state['lastError']
 
 
 def test_execution_upgrade_keeps_storage_and_full_stop_joins_both(services, monkeypatch):
@@ -71,6 +118,15 @@ def test_execution_upgrade_keeps_storage_and_full_stop_joins_both(services, monk
     calls.clear()
     manager._stop_resident_services()
     assert [name for name, _ in calls] == ['stop-execution', 'stop-storage']
+
+
+@pytest.mark.parametrize('explicit', [True, False])
+def test_only_an_explicit_replacement_may_retire_a_failed_executor_close(services, monkeypatch, explicit):
+    manager, calls = services
+    monkeypatch.setattr(manager._execution, 'needs_replacement', lambda *args, **kwargs: True)
+    manager._ensure_resident_services({}, {'storage': 1}, {'execution': 2}, reset_failed=explicit)
+    assert calls[0] == ('stop-execution', {'retire_failed_close': explicit})
+    assert [name for name, _ in calls] == ['stop-execution', 'ensure-storage', 'ensure-execution']
 
 
 def test_missing_shared_authority_refuses_before_any_stop(services, monkeypatch):
@@ -137,6 +193,43 @@ def test_recovery_refuses_changed_code_until_explicit_restart(departed_execution
     assert 'changed' in manager._state['lastError']
     assert manager._state['executionRecovery']['requiresRestart']
     assert calls == []
+
+
+def _still_exiting():
+    from serverctl_pkg.resident_service import ServiceOwnerDraining
+    raise ServiceOwnerDraining('resident service owner is still draining')
+
+
+def test_departed_host_still_releasing_its_lease_is_retried_as_the_same_failure(
+        departed_execution, monkeypatch):
+    # A killed host's cmdline vanishes before its descriptors (and lease) close.
+    manager, calls, _ = departed_execution
+    assert not manager._recover_execution_service()
+    recording_stop = manager._execution.stop
+    monkeypatch.setattr(manager._execution, 'stop', _still_exiting)
+    monkeypatch.setattr(existing.sm, '_now', lambda: 1010.0)
+    assert not manager._recover_execution_service()
+    assert not manager._state['executionRecovery'].get('requiresRestart')
+    assert manager._state['failureHistory'] == [1000.0]
+    monkeypatch.setattr(manager._execution, 'stop', recording_stop)
+    monkeypatch.setattr(existing.sm, '_now', lambda: 1011.0)
+    assert not manager._recover_execution_service()
+    assert [name for name, _ in calls][-2:] == ['stop-execution', 'ensure-execution']
+
+
+def test_lease_held_beyond_the_host_stop_budget_requires_explicit_restart(
+        departed_execution, monkeypatch):
+    from serverctl_pkg.restart_budget import NATIVE_SERVICE_STOP_SECONDS
+    manager, calls, _ = departed_execution
+    assert not manager._recover_execution_service()
+    monkeypatch.setattr(manager._execution, 'stop', _still_exiting)
+    monkeypatch.setattr(existing.sm, '_now', lambda: 1010.0)
+    assert not manager._recover_execution_service()
+    monkeypatch.setattr(existing.sm, '_now', lambda: 1010.0 + NATIVE_SERVICE_STOP_SECONDS)
+    assert not manager._recover_execution_service()
+    assert manager._state['executionRecovery']['requiresRestart']
+    assert 'still draining' in manager._state['lastError']
+    assert 'ensure-execution' not in [name for name, _ in calls]
 
 
 def test_live_executor_boot_does_not_rehash_or_clear_failure_history(departed_execution):

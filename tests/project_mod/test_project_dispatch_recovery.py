@@ -311,6 +311,23 @@ def test_trusted_service_rechecks_current_scope_and_deadline(rig, change):
     assert r.state.starts == []
 
 
+def test_a_refused_grant_is_logged_at_warning_with_its_cause(rig, monkeypatch, caplog):
+    import logging
+    r = rig; r.state.busy = False
+    r.c.turn['projectionRevision'] += 1
+    refused = []
+    monkeypatch.setattr('lib.router.watchdog.signals.report_recovery_failure',
+                        lambda owner, project, error, **kwargs: refused.append(error))
+    with caplog.at_level(logging.WARNING, logger=recovery.__name__):
+        assert r.recover()['failed'] == 1
+    error, = refused
+    record, = [row for row in caplog.records if row.name == recovery.__name__]
+    assert record.levelno == logging.WARNING
+    message = record.getMessage()
+    assert r.assignment['id'] in message
+    assert f'{type(error).__name__}: {error}' in message
+
+
 def test_one_failed_grant_does_not_starve_next_and_scan_is_bounded(context):
     c = context
     assignments = [c.repo.authorize(c.request, c.principal, f'grant-{i}')
@@ -693,21 +710,18 @@ def test_http_stop_answers_ok_only_once_the_stop_watermark_is_durable(
             repository_factory=lambda owner, project: c.repo,
             lock_factory=lambda project: lock[0](project), stop_client=c.client)
 
-    def start(*args, **kwargs):
-        kwargs['on_task_registered'](task_id)
-        return task_id, None
-
     delete_conversation(conversation_id, user_id=1)
     seed_conversation(conversation_id, user_id=1, title='Stop withdrawal')
-    task = chat_task_runtime.create(user_id=1, task_id=task_id)
-    chat_task_runtime.mark_running(task_id)
-    monkeypatch.setattr(task_start, 'start_conversation_attempt_executor', start)
+    task_id = None
     try:
         created = flask_client.post(f'/api/v4/conversations/{conversation_id}/turns', json={
             'commandId': conversation_id, 'inputTurn': {'content': 'run'},
             'config': {'model': 'gpt-4o'}})
         assert created.status_code == 200
         attempt_id = created.get_json()['attempt']['attemptId']
+        task_id = created.get_json()['attempt']['taskId']
+        task = chat_task_runtime.create(user_id=1, task_id=task_id)
+        chat_task_runtime.mark_running(task_id)
         monkeypatch.setattr(recovery, 'revoke_conversation_dispatch', stop)
         if contended == 'stop_watermark':
             c.client.forced_conflicts = LIMITS['casAttempts']

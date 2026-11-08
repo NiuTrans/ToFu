@@ -35,6 +35,9 @@ def create_application(shutdown_requested, plan):
     pins = PinnedImportSource(server._APPLICATION_IMPORT_ROOTS)
     pins.install()
     try:
+        retained = pins.freeze()
+        if any(retained[key] != plan[key] for key in retained):
+            raise RuntimeError('Retained execution sources differ from the prepared generation')
         app = server.create_app()
         server.register_server_runtime_lifecycle(app, shutdown_requested=shutdown_requested)
         # Same source owner as server.py/asgi.py. Preserve __file__ paths and
@@ -54,16 +57,26 @@ async def _run_application(args, record, stopped, shutdown_requested, applicatio
     from serverctl_pkg.execution_lifespan import run_execution_lifespan
     loop = asyncio.get_running_loop()
     owner_fd = args.manager_fd
+    command_controls = None
 
     def request_stop():
         loop.remove_reader(owner_fd)
         shutdown_requested.set()
         stopped.set()
 
-    def ready():
+    async def ready():
+        nonlocal command_controls
+        from lib.tasks_pkg.command_control_transport import CommandControlServer
+        from lib.tasks_pkg.command_controls import apply_command_control
+        command_controls = CommandControlServer(record['serviceId'], apply_command_control)
+        record['commandControl'] = await command_controls.start()
         record['state'] = 'ready'
         record['error'] = ''
         write_record(Path(args.state_file), record)
+
+    async def close_controls():
+        if command_controls is not None:
+            await command_controls.close()
 
     try:
         loop.add_reader(owner_fd, request_stop)
@@ -74,7 +87,7 @@ async def _run_application(args, record, stopped, shutdown_requested, applicatio
         # Imports and app construction may touch the source filesystem. Keep
         # owner-exit notification live; asyncio.run joins this construction.
         app = await asyncio.to_thread(application_factory, shutdown_requested, record['plan'])
-        await run_execution_lifespan(app, stopped, ready)
+        await run_execution_lifespan(app, stopped, ready, before_shutdown=close_controls)
     finally:
         loop.remove_reader(owner_fd)
 

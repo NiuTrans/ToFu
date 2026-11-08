@@ -43,18 +43,9 @@ def conversation_authority(flask_client):
         reset_for_test()
 
 
-def _capture_start(monkeypatch):
-    import lib.conversation_sync.task_start as task_start
-
-    captured = {}
-
-    def fake_start(conv_id, config, **kwargs):
-        captured['config'] = dict(config)
-        kwargs['on_task_registered']('task-deferred')
-        return 'task-deferred', None
-
-    monkeypatch.setattr(task_start, 'start_conversation_attempt_executor', fake_start)
-    return captured
+def _capture_admission(monkeypatch):
+    from tests.support.conversation_workers import observe_admissions
+    return observe_admissions(monkeypatch)
 
 
 @pytest.mark.api
@@ -67,7 +58,7 @@ def test_turn_command_persists_authored_text_without_waiting_on_translation(
     monkeypatch.setattr(
         turn_builder, 'auto_translate_user',
         lambda *args, **kwargs: pytest.fail('the turn command waited on a translator'))
-    captured = _capture_start(monkeypatch)
+    captured = _capture_admission(monkeypatch)
 
     response = flask_client.post(f'/api/v4/conversations/{CONV}/turns', json={
         'commandId': 'cmd-deferred',
@@ -76,7 +67,7 @@ def test_turn_command_persists_authored_text_without_waiting_on_translation(
     })
 
     assert response.status_code == 200, response.get_json()
-    assert captured['config']['_deferredInputTranslation'] is True
+    assert captured[0]['config']['_deferredInputTranslation'] is True
     authored = [turn for turn in list_turns(CONV, user_id=1)['turns']
                 if turn['actor'] == 'human']
     assert authored[0]['projection']['content'] == '请帮我修复这个问题'
@@ -87,7 +78,7 @@ def test_turn_command_persists_authored_text_without_waiting_on_translation(
 @pytest.mark.auth_mode('open')
 def test_client_cannot_assign_a_translation_obligation(
         flask_client, conversation_authority, monkeypatch):
-    captured = _capture_start(monkeypatch)
+    captured = _capture_admission(monkeypatch)
 
     response = flask_client.post(f'/api/v4/conversations/{CONV}/turns', json={
         'commandId': 'cmd-forged',
@@ -96,7 +87,7 @@ def test_client_cannot_assign_a_translation_obligation(
     })
 
     assert response.status_code == 200, response.get_json()
-    assert '_deferredInputTranslation' not in captured['config']
+    assert '_deferredInputTranslation' not in captured[0]['config']
 
 
 # ── Input verdict writer (real storage) ──────────────────────────────
@@ -575,7 +566,7 @@ def test_turn_command_window_has_paired_startup_anchors(
             real_info(fmt, *args)
 
     monkeypatch.setattr(observability.logger, 'info', capture)
-    _capture_start(monkeypatch)
+    _capture_admission(monkeypatch)
 
     response = flask_client.post(f'/api/v4/conversations/{CONV}/turns', json={
         'commandId': 'cmd-anchors',
@@ -595,7 +586,7 @@ def test_turn_command_window_has_paired_startup_anchors(
 
 
 def _busy_lane(flask_client, monkeypatch):
-    _capture_start(monkeypatch)
+    _capture_admission(monkeypatch)
     first = flask_client.post(f'/api/v4/conversations/{CONV}/turns', json={
         'commandId': 'cmd-live', 'message': {'text': 'first'},
         'config': {'model': 'gpt-4o'}})

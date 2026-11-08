@@ -104,17 +104,58 @@ def test_exact_tools_and_segment_prefixes(granted):
 
 
 @pytest.mark.parametrize('path', ['.env', 'src/.env.local', '.native/state.json',
-    'node_modules/a.txt', '.venv/a.txt', 'src/__pycache__/a.txt', 'target/a.txt', 'build/a.txt'])
+    'node_modules/a.txt', '.venv/a.txt', 'src/__pycache__/a.txt',
+    # Tofu's runtime home: the root trees, in any letter case.
+    'data/x', 'logs/x', 'uploads/x', 'Data/x', 'uploads/images/.gitkeep',
+    # Credentials, checkout control, undo evidence, Tofu artifacts and caches at any depth.
+    'pkg/.env', '.env.local', 'pkg/.ENV.production', '.git/config', 'pkg/.git/config',
+    'pkg/.worktrees/x', 'lib/.project_sessions/s/modifications.json', 'pkg/modifications.journal',
+    'pkg/modifications.journal.fold', 'pkg/write-intents-v1/x', 'pkg/project.json', '.tofu/x',
+    'pkg/.tofu_atomic_x', 'pkg/.native/x', 'pkg/node_modules/x', 'pkg/.venv/x',
+    '.env.example', 'pkg/.env.example'])
 def test_whole_project_scope_never_admits_secrets_runtime_or_caches(granted, path):
     granted.profile['readPaths'] = ['.']
     granted.profile['writePaths'] = ['.']
     scope.validate_profile({'profile': granted.profile})
     assert not scope.relative_path_allowed(path, ['.'])
+    assert not scope.relative_path_allowed(path, ['.'], project_grant=True)
 
     from lib.project_dispatch.publication import _path_allowed
     assert not _path_allowed(path, ['.'], granted.root)
+    assert not _path_allowed(path, ['.'], granted.root, project_grant=True)
     with pytest.raises((ValueError, AbortedError)):
         granted.call('read_files', {'path': path})
+
+
+@pytest.mark.parametrize('path', ['pkg/data/x.kt', 'pkg/model_info/data/x.json', 'src/logs/app.log',
+    'pkg/uploads/x', 'android/app/src/main/java/com/tofu/client/data/Profile.kt',
+    # Tracked trees named like build output (a rendered report deck, a Rust crate's target).
+    'docs/report/build/deck/pages/01.page', 'build/a.txt', 'target/a.txt', 'pkg/target/x',
+    'pkg/dist/x', 'pkg/build/x'])
+def test_nested_runtime_and_build_names_are_files_only_for_project_grants(granted, path):
+    # File grants refuse data/logs/uploads and build/dist/target at any depth; a
+    # project grant's checkpoint is a commit, so tracked content there is source.
+    granted.profile['readPaths'] = ['.']
+    granted.profile['writePaths'] = ['.']
+    assert not scope.relative_path_allowed(path, ['.'])
+    assert scope.relative_path_allowed(path, ['.'], project_grant=True)
+
+    from lib.project_dispatch.publication import _path_allowed
+    assert not _path_allowed(path, ['.'], granted.root)
+    assert _path_allowed(path, ['.'], granted.root, project_grant=True)
+    with pytest.raises((ValueError, AbortedError)):
+        granted.call('write_file', {'path': path, 'content': 'file grants stay fenced\n'})
+    assert not (granted.root / path).exists()
+
+
+def test_refusals_name_the_root_runtime_tree_or_metadata_segment(granted):
+    granted.profile['readPaths'] = ['.']
+    with pytest.raises(ValueError, match="root runtime tree 'uploads/'"):
+        granted.call('read_files', {'path': 'uploads/images/.gitkeep'})
+    with pytest.raises(ValueError, match="metadata segment 'data'"):
+        granted.call('read_files', {'path': 'src/data/secrets'})
+    with pytest.raises(ValueError, match="metadata segment '.env.local'"):
+        granted.call('read_files', {'path': 'pkg/.env.local'})
 
 
 def test_whole_project_prefix_is_explicit_not_a_directory_read(granted):

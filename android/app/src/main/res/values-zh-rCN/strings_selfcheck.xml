@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 设备自检（selfcheck/SelfCheckActivity） -->
+    <string name="selfcheck_title">设备自检</string>
+    <string name="selfcheck_intro">按 docs/ANDROID_KERNELS.md 中的本机内核检查项（S1）测量这台手机：targetSdk 34 下的 proot 执行、16 KB 内存页、内核达到“就绪”所需的时间，以及 Android 在前台和后台两个阶段对子进程的限制。除非你分享报告，否则任何内容都不会离开这台手机。</string>
+    <string name="selfcheck_warning">子进程测试每个阶段启动 36 个进程，超过 Android 全系统 32 个的上限。测试期间 Android 可能会结束超出的进程，包括其他应用的后台子进程。如果这会造成影响，请先停止其他应用的服务器。开始前请关闭正在运行的本机内核。</string>
+    <string name="selfcheck_duration_label">每个阶段的分钟数（先前台，后后台）</string>
+    <string name="selfcheck_run">运行自检</string>
+    <string name="selfcheck_cancel">取消</string>
+    <string name="selfcheck_close">关闭</string>
+    <string name="selfcheck_share">分享报告</string>
+    <string name="selfcheck_share_subject">Tofu 设备自检报告</string>
+    <string name="selfcheck_report_clip_label">设备自检报告</string>
+    <string name="selfcheck_skip_background">跳过后台阶段</string>
+    <string name="selfcheck_background_instructions">现在请按 Home 键。后台阶段在前台服务中运行，完成后会有通知告诉你。届时回到这里，或点按该通知中的“分享报告”。</string>
+    <string name="selfcheck_summary_title">摘要</string>
+    <string name="selfcheck_no_report">还没有报告。请运行自检；如果应用进程曾重启，也可以分享上一份报告。</string>
+    <string name="selfcheck_running">正在自检…</string>
+    <string name="selfcheck_waiting_background">等待你按 Home 键…</string>
+    <string name="selfcheck_finished">设备自检已完成</string>
+    <string name="selfcheck_finished_text">报告已可分享。</string>
+    <string name="selfcheck_channel_name">设备自检</string>
+    <string name="selfcheck_channel_description">设备自检运行期间显示，包括其后台阶段</string>
+    <string name="selfcheck_interrupted">上一次自检随应用进程一起结束了。它的最后一份报告已保留，并附有 Android 记录的退出原因。</string>
+</resources>

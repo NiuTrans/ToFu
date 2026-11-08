@@ -30,11 +30,6 @@ function _modelRoutingPriceLabel(pricing) {
     Number(pricing.output || 0) + ' · 每百万 tokens';
 }
 
-var _MODEL_CAP_LABELS = {
-  text: '文本', thinking: '思考', vision: '视觉',
-  cheap: '低价', image_gen: '图像', embedding: '向量',
-};
-
 // 上下文窗口按惯例缩写：1000000 → 1M，128000 → 128K，8192 → 8.2K。
 function _modelRoutingContextLabel(tokens) {
   var n = Number(tokens) || 0;

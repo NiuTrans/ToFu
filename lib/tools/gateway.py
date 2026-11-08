@@ -2547,6 +2547,17 @@ def _resolve_catalog_name_detail(
             'message': 'Each call requires a tool name.',
             'retry_hint': 'Copy an exact name returned by search_tools.',
         }, None
+    # A registered tool this kernel cannot run is never repaired into a
+    # neighbour: its refusal names the missing capability and the fix.
+    from lib.tools.environment_capabilities import environment_unavailable_tool
+    unavailable = environment_unavailable_tool(attempted)
+    if unavailable is not None:
+        return None, {
+            'code': 'environment_capability_missing',
+            'message': unavailable['message'],
+            'missing_capabilities': unavailable['missing_capabilities'],
+            'retry_hint': unavailable['recovery_hint'],
+        }, None
 
     ns_map = namespace_by_name if isinstance(namespace_by_name, dict) else {}
     candidates: set[str] = set()

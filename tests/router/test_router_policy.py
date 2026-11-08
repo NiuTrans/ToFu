@@ -35,7 +35,7 @@ def _schema(name):
 def test_router_ceiling_is_the_coordinator_ceiling_plus_router_and_channel_names(home):
     assert ROUTER_TOOLS == COORDINATOR_TOOLS | ROUTER_ONLY_TOOLS | CHANNEL_TOOLS
     assert {'route_to_project', 'get_router_projects', 'router_instruction_create',
-            'router_instruction_list', 'router_instruction_cancel'} == ROUTER_ONLY_TOOLS
+            'router_instruction_list', 'router_instruction_cancel', 'restart_server'} == ROUTER_ONLY_TOOLS
     assert {'channel_send', 'channel_read', 'channel_threads', 'channel_configure_thread',
             'channel_subscribe', 'channel_unsubscribe', 'channel_outbox',
             'channel_outbox_approve'} == CHANNEL_TOOLS

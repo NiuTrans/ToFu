@@ -51,9 +51,9 @@ def test_dx_tab_follows_feishu_and_renders_live_channel_state(page, live_server,
 
     tab.click()
     # Each card renders when its own read answers.
-    page.wait_for_function("() => document.querySelectorAll('#settingsTab_dx .channel-card').length === 4")
+    page.wait_for_function("() => document.querySelectorAll('#settingsTab_dx .channel-card').length === 7")
     titles = page.locator('#settingsTab_dx .channel-card-title').all_inner_texts()
-    assert titles == ['状态', '指令会话', '会话', '发件箱'], titles
+    assert titles == ['状态', '指令会话', '通知机器人', '代回复', '会话', '发件箱', '代发记录'], titles
     assert page.locator('#settingsTab_dx .ui-alert--error').count() == 0
     account_card = page.locator('#settingsTab_dx .channel-card').first
     assert account_card.get_by_role('button', name='启用', exact=True).count() == 1
@@ -97,8 +97,8 @@ _OWNER = {'uid': '1001', 'mis': 'owner', 'name': '负责人'}
 def _thread(key, title, kind, *, command=False, last=1):
     return {'key': key, 'kind': kind, 'title': title,
             'mode': 'command' if command else _DEFAULT_MODE[kind],
-            'modeOverride': None, 'replyPolicy': 'draft', 'replyPolicyOverride': None,
-            'isCommandChat': command, 'subscribers': [], 'lastEventAtMs': last, 'watermark': None}
+            'modeOverride': None, 'replyPolicy': 'notify', 'replyPolicyOverride': None,
+            'isCommandChat': command, 'subscribers': [], 'lastEventAtMs': last, 'watermark': None, 'note': ''}
 
 
 class _ConnectedDx:
@@ -106,12 +106,13 @@ class _ConnectedDx:
 
     def __init__(self, page, threads=None):
         self.command_chat = None
+        self.robot = None
         self.identity = dict(_OWNER)
         self.login_mis = 'owner'
         self.status = dict(_CONNECTED)
         self.writes = []
         self.threads = threads if threads is not None else [
-            _thread('dx:gid:70565831967', 'CMU-Meituan AutoResearch', 'gid'), _thread('dx:uid:2002', 'Ann', 'uid')]
+            _thread('dx:gid:70565831967', 'CMU-YourProvider AutoResearch', 'gid'), _thread('dx:uid:2002', 'Ann', 'uid')]
         page.route(re.compile(r'/api/v4/channels/dx(\?.*)?$'), self._account)
         page.route(re.compile(r'/api/v4/channels/dx/threads(\?.*)?$'), self._threads)
         page.route(re.compile(r'/api/v4/channels/dx/threads/[^/?]+$'), self._thread_update)
@@ -121,7 +122,7 @@ class _ConnectedDx:
     def view(self):
         return {'channel': 'dx', 'enabled': True, 'loginMis': self.login_mis, 'identity': self.identity,
                 'commandChat': self.command_chat, 'status': self.status,
-                'skillInstalled': True, 'routerConversationId': None}
+                'skillInstalled': True, 'routerConversationId': None, 'robot': self.robot, 'assistantNote': ''}
 
     def _account(self, route):
         if route.request.method == 'PUT':
@@ -131,6 +132,13 @@ class _ConnectedDx:
                 # Another account: no identity until its login is approved in 大象.
                 self.login_mis, self.identity, self.command_chat = body['mis'], None, None
                 self.status = {'state': 'authorizing', 'detail': '', 'updatedAtMs': 2, 'connectedAtMs': None}
+            if 'robot' in body:
+                robot = body['robot']
+                # The server keeps a pasted secret in the vault and answers only its redacted hint.
+                self.robot = robot and {
+                    'clientId': robot['clientId'], 'credentialHint': 'fa…42', 'error': None,
+                    'credentialName': robot.get('credentialName', 'channel.u1.dx.robot'),
+                    'managed': 'credentialName' not in robot}
         route.fulfill(json=self.view())
 
     def _threads(self, route):
@@ -146,7 +154,9 @@ class _ConnectedDx:
             thread['mode'] = body['mode'] or _DEFAULT_MODE[thread['kind']]
         if 'replyPolicy' in body:
             thread['replyPolicyOverride'] = body['replyPolicy']
-            thread['replyPolicy'] = body['replyPolicy'] or 'draft'
+            thread['replyPolicy'] = body['replyPolicy'] or 'notify'
+        if 'note' in body:
+            thread['note'] = body['note'] or ''
         route.fulfill(json=thread)
 
     def _create(self, route):
@@ -161,7 +171,8 @@ class _ConnectedDx:
             'id': 'ob1', 'thread': 'dx:uid:2002', 'threadTitle': 'Ann',
             'text': '[Tofu 代发] 方案 B 已合入，今晚发布。', 'replyTo': None, 'state': 'draft',
             'origin': {'kind': 'tool', 'conversationId': 'router-conv', 'turnId': 't'},
-            'createdAtMs': 1, 'updatedAtMs': 1, 'externalId': None, 'error': None}]})
+            'createdAtMs': 1, 'updatedAtMs': 1, 'externalId': None, 'error': None, 'attachments': [],
+            'approvalCode': '1A2B3C', 'authority': 'third_party', 'decision': None}]})
 
 
 _CONFIRM_GONE = "() => ![...document.querySelectorAll('dialog')].some((node) => node.textContent.includes('只有你一个成员'))"
@@ -290,3 +301,116 @@ def test_many_groups_are_searched_filtered_and_set_in_bulk(page, live_server, sc
     assert _no_horizontal_overflow(panel)
     panel.locator('.dx-threads').evaluate('(el) => el.scrollIntoView()')
     page.screenshot(path=str(Path(screenshot_dir) / 'dx-settings-threads-mobile.png'))
+
+
+_ROBOT_SECRET = 'fake-robot-secret-never-real-42'  # synthetic, never a real credential
+
+
+def test_the_notification_robot_keeps_its_secret_write_only_and_names_the_fix_for_a_refusal(
+        page, live_server, screenshot_dir):
+    dx = _ConnectedDx(page)
+    dx.command_chat = _ROUTER_GID
+    dx.threads.insert(0, _thread(_ROUTER_GID, 'Tofu Router', 'gid', command=True))
+    _open_app_in_chinese(page, live_server)
+    panel = _open_dx_tab(page)
+    robot = panel.locator('.channel-card', has=page.locator('.channel-card-title', has_text='通知机器人'))
+    robot.locator('.channel-card-head .channel-chip', has_text='未配置').wait_for(state='visible')
+    assert robot.locator('details.dx-robot-setup[open] li').count() == 4
+    secret = robot.get_by_label('Client Secret', exact=True)
+    assert secret.get_attribute('type') == 'password'
+    assert robot.get_by_role('button', name='移除机器人', exact=True).count() == 0
+    assert_channel_layout_aligned(panel)
+    robot.scroll_into_view_if_needed()
+    page.screenshot(path=str(Path(screenshot_dir) / 'dx-settings-robot-unconfigured.png'))
+
+    robot.get_by_label('Client ID', exact=True).fill('fake-robot-client')
+    secret.fill(_ROBOT_SECRET)
+    secret.press('Enter')
+    robot.locator('.channel-card-head .channel-chip', has_text='已配置').wait_for(state='visible')
+    assert dx.writes == [('PUT', '/api/v4/channels/dx',
+                          {'robot': {'clientId': 'fake-robot-client', 'secret': _ROBOT_SECRET}})]
+    # Write-only: the page holds the secret nowhere once it was sent.
+    assert _ROBOT_SECRET not in page.content()
+    assert not page.evaluate("(value) => [...document.querySelectorAll('input')].some((i) => i.value === value)",
+                             _ROBOT_SECRET)
+    assert 'fa…42 · 保管库条目 channel.u1.dx.robot' in robot.inner_text()
+    assert robot.get_by_label('Client ID', exact=True).input_value() == 'fake-robot-client'
+    assert robot.locator('.ui-alert').count() == 0
+    assert_channel_layout_aligned(panel)
+    robot.scroll_into_view_if_needed()
+    page.screenshot(path=str(Path(screenshot_dir) / 'dx-settings-robot-configured.png'))
+
+    # The open platform refused a send: the card says when, why and which setup step fixes it.
+    dx.robot['error'] = {'code': 'robot_70003', 'atMs': 1_700_000_000_000,
+                         'detail': 'The open platform refused the robot send: 机器人不在该群'}
+    panel.locator('.channel-card').first.get_by_role('button', name='刷新', exact=True).click()
+    robot.locator('.channel-card-head .channel-chip', has_text='上次发送被拒').wait_for(state='visible')
+    refusal = robot.locator('.dx-robot-refusal').inner_text()
+    assert '机器人不在该群 (robot_70003)' in refusal and '请把机器人加入指令会话群（配置步骤 3）。' in refusal
+    assert robot.locator('details.dx-robot-setup').evaluate('(el) => el.open')
+    assert_channel_layout_aligned(panel)
+    robot.scroll_into_view_if_needed()
+    page.screenshot(path=str(Path(screenshot_dir) / 'dx-settings-robot-refused.png'))
+
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert _no_horizontal_overflow(panel)
+    robot.scroll_into_view_if_needed()
+    page.screenshot(path=str(Path(screenshot_dir) / 'dx-settings-robot-mobile.png'))
+
+    robot.get_by_role('button', name='移除机器人', exact=True).click()
+    dialog = page.locator('dialog.ui-dialog[open]', has_text='要移除通知机器人吗')
+    dialog.wait_for(state='visible')
+    page.screenshot(path=str(Path(screenshot_dir) / 'dx-settings-robot-remove-confirm.png'), animations='disabled')
+    dialog.get_by_role('button', name='移除机器人', exact=True).click()
+    robot.locator('.channel-card-head .channel-chip', has_text='未配置').wait_for(state='visible')
+    assert dx.writes[-1] == ('PUT', '/api/v4/channels/dx', {'robot': None})
+
+
+def test_the_assistant_keeps_notes_approval_codes_and_the_audit_aligned(page, live_server, screenshot_dir):
+    dx = _ConnectedDx(page)
+    dx.command_chat = _ROUTER_GID
+    dx.threads.insert(0, _thread(_ROUTER_GID, 'Tofu Router', 'gid', command=True))
+    sent = {'id': 'ob0', 'thread': 'dx:uid:2002', 'threadTitle': 'Ann', 'text': '[Tofu 代发] 开的，下午三点见。',
+            'replyTo': None, 'state': 'sent', 'origin': {'kind': 'tool', 'conversationId': 'router-conv', 'turnId': 't'},
+            'createdAtMs': 1_790_000_000_000, 'updatedAtMs': 1_790_000_000_000, 'externalId': 'm1', 'error': None,
+            'attachments': [], 'approvalCode': '0A1B2C', 'authority': 'third_party',
+            'decision': {'kind': 'approved', 'by': 'owner_message', 'atMs': 1_790_000_060_000, 'turnId': 't2'}}
+    page.route(re.compile(r'/api/v4/channels/audit(\?.*)?$'),
+               lambda route: route.fulfill(json={'items': [sent], 'nextBefore': None}))
+    _open_app_in_chinese(page, live_server)
+    panel = _open_dx_tab(page)
+    assistant = panel.locator('.channel-card', has=page.locator('.channel-card-title', has_text='代回复'))
+    assistant.wait_for(state='visible')
+    assert '「[Tofu 代发]」' in assistant.inner_text()
+    assert assistant.get_by_label('关于你', exact=True).input_value() == ''
+
+    # A contact's note is written beside its reply policy, which offers 仅通知 first as the default.
+    ann = panel.locator('.dx-thread-row', has_text='Ann')
+    reply = ann.locator('select')
+    assert reply.input_value() == 'notify'
+    assert reply.locator('option').all_inner_texts() == ['回复：仅通知', '回复：起草待批', '回复：自动回复', '回复：关闭']
+    ann.get_by_role('button', name='说明 · Ann', exact=True).click()
+    ann.get_by_label('给这个会话的说明', exact=True).fill('我的导师，回复要正式。')
+    ann.get_by_role('button', name='保存', exact=True).click()
+    ann.locator('.dx-thread-note', has_text='说明：我的导师，回复要正式。').wait_for(state='visible')
+    assert dx.writes[-1] == ('PUT', 'dx:uid:2002', {'note': '我的导师，回复要正式。'})
+
+    assert panel.locator('.channel-outbox-item .channel-outbox-code').inner_text() == '批准码 1A2B3C'
+    audit = panel.locator('.channel-audit')
+    audit.locator('.channel-audit-item').first.wait_for(state='visible')
+    record = audit.inner_text()
+    assert '[Tofu 代发] 开的，下午三点见。' in record and '来源：审阅他人的消息' in record
+    assert '已批准：你在聊天中用批准码' in record
+    assert audit.get_by_role('button', name='加载更早的记录', exact=True).is_hidden()
+    assert_channel_layout_aligned(panel)
+    assistant.scroll_into_view_if_needed()
+    page.screenshot(path=str(Path(screenshot_dir) / 'dx-settings-assistant.png'))
+    ann.scroll_into_view_if_needed()
+    page.screenshot(path=str(Path(screenshot_dir) / 'dx-settings-thread-note.png'))
+    audit.scroll_into_view_if_needed()
+    page.screenshot(path=str(Path(screenshot_dir) / 'dx-settings-audit.png'))
+
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert _no_horizontal_overflow(panel)
+    audit.scroll_into_view_if_needed()
+    page.screenshot(path=str(Path(screenshot_dir) / 'dx-settings-audit-mobile.png'))

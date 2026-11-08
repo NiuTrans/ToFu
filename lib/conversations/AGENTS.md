@@ -18,8 +18,10 @@ in `lib/integration_control.py`. Read
   never add claim, lease, block, reopen, transfer, or autonomous dispatch.
 - Project Context is a final user-role dynamic suffix. Never modify the system
   prompt, replay snapshots, or acknowledge narrative before provider success.
-- Cross-conversation path overlap advice is bounded and execution-local. Push
-  is a UI hint; neither is durable coordination state.
+- Cross-conversation overlap advice comes from the integration radar
+  (`lib/project_mod/integration_radar.py`): task-local, bounded delivery; its
+  repository files are reconstructible advice, never coordination state or
+  authority, and never a reason to wait or refuse. Push is a UI hint.
 - Charter decisions require an immutable registered Checker version. Checker
   processes use argv without a shell, bounded output/time, and fail publication
   without changing terminal work state.

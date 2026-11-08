@@ -9,10 +9,11 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.parametrize('wake_hint', [False, True])
 @pytest.mark.parametrize('initial_change', [False, True])
 @pytest.mark.parametrize('diagnostic_query', ['', '?diagnosticPayload=none'])
 def test_quiet_stream_confirms_its_cursor_and_noop_wakes_keep_heartbeat_deadline(
-    monkeypatch, initial_change, diagnostic_query,
+    monkeypatch, initial_change, diagnostic_query, wake_hint,
 ):
     from quart import Quart, g
     from lib.api_keys import local_admin_context
@@ -20,6 +21,7 @@ def test_quiet_stream_confirms_its_cursor_and_noop_wakes_keep_heartbeat_deadline
 
     clock = [100.0]
     waits = []
+    reads = []
 
     class Subscription:
         closed = False
@@ -41,8 +43,8 @@ def test_quiet_stream_confirms_its_cursor_and_noop_wakes_keep_heartbeat_deadline
             # The old implementation restarted its entire wait on every hint.
             assert len(waits) <= 3, 'no-op wakes starved the heartbeat'
             assert timeout > 0, 'the stream must not spin at an expired deadline'
-            clock[0] += 5
-            return True
+            clock[0] += 5 if wake_hint else timeout
+            return wake_hint
 
     subscription = Subscription()
 
@@ -59,6 +61,7 @@ def test_quiet_stream_confirms_its_cursor_and_noop_wakes_keep_heartbeat_deadline
 
         @staticmethod
         def changes(cid, _owner, *, after_sequence, **_kwargs):
+            reads.append(after_sequence)
             assert _kwargs.get('diagnostic_payload', 'full') == ('none' if diagnostic_query else 'full')
             events = ([{'type': 'turn.upsert', 'syncSeq': 1,
                         'conversationId': cid, 'payload': {}}]
@@ -90,10 +93,12 @@ def test_quiet_stream_confirms_its_cursor_and_noop_wakes_keep_heartbeat_deadline
                 first = await anext(stream)
                 assert not waits, 'confirm an idle stream without an initial heartbeat wait'
                 assert ('event: turn.upsert' if initial_change else 'event: sync.heartbeat') in first
+                initial_reads = len(reads)
                 heartbeat = await anext(stream)
                 assert 'event: sync.heartbeat' in heartbeat
                 assert f'cursor-{int(initial_change)}' in heartbeat
-                assert waits == [15, 10, 5]
+                assert waits == ([15, 10, 5] if wake_hint else [15])
+                assert len(reads) - initial_reads == (3 if wake_hint else 0)
                 assert clock[0] == 115
             finally:
                 await stream.aclose()

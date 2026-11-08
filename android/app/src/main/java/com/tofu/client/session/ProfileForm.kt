@@ -1,6 +1,7 @@
 package com.tofu.client.session
 
 import com.tofu.client.data.AuthType
+import com.tofu.client.data.SshEndpoint
 
 /**
  * Pure (Android-free) validation for the add / edit-server form, so the rules
@@ -39,12 +40,7 @@ object ProfileForm {
     ): ValidationResult {
         val errors = mutableMapOf<String, String>()
 
-        val a = alias.trim()
-        if (a.isEmpty()) {
-            errors["alias"] = "Name is required"
-        } else if (a != editingAlias && a in existingAliases) {
-            errors["alias"] = "A server with this name already exists"
-        }
+        aliasError(alias, existingAliases, editingAlias)?.let { errors["alias"] = it }
 
         val u = baseUrl.trim()
         if (u.isEmpty()) {
@@ -53,6 +49,8 @@ object ProfileForm {
             errors["baseUrl"] = "Must be a full http(s):// URL"
         } else if (!u.startsWith("http://") && !u.startsWith("https://")) {
             errors["baseUrl"] = "Must start with http:// or https://"
+        } else if (LocalKernelCookie.isReservedUrl(u)) {
+            errors["baseUrl"] = LocalKernelCookie.RESERVED_HOST_MESSAGE
         }
 
         // A blank password selects interactive sign-in. The outer gateway may
@@ -60,6 +58,62 @@ object ProfileForm {
 
         return ValidationResult(errors)
     }
+
+    /**
+     * Validate the SSH kernel form. Ports arrive as the typed text; an ok result
+     * guarantees [toSshEndpoint] can build the endpoint. Aliases share one
+     * namespace with URL profiles (they key the vault).
+     */
+    fun validateSsh(
+        alias: String,
+        host: String,
+        port: String,
+        user: String,
+        remotePort: String,
+        existingAliases: Set<String>,
+        editingAlias: String? = null,
+    ): ValidationResult {
+        val errors = mutableMapOf<String, String>()
+        aliasError(alias, existingAliases, editingAlias)?.let { errors["alias"] = it }
+        val h = host.trim()
+        when {
+            h.isEmpty() -> errors["host"] = "Host is required"
+            h.any { it.isWhitespace() || it == '/' || it == '@' } -> errors["host"] = "Just the host name or IP address"
+            // One colon is host:port; IPv6 literals have several.
+            h.count { it == ':' } == 1 -> errors["host"] = "Put the port in its own field"
+        }
+        if (parsePort(port) == null) errors["port"] = PORT_RANGE_ERROR
+        val u = user.trim()
+        when {
+            u.isEmpty() -> errors["user"] = "User is required"
+            u.any { it.isWhitespace() || it == '@' } -> errors["user"] = "Just the user name"
+        }
+        if (parsePort(remotePort) == null) errors["remotePort"] = PORT_RANGE_ERROR
+        return ValidationResult(errors)
+    }
+
+    /** The endpoint from fields that passed [validateSsh]; never carries a pinned key. */
+    fun toSshEndpoint(host: String, port: String, user: String, remotePort: String): SshEndpoint =
+        SshEndpoint(
+            host = host.trim(),
+            port = checkNotNull(parsePort(port)),
+            user = user.trim(),
+            remotePort = checkNotNull(parsePort(remotePort)),
+        )
+
+    private fun aliasError(alias: String, existingAliases: Set<String>, editingAlias: String?): String? {
+        val a = alias.trim()
+        return when {
+            a.isEmpty() -> "Name is required"
+            a != editingAlias && a in existingAliases -> "A server with this name already exists"
+            else -> null
+        }
+    }
+
+    /** TCP's port range. */
+    private fun parsePort(raw: String): Int? = raw.trim().toIntOrNull()?.takeIf { it in 1..65535 }
+
+    private const val PORT_RANGE_ERROR = "A port from 1 to 65535"
 
     /**
      * Build the [Profile] to persist from validated form fields. Parses the

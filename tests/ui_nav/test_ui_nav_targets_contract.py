@@ -30,7 +30,7 @@ KEBAB = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
 # the model directory. Literal labels (MCP/API Key) are intentional UI copy.
 SETTING_LABELS = {
     'general': 'settings.tabGeneral',
-    'preset': 'settings.tabDisplay',
+    'preset': 'settings.tabModelSelection',
     'api': 'settings.tabProviders',
     'models': 'settings.tabModels',
     'oauth': 'settings.tabOAuth',

@@ -76,7 +76,7 @@ def test_create_independent_leader_and_keep_project_navigation_isolated(page, mo
         'tasks': [
             {'title': 'Fix folder creation in the sidebar', 'status': 'completed', 'progress': 'Merged and verified in the browser.'},
             {'title': 'Research New Year homestays in Tianyu Creek', 'status': 'in_progress',
-             'progress': 'Comparing Xiaohongshu, Ctrip, Meituan and Douyin listings.'},
+             'progress': 'Comparing Xiaohongshu, Ctrip, YourProvider and Douyin listings.'},
             {'title': 'Summarize the WeChat article', 'status': 'pending'},
         ]})
     page.wait_for_function('document.querySelector("#projectCoordinatorEntry .coordination-leader-meta")?.textContent === "In progress: 1"')

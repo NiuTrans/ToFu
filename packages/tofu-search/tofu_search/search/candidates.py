@@ -5,6 +5,7 @@ its existing lock. No provider callback, fetch submission or worker lives here.
 Provider rows are copied; a URL is published only after its evidence fields
 validate, so one malformed engine cannot poison a later source's valid row.
 """
+from tofu_search.generated_url_blocklist import url_is_blocked
 from tofu_search.search.dedup import canonical_url_key
 from tofu_search.search.quality import annotate_relevance, matches_site_constraints
 from tofu_search.search.rerank import RRF_RANK_OFFSET
@@ -20,6 +21,7 @@ class CandidateAccumulator:
         self.all_results = []
         self.unique_results = []
         self.constraint_rejected = 0
+        self.blocklist_rejected = 0
 
     def add_batch(self, batch, engine_tag=''):
         """Merge received rows and return newly admitted representatives."""
@@ -38,6 +40,15 @@ class CandidateAccumulator:
                     r.pop('full_content')
             if not matches_site_constraints(r.get('url') or '', self.constraint_scopes):
                 self.constraint_rejected += 1
+                continue
+            # search.skip_domains is an admission rule, not only a fetch gate:
+            # a blocked URL must never reach the model through a search
+            # listing either, because the listing itself carries the page's
+            # title, snippet and fetched excerpts (and its URL invites a
+            # follow-up fetch). Config is read through the call binding.
+            from tofu_search.config import get_config
+            if url_is_blocked(r.get('url') or '', get_config().skip_domains):
+                self.blocklist_rejected += 1
                 continue
             admitted_batch.append(r)
             annotate_relevance(r, self.query)

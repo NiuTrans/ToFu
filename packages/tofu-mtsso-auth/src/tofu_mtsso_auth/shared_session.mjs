@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
+import {hostname} from 'node:os';
 import {dirname} from 'node:path';
 import {pathToFileURL} from 'node:url';
 
@@ -64,6 +65,72 @@ function session(path) {
     return {data, fingerprint: createHash('sha256').update(raw).digest('hex')};
   } finally { fs.closeSync(fd); }
 }
+// A reservation names the process that made it, so a later call can tell one
+// abandoned by a killed process (a deadline SIGKILL, a restart's group kill:
+// neither runs `finally`) from one still in use.
+const RESERVATION_KEY = 'tofu_mtsso_auth_reservation';
+function processStart(pid) {
+  // Linux /proc/<pid>/stat field 22, the start time since boot: with the pid it
+  // names one process, so a reused pid is not taken for the reservation's owner.
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] || '';
+  } catch { return ''; }
+}
+function running(owner) {
+  try { process.kill(owner.pid, 0); } catch (error) { if (error.code === 'ESRCH') return false; }
+  const start = processStart(owner.pid);
+  return !(owner.start && start && start !== owner.start);
+}
+function release(temporary, reserved) {
+  // Remove only that still-unrenamed file; preserve concurrent work.
+  try {
+    const current = fs.lstatSync(temporary);
+    if (current.dev === reserved.dev && current.ino === reserved.ino && current.isFile()) fs.unlinkSync(temporary);
+  } catch { /* SDK normally renames its scratch file into the source. */ }
+}
+function reserve(temporary) {
+  let fd;
+  try {
+    fd = fs.openSync(temporary, fs.constants.O_CREAT | fs.constants.O_EXCL |
+      fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK, 0o600);
+  } catch { return null; }
+  try {
+    const reserved = fs.fstatSync(fd);
+    const owner = {pid: process.pid, start: processStart(process.pid), host: hostname()};
+    try { fs.writeSync(fd, JSON.stringify({[RESERVATION_KEY]: owner})); }
+    catch (error) { release(temporary, reserved); throw error; }
+    return reserved;
+  } finally { fs.closeSync(fd); }
+}
+// The existing scratch file when it is a reservation nobody uses any more: a
+// private regular file with one name that holds nothing (a reservation of an
+// earlier bridge version, or one cut off before it was named) or names a
+// process of this host that no longer runs. Anything else is not ours to
+// remove. Callers hold the source lock (shared.py), so no bridge reserves meanwhile.
+function abandonedReservation(temporary) {
+  let fd;
+  try {
+    fd = fs.openSync(temporary, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch { return null; }
+  try {
+    const info = fs.fstatSync(fd);
+    if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) || info.nlink !== 1 ||
+        info.size > LIMIT)
+      return null;
+    const text = readBounded(fd).toString('utf8');
+    if (!text) return info;
+    let owner;
+    try { owner = JSON.parse(text)[RESERVATION_KEY]; } catch { return null; }
+    if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || owner.host !== hostname()) return null;
+    // A login whose launcher died keeps running in its own session, possibly
+    // waiting for an approval; never write beside it.
+    if (running(owner))
+      throw new Failure('SSO_AUTH_REQUEST_PENDING', '另一个共享 SSO 登录或续期仍在进行（可能正在等待大象授权）；' +
+        '本次未发起新的授权。请先处理该授权，完成后重试原业务操作。', 42);
+    return info;
+  } finally { fs.closeSync(fd); }
+}
 async function sdkWrite(path, callback) {
   // The installed SDK uses a fixed scratch name. Reserve it before any grant;
   // neither stale files nor symlinks may be overwritten by its writer.
@@ -71,23 +138,17 @@ async function sdkWrite(path, callback) {
   if (!parent.isDirectory() || parent.uid !== process.getuid() || (parent.mode & 0o022))
     fail('SSO_SESSION_CONFIGURATION', '共享 SSO 源目录不可由组或其他用户写入。');
   const temporary = path + '.tmp';
-  let fd;
-  try {
-    fd = fs.openSync(temporary, fs.constants.O_CREAT | fs.constants.O_EXCL |
-      fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK, 0o600);
-  } catch {
-    fail('SSO_SESSION_CONFIGURATION', '共享 SSO 已有临时文件；请由用户检查上游会话，未覆盖原文件。');
+  let reserved = reserve(temporary);
+  if (!reserved) {
+    const abandoned = abandonedReservation(temporary);
+    if (abandoned) {
+      release(temporary, abandoned);
+      reserved = reserve(temporary);
+    }
   }
-  const reserved = fs.fstatSync(fd);
-  fs.closeSync(fd);
+  if (!reserved) fail('SSO_SESSION_CONFIGURATION', '共享 SSO 已有临时文件；请由用户检查上游会话，未覆盖原文件。');
   try { return await callback(); }
-  finally {
-    // Remove only our own still-unrenamed reservation; preserve concurrent work.
-    try {
-      const current = fs.lstatSync(temporary);
-      if (current.dev === reserved.dev && current.ino === reserved.ino && current.isFile()) fs.unlinkSync(temporary);
-    } catch { /* SDK normally renames its scratch file into the source. */ }
-  }
+  finally { release(temporary, reserved); }
 }
 function sdkFailure(error) {
   if (error instanceof Failure) return error;

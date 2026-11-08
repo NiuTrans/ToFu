@@ -834,9 +834,36 @@ replay projector; legacy `tool_calls/results` rows remain readable. Missing or
 orphan results are never fabricated as successful execution. Standalone orphan
 observations are explicitly marked with their original role/call ID. Equal calls
 in separate occurrences remain separate. This is a normalized working-context
-export, not byte-exact provider traffic or a promise to undo prior compaction.
-`final_metrics` accepts canonical `prompt_tokens/completion_tokens` as well as
-historical `input_tokens/output_tokens` names.
+export, not byte-exact provider traffic.
+
+**Compacted runs keep every round.** Compaction replaces the working view with
+a summary plus a retained tail, so an export built only from that view lost the
+folded rounds (12 of 88 TB2.1 baseline trajectories). `_archive_transcript`
+now records each fold's full pre-compaction transcript on the task
+(`_compaction_archives`), and the exporter emits every view in order, each
+message once: messages a view repeats from its predecessor (system prompt,
+task, retained tail; calls and receipts matched by call ID, so an L1-cleared
+receipt still matches) are skipped in favour of the older, uncleared copy. A
+`system` step marks each compaction point (trigger and round number). The archive row remains the
+durable authority; the task-local record makes the export complete even where
+the conversation store is not readable (headless runtime). `final_metrics`
+accepts canonical `prompt_tokens/completion_tokens` as well as historical
+`input_tokens/output_tokens` names. Spec:
+`tests/trajectory/test_atif_compacted_export.py`.
+
+**Gateway child calls are steps too.** `execute_tools` and `execute_program`
+run child tool calls that the working transcript never holds as assistant
+`tool_calls`; only the gateway call and its aggregate receipt are there. Each
+child (a `toolRounds` row whose `source` is `execute_calls`/`execute_program`
+or that carries `parentToolCallId`) is exported as an agent step right after
+its parent's step, with its own arguments and receipt and an `extra` holding
+`origin` (`gateway_child`), `parent_call_id`, `call_source` and `status`. A
+batch child has only its `llmRound`; that names the parent when the response
+issued one gateway call, else the parent receipt that lists the child's call
+ID does; an unproven parent is `null` with `candidate_parent_call_ids`, never
+a guess. Program presentation rows (`_programSynthetic`) are not calls, so
+`n_tool_rounds` exceeds the exported call count by one per program run.
+Spec: `tests/trajectory/test_atif_gateway_children.py`.
 
 The embeddable SDK and CLI terminal-success/diagnostic contract is documented in
 [DEVELOPER_RUNTIME.md](../DEVELOPER_RUNTIME.md#terminal-success-and-diagnostics).
@@ -1045,16 +1072,22 @@ in-repo Gradle output; point it elsewhere with `TOFU_ANDROID_APK_PATH`.
 ```text
 GET /api/v4/mobile/android        — scan-me HTML page (QR + status)
 GET /api/v4/mobile/android/link   — {available, url, tokenEmbedded, qr,
-                                    sizeBytes?, modifiedMs?}
+                                    sizeBytes?, modifiedMs?}; ?base=<root>
 GET /api/v4/mobile/android/apk    — the APK attachment
                                     (application/vnd.android.package-archive)
 ```
 
 All three require auth. The URL returned by `link` (and encoded in the QR)
-carries the caller's own credential via the `?token=` first-link transport
-when one was presented (the session cookie stores the raw token, so a normal
-browser session always embeds one); the phone's first hit installs its own
-session cookie through the standard query-token redirect. A 404 on `apk`
+names `api/v4/mobile/android/apk` under this request's root, and carries the
+caller's own credential via the `?token=` first-link transport when one was
+presented (the session cookie stores the raw token, so a normal browser
+session always embeds one); the phone's first hit installs its own session
+cookie through the standard query-token redirect. A path-prefixed gateway
+(code-server `/proxy/<port>/`) strips its prefix before the request arrives,
+so callers behind one pass the root they reach as `?base=`; it must name the
+request's Host, without query or fragment, or `link` answers 400. The scan
+page computes that root from its own `location` (everything before `/api/`)
+and asks `link` with it. A 404 on `apk`
 means no local build exists yet — run `./gradlew assembleRelease` in
 `android/` first.
 ---

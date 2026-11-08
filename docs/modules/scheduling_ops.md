@@ -86,8 +86,11 @@ resolves from `task['config']` alone. The model route, reasoning depth, extra
 and read-only roots and Manual write approval (`autoApply`) come from the
 conversation through inactive `resolve_conv_config`; its `modelRef` is the
 routing authority, so the `model` name is aligned to it, as task registration
-does. A `schedule_create` definition's model-authored `tools_config` never
-selects the model. Attended capabilities (`autopilot`, `desktopEnabled`,
+does. A conversation without a model choice (no name and no `modelRef`) runs on
+the owner's default model (`owner_default_model`), never with an empty model
+([ROUTER.md R5](../ROUTER.md#r5-router-and-worker-models-are-chosen-separately)).
+A `schedule_create` definition's model-authored `tools_config` never selects
+the model. Attended capabilities (`autopilot`, `desktopEnabled`,
 `humanGuidanceEnabled`) are explicitly off: never granted, and recorded as a
 human turn records them. While the conversation is in Plan mode the dispatch
 returns `busy` (nothing accepted); a timer keeps its ready verdict and retries

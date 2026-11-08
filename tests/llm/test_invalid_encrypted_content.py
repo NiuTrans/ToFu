@@ -181,3 +181,66 @@ def test_websocket_code_only_failure_closes_without_replay_or_checkpoint(monkeyp
         assert source == before
     finally:
         ws._sessions().clear()
+
+
+GATEWAY_SENTENCE = ('The encrypted content for item rs_0e712b5bb95b1c57 could not be verified. '
+                    'Reason: Encrypted content could not be decrypted or parsed.')
+
+
+@pytest.mark.parametrize('payload', [
+    {'type': 'error', 'error': {'type': '<nil>', 'message': GATEWAY_SENTENCE}},
+    {'error': {'message': GATEWAY_SENTENCE, 'type': 'invalid_request_error',
+               'param': None, 'code': None}},
+], ids=['gateway-rewrap', 'null-code'])
+def test_gateway_dropping_the_code_still_selects_the_terminal_type(payload):
+    with pytest.raises(errors.RequestScopedError) as caught:
+        errors._classify_http_error(400, 'API HTTP 400: ' + json.dumps(payload),
+                                    'unit-model', '')
+    _assert_typed(caught.value, param=None)
+
+
+@pytest.mark.parametrize('error', [
+    {'message': 'Note: ' + GATEWAY_SENTENCE},
+    {'message': GATEWAY_SENTENCE, 'code': 'other_code'},
+], ids=['not-anchored', 'other-code'])
+def test_sentence_counts_only_anchored_and_without_another_code(error):
+    with pytest.raises(errors.BadRequestError) as caught:
+        errors._classify_http_error(400, json.dumps({'error': error}), 'unit-model', '')
+    assert type(caught.value) is errors.BadRequestError
+
+
+@pytest.mark.parametrize('run', [_run_sync, _run_async], ids=['sync', 'async'])
+def test_sse_message_only_rejection_uses_the_terminal_type(run):
+    event = {'type': 'error', 'error': {'type': '<nil>', 'message': GATEWAY_SENTENCE}}
+    wire = b'data: ' + json.dumps(event).encode() + b'\n\n'
+    with pytest.raises(errors.RequestScopedError) as caught:
+        run([], raw_chunks=[wire], protocol='responses',
+            base_url='https://api.example.test/v1', api_key='synthetic-key')
+    _assert_typed(caught.value, param=None, stage='provider_stream')
+
+
+def test_retire_rejected_reasoning_keeps_compaction_and_drops_stale_witness():
+    from lib.llm.responses_replay import REPLAY_ORDER_TYPE, retire_rejected_reasoning_state
+    from lib.llm.responses_state_origin import STATE_ORIGIN_TYPE, responses_state_origins
+
+    marker = {'type': STATE_ORIGIN_TYPE, 'version': 1, 'deployment_id': 'dep'}
+    reasoning = {'type': 'reasoning', 'id': 'rs_1', 'encrypted_content': CIPHERTEXT}
+    compaction = {'type': 'compaction', 'encrypted_content': CIPHERTEXT}
+    phase = {'type': 'message', 'role': 'assistant', 'content': []}
+    messages = [
+        {'role': 'user', 'content': 'go'},
+        {'role': 'assistant', 'content': 'a', '_responses_items': [
+            reasoning, phase, {'type': REPLAY_ORDER_TYPE, 'version': 1}, marker]},
+        {'role': 'assistant', 'content': 'b', '_responses_items': [reasoning, compaction, marker]},
+        {'role': 'assistant', 'content': 'c', '_responses_items': [reasoning, marker]},
+        {'role': 'assistant', 'content': 'd', '_responses_items': [compaction, marker]},
+    ]
+    alias = messages[1]['_responses_items']
+    assert retire_rejected_reasoning_state(messages) == 3
+    assert messages[1]['_responses_items'] == [phase]
+    assert alias[0] is reasoning
+    assert messages[2]['_responses_items'] == [compaction, marker]
+    assert '_responses_items' not in messages[3]
+    assert messages[4]['_responses_items'] == [compaction, marker]
+    assert responses_state_origins(messages) == {'dep'}
+    assert retire_rejected_reasoning_state(messages) == 0

@@ -104,6 +104,44 @@ def test_production_lifecycle_runs_required_optional_and_cleanup_in_order():
         for line in boot_lines)
 
 
+def test_a_lifecycle_starting_in_the_same_process_reopens_turn_admission():
+    """The shutdown quiesce closes admission; an in-process restart owns it again."""
+    from lib.tasks_pkg.manager import quiesce_running_tasks, task_admission_closed
+
+    def lifecycle():
+        app = create_base_app('production-lifecycle-admission', {'TESTING': True})
+
+        async def shutdown_runtime(_event, **_kwargs):
+            quiesce_running_tasks(reason='server_shutdown')
+
+        register_production_lifecycle(
+            app,
+            steps=ProductionStartupSteps(
+                build_assets=lambda: None,
+                validate_storage_boundary=lambda: None,
+                init_database=lambda: None,
+                start_storage=lambda: None,
+                bootstrap_model_routing=lambda: None,
+                validate_imports=lambda: None,
+                start_workers=lambda _app: None,
+            ),
+            shutdown_requested=threading.Event(),
+            logger=logging.getLogger('test.production-lifecycle'),
+            optional_services=lambda **_kwargs: ({}, False),
+            announce_ready=lambda *_args: None,
+            shutdown_runtime=shutdown_runtime,
+        )
+        return app
+
+    async def exercise(app):
+        async with app.test_app():
+            assert not task_admission_closed()
+        assert task_admission_closed()
+
+    asyncio.run(exercise(lifecycle()))
+    asyncio.run(exercise(lifecycle()))
+
+
 def test_shutdown_checkpoint_skips_post_database_startup():
     app = create_base_app('production-lifecycle-interrupt', {'TESTING': True})
     stop = threading.Event()

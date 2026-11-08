@@ -1,0 +1,16 @@
+proot 5.1.107.102 calls strcmp(3) and memset(3) in this file without including
+<string.h>; NDK r27 clang rejects the implicit declarations
+(-Wimplicit-function-declaration is an error in C99 and later).
+termux-play-store/termux-packages carries the same one-line fix
+(packages/proot/include-string.patch).
+
+--- a/src/extension/ashmem_memfd/ashmem_memfd.c
++++ b/src/extension/ashmem_memfd/ashmem_memfd.c
+@@ -1,6 +1,7 @@
+ #if defined(__ANDROID__) || defined(__BIONIC__)
+ 
+ #include <stdlib.h>
++#include <string.h>     /* strcmp(3), memset(3), */
+ #include <signal.h>
+ #include <unistd.h>
+ #include <sys/syscall.h>  /* __NR_memfd_create,  */

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
-  ChannelAccountView, ChannelThreadPage, ChannelThreadUpdate, ChannelThreadView, OutboxPage,
+  AuditPage, ChannelAccountView, ChannelThreadPage, ChannelThreadUpdate, ChannelThreadView, DxRobotView, OutboxPage,
 } from '../../api/channels.generated';
 
 const runtime = vi.hoisted(() => ({ Api: undefined as unknown, closeSettings: vi.fn(), loadConversation: vi.fn() }));
@@ -22,16 +22,16 @@ function status(state: ChannelAccountView['status']['state'], detail = '') {
 function account(overrides: Partial<ChannelAccountView> = {}): ChannelAccountView {
   return {
     channel: 'dx', enabled: true, loginMis: 'owner', identity: { uid: '1001', mis: 'owner', name: 'Owner' },
-    commandChat: 'dx:gid:900', skillInstalled: true, routerConversationId: 'router-conv',
-    status: CONNECTED, ...overrides,
+    commandChat: 'dx:gid:900', skillInstalled: true, routerConversationId: 'router-conv', robot: null,
+    assistantNote: '', status: CONNECTED, ...overrides,
   };
 }
 
 function thread(key: string, title: string, overrides: Partial<ChannelThreadView> = {}): ChannelThreadView {
   const kind = key.split(':')[1] as ChannelThreadView['kind'];
   const mode = kind === 'uid' ? 'mentions' : 'ignore';
-  return { key, kind, title, mode, modeOverride: null, replyPolicy: 'draft', replyPolicyOverride: null,
-           isCommandChat: false, subscribers: [], lastEventAtMs: null, watermark: null, ...overrides };
+  return { key, kind, title, mode, modeOverride: null, replyPolicy: 'notify', replyPolicyOverride: null,
+           isCommandChat: false, subscribers: [], lastEventAtMs: null, watermark: null, note: '', ...overrides };
 }
 
 function threads(): ChannelThreadView[] {
@@ -48,7 +48,24 @@ const DEFAULT_MODE = { gid: 'ignore', uid: 'mentions', pid: 'ignore', issue: 'me
 const outbox: OutboxPage = {
   items: [{ id: 'ob1', thread: 'dx:uid:2002', threadTitle: 'Ann', text: '[Tofu 代发] hello', replyTo: null,
             state: 'draft', origin: { kind: 'tool', conversationId: 'router-conv', turnId: 't' },
-            createdAtMs: 1, updatedAtMs: 1, externalId: null, error: null }],
+            createdAtMs: 1, updatedAtMs: 1, externalId: null, error: null, attachments: [],
+            approvalCode: '1A2B3C', authority: 'third_party', decision: null }],
+};
+
+const EMPTY_AUDIT: AuditPage = { items: [], nextBefore: null };
+
+const SHA = 'a'.repeat(64);
+const withAttachments: OutboxPage = {
+  items: [{ ...outbox.items[0], attachments: [
+    { index: 0, name: 'chart.png', type: 'image/png', size: 2048, sha256: SHA, kind: 'image', renditionOf: null,
+      state: 'pending', error: null },
+    { index: 1, name: 'deck.pptx', type: 'application/vnd.ms-powerpoint', size: 3 * 1024 * 1024, sha256: SHA,
+      kind: 'file', renditionOf: null, state: 'sent', error: null },
+    { index: 2, name: 'deck.pdf', type: 'application/pdf', size: 700, sha256: SHA, kind: 'file', renditionOf: 1,
+      state: 'failed', error: 'not_delivered' },
+    { index: 3, name: 'deck-1.png', type: 'image/png', size: 900, sha256: SHA, kind: 'image', renditionOf: 1,
+      state: 'pending', error: null },
+  ] }],
 };
 
 function fakeApi(view = account(), items = threads()) {
@@ -67,14 +84,17 @@ function fakeApi(view = account(), items = threads()) {
       }
       if ('replyPolicy' in update) {
         next.replyPolicyOverride = update.replyPolicy ?? null;
-        next.replyPolicy = update.replyPolicy ?? 'draft';
+        next.replyPolicy = update.replyPolicy ?? 'notify';
       }
+      if ('note' in update) next.note = update.note ?? '';
       byKey.set(key, next);
       return next;
     }),
     outbox: vi.fn(async (_channel: string, _signal?: AbortSignal) => outbox),
     approveOutbox: vi.fn(async () => outbox.items[0]),
     discardOutbox: vi.fn(async () => outbox.items[0]),
+    outboxAttachmentUrl: vi.fn((id: string, index: number) => `/api/v4/channels/outbox/${id}/attachments/${index}`),
+    audit: vi.fn(async (_channel: string, _before?: string, _signal?: AbortSignal): Promise<AuditPage> => EMPTY_AUDIT),
   };
 }
 
@@ -168,7 +188,7 @@ describe('大象 settings tab', () => {
     expect(row('Tofu Router').querySelector('input')).toBeNull();
     expect(radio(row('Ops'), 'watch').checked).toBe(true);
     expect(radio(row('Team'), 'ignore').checked).toBe(true);
-    expect(row('Ann').querySelector('select')!.value).toBe('draft');
+    expect(row('Ann').querySelector('select')!.value).toBe('notify');
     expect(text()).toContain('[Tofu 代发] hello');
     expect(api.outbox).toHaveBeenCalledWith('dx', expect.anything());
     expect(text()).not.toContain('router-conv');
@@ -439,7 +459,7 @@ describe('大象 settings tab', () => {
     reply.dispatchEvent(new Event('change'));
     await settle();
     expect(api.updateDxThread).toHaveBeenLastCalledWith('dx:uid:2002', { replyPolicy: 'auto' });
-    reply.value = 'draft';
+    reply.value = 'notify';
     reply.dispatchEvent(new Event('change'));
     await settle();
     expect(api.updateDxThread).toHaveBeenLastCalledWith('dx:uid:2002', { replyPolicy: null });
@@ -573,6 +593,32 @@ describe('大象 settings tab', () => {
     expect(row('Team').querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(false);
   });
 
+  it('lists a draft\'s attachments with name, type and size, and thumbnails only original images', async () => {
+    const api = fakeApi();
+    api.outbox.mockImplementation(async () => withAttachments);
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    const entries = [...document.querySelectorAll<HTMLElement>('.channel-outbox-attachment')];
+    expect(entries.map((entry) => entry.querySelector('.channel-outbox-attachment-name')!.textContent))
+      .toEqual(['chart.png', 'deck.pptx', 'deck.pdf', 'deck-1.png']);
+    expect(entries[0].querySelector('.channel-outbox-attachment-meta')!.textContent).toBe('image/png · 2.0 KB');
+    expect(entries[1].querySelector('.channel-outbox-attachment-meta')!.textContent)
+      .toBe('application/vnd.ms-powerpoint · 3.0 MB');
+    expect(entries[2].querySelector('.channel-outbox-attachment-meta')!.textContent)
+      .toBe('settings.dx.attachmentPreviewOf:{"name":"deck.pptx"} · application/pdf · 700 B');
+    const thumbnails = [...document.querySelectorAll<HTMLImageElement>('.channel-outbox-thumbnail')];
+    expect(thumbnails.map((image) => image.getAttribute('src'))).toEqual(['/api/v4/channels/outbox/ob1/attachments/0']);
+    expect(thumbnails[0].alt).toBe('chart.png');
+    expect(api.outboxAttachmentUrl).toHaveBeenCalledWith('ob1', 0);
+    expect(entries.map((entry) => entry.querySelector('.channel-chip-text')!.textContent)).toEqual([
+      'settings.dx.attachmentPending', 'settings.dx.outboxState.sent', 'settings.dx.outboxState.failed',
+      'settings.dx.attachmentPending']);
+    expect(entries[2].textContent).toContain('not_delivered');
+    expect(document.querySelector('.channel-outbox-attachments')!.getAttribute('aria-label'))
+      .toBe('settings.dx.attachments');
+  });
+
   it('approves a draft and re-reads authoritative state', async () => {
     const api = fakeApi();
     runtime.Api = { channels: api };
@@ -605,6 +651,490 @@ describe('大象 settings tab', () => {
     expect(failure.textContent).toContain('settings.dx.loadFailed:{"error":"boom"}');
     expect(findButton('settings.dx.enable')).toBeUndefined();
     expect(findButton('settings.dx.disable')).toBeUndefined();
+    expect(visibleTitles()).toEqual(['Tofu Router', 'Ops', 'Ann', 'Team']);
+  });
+});
+
+// Synthetic, never a real credential: the card must never render it back.
+const SECRET = 'fake-robot-secret-never-real-42';
+
+function robotView(overrides: Partial<DxRobotView> = {}): DxRobotView {
+  return { clientId: 'fake-robot-client', credentialName: 'channel.u1.dx.robot', credentialHint: 'fa…42',
+           managed: true, error: null, ...overrides };
+}
+
+function robotCard(): HTMLElement {
+  const found = [...document.querySelectorAll<HTMLElement>('#dxChannelRoot .channel-card')]
+    .find((node) => node.querySelector('.channel-card-title')!.textContent === 'settings.dx.robot.title');
+  if (!found) throw new Error('missing robot card');
+  return found;
+}
+
+function robotChip(): string {
+  return robotCard().querySelector('.channel-card-head .channel-chip')!.textContent ?? '';
+}
+
+/** The client ID and secret inputs of the robot card's form. */
+function robotInputs(): [HTMLInputElement, HTMLInputElement] {
+  const inputs = robotCard().querySelectorAll<HTMLInputElement>('.dx-robot-form input');
+  return [inputs[0], inputs[1]];
+}
+
+function secretShown(): boolean {
+  return document.body.innerHTML.includes(SECRET)
+    || [...document.querySelectorAll('input')].some((input) => input.value === SECRET);
+}
+
+function dialogButton(label: string): HTMLButtonElement {
+  return [...document.querySelector('dialog')!.querySelectorAll('button')].find((node) => node.textContent === label)!;
+}
+
+describe('大象 notification robot card', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="settingsTab_dx"><div id="dxChannelRoot"></div></div>';
+  });
+  afterEach(() => destroyDxTab());
+
+  it('renders an unconfigured robot after the command chat, with a write-only secret and its setup steps', async () => {
+    runtime.Api = { channels: fakeApi() };
+    populateDxTab();
+    await settle();
+    expect(card(2)).toBe(robotCard());
+    expect(robotChip()).toBe('settings.dx.robot.state.none');
+    const [client, secret] = robotInputs();
+    expect(client.value).toBe('');
+    expect([secret.type, secret.value, secret.autocomplete]).toEqual(['password', '', 'new-password']);
+    expect(secret.placeholder).toBe('');
+    expect(findButton('settings.dx.robot.remove')).toBeUndefined();
+    expect(robotCard().querySelector('.dx-robot-vault')).toBeNull();
+    const steps = robotCard().querySelector<HTMLDetailsElement>('.dx-robot-setup')!;
+    expect(steps.open).toBe(true);
+    expect(steps.querySelectorAll('.dx-robot-steps li')).toHaveLength(4);
+    expect([...steps.querySelectorAll<HTMLAnchorElement>('a')].map((link) => [link.href, link.target, link.rel]))
+      .toEqual([['https://open.internal.example.com/developer/app/apply', '_blank', 'noopener noreferrer'],
+                ['https://xopen.internal.example.com/home', '_blank', 'noopener noreferrer']]);
+    expect(steps.textContent).toContain('settings.dx.robot.stepsSource');
+  });
+
+  it('saves a pasted secret, empties its input before the request and never shows it back', async () => {
+    const api = fakeApi();
+    const configured = account({ robot: robotView() });
+    let inputWhenSent: string | null = null;
+    api.updateDxAccount.mockImplementationOnce(async () => {
+      inputWhenSent = robotInputs()[1].value;
+      return configured;
+    });
+    api.dxAccount.mockResolvedValueOnce(account()).mockResolvedValue(configured);
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    const [client, secret] = robotInputs();
+    type(client, '  fake-robot-client ');
+    type(secret, SECRET);
+    button('settings.dx.robot.save').click();
+    await settle();
+    expect(api.updateDxAccount).toHaveBeenCalledWith({ robot: { clientId: 'fake-robot-client', secret: SECRET } });
+    expect(inputWhenSent).toBe('');
+    expect(api.dxAccount).toHaveBeenCalledTimes(2);
+    expect(robotChip()).toBe('settings.dx.robot.state.configured');
+    const text = robotCard().textContent ?? '';
+    expect(text).toContain('fake-robot-client');
+    expect(text).toContain('settings.dx.robot.secretValue:{"hint":"fa…42","name":"channel.u1.dx.robot"}');
+    expect(text).not.toContain('settings.dx.robot.groupOnly');  // the command chat is a group
+    const [savedClient, savedSecret] = robotInputs();
+    expect(savedClient.value).toBe('fake-robot-client');
+    expect([savedSecret.value, savedSecret.placeholder]).toEqual(['', 'settings.dx.robot.secretKeep']);
+    expect(robotCard().querySelector<HTMLDetailsElement>('.dx-robot-setup')!.open).toBe(false);
+    expect(secretShown()).toBe(false);
+  });
+
+  it('keeps the saved secret when only the client ID changes', async () => {
+    const api = fakeApi(account({ robot: robotView() }));
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    type(robotInputs()[0], 'other-client');
+    button('settings.dx.robot.save').click();
+    await settle();
+    expect(api.updateDxAccount).toHaveBeenCalledWith({ robot: { clientId: 'other-client' } });
+  });
+
+  it('asks for the client ID, then the secret, before sending anything', async () => {
+    const api = fakeApi();
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    const [client, secret] = robotInputs();
+    button('settings.dx.robot.save').click();
+    await settle();
+    const problem = robotCard().querySelector('.channel-feedback')!;
+    expect(problem.textContent).toContain('settings.dx.robot.needsClientId');
+    expect(problem.previousElementSibling).toBe(client.closest('.channel-actions'));
+    expect(document.activeElement).toBe(client);
+    type(client, 'fake-robot-client');
+    expect(robotCard().querySelector('.channel-feedback')).toBeNull();
+    button('settings.dx.robot.save').click();
+    await settle();
+    expect(robotCard().querySelector('.channel-feedback')!.textContent).toContain('settings.dx.robot.needsSecret');
+    expect(document.activeElement).toBe(secret);
+    expect(api.updateDxAccount).not.toHaveBeenCalled();
+  });
+
+  it('uses an existing vault entry by name and never offers entries reserved for other owners', async () => {
+    const api = fakeApi();
+    const list = vi.fn(async () => ({ credentials: [
+      { name: 'dx-robot-secret' }, { name: 'channel.u1.dx.robot' }, { name: 'skill.dx-pura-api.sso' },
+      { name: 'other-token' }] }));
+    const chosen = account({ robot: robotView({ credentialName: 'dx-robot-secret', managed: false }) });
+    api.updateDxAccount.mockResolvedValueOnce(chosen);
+    api.dxAccount.mockResolvedValueOnce(account()).mockResolvedValue(chosen);
+    runtime.Api = { channels: api, credentials: { list } };
+    populateDxTab();
+    await settle();
+    const vault = robotCard().querySelector<HTMLDetailsElement>('.dx-robot-vault')!;
+    expect(vault.open).toBe(false);
+    const select = vault.querySelector('select')!;
+    expect([...select.options].map((option) => option.value)).toEqual(['dx-robot-secret', 'other-token']);
+    button('settings.dx.robot.vaultUse').click();
+    await settle();
+    expect(vault.querySelector('.channel-feedback')!.textContent).toContain('settings.dx.robot.needsClientId');
+    expect(api.updateDxAccount).not.toHaveBeenCalled();
+    type(robotInputs()[0], 'fake-robot-client');
+    select.value = 'dx-robot-secret';
+    button('settings.dx.robot.vaultUse').click();
+    await settle();
+    expect(api.updateDxAccount).toHaveBeenCalledWith(
+      { robot: { clientId: 'fake-robot-client', credentialName: 'dx-robot-secret' } });
+    const reopened = robotCard().querySelector<HTMLDetailsElement>('.dx-robot-vault')!;
+    expect(reopened.open).toBe(true);
+    expect(reopened.querySelector('select')!.value).toBe('dx-robot-secret');
+    expect(robotCard().textContent).toContain('"name":"dx-robot-secret"');
+  });
+
+  it('removes the robot only after the owner confirms', async () => {
+    const restore = emulateNativeModal();
+    try {
+      const api = fakeApi(account({ robot: robotView() }));
+      runtime.Api = { channels: api };
+      populateDxTab();
+      await settle();
+      button('settings.dx.robot.remove').click();
+      expect(document.querySelector('dialog')!.open).toBe(true);
+      expect(document.querySelector('dialog')!.textContent).toContain('settings.dx.robot.removeConfirm');
+      dialogButton('common.cancel').click();
+      await settle();
+      expect(document.querySelector('dialog')).toBeNull();
+      expect(api.updateDxAccount).not.toHaveBeenCalled();
+
+      api.updateDxAccount.mockResolvedValueOnce(account());
+      api.dxAccount.mockResolvedValue(account());
+      button('settings.dx.robot.remove').click();
+      dialogButton('settings.dx.robot.remove').click();
+      await settle();
+      expect(api.updateDxAccount).toHaveBeenCalledWith({ robot: null });
+      expect(robotChip()).toBe('settings.dx.robot.state.none');
+      expect(findButton('settings.dx.robot.remove')).toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+
+  it.each([
+    ['robot_70003', 'settings.dx.robot.fix.group'],
+    ['robot_30002', 'settings.dx.robot.fix.permission'],
+    ['robot_70001', 'settings.dx.robot.fix.app'],
+    ['token_rejected', 'settings.dx.robot.fix.credentials'],
+    ['robot_credential_missing', 'settings.dx.robot.fix.secretMissing'],
+    ['token_unavailable', 'settings.dx.robot.fix.network'],
+    ['robot_99999', null],
+  ])('shows the last refusal %s with the setup step that fixes it', async (code, fix) => {
+    const error = { code, detail: 'The open platform refused the robot send: 机器人不在该群', atMs: 1_700_000_000_000 };
+    runtime.Api = { channels: fakeApi(account({ robot: robotView({ error }) })) };
+    populateDxTab();
+    await settle();
+    expect(robotChip()).toBe('settings.dx.robot.state.refused');
+    const refusal = robotCard().querySelector('.dx-robot-refusal')!;
+    const time = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+      .format(new Date(error.atMs));
+    expect(refusal.textContent).toContain(`settings.dx.robot.refused:{"time":"${time}"}`);
+    expect(refusal.textContent).toContain(`机器人不在该群 (${code})`);
+    expect(refusal.querySelector('.dx-robot-fix')?.textContent ?? null).toBe(fix);
+    expect(robotCard().querySelector<HTMLDetailsElement>('.dx-robot-setup')!.open).toBe(true);
+  });
+
+  it('warns that only a group command chat uses the robot', async () => {
+    runtime.Api = { channels: fakeApi(account({ commandChat: 'dx:uid:2002', robot: robotView() })) };
+    populateDxTab();
+    await settle();
+    expect(robotChip()).toBe('settings.dx.robot.state.configured');
+    expect(robotCard().querySelector('.ui-alert--warning')!.textContent).toBe('settings.dx.robot.groupOnly');
+  });
+
+  it('keeps a refused save beside its row with the fix, and does not keep the secret', async () => {
+    const api = fakeApi();
+    api.updateDxAccount.mockRejectedValueOnce(Object.assign(
+      new Error('The SSO token endpoint refused the robot credentials (HTTP 400 invalid_client)'),
+      { status: 409, code: 'token_rejected' }));
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    type(robotInputs()[0], 'fake-robot-client');
+    type(robotInputs()[1], SECRET);
+    button('settings.dx.robot.save').click();
+    await settle();
+    const alert = robotCard().querySelector('.channel-feedback')!;
+    expect(alert.textContent).toContain('settings.dx.actionFailed:{"error":"The SSO token endpoint refused the robot '
+                                        + 'credentials (HTTP 400 invalid_client)"} settings.dx.robot.fix.credentials');
+    expect(alert.previousElementSibling).toBe(button('settings.dx.robot.save').closest('.channel-actions'));
+    expect(button('settings.dx.robot.save').disabled).toBe(false);
+    expect(button('settings.dx.robot.save').hasAttribute('aria-busy')).toBe(false);
+    expect(robotInputs()[0].value).toBe('fake-robot-client');
+    expect(robotInputs()[1].value).toBe('');
+    expect(secretShown()).toBe(false);
+    expect(api.dxAccount).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps what the owner typed when the other cards re-render', async () => {
+    vi.useFakeTimers();
+    try {
+      const api = fakeApi(account({ status: status('disconnected') }));
+      runtime.Api = { channels: api };
+      populateDxTab();
+      await flush();
+      const robot = robotCard();
+      const [client, secret] = robotInputs();
+      type(client, 'fake-robot-client');
+      type(secret, SECRET);
+      secret.focus();
+      api.dxAccount.mockResolvedValue(account());
+      await vi.advanceTimersByTimeAsync(3000);
+      await flush();
+      expect(card(0).querySelector('.channel-status')!.textContent).toBe('settings.dx.state.connected');
+      expect(api.dxAccount).toHaveBeenCalledTimes(3);  // first read, the tick, the reload
+      button('settings.dx.switchAccount').click();
+      expect(robotCard()).toBe(robot);
+      expect([client.value, secret.value]).toEqual(['fake-robot-client', SECRET]);
+      expect(document.activeElement).toBe(secret);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+function assistantCard(): HTMLElement {
+  const found = document.querySelector<HTMLElement>('#dxChannelRoot .dx-assistant');
+  if (!found) throw new Error('missing assistant card');
+  return found;
+}
+
+function auditCard(): HTMLElement {
+  const found = document.querySelector<HTMLElement>('#dxChannelRoot .channel-audit');
+  if (!found) throw new Error('missing audit card');
+  return found;
+}
+
+function typeText(input: HTMLTextAreaElement, value: string) {
+  input.value = value;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function auditItem(id: string, overrides: Partial<OutboxPage['items'][number]> = {}): OutboxPage['items'][number] {
+  return { ...outbox.items[0], id, state: 'sent', ...overrides };
+}
+
+describe('大象 assistant for other people\'s messages (C11)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="settingsTab_dx"><div id="dxChannelRoot"></div></div>';
+  });
+  afterEach(() => destroyDxTab());
+
+  it('explains the assistant after the robot card and saves the owner\'s account note', async () => {
+    let view = account({ assistantNote: 'I lead the search team.' });
+    const api = fakeApi(view);
+    api.dxAccount.mockImplementation(async () => view);
+    api.updateDxAccount.mockImplementation(async (update) => {
+      view = { ...view, assistantNote: (update as { assistantNote: string | null }).assistantNote ?? '' };
+      return view;
+    });
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    const titles = [...document.querySelectorAll('#dxChannelRoot .channel-card-title')].map((node) => node.textContent);
+    expect(titles).toEqual(['settings.dx.status', 'settings.dx.commandChat', 'settings.dx.robot.title',
+                            'settings.dx.assistant.title', 'settings.dx.threads', 'settings.dx.outbox',
+                            'settings.channels.audit.title']);
+    expect(card(3)).toBe(assistantCard());
+    expect(assistantCard().textContent).toContain('settings.dx.assistant.how:{"label":"[Tofu 代发]"}');
+    expect(assistantCard().textContent).toContain('settings.dx.assistant.approval');
+    const note = assistantCard().querySelector('textarea')!;
+    expect(note.value).toBe('I lead the search team.');
+    expect(note.maxLength).toBe(2000);
+    typeText(note, '  Keep replies short.  ');
+    button('settings.dx.noteSave').click();
+    await settle();
+    expect(api.updateDxAccount).toHaveBeenLastCalledWith({ assistantNote: 'Keep replies short.' });
+    expect(api.dxAccount).toHaveBeenCalledTimes(2);  // the save re-reads the server
+    expect(assistantCard().querySelector('textarea')!.value).toBe('Keep replies short.');
+    typeText(assistantCard().querySelector('textarea')!, '   ');
+    button('settings.dx.noteSave').click();
+    await settle();
+    expect(api.updateDxAccount).toHaveBeenLastCalledWith({ assistantNote: null });  // blank clears it
+  });
+
+  it('keeps a typed account note when another command re-reads the tab', async () => {
+    const api = fakeApi();
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    const note = assistantCard().querySelector('textarea')!;
+    typeText(note, 'unsaved words');
+    button('settings.dx.refresh').click();
+    await settle();
+    expect(api.dxAccount).toHaveBeenCalledTimes(2);
+    expect(assistantCard().querySelector('textarea')).toBe(note);
+    expect(note.value).toBe('unsaved words');
+  });
+
+  it('offers notify-only first, the default, and stores choosing it as null', async () => {
+    const api = fakeApi();
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    const reply = row('Ann').querySelector('select')!;
+    expect([...reply.options].map((option) => option.value)).toEqual(['notify', 'draft', 'auto', 'never']);
+    expect(reply.value).toBe('notify');
+    reply.value = 'draft';
+    reply.dispatchEvent(new Event('change'));
+    await settle();
+    expect(api.updateDxThread).toHaveBeenLastCalledWith('dx:uid:2002', { replyPolicy: 'draft' });
+    reply.value = 'notify';
+    reply.dispatchEvent(new Event('change'));
+    await settle();
+    expect(api.updateDxThread).toHaveBeenLastCalledWith('dx:uid:2002', { replyPolicy: null });
+  });
+
+  it('edits a thread\'s note in place and shows it under the thread\'s controls', async () => {
+    const api = fakeApi();
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    const ann = row('Ann');
+    const toggle = [...ann.querySelectorAll<HTMLButtonElement>('button')]
+      .find((node) => node.textContent === 'settings.dx.note.edit')!;
+    expect(toggle.getAttribute('aria-label')).toBe('settings.dx.note.edit · Ann');
+    expect(ann.querySelector<HTMLElement>('.dx-thread-note')!.hidden).toBe(true);  // no note yet
+    toggle.click();
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    const input = ann.querySelector('textarea')!;
+    expect(document.activeElement).toBe(input);
+    typeText(input, ' My mentor: reply formally. ');
+    [...ann.querySelectorAll('button')].find((node) => node.textContent === 'settings.dx.noteSave')!.click();
+    await settle();
+    expect(api.updateDxThread).toHaveBeenLastCalledWith('dx:uid:2002', { note: 'My mentor: reply formally.' });
+    expect(ann.querySelector('textarea')).toBeNull();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    const shown = ann.querySelector<HTMLElement>('.dx-thread-note')!;
+    expect(shown.hidden).toBe(false);
+    expect(shown.textContent).toBe('settings.dx.note.value:{"note":"My mentor: reply formally."}');
+    toggle.click();
+    expect(ann.querySelector('textarea')!.value).toBe('My mentor: reply formally.');
+    typeText(ann.querySelector('textarea')!, '');
+    [...ann.querySelectorAll('button')].find((node) => node.textContent === 'settings.dx.noteSave')!.click();
+    await settle();
+    expect(api.updateDxThread).toHaveBeenLastCalledWith('dx:uid:2002', { note: null });  // blank removes it
+    expect(ann.querySelector<HTMLElement>('.dx-thread-note')!.hidden).toBe(true);
+    // An ignored thread gets no replies, so it offers no note; the command chat is the owner's own.
+    expect(row('Team').querySelector<HTMLElement>('.dx-thread-controls button')!.hidden).toBe(true);
+    expect(row('Tofu Router').querySelector('button')).toBeNull();
+  });
+
+  it('keeps a refused note beside its editor with what the owner typed', async () => {
+    const api = fakeApi();
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    api.updateDxThread.mockRejectedValueOnce(new Error('A note is text of at most 2000 characters'));
+    const ann = row('Ann');
+    [...ann.querySelectorAll('button')].find((node) => node.textContent === 'settings.dx.note.edit')!.click();
+    typeText(ann.querySelector('textarea')!, 'too long');
+    [...ann.querySelectorAll('button')].find((node) => node.textContent === 'settings.dx.noteSave')!.click();
+    await settle();
+    expect(ann.querySelector('textarea')!.value).toBe('too long');
+    const alert = ann.querySelector('.dx-thread-note-editor .channel-feedback')!;
+    expect(alert.textContent).toContain('A note is text of at most 2000 characters');
+    expect(ann.querySelector<HTMLElement>('.dx-thread-note')!.hidden).toBe(true);
+  });
+
+  it('shows a draft\'s approval code beside its state', async () => {
+    const api = fakeApi();
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    const item = document.querySelector('.channel-outbox-item')!;
+    expect(item.querySelector('.channel-outbox-code')!.textContent)
+      .toBe('settings.channels.approvalCode:{"code":"1A2B3C"}');
+    api.outbox.mockResolvedValue({ items: [{ ...outbox.items[0], state: 'queued' }] });
+    button('settings.dx.refresh').click();
+    await settle();
+    expect(document.querySelector('.channel-outbox-item .channel-outbox-code')).toBeNull();
+  });
+
+  it('audits what was recorded for other people with whose request and the decision, page by page', async () => {
+    const api = fakeApi();
+    const approved = auditItem('ob3', {
+      text: '[Tofu 代发] 开的，下午三点见。', createdAtMs: Date.UTC(2026, 10, 6, 8), authority: 'third_party',
+      decision: { kind: 'approved', by: 'owner_message', atMs: Date.UTC(2026, 10, 6, 9), turnId: 'turn-9' },
+      attachments: [{ index: 0, name: 'agenda.pdf', type: 'application/pdf', size: 10, sha256: 'a'.repeat(64),
+                      kind: 'file', renditionOf: null, state: 'sent', error: null }],
+    });
+    const discarded = auditItem('ob2', { state: 'discarded', authority: 'merged',
+                                         decision: { kind: 'discarded', by: 'owner_settings', atMs: 3, turnId: '' } });
+    const older = auditItem('ob1', { state: 'draft', decision: null });
+    api.audit.mockImplementation(async (_channel, before) => (before === 'cursor-2'
+      ? { items: [older], nextBefore: null } : { items: [approved, discarded], nextBefore: 'cursor-2' }));
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    expect(api.audit).toHaveBeenCalledWith('dx', '', expect.anything());
+    const items = () => [...auditCard().querySelectorAll<HTMLElement>('.channel-audit-item')];
+    expect(items()).toHaveLength(2);
+    const first = items()[0].textContent ?? '';
+    expect(first).toContain('[Tofu 代发] 开的，下午三点见。');
+    expect(first).toContain('settings.dx.outboxState.sent');
+    expect(first).toContain('settings.channels.audit.attachments:{"names":"agenda.pdf"}');
+    expect(first).toContain('settings.channels.audit.authority.third_party');
+    expect(first).toContain('"decision":"settings.channels.audit.kind.approved"');
+    expect(first).toContain('"by":"settings.channels.audit.by.owner_message"');
+    expect(items()[1].textContent).toContain('settings.channels.audit.authority.merged');
+    // Read-only: drafts are decided in the outbox card, never here.
+    expect(auditCard().querySelector('.channel-outbox-code, .channel-outbox-actions')).toBeNull();
+    const more = button('settings.channels.audit.more');
+    more.click();
+    await settle();
+    expect(api.audit).toHaveBeenLastCalledWith('dx', 'cursor-2', expect.anything());
+    expect(items()).toHaveLength(3);
+    expect(items()[2].textContent).not.toContain('settings.channels.audit.kind');  // an undecided draft
+    expect(more.hidden).toBe(true);
+    // A re-read shows the newest page again.
+    button('settings.dx.refresh').click();
+    await settle();
+    expect(items()).toHaveLength(2);
+    expect(more.isConnected && !more.hidden).toBe(true);
+  });
+
+  it('says when nothing was recorded, and reports a failed audit read in its own card', async () => {
+    const api = fakeApi();
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    expect(auditCard().textContent).toContain('settings.channels.audit.empty');
+    api.audit.mockRejectedValueOnce(new Error('store down'));
+    destroyDxTab();
+    populateDxTab();
+    await settle();
+    expect(auditCard().querySelector('.ui-alert')!.textContent)
+      .toContain('settings.channels.audit.loadFailed:{"error":"store down"}');
+    expect(card(0).querySelector('.channel-status')!.textContent).toBe('settings.dx.state.connected');
     expect(visibleTitles()).toEqual(['Tofu Router', 'Ops', 'Ann', 'Team']);
   });
 });

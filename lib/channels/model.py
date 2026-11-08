@@ -3,8 +3,8 @@
 Responsibility: the channel-neutral shapes shared by every channel module,
 derived from the single contract ``contracts/channels_v1.schema.json``
 (enums, defaults, limits, provider limits, tool schemas).
-Entry points: ``ThreadKey``, ``ChannelEvent``, ``OutboxItem``, ``ChannelError``
-and the contract vocabularies below. Dependencies: the contract file only; no
+Entry points: ``ThreadKey``, ``ChannelEvent``, ``ChannelMedia``, ``OutboxItem``,
+``ChannelError`` and the contract vocabularies below. Dependencies: the contract file only; no
 storage, network or task imports, so adapters and tests can use it freely.
 """
 from __future__ import annotations
@@ -29,8 +29,15 @@ BRIDGE_CONTRACT = CONTRACT['x-bridge']
 # messages that are human input) and whether quote replies exist.
 CHANNEL_TRAITS = CONTRACT['x-channelTraits']
 GITHUB = CONTRACT['x-github']
+DX_ROBOT = CONTRACT['x-dxRobot']
+# 大象 message types, the rich-text subtype, the voice format and the Web
+# SDK's file hosts (docs/CHANNELS.md C9).
+DX = CONTRACT['x-dx']
 DEFAULT_MODE_BY_KIND = dict(CONTRACT['x-defaults']['modeByKind'])
 DEFAULT_REPLY_POLICY = CONTRACT['x-defaults']['replyPolicy']
+# The owner's assistant for other people's messages (docs/CHANNELS.md C11).
+ASSISTANT = CONTRACT['x-assistant']
+OWNER_NOTE_MAX_CHARS = _DEFS['OwnerNote']['maxLength']
 
 CHANNELS = tuple(_DEFS['Channel']['enum'])
 THREAD_KINDS = tuple(_DEFS['ThreadKind']['enum'])
@@ -44,6 +51,7 @@ ACCOUNT_STATES = tuple(_DEFS['AccountState']['enum'])
 # 'starting' written over its 'connected' would stick.
 SESSION_REPORTED_STATES = frozenset({'starting', 'authorizing', 'connected', 'disconnected'})
 EVENT_DISPOSITIONS = tuple(_DEFS['EventDisposition']['enum'])
+OUTBOX_AUTHORITIES = tuple(_DEFS['OutboxAuthority']['enum'])
 OUTBOX_STATES = tuple(_DEFS['OutboxState']['enum'])
 # Terminal outbox states leave the per-thread active index; ``failed`` stays
 # listed (non-blocking) until the owner discards it.
@@ -176,13 +184,69 @@ def external_id_after(left: str, right: str | None) -> bool:
     return right is None or right == '' or int(left) > int(right)
 
 
+# Kinds of downloadable originals and their resolution states (C9).
+MEDIA_KINDS = ('image', 'file', 'voice')
+MEDIA_STATES = ('pending', 'attached', 'failed')
+
+
+@dataclass(frozen=True)
+class ChannelMedia:
+    """One downloadable original of an event: protocol facts, then its resolution.
+
+    ``source`` and ``token`` locate the provider original for the adapter's
+    download port only. A media URL or file token is a credential-bearing
+    locator, so neither is ever recorded, rendered or shown in a ``repr``.
+    ``attachment`` is the owner-scoped attachment ref once the original is
+    stored (``lib.media_attachments``); voice also carries its transcript.
+    """
+
+    kind: str
+    name: str
+    mime_type: str = ''
+    size_bytes: int = 0
+    duration_s: int = 0
+    source: str = field(default='', repr=False, compare=False)
+    token: str = field(default='', repr=False, compare=False)
+    status: str = 'pending'
+    detail: str = ''
+    attachment: dict[str, Any] | None = None
+    transcript: str = ''
+    transcript_status: str = ''
+    transcript_detail: str = ''
+
+    def __post_init__(self):
+        if self.kind not in MEDIA_KINDS or self.status not in MEDIA_STATES:
+            raise ChannelError('invalid_media', 'Unknown channel media kind or state')
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            'kind': self.kind, 'name': self.name, 'mimeType': self.mime_type,
+            'sizeBytes': int(self.size_bytes), 'durationS': int(self.duration_s),
+            'status': self.status, 'detail': self.detail, 'attachment': self.attachment,
+            'transcript': self.transcript, 'transcriptStatus': self.transcript_status,
+            'transcriptDetail': self.transcript_detail,
+        }
+
+    @classmethod
+    def from_record(cls, value: dict[str, Any]) -> 'ChannelMedia':
+        return cls(
+            kind=value['kind'], name=value.get('name', ''), mime_type=value.get('mimeType', ''),
+            size_bytes=int(value.get('sizeBytes') or 0), duration_s=int(value.get('durationS') or 0),
+            status=value.get('status') or 'pending', detail=value.get('detail', ''),
+            attachment=value.get('attachment'), transcript=value.get('transcript', ''),
+            transcript_status=value.get('transcriptStatus', ''),
+            transcript_detail=value.get('transcriptDetail', ''))
+
+
 @dataclass(frozen=True)
 class ChannelEvent:
     """One inbound message normalized by an adapter; facts only, no policy.
 
     ``sent_at_ms`` is the provider server time when the adapter can derive it.
     ``mentioned_ids``/``mentions_all`` and ``reply_to_sender_id`` are protocol
-    facts; ingress compares them with the bound owner identity.
+    facts; ingress compares them with the bound owner identity. ``media`` are
+    the event's downloadable originals; ``text`` is its own text or, for a
+    non-text message, a readable description.
     """
 
     thread: ThreadKey
@@ -201,11 +265,14 @@ class ChannelEvent:
     outbox_marker: str = ''
     own_connection: bool = False
     url: str = ''
+    media: tuple[ChannelMedia, ...] = ()
 
     def __post_init__(self):
         require_external_id(self.external_id)
         if not isinstance(self.text, str) or not isinstance(self.sender_id, str):
             raise ChannelError('invalid_event', 'Channel event text and sender must be strings')
+        if not all(isinstance(item, ChannelMedia) for item in self.media):
+            raise ChannelError('invalid_event', 'Channel event media must be ChannelMedia')
 
     @property
     def channel(self) -> str:
@@ -225,7 +292,7 @@ class ChannelEvent:
             'mentionedIds': list(self.mentioned_ids), 'mentionsAll': bool(self.mentions_all),
             'replyToExternalId': self.reply_to_external_id,
             'replyToSenderId': self.reply_to_sender_id, 'clientId': self.client_id,
-            'url': self.url,
+            'url': self.url, 'media': [item.to_record() for item in self.media],
         }
 
     @classmethod
@@ -240,12 +307,21 @@ class ChannelEvent:
             mentions_all=bool(value.get('mentionsAll')),
             reply_to_external_id=value.get('replyToExternalId', ''),
             reply_to_sender_id=value.get('replyToSenderId', ''),
-            client_id=value.get('clientId', ''), url=value.get('url', ''))
+            client_id=value.get('clientId', ''), url=value.get('url', ''),
+            media=tuple(ChannelMedia.from_record(item) for item in value.get('media') or ()))
+
+
+# Outbound 大象 attachment facts: accepted types, size bound, preview sources (C10).
+DX_ATTACHMENTS = CONTRACT['x-dxAttachments']
 
 
 @dataclass
 class OutboxItem:
-    """One durable outbound message; ``state`` follows ``OutboxState``."""
+    """One durable outbound message; ``state`` follows ``OutboxState``.
+
+    ``extra['attachments']`` holds its attachment records (C10), originals in
+    the order given and each original's preview copies after it.
+    """
 
     id: str
     thread: str
@@ -304,7 +380,25 @@ class OutboxItem:
                        'turnId': self.origin.get('turnId', '')},
             'createdAtMs': self.created_at_ms, 'updatedAtMs': self.updated_at_ms,
             'externalId': self.external_id, 'error': self.error,
+            'attachments': [
+                {'index': index, 'name': record['name'], 'type': record['type'], 'size': int(record['size']),
+                 'sha256': record['sha256'], 'kind': record['kind'], 'renditionOf': record.get('renditionOf'),
+                 'state': record.get('state') or 'pending', 'error': record.get('error')}
+                for index, record in enumerate(self.extra.get('attachments') or ())],
+            'approvalCode': approval_code(self.id),
+            # Items recorded before authorities existed came from the router's own requests.
+            'authority': self.extra.get('authority') or 'nonhuman',
+            'decision': self.extra.get('decision'),
         }
+
+
+def approval_code(item_id: str) -> str:
+    """The short code the owner's own words name to decide a draft (``x-assistant``).
+
+    Outbox item IDs are ``ob`` plus hex digest digits, so the code is the
+    first digest digits, upper case.
+    """
+    return str(item_id)[2:2 + ASSISTANT['approvalCodeLength']].upper()
 
 
 def session_owns_status(account: dict[str, Any] | None) -> bool:
@@ -315,10 +409,12 @@ def session_owns_status(account: dict[str, Any] | None) -> bool:
 
 __all__ = [
     'ACCOUNT_STATES', 'ACTIVE_OUTBOX_STATES', 'BRIDGE_CONTRACT', 'CHANNELS', 'CHANNEL_TRAITS',
-    'CONFIGURABLE_MODES', 'CONTRACT', 'ChannelError', 'ChannelEvent', 'DEFAULT_MODE_BY_KIND',
-    'DEFAULT_REPLY_POLICY', 'DISCLOSURE_LABEL', 'EVENT_DISPOSITIONS', 'GITHUB', 'LIMITS',
-    'NAMESPACE', 'OUTBOX_MARKER_FIELD',
+    'CONFIGURABLE_MODES', 'CONTRACT', 'ChannelError', 'ChannelEvent', 'ChannelMedia',
+    'DEFAULT_MODE_BY_KIND', 'DEFAULT_REPLY_POLICY', 'DISCLOSURE_LABEL', 'DX', 'DX_ROBOT',
+    'EVENT_DISPOSITIONS', 'GITHUB', 'LIMITS', 'MEDIA_KINDS', 'MEDIA_STATES', 'NAMESPACE',
+    'OUTBOX_MARKER_FIELD',
     'OUTBOX_STATES', 'OutboxItem', 'PROVIDER_LIMITS', 'REPLY_POLICIES', 'SESSION_REPORTED_STATES',
     'TERMINAL_OUTBOX_STATES', 'THREAD_KINDS', 'THREAD_MODES', 'TOOLS', 'TOOL_NAMES', 'ThreadKey',
     'external_id_after', 'order_key', 'parse_event_id', 'require_external_id', 'session_owns_status',
+    'DX_ATTACHMENTS', 'ASSISTANT', 'OUTBOX_AUTHORITIES', 'OWNER_NOTE_MAX_CHARS', 'approval_code',
 ]

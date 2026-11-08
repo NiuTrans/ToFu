@@ -8,8 +8,8 @@ import sys
 
 import pytest
 
-from tests.project_mod.test_git_land_script import (
-    ROOT, SCRIPT, commit_all, feature, git, land, rev, shared, state,
+from tests.project_mod.test_git_land_script import (  # noqa: F401 - pytest fixtures
+    ROOT, SCRIPT, commit_all, feature, git, land, private_local_root, rev, shared, state,
 )
 
 pytestmark = pytest.mark.unit

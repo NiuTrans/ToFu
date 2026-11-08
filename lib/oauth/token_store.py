@@ -55,7 +55,7 @@ _sf_locks = WeakLockPool(threading.Lock)
 _store_locks: dict[str, threading.RLock] = {}
 _store_guard = threading.Lock()
 _PROVIDER_RE = re.compile(r'^[a-z][a-z0-9_-]{0,31}$')
-_SUPPORTED_PROVIDERS = frozenset({'claude', 'codex'})
+_SUPPORTED_PROVIDERS = frozenset({'claude', 'codex', 'kimi'})
 
 
 def _sf_lock(provider: str, refresh_tok: str) -> threading.Lock:

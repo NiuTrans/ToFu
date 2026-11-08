@@ -384,7 +384,17 @@ pub const STAGE_OVERLAY_VALIDATE_HEAD_VERSIONS: usize = 210;
 pub const STAGE_OVERLAY_VALIDATE_ORIGINAL_BLIND_VERSIONS: usize = 211;
 pub const STAGE_OVERLAY_VALIDATE_RANGE_WITNESSES: usize = 212;
 pub const STAGE_RETENTION_PRUNE: usize = 213;
-const STAGE_COUNT: usize = 214;
+/// Block lookups (reads, dedupe and membership probes) answered by the
+/// published catalog location table (docs/TOFUDB_BLOCK_READ_PATH.md,
+/// "Published catalog location table"): held by a located segment, proven
+/// absent from the installed catalog, or left to the exact catalog path (no
+/// usable table, a stale table's miss, or a failed located read).
+pub const STAGE_CATALOG_LOCATION_HIT: usize = 214;
+pub const STAGE_CATALOG_LOCATION_ABSENT: usize = 215;
+pub const STAGE_CATALOG_LOCATION_UNKNOWN: usize = 216;
+/// Deriving the published table for a newly installed catalog, off the mutex.
+pub const STAGE_CATALOG_LOCATION_DERIVE: usize = 217;
+const STAGE_COUNT: usize = 218;
 pub const STAGE_NAMES: [&str; STAGE_COUNT] = [
     "semantic",
     "prepare",
@@ -600,6 +610,10 @@ pub const STAGE_NAMES: [&str; STAGE_COUNT] = [
     "overlay_validate_original_blind_versions",
     "overlay_validate_range_witnesses",
     "retention_prune",
+    "catalog_location_hit",
+    "catalog_location_absent",
+    "catalog_location_unknown",
+    "catalog_location_derive",
 ];
 
 #[derive(Clone, Copy)]

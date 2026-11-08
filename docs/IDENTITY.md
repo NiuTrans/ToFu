@@ -321,6 +321,23 @@ authorization. Account changes fail closed rather than silently rebinding.
 Source outages preserve ProviderAccess configuration. Tests use synthetic
 credentials and isolate the real Codex home: `tests/oauth/test_codex_shared_login.py`.
 
+## Kimi Code sign-in
+
+Problem: Kimi Code issues membership tokens only through its own CLI's public
+device grant, and its documentation treats a tampered client identifier as a
+violation that may suspend the account. Decision: Tofu runs that device grant
+itself (`lib/oauth/kimi.py`) and owns the resulting login and its refresh in the
+common token store. Every device, token, refresh and model request names Tofu
+(`User-Agent: Tofu/<version>`, `X-Msh-Platform: tofu`), with device headers that
+describe this host and a per-login device id stored with the token. The device
+code stays server-side; status exposes only the user code and verification URL,
+and nothing logs a token, device code or upstream body. Alternatives rejected:
+presenting as the official CLI (client-identifier tampering); borrowing the
+CLI's stored login (two refreshers would race one rotating refresh token, the
+hazard described for Codex above); running a third-party proxy binary. Owner
+steps and plan terms live in
+[auth_providers_billing.md](modules/auth_providers_billing.md#domestic-coding-subscriptions).
+
 ## Tofu-DB pre-authority account layout
 
 All seven `tenant.user.*` operations now compile through the experimental

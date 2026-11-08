@@ -16,6 +16,14 @@ if TYPE_CHECKING:
     from lib.llm.llm_errors import SubscriptionCredentialUnavailableError
 
 SUMMARY_FAILURE_CODE = 'summary_credentials_unavailable'
+SUMMARY_FAILURE_CODES = frozenset({
+    SUMMARY_FAILURE_CODE, 'summary_rate_limited', 'summary_provider_unavailable',
+    'summary_permission_denied', 'summary_route_unavailable', 'summary_incomplete',
+    'summary_empty', 'summary_cancelled', 'summary_dispatch_failed',
+    'summary_route_revalidation_failed',
+})
+# JSON consumers represent receipt counts as JavaScript safe integers.
+MAX_SUMMARY_DIAGNOSTIC_COUNT = 2**53 - 1
 MAX_SUMMARY_ATTEMPTS = 3
 MAX_SUMMARY_ROUTE_ID_LENGTH = 200
 SUMMARY_AUTH_ISSUES = frozenset({
@@ -46,16 +54,73 @@ def _allowlisted(value, allowed) -> bool:
 
 
 def validate_summary_failure(value) -> dict | None:
-    """Reject unknown fields/reasons outright; never clip or stringify them."""
-    if (type(value) is not dict or len(value) != len(_FAILURE_FIELDS)
-            or value.keys() != _FAILURE_FIELDS
-            or not _allowlisted(value.get('code'), {SUMMARY_FAILURE_CODE})
-            or not _allowlisted(value.get('authIssue'), SUMMARY_AUTH_ISSUES)
-            or not _allowlisted(value.get('credentialSource'), SUMMARY_CREDENTIAL_SOURCES)
-            or value.get('providerReached') is not False):
+    """Detach safe diagnostics; only the strict credential shape proves unsent auth."""
+    if type(value) is not dict or not _allowlisted(value.get('code'), SUMMARY_FAILURE_CODES):
         return None
-    return {key: value[key] for key in (
-        'code', 'authIssue', 'credentialSource', 'providerReached')}
+    if value['code'] == SUMMARY_FAILURE_CODE:
+        if (value.keys() != _FAILURE_FIELDS
+                or not _allowlisted(value.get('authIssue'), SUMMARY_AUTH_ISSUES)
+                or not _allowlisted(value.get('credentialSource'), SUMMARY_CREDENTIAL_SOURCES)
+                or value.get('providerReached') is not False):
+            return None
+        return {key: value[key] for key in (
+            'code', 'authIssue', 'credentialSource', 'providerReached')}
+    if not value.keys() <= {'code', 'statusCode', 'attempts', 'limit'}:
+        return None
+    if ('statusCode' in value and (type(value['statusCode']) is not int
+                                  or not 100 <= value['statusCode'] <= 599)):
+        return None
+    for key in ('attempts', 'limit'):
+        if key in value and (type(value[key]) is not int
+                or not (1 if key == 'limit' else 0) <= value[key] <= MAX_SUMMARY_DIAGNOSTIC_COUNT):
+            return None
+    if 'limit' in value and ('attempts' not in value or value['attempts'] > value['limit']):
+        return None
+    return {key: value[key] for key in ('code', 'statusCode', 'attempts', 'limit') if key in value}
+
+
+def classify_summary_failure(error: BaseException, *, provider_completed=False) -> dict:
+    """Classify existing typed failures without inspecting text or arbitrary attributes.
+
+    Diagnostic facts do not create a retry allowance, route, or credential grant.
+    Actual 429 counts come only from the dispatcher's typed caller-owned budget.
+    A local failure after a completed transport is not another provider outage.
+    """
+    from lib.llm.llm_errors import PermissionError_, RateLimitError, RetryableAPIError
+    from lib.llm.stream_result import UnverifiedProviderStreamError
+    from lib.llm_dispatch._api_errors import DispatchNoAdmissibleSlot, DispatchRateLimitBudgetExceeded
+    from lib.model_routing.domain import ModelRoutingError
+    from lib.tasks_pkg.compaction._layer2._summary_transport import IncompleteSummaryError
+
+    result = {'code': 'summary_dispatch_failed'}
+    if isinstance(error, (IncompleteSummaryError, UnverifiedProviderStreamError)):
+        return {'code': 'summary_incomplete'}
+    if provider_completed:
+        return result
+    if isinstance(error, DispatchNoAdmissibleSlot):
+        return {'code': 'summary_route_unavailable', 'attempts': 0}
+    if isinstance(error, ModelRoutingError):
+        return {'code': 'summary_route_revalidation_failed'
+                if error.kind == 'model_route_changed' else 'summary_route_unavailable'}
+    if isinstance(error, (PermissionError_, RateLimitError, RetryableAPIError)):
+        status = error.status_code
+        if type(status) is int and 100 <= status <= 599:
+            result['statusCode'] = status
+        if isinstance(error, PermissionError_):
+            if status in (0, 401, 403):
+                result['code'] = 'summary_permission_denied'
+        elif isinstance(error, RetryableAPIError):
+            if status == 0 or type(status) is int and 500 <= status <= 599:
+                result['code'] = 'summary_provider_unavailable'
+        elif error.is_gateway or type(status) is int and 500 <= status <= 599:
+            result['code'] = 'summary_provider_unavailable'
+        elif not error.is_quota and status in (0, 429):
+            result['code'] = 'summary_rate_limited'
+    if isinstance(error, DispatchRateLimitBudgetExceeded):
+        counted = {**result, 'attempts': error.attempts, 'limit': error.limit}
+        if validate_summary_failure(counted) is not None:
+            result = counted
+    return result
 
 
 def _valid_route_id(value) -> bool:
@@ -96,7 +161,9 @@ def validate_summary_attempts(value) -> list[dict]:
 
 
 def _failure_matches_attempts(failure: dict, attempts: list[dict]) -> bool:
-    """An unsent overall failure cannot override recorded or unknown ingress."""
+    """Only credential recovery needs whole-attempt proof of unsent ingress."""
+    if failure['code'] != SUMMARY_FAILURE_CODE:
+        return True  # Display diagnostics never reconstruct credential authority.
     return (all(row['status'] == 'failed' and row.get('providerReached') is False
                 for row in attempts)
             and (not attempts or all(attempts[-1].get(key) == failure[key]
@@ -125,7 +192,7 @@ def reconstructed_summary_failure(
         return None
     failure, attempts = state.validated_metadata()
     projected_attempts = validate_summary_attempts(summary_usage.get('_summaryAttempts'))
-    if (failure is None
+    if (failure is None or failure.get('code') != SUMMARY_FAILURE_CODE
             or summary_usage.get('_summaryFailure') is not state.projected_failure
             or validate_summary_failure(summary_usage.get('_summaryFailure')) != failure
             or ('_summaryAttempts' in summary_usage and not projected_attempts)
@@ -139,7 +206,8 @@ def reconstructed_summary_failure(
 
 
 __all__ = [
-    'MAX_SUMMARY_ATTEMPTS', 'SUMMARY_FAILURE_CODE', 'SUMMARY_AUTH_ISSUES',
+    'MAX_SUMMARY_ATTEMPTS', 'SUMMARY_FAILURE_CODE', 'SUMMARY_FAILURE_CODES',
+    'MAX_SUMMARY_DIAGNOSTIC_COUNT', 'classify_summary_failure', 'SUMMARY_AUTH_ISSUES',
     'SUMMARY_CREDENTIAL_SOURCES', 'validate_summary_failure',
     'validate_summary_attempts', 'reconstructed_summary_failure',
 ]

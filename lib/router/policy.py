@@ -18,6 +18,7 @@ from lib.tasks_pkg.coordinator_policy import COORDINATOR_TOOLS
 ROUTER_ONLY_TOOLS = frozenset({
     'route_to_project', 'get_router_projects',
     'router_instruction_create', 'router_instruction_list', 'router_instruction_cancel',
+    'restart_server',
 })
 CHANNEL_TOOLS = frozenset({
     'channel_send', 'channel_read', 'channel_threads', 'channel_configure_thread',
@@ -56,6 +57,21 @@ def is_router_scope(scope: dict | None) -> bool:
     return is_router_home(scope['user_id'], scope['project_path'])
 
 
+def router_tool_ceiling(scope: dict, task: dict | None = None) -> frozenset:
+    """``ROUTER_TOOLS``, or the channel review ceiling for a Turn reviewing other people's messages.
+
+    docs/CHANNELS.md C11: such a Turn reads and drafts for the reviewed
+    threads, tells the owner, and applies the owner's standing instructions;
+    nothing in other people's text widens it. Lookup errors propagate.
+    """
+    if task is not None:
+        from lib.channels.assistant import review_tool_ceiling
+        narrowed = review_tool_ceiling(task, scope)
+        if narrowed is not None:
+            return narrowed
+    return ROUTER_TOOLS
+
+
 def router_scope(task: dict, project_path: str | None = None) -> dict | None:
     """The coordinator scope of ``task`` when it is the Global Router, else None.
 
@@ -67,4 +83,4 @@ def router_scope(task: dict, project_path: str | None = None) -> dict | None:
 
 
 __all__ = ['CHANNEL_TOOLS', 'ROUTER_ONLY_TOOLS', 'ROUTER_ROLE_ADDENDUM', 'ROUTER_TOOLS',
-           'is_router_scope', 'router_scope']
+           'is_router_scope', 'router_scope', 'router_tool_ceiling']

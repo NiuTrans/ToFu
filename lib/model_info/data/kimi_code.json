@@ -1,0 +1,19 @@
+{
+  "brand": "kimi",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "kimi_code",
+  "category": "subscription",
+  "name": "Kimi Code (membership)",
+  "base_url": "https://api.kimi.com/coding/v1",
+  "catalog_mode": "curated",
+  "catalog_source": {"url": "https://www.kimi.com/code/docs/en/kimi-code/models.html", "checked_at": "2026-11-06"},
+  "subscription": {"key_console_url": "https://www.kimi.com/code/console"},
+  "_plan_note": "Kimi membership Plus and above. Plus may use K3/K3.1 Pro only up to 256K context (403 above it), so the K3 line is declared at 262144; Pro and above may raise it to 1048576. k3-256k costs about half the quota of k3 at the same context. The highspeed wires need Pro and above. Signing in with Settings → 订阅登录 → Kimi Code provisions the same roster as oauth_kimi.",
+  "offering_recipes": [
+    {"model_id": "kimi-k3.1-pro", "request_ids": ["k3.1-pro"], "capabilities": ["text", "vision", "video", "thinking"], "context_window": 262144},
+    {"model_id": "kimi-k3", "request_ids": ["k3-256k", "k3"], "capabilities": ["text", "vision", "thinking"], "context_window": 262144},
+    {"model_id": "kimi-k2.8-preview", "request_ids": ["kimi-for-coding"], "capabilities": ["text", "vision", "thinking"], "context_window": 1048576},
+    {"model_id": "kimi-k2.7-code-highspeed", "request_ids": ["kimi-for-coding-highspeed"], "capabilities": ["text", "vision", "video", "thinking"], "context_window": 262144},
+    {"model_id": "kimi-k3.1-pro-highspeed", "request_ids": ["k3.1-pro-highspeed"], "capabilities": ["text", "vision", "thinking"], "context_window": 1048576}
+  ]
+}

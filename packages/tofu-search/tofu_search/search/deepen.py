@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 from tofu_search._worker_executor import DemandThreadPoolExecutor as ThreadPoolExecutor
 from tofu_search.config import get_config
 from tofu_search.fetch import fetch_page_content
+from tofu_search.generated_url_blocklist import url_is_blocked
 from tofu_search.log import get_logger
 from tofu_search.providers import submit_with_provider_context
 from tofu_search.search.dedup import canonical_url_key
@@ -133,7 +134,7 @@ def deepen_results(query, results, *, max_links=4, max_chars=None,
         if key in visited or key in seen_cand:
             continue
         dom = _domain(url)
-        if not dom or any(skip in dom for skip in skip_domains):
+        if not dom or url_is_blocked(url, skip_domains):
             continue
         seen_cand.add(key)
         score = _score_candidate(subject_terms, cand['anchor'], url)

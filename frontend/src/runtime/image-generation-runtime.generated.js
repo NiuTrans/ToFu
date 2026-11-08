@@ -1,6 +1,7 @@
 // @ts-check
 /* Generated lazy retained runtime: image-generation. Do not edit directly. */
 import { featureRegistry as runtimeScope } from '../feature-registry';
+import { supportedImageComposerOptions } from '../features/image/composer-constraints';
 import { escapeHtml } from '../html-safety';
 
 const Api = runtimeScope.Api;
@@ -255,6 +256,7 @@ function enterImageGenMode() {
   captureActiveConversationSettings();
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
   if (!_igModelsLoaded) void _loadIgModels();
+  else _igApplyModelOptions();
   debugLog('Image Gen Mode: ENTER', 'success');
   // Focus the textarea
   document.getElementById('userInput')?.focus();
@@ -322,8 +324,34 @@ function selectIgModel(el) {
 
   // Close dropdown
   document.getElementById('igModelPicker')?.classList.remove('open');
+  _igApplyModelOptions();
   /* Reflow toolbar after model label change */
   if (typeof _scheduleReflow === 'function') _scheduleReflow();
+}
+
+/* Offer only the aspect ratios and resolutions the selected Model documents
+ * (supportedImageComposerOptions owns the rule); an unsupported active choice
+ * moves to the first supported one. */
+function _igApplyModelOptions() {
+  const selected = ImageGenerationComposerState.selectedModel;
+  const providerId = ImageGenerationComposerState.selectedProviderId;
+  const route = selected === '__all__' ? null : _IG_ALL_ROUTES.find(r =>
+    r.model === selected && (!providerId || r.providerId === providerId));
+  const aspectPills = Array.from(document.querySelectorAll('#igAspectBar .ig-pill'));
+  const resolutionPills = Array.from(document.querySelectorAll('#igResolutionBar .ig-pill'));
+  const supported = supportedImageComposerOptions(route ? route.mediaProfile : null, {
+    aspects: aspectPills.map(pill => pill.dataset.ar),
+    resolutions: resolutionPills.map(pill => pill.dataset.res),
+  });
+  const constrain = (pills, values, key, select) => {
+    const allowed = new Set(values);
+    for (const pill of pills) pill.disabled = !allowed.has(pill.dataset[key]);
+    const active = pills.find(pill => pill.classList.contains('active'));
+    const fallback = pills.find(pill => !pill.disabled);
+    if (active && active.disabled && fallback) select(fallback);
+  };
+  constrain(aspectPills, supported.aspects, 'ar', selectIgAspect);
+  constrain(resolutionPills, supported.resolutions, 'res', selectIgResolution);
 }
 function selectIgAspect(el) {
   ImageGenerationComposerState.selectedAspect = el.dataset.ar;
@@ -745,7 +773,9 @@ async function _requestIgModels() {
     // Update the owner-scoped route list from API data.
     for (const m of visible) {
       _IG_ALL_MODELS.push(m.model);
-      _IG_ALL_ROUTES.push({ model: m.model, providerId: m.provider_id || '' });
+      _IG_ALL_ROUTES.push({
+        model: m.model, providerId: m.provider_id || '', mediaProfile: m.media_profile || null,
+      });
     }
 
     // ── Always start with "All Models" option ──
@@ -800,6 +830,7 @@ async function _requestIgModels() {
     }
     dropdown.innerHTML = html;
     _igModelsLoaded = true;
+    _igApplyModelOptions();
     /* Reflow toolbar after models loaded (toolbar width may have changed) */
     if (typeof _scheduleReflow === 'function') _scheduleReflow();
   } catch (e) {

@@ -82,6 +82,23 @@ class ChatTaskTestRegistry(MutableMapping[str, dict]):
 
 chat_task_registry = ChatTaskTestRegistry()
 
+
+def register_local_executor(task_id: str, *, conv_id: str = '', attempt_id: str = '',
+                            turn_id: str = '', user_id: int = 1) -> dict:
+    """Model a fake executor as the live local executor of its attempt.
+
+    Tests replace ``start_conversation_attempt_executor`` with a stub that only
+    binds an attempt's task id. A steer publishes its wakeup into this
+    process's inbox only for an attempt this process executes, so such a stub
+    must also register here; otherwise the steer is committed for the other
+    server process. Call ``chat_task_registry.pop(task_id)`` on teardown.
+    """
+    chat_task_registry[task_id] = {'id': task_id, 'convId': conv_id,
+        '_attemptId': attempt_id, '_turnId': turn_id, '_userId': user_id,
+        'status': 'running', 'aborted': False}
+    return chat_task_registry[task_id]
+
+
 # Fixture setup is normally single-threaded.  The guard preserves multi-line
 # setup readability without exposing or pretending to own TaskRuntime's lock;
 # each mapping operation above remains independently synchronized by runtime.
@@ -105,4 +122,5 @@ def isolated_reaper_registry(monkeypatch) -> ChatTaskTestRegistry:
     return ChatTaskTestRegistry(runtime)
 
 
-__all__ = ['chat_task_fixture_guard', 'chat_task_registry', 'isolated_reaper_registry']
+__all__ = ['chat_task_fixture_guard', 'chat_task_registry', 'isolated_reaper_registry',
+           'register_local_executor']

@@ -86,11 +86,13 @@ def start_install_job(command: str) -> dict:
 
     Returns the job snapshot dict.
     """
-    from lib.tools.process_environment import apply_tool_paths, resolve_executable
-    from lib.mcp.client._vendor import _mcp_cache_root
+    from lib.tools.process_environment import (
+        apply_tool_paths, resolve_executable, tool_cache_root,
+    )
     pkg = _pkg()
     environment = dict(os.environ)
-    apply_tool_paths(environment, interpreter_first=True, cache_root=_mcp_cache_root())
+    apply_tool_paths(environment, interpreter_first=True,
+                     cache_root=tool_cache_root())
     warmable = bool(command) and os.sep not in command and \
         pkg.vendored_launch_argv(command) is not None
     if not command or os.sep in command or (

@@ -12,12 +12,14 @@ never bypass its source-identity check or target a production server. For CJK
 screenshots this host's cached conda fontconfig can be selected with
 ``FONTCONFIG_FILE="$(dirname "$(dirname "$(command -v fc-list)")")/etc/fonts/fonts.conf"``.
 Run with ``-k 'not real_app'`` for the native-independent source visual tier.
-The first test boots the real local Hypercorn app and shipped frontend. Only catalog/snapshot/SSE inputs
-are synthetic; mutation HTTP requests and off-origin requests are blocked.
+The first test boots the real local Hypercorn app and shipped frontend. Only
+catalog/snapshot/multiplexed-SSE inputs are synthetic; mutation HTTP requests
+and off-origin requests are blocked.
 This verifies presentation/replay, NOT backend receipt or provider execution.
 The second uses the established source-build visual tier for the composer owner
 (the production instance is private). Screenshots under tests/visual/output
-are review evidence, not golden baselines. No existing test files are changed.
+are review evidence, not golden baselines. The transport fixture's independent
+specification lives in test_translation_compaction_fixture_stream.py.
 """
 from __future__ import annotations
 
@@ -140,34 +142,46 @@ def _install_fixture(page, origin, language, theme):
             route.continue_()
 
     page.route("**/*", intercept)
-    # Real hydration/decoder/reducer; only the fixture's stream transport changes.
-    script = """(({id, language, theme}) => {
+    # Keep the real multiplexer, hydration, decoder and reducer. Substitute only
+    # its native SSE boundary, using the actual request's subscription index.
+    script = r"""(({id, language, theme, origin}) => {
       localStorage.setItem('tofu_ui_lang', language);
       localStorage.setItem('claude_ui_theme', theme);
       sessionStorage.setItem('tofu_activeConvId', id);
       const NativeEventSource = window.EventSource;
+      const fixtureOrigin = new URL(origin).origin;
       window.__visualConversationSources = [];
       window.EventSource = class FixtureEventSource extends EventTarget {
         constructor(url, options) {
           super();
-          if (!String(url).includes('/conversations/' + id + '/events')) {
+          const endpoint = new URL(String(url), origin);
+          if (endpoint.origin !== fixtureOrigin || endpoint.pathname !== '/api/v4/conversation-events') {
             return new NativeEventSource(url, options);
           }
-          this.url = String(url); this.readyState = 1;
+          const subscriptions = JSON.parse(endpoint.searchParams.get('streams') || '[]');
+          const streamIndex = subscriptions.findIndex(item => item.conversationId === id);
+          if (streamIndex < 0) return new NativeEventSource(url, options);
+          this.url = String(url); this.readyState = 0; this.streamIndex = streamIndex;
           window.__visualConversationSources.push(this);
-          setTimeout(() => { this.onopen?.(new Event('open')); this.dispatchEvent(new Event('open')); }, 0);
+          queueMicrotask(() => {
+            if (this.readyState === 2) return;
+            this.readyState = 1;
+            this.onopen?.(new Event('open')); this.dispatchEvent(new Event('open'));
+          });
         }
         close() { this.readyState = 2; }
       };
       window.__emitVisualConversationEvent = (event) => {
+        if (event.conversationId !== id) throw new Error('Visual fixture event conversation mismatch');
         const source = window.__visualConversationSources.findLast(item => item.readyState === 1);
         if (!source) throw new Error('Real app did not subscribe to fixture conversation');
         source.dispatchEvent(new MessageEvent(event.type, {
-          data: JSON.stringify(event), lastEventId: 'visual-cursor-' + event.syncSeq,
+          data: source.streamIndex + '\n' + JSON.stringify(event),
+          lastEventId: 'visual-cursor-' + event.syncSeq,
         }));
       };
     })"""
-    page.add_init_script(script + f"({json.dumps({'id': CONVERSATION, 'language': language, 'theme': theme})});")
+    page.add_init_script(script + f"({json.dumps({'id': CONVERSATION, 'language': language, 'theme': theme, 'origin': origin})});")
     return snapshot, blocked_mutations
 
 
@@ -208,10 +222,12 @@ def _order_and_attribution(page, language):
     disclosure = card.locator(':scope > summary.activity-event__compaction-summary')
     assert disclosure.count() == 1
     assert ("详情" if language == "zh" else "Details") not in disclosure.inner_text()
-    # The snapshot action is inline in the header, always visible, no fold needed.
-    snapshot = disclosure.locator('button[data-conversation-action="open-compaction"]')
+    # Genuine snapshots belong to the expanded DIV, never the native summary.
+    assert disclosure.locator('button[data-conversation-action="open-compaction"]').count() == 0
+    assert card.locator(':scope > details').count() == 0
+    snapshot = card.locator(':scope > div button[data-conversation-action="open-compaction"]')
     assert snapshot.count() == 1
-    assert snapshot.is_visible()
+    assert not snapshot.is_visible()
     assert disclosure.evaluate("node => getComputedStyle(node).listStyleType") == 'none'
     assert disclosure.locator('.activity-event__compaction-model').inner_text() == 'Luna'
     assert summary_label in (disclosure.locator('.activity-event__compaction-model').get_attribute('title') or '')
@@ -225,6 +241,7 @@ def _order_and_attribution(page, language):
 
     disclosure.locator('.activity-event__compaction-model').click()
     assert diagnostics.evaluate('node => node.open')
+    assert snapshot.is_visible()
     assert main_label in card.inner_text()
     assert 'final rendered prompt' in card.inner_text()
     disclosure.focus()
@@ -258,7 +275,7 @@ def _order_and_attribution(page, language):
     ("zh", "light", {"width": 390, "height": 1000}),
 ])
 def test_real_app_translation_and_preflight_replay(browser, live_server, language, theme, viewport):
-    """Local shipped app + synthetic SSE upsert + authoritative reload."""
+    """Local shipped app + synthetic multiplexed SSE upsert + authoritative reload."""
     context = browser.new_context(viewport=viewport, device_scale_factor=1)
     page = context.new_page()
     page.set_default_timeout(15000)

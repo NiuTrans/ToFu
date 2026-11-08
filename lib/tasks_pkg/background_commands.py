@@ -1,10 +1,12 @@
 """Process-local control registry for explicit background commands.
 
 Conversation completions use the existing durable queue + inbox handoff lane.
-An idle conversation gets one collective wake only after all registered
-commands have published their durable results. The receiving conversation is
-fixed at launch by ``lib.tasks_pkg.conversation_delivery``: a child invocation
-runs under its parent's conversation id, but its commands publish nowhere.
+An idle conversation gets one collective wake only after every command for it
+on this host has published its durable result: the registry answers for this
+process, durable records for commands another server process owns. The
+receiving conversation is fixed at launch by
+``lib.tasks_pkg.conversation_delivery``: a child invocation runs under its
+parent's conversation id, but its commands publish nowhere.
 Headless and child commands retain queryable results until completed-history
 eviction or process exit; running entries are never evicted. Controls are
 scoped to their owner. A root task without a saved conversation reads its own
@@ -147,17 +149,50 @@ def conversation_results_complete(*, conv_id: str, user_id: int) -> bool:
     A finished process is still pending until its durable receipt commits.
     Startup scans all records before allowing a completion wake, so a result
     encountered early in that scan cannot race a still-running sibling.
+
+    The registry holds only this process's commands, while the API host and
+    the resident execution host each launch their own. A durable record lives
+    from launch until settlement, so one this registry does not own is another
+    process's unsettled command.
     """
     with _lock:
         if (_recovery_in_progress or _recovery_scan_failed
                 or (user_id, conv_id) in _recovery_incomplete_conversations):
             return False
-        return all(
+        if not all(
             entry['done'].is_set()
             and entry['state']['delivery_status'] in _SETTLED_DELIVERY
             for entry in _registry.values()
             if entry.get('conv_id') == conv_id and entry.get('user_id') == user_id
-        )
+        ):
+            return False
+        owned = frozenset(_registry)
+    return not _unowned_record_holds(conv_id=conv_id, user_id=user_id, owned=owned)
+
+
+def _unowned_record_holds(*, conv_id: str, user_id: int, owned: frozenset[str]) -> bool:
+    """Whether a record no entry here owns still holds this conversation's command."""
+    if not _posix_durable():
+        return False
+    root = _records_root()
+    try:
+        names = os.listdir(root)
+    except FileNotFoundError:
+        return False
+    for name in names:
+        if name in owned:
+            continue
+        record = _read_record(os.path.join(root, name))
+        # A directory without published metadata names no owner yet; the
+        # recovery sweep owns reporting an unreadable record.
+        if record is None or record.get('conv_id') != conv_id:
+            continue
+        try:
+            if int(record.get('user_id')) == int(user_id):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def conversation_has_known_commands(*, conv_id: str, user_id: int) -> bool:
@@ -1036,7 +1071,20 @@ def _kill_record_tree(record: dict) -> bool:
             return False
     except (KeyError, OSError, TypeError, ValueError):
         return False
-    retire_process_group(pgid, leader_alive=lambda: _record_pid_alive(record))
+    escaped = []
+    if sys.platform.startswith('linux'):
+        from lib.project_mod.process_group import (
+            ProcessGroupRetirementError, escaped_descendant_groups,
+        )
+        try:
+            # Bound to the verified start time: a leader that exits and whose
+            # PID is reused during discovery links no subtree.
+            escaped = escaped_descendant_groups(
+                int(record['pid']), pgid, birth=token.encode('ascii'))
+        except (OSError, ProcessGroupRetirementError):
+            escaped = []  # Discovery never blocks retiring the recorded group itself.
+    retire_process_group(pgid, leader_alive=lambda: _record_pid_alive(record),
+                         escaped_groups=escaped)
     return True
 
 

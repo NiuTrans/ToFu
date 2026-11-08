@@ -119,7 +119,7 @@ def bind_source_account(task, *, repository=None, expected_input=None):
     """
     from lib.identity import PrincipalContext
     from lib.tasks_pkg.coordinator_policy import coordinator_scope
-    from .admission import is_dispatch_task
+    from .admission import is_dispatch_task, reread_on_contention
     from .repository import ProjectDispatchError
     if is_dispatch_task(task) or not (scope := coordinator_scope(task)):
         return None
@@ -135,7 +135,9 @@ def bind_source_account(task, *, repository=None, expected_input=None):
     from .delegation import source_for_task
     from .repository import SyntheticSource
     try:
-        principal, source, attempt = source_for_task(repository, task, for_budget=True)
+        principal, source, attempt = reread_on_contention(
+            task, lambda: source_for_task(repository, task, for_budget=True),
+            label='coordinator request source', effect_free=True)
     except SyntheticSource:
         # Report relays, channel events and other nonhuman input authorize no
         # Workers, so their request opens no account; delegation still refuses.
@@ -169,7 +171,9 @@ def bind_source_account(task, *, repository=None, expected_input=None):
         if prior is None:
             old['accounts'].append(deepcopy(account))
         return old
-    accepted = repository._change(register, selected=repository._selection(budgets=[identity], cohort=False))
+    accepted = reread_on_contention(
+        task, lambda: repository._change(register, selected=repository._selection(budgets=[identity], cohort=False)),
+        label='coordinator request account')
     marker = SourceBudgetBinding(identity, nonce, id(budget), task['id'])
     task['_coordinatorRequestBudget'] = marker
     live_models = set()
@@ -183,7 +187,7 @@ def bind_source_account(task, *, repository=None, expected_input=None):
 
     def admit_dispatch():
         try:
-            validate()
+            reread_on_contention(task, validate, label='coordinator request authority', effect_free=True)
         except (PermissionError, ProjectDispatchError) as error:
             from lib.llm.llm_errors import AbortedError, ModelAdmissionRefused
             if _stopped(task):
@@ -201,21 +205,25 @@ def bind_source_account(task, *, repository=None, expected_input=None):
             record_model_event(row['modelAttempts'], event, live_intents=live_models, prior_accounts=True)
             fold_settled_models(row)
         try:
-            repository._change(record, selected=repository._selection(budgets=[identity], cohort=False))
+            reread_on_contention(
+                task, lambda: repository._change(record, selected=repository._selection(budgets=[identity], cohort=False)),
+                label='coordinator request model occurrence', cancellable=event['phase'] == 'dispatch_intent')
         finally:
             if event['phase'] != 'dispatch_intent': live_models.discard(event['attempt_ordinal'])
         if event['phase'] == 'dispatch_intent':
             admit_dispatch(); live_models.add(event['attempt_ordinal'])
 
     def reserve_tool(event):
-        validate()
+        reread_on_contention(task, validate, label='coordinator request authority', effect_free=True)
         def record(value):
             row = budget_row(value, identity)
             current = next(item for item in row['accounts'] if item['taskId'] == task['id'] and item['nonce'] == nonce)
             if event['root_task_id'] != task['id'] or event['reservation_ordinal'] not in (current['toolCalls'], current['toolCalls'] + 1):
                 raise PermissionError('Source tool occurrence changed its ordinal')
             current['toolCalls'] = event['reservation_ordinal']
-        repository._change(record, selected=repository._selection(budgets=[identity], cohort=False))
+        reread_on_contention(
+            task, lambda: repository._change(record, selected=repository._selection(budgets=[identity], cohort=False)),
+            label='coordinator request tool reservation')
 
     budget.bind_model_attempt_observer(observe, tool_reservation_observer=reserve_tool)
     return accepted

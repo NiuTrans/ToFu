@@ -16,8 +16,14 @@ import { openRequestNamePanel, requestNameDraftFrom } from './settings/provider-
 import { createProviderTemplatePicker } from './settings/provider-template-picker';
 import { mountProviderReasoningEditors } from './settings/reasoning-editor';
 import { brandIconHtml } from '../core/model-brand-icons';
-import type { CompiledProviderBundle, ProviderProbeResponse, ProviderTemplateCompileResponse } from '../api/api-v1-model-routing.generated';
-import { t } from '../i18n';
+import type {
+  CompiledProviderBundle,
+  ModelRoutingMediaPricing,
+  ProviderProbeResponse,
+  ProviderTemplateCompileResponse,
+} from '../api/api-v1-model-routing.generated';
+import { _i18nLang, t } from '../i18n';
+import { capabilityLabel, mediaPriceSummary } from './model-catalog/kinds';
 import type { I18nKey } from '../i18n';
 import './settings/section-requires';
 import './settings/private-hosts';
@@ -27,6 +33,8 @@ import './settings/browser-access';
 import './settings/devices';
 import './settings/speech';
 import './settings/catpaw-settings';
+import './settings/kimi-code-login';
+import './settings/subscription-plans';
 import './settings/credentials-vault';
 import './settings/auth-sources';
 import './settings/model-catalog-tab';
@@ -45,6 +53,21 @@ import '../runtime/settings-presenters.generated.js';
 
 const settingsCompatibility = featureRegistry;
 setRuntimeService('modelPricePresentation', modelPricePresentation);
+
+function priceDisplayRates(): Record<string, unknown> {
+  const policy = (featureRegistry as unknown as {
+    _modelPriceDisplayPolicy?: { usd_rates?: unknown };
+  })._modelPriceDisplayPolicy;
+  return policy?.usd_rates && typeof policy.usd_rates === 'object'
+    ? policy.usd_rates as Record<string, unknown> : { USD: 1 };
+}
+
+// The retained supply matrix labels capability chips and media reference
+// prices with the Models tab's presentation owner instead of its own copy.
+setRuntimeService('modelCapabilityLabel', capabilityLabel);
+setRuntimeService('modelMediaPriceSummary', (pricing: ModelRoutingMediaPricing | null | undefined) => (
+  mediaPriceSummary(pricing, (value) => modelPricePresentation.formatForUi(
+    value, pricing?.currency ?? 'USD', _i18nLang, priceDisplayRates()))));
 
 setRuntimeService('manualMatrixProbe', manualMatrixProbe);
 setRuntimeService('jumpToSetting', jumpToSetting);

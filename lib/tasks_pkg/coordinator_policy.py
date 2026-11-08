@@ -77,11 +77,15 @@ def coordinator_scope(task: dict, project_path: str | None = None) -> dict | Non
     return dict(result)
 
 
-def coordinator_tool_ceiling(scope: dict) -> frozenset:
-    """The tool names an active coordinator scope may use: one shared ceiling."""
-    from lib.router.policy import ROUTER_TOOLS, is_router_scope
+def coordinator_tool_ceiling(scope: dict, task: dict | None = None) -> frozenset:
+    """The tool names an active coordinator scope may use: one shared ceiling.
+
+    ``task`` lets the Global Router narrow the ceiling of one Turn (a review of
+    other people's channel messages, docs/CHANNELS.md C11).
+    """
+    from lib.router.policy import is_router_scope, router_tool_ceiling
     if is_router_scope(scope):
-        return ROUTER_TOOLS
+        return router_tool_ceiling(scope, task)
     from lib.router.watchdog.binding import is_watchdog_scope
     if is_watchdog_scope(scope):
         from lib.router.watchdog.policy import WATCHDOG_TOOLS
@@ -155,7 +159,7 @@ def coordinator_call_rejection(task: dict, name: str, arguments: dict,
     if not active:
         return None
     try:
-        ceiling = coordinator_tool_ceiling(active)
+        ceiling = coordinator_tool_ceiling(active, task)
     except Exception:
         logger.warning('[Coordinator] tool ceiling lookup failed; refusing tool %s', name,
                        exc_info=True)
@@ -172,6 +176,9 @@ def coordinator_call_rejection(task: dict, name: str, arguments: dict,
                         and call.get('name') in ceiling
                         for call in calls)):
             return None
+    # A narrowed ceiling (lib.channels.assistant.ReviewCeiling) names what its Turn may do instead.
+    if getattr(ceiling, 'denial', ''):
+        return f'{name} is not allowed here. {ceiling.denial}'
     return (f'Coordinator dispatch-only policy: {name} is not allowed. '
             'Delegate the current human request with delegate_project_work, '
             'wait for independent worker results with await_project_workers, '
@@ -188,7 +195,7 @@ def filter_coordinator_tools(task: dict, tools: list[dict] | None,
     scope = coordinator_scope(task, project_path)
     if not scope:
         return tools
-    ceiling = coordinator_tool_ceiling(scope)
+    ceiling = coordinator_tool_ceiling(scope, task)
     return [tool for tool in tools
             if (tool.get('function') or {}).get('name') in ceiling]
 
@@ -205,7 +212,7 @@ def prepare_coordinator_tool_surface(task: dict, cfg: dict, tools: list[dict] | 
     scope = coordinator_scope(task, project_path)
     if not scope:
         return tools
-    ceiling = coordinator_tool_ceiling(scope)
+    ceiling = coordinator_tool_ceiling(scope, task)
     catalog = cfg.get('_executableToolCatalog')
     if not isinstance(catalog, list):
         catalog = tools or []

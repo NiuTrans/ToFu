@@ -26,6 +26,11 @@ cache/protocol translation remain later stages. Preserve diagnostics and latches
 - Diagnostic values and request archives follow docs/LOGGING.md. Preserve
   their resource bounds, fault-injection seams and deterministic fake transports.
 - Optional provider dependencies load lazily; no import-time network calls.
+- `route_features.route_feature` is closed-world: with any route profile it
+  returns False for undeclared features and features bound to another wire.
+  `route_feature(...) is False` therefore never means "declared unsupported";
+  read the explicit declaration before narrowing an existing default (see
+  `cache._gateway_honors_cache_markers`).
 - `chat.py` exposes the lightweight definition imported by the package facade;
   load its provider/HTTP dependencies at invocation. Verify import order and
   startup boundaries in `test_llm_startup_boundary.py`.

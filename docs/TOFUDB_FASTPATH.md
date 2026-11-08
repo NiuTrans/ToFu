@@ -218,7 +218,7 @@ backup and restore republish every reachable block as one file, so first
 activation plans ~68M block publications, roughly 185 h at the measured 5.5 ms
 FUSE and 4.3 ms overlay publication costs, against a 450 s budget. The
 container overlay also holds 16.5M free inodes against that corpus, and
-`/opt/meituan/hadoop` (4.9 TB, 169M inodes) is mounted read-only. Automatic
+`/opt/yourprovider/hadoop` (4.9 TB, 169M inodes) is mounted read-only. Automatic
 selection therefore reports `activation-too-costly`, `inode-capacity` or
 `placement-insufficient-space` and serves the classic authority. Relocating
 this corpus needs its loose blocks packed first, so the reachable set shrinks,
@@ -242,10 +242,12 @@ descriptors for a 20k-segment catalog, verification opens never reused one,
 and every catalog install closed all of them. The bound now follows the soft
 descriptor limit (1/16, clamped 32..4096, so macOS's 256 keeps the historical
 32). A point-read index miss hands its verifying handle to the payload fetch;
-verification opens reuse an idle handle while still re-checking the path and
+verification opens reuse the cached handle while still re-checking the path and
 re-verifying framing, and never insert; catalog replacement keeps handles of
-still-referenced segments; a lease returned after its segment was removed is
-closed instead of re-cached. Paired measurement (1,024 segments x 64 blocks,
+still-referenced segments; a handle opened before its segment was removed is
+never admitted. Since 2026-11-07 readers share the cached handle instead of
+leasing it ([read path](TOFUDB_BLOCK_READ_PATH.md#shared-segment-read-handles-2026-11-07)).
+Paired measurement (1,024 segments x 64 blocks,
 20,000 random reads, same source tree before and after): FUSE point read
 721-2,267 us to 160 us and verification open 659-2,066 us to 74 us; local
 overlay 30 us to 12 us and 32-36 us to 13 us. Reproduce with the ignored

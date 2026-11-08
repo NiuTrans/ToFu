@@ -1,7 +1,8 @@
 """Source builds under launcher caches are not members of the repository Cargo workspace.
 
 uv builds a dependency without a matching wheel (pydantic-core via maturin) from
-its sdist inside the launcher cache, ``<repo>/data/mcp-cache/uv/sdists-*/``.
+its sdist inside the launcher cache, ``data/mcp-cache/uv/sdists-*/`` in the
+runtime base, which is the checkout on a normal server.
 Cargo resolves a crate's workspace by walking ancestor manifests, and the
 repository-root ``[workspace]`` claimed every crate beneath it, so maturin's
 ``cargo metadata`` refused the sdist ("current package believes it's in a
@@ -20,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from lib.mcp.client._vendor import _mcp_cache_root
-from lib.tools.process_environment import tool_cache_defaults
+from lib.tools.process_environment import tool_cache_defaults, tool_cache_root
+from runtime_path_policy import get_runtime_base
 
 pytestmark = pytest.mark.unit
 
@@ -57,7 +58,8 @@ def _checkout(directory: Path) -> None:
 def test_launcher_cache_sdist_crate_is_its_own_workspace(tmp_path, monkeypatch, checkout):
     cargo = _cargo()
     monkeypatch.delenv('TOFU_MCP_CACHE_DIR', raising=False)
-    uv_cache = Path(tool_cache_defaults(_mcp_cache_root())['UV_CACHE_DIR']).relative_to(ROOT)
+    uv_cache = Path(tool_cache_defaults(tool_cache_root())['UV_CACHE_DIR']).relative_to(
+        get_runtime_base())
     _checkout(tmp_path)
     _checkout(tmp_path / checkout)
     crate = _crate(tmp_path / checkout / uv_cache / 'sdists-v10/pypi/pydantic-core/2.46.4/build/src',

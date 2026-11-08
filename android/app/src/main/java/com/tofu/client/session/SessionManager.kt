@@ -1,6 +1,7 @@
 package com.tofu.client.session
 
 import com.tofu.client.data.AuthType
+import com.tofu.client.data.KernelKind
 import com.tofu.client.data.Profile
 import com.tofu.client.data.ProfileDao
 import kotlinx.coroutines.Dispatchers
@@ -72,7 +73,7 @@ class SessionManager(
         .followSslRedirects(false).cookieJar(CookieJar.NO_COOKIES).build()
 
     suspend fun login(profile: Profile): LoginResult {
-        diagnostics?.record("I", "Auth", "begin profile=${profile.alias} mode=${profile.authType} url=${ClientReport.safeUrl(profile.baseUrl)}")
+        diagnostics?.record("I", "Auth", "begin profile=${profile.alias} kind=${profile.kind} mode=${profile.authType} url=${ClientReport.safeUrl(profile.baseUrl)}")
         try {
             val result = loginInternal(profile)
             val detail = when (result) {
@@ -96,6 +97,17 @@ class SessionManager(
     private suspend fun loginInternal(profile: Profile): LoginResult = withContext(Dispatchers.IO) {
         val server = ServerUrl.parse(profile.baseUrl)
             ?: return@withContext LoginResult.Error("Invalid server URL")
+        when (profile.kind) {
+            // 127.0.0.1 carries This phone's credential cookie, whatever the port.
+            KernelKind.REMOTE_URL -> if (LocalKernelCookie.isReservedHost(server.host)) {
+                return@withContext LoginResult.Error(LocalKernelCookie.RESERVED_HOST_MESSAGE)
+            }
+            // [profile] is bound to the endpoint its KernelController returned,
+            // which also set up any session that kernel needs. No gateway sits
+            // in front of a loopback kernel, so only the API gate remains.
+            KernelKind.LOCAL, KernelKind.SSH ->
+                return@withContext withApiPreflight(server, LoginResult.Success(server.host))
+        }
         if (profile.authType == AuthType.NONE) return@withContext LoginResult.Success(server.host)
         if (!cookies.cookieHeader(sessionProbeUrl(server)).isNullOrBlank() && verifyGatewaySession(profile)) {
             return@withContext if (stamp(profile, server.host)) withApiPreflight(server, LoginResult.Success(server.host)) else interactive(profile)

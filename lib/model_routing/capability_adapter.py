@@ -8,8 +8,10 @@ keeps owner identity explicit at the repository boundary.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
+
+from lib.model_info.media_facts import effective_media_profile
 
 from .dispatch_adapter import (
     RoutedSlotGroup,
@@ -58,9 +60,13 @@ class CapabilityRoute:
     model_id: str
     display_name: str
     wire_model_id: str
+    creator_id: str = ""
+    # Documented generation constraints (registered or maintained) so media
+    # pickers offer only the sizes, ratios and counts the Model accepts.
+    media_profile: Mapping[str, object] | None = field(default=None, compare=False)
 
-    def public_dict(self) -> dict[str, str | bool]:
-        return {
+    def public_dict(self) -> dict[str, object]:
+        row: dict[str, object] = {
             "model": self.model_id,
             "display_name": self.display_name,
             "available": True,
@@ -68,6 +74,11 @@ class CapabilityRoute:
             "provider_name": self.provider_name,
             "offering_id": self.offering_id,
         }
+        if self.creator_id:
+            row["creator_id"] = self.creator_id
+        if self.media_profile:
+            row["media_profile"] = dict(self.media_profile)
+        return row
 
 
 def _offering_selection(
@@ -135,12 +146,16 @@ def _capability_routes(
             continue
         model_id = str(offering.get("pending_model_id") or "")
         display_name = model_id
+        creator_id = ""
+        media_profile = None
         model_ref = offering.get("model")
         if isinstance(model_ref, Mapping):
             model_id = str(model_ref.get("model_id") or "")
-            model_row = models.get((
-                str(model_ref.get("creator_id") or ""), model_id)) or {}
+            creator_id = str(model_ref.get("creator_id") or "")
+            model_row = models.get((creator_id, model_id)) or {}
             display_name = str(model_row.get("display_name") or model_id)
+            if model_row:
+                media_profile = effective_media_profile(model_row)
         routes.append((candidate.score, CapabilityRoute(
             selection=selection,
             provider_id=str(provider["provider_id"]),
@@ -151,6 +166,8 @@ def _capability_routes(
             model_id=model_id,
             display_name=display_name,
             wire_model_id=str(candidate.deployment["wire_model_id"]),
+            creator_id=creator_id,
+            media_profile=media_profile,
         )))
     routes.sort(key=lambda row: (
         row[0], row[1].model_id.casefold(), row[1].provider_id))

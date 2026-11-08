@@ -1,6 +1,77 @@
 # Changelog
 
 
+## [0.19.0] - 2026-11-07
+
+### Added
+- Android local kernel: "This phone" runs Tofu on the device end to end from
+  deterministic runtime images (runtime contract v1.1, proot as APK native
+  libraries, an aarch64 TofuDB engine), listed beside URL and SSH kernels
+  (host-key pinning), with a lifecycle policy, a keep-running notification and
+  an in-app device self-check.
+- 大象 channel: received images, files and voice are usable in the
+  conversation, announcements arrive with title, link and content, final
+  answers send workspace files and slide decks as outbound attachments through
+  the outbox, and a notification robot posts command-chat notifications.
+- Model kinds and media facts in Settings and the image composer; LongCat-2.5
+  and Hy4 on the YourProvider gateway.
+- An environment-capability snapshot gates tool exposure; a failed probe never
+  withholds tools.
+- Terminal-Bench native evaluations gain a Claude Code control arm.
+- 大象 assistant: the owner's assistant reviews other people's messages without
+  acting on their authority, with reply policies, notes, approval codes and an
+  audit trail in Settings.
+- Domestic coding-plan subscriptions, including Kimi Code device-grant sign-in
+  with refresh and expiry, and coding-plan key cards in Settings.
+- The Global Router can restart the server and continue or stop conversations
+  for the owner through an explicit, revocable delegation the owner enables in
+  the browser.
+- Search settings take URL-prefix and domain-glob blocklists that search, fetch
+  and the browser honour.
+- An edit-tool benchmark harness with its pre-registered forced-operation
+  results.
+
+### Changed
+- Project coordination keeps a recovered or continued Worker's grant
+  association and tool settings, re-reads dispatch contention instead of
+  stopping Workers, delivers steers committed by another server process, and
+  pauses a task across a server restart instead of denying its publication.
+- Runtime caches and reconstructible state derive from the runtime data root;
+  task checkouts keep frontend toolchain caches local.
+- Internal exports can also publish to a private GitHub repository; every
+  internal push target is verified immediately before the push.
+
+### Fixed
+- A shutdown-interrupted attempt starts no successor in the stopping process,
+  and restart settlement owns only the previous generation's attempts.
+- Delivery patches preserve CR/CRLF bytes, and project checkpoints publish
+  nested `data`, `logs` and `uploads` packages.
+- File serving answers suffix byte ranges per RFC 9110; bridge downloads follow
+  the full Fetch redirect budget.
+- A conversation without a model choice runs on the owner's default model, and
+  a recovered Router can be notified again.
+- The mobile APK link and connect page use the live v4 route.
+- Every tool-call ID is spelled within its destination provider's alphabet
+  (one ID per call and result; stored history unchanged), so replayed and
+  cross-provider histories no longer fail with HTTP 400.
+- History a model already received is never rewritten, so prompt caches survive
+  task-board updates; after a usage-policy refusal the fallback model serves the
+  rest of the turn; a rejected encrypted reasoning block is recovered instead of
+  stopping the turn.
+- Resumed and retried Workers continue their assignment checkout, tool
+  reservations are counted per assignment, and a refusal names the blocking
+  tool occurrence.
+- Commands wait on their pipes with poll() instead of select(), and Stop,
+  deadlines and kill also retire process groups a command's descendants created.
+- Restart and shutdown: background-service joins are bounded by wall time, a
+  slow storage drain keeps restart recovery alive, and the server manager
+  retries an execution host that is still releasing its lease.
+- Terminal-Bench Tofu arm: catalog-derived capabilities and reasoning wire,
+  compacted and gateway-run calls in the ATIF export, and the same source
+  blocking as the other arms.
+- Server startup no longer refuses its exclusive storage-boundary phase: the
+  landing-verification test cache moved behind the SQL storage package.
+
 ## [0.18.4] - 2026-10-26
 
 ### Added

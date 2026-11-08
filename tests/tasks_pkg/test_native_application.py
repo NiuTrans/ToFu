@@ -39,7 +39,8 @@ def task():
 
 
 @pytest.mark.parametrize('flow,actor_recovery', [(False, False), (True, False), (True, True)])
-def test_application_binding_borrows_issued_owners_and_freezes_policy(flow, actor_recovery):
+@pytest.mark.parametrize('binding_origin', ['request', 'worker'])
+def test_application_binding_borrows_issued_owners_and_freezes_policy(flow, actor_recovery, binding_origin):
     async def run():
         app=create_base_app(__name__);release=image();host=register_native_host(app,image=release)
         from lib.tasks_pkg.native_pricing import NativeRoutePricing
@@ -65,8 +66,13 @@ def test_application_binding_borrows_issued_owners_and_freezes_policy(flow, acto
                 value=task()
                 with patch('lib.agent_core.native_artifact.seal_archive') as seal:
                     async with app.app_context():
-                        bind_application_native_task(value,flow=flow)
+                        if binding_origin == 'request':
+                            bind_application_native_task(value,flow=flow)
                         application_options = recovery_options()
+                    if binding_origin == 'worker':
+                        from quart import has_app_context
+                        assert not has_app_context()
+                        bind_application_native_task(value, flow=flow, application=app)
                     port=value['_nativePreparedInvocation']
                     assert port.host is host and port.loop is runtime.loop and port.executor is callbacks
                     assert port.selection is value['_model_routing_selection']

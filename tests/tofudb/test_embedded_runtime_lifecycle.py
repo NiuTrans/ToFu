@@ -11,6 +11,57 @@ from tofu_db.embedded import EmbeddedRuntime, EmbeddedTransportError, _ffi
 pytestmark = pytest.mark.unit
 
 
+def test_commit_watch_cancellation_and_close_join_exact_native_tokens():
+    from tofu_db._request_cancellation import RequestCancellation
+    from tofu_db.embedded import _dumps
+    runtime = EmbeddedRuntime.__new__(EmbeddedRuntime)
+    runtime._handle = _ffi.cast('void*', 1)
+    runtime._lifecycle = threading.Condition()
+    runtime._active_calls = 0
+    runtime._watch_tokens = set()
+    runtime._closing = False
+    enrolled = threading.Barrier(3)
+    releases, freed = {}, []
+    lock = threading.Lock()
+    def open_watch(handle):
+        with lock:
+            token = _ffi.cast('void*', len(releases) + 2)
+            releases[token] = threading.Event()
+            return token
+    def execute(token, request, length, out, capacity):
+        enrolled.wait(5)
+        assert releases[token].wait(5)
+        assert token not in freed
+        value = _dumps({'status': 1, 'error_code': 'cancelled'})
+        _ffi.memmove(out, value, len(value))
+        return len(value)
+    def cancel(token):
+        assert token not in freed
+        releases[token].set()
+    def free(token):
+        assert releases[token].is_set()
+        freed.append(token)
+    def close(handle):
+        assert len(freed) == 2
+    runtime._lib = SimpleNamespace(tofudb_embed_watch_open=open_watch,
+        tofudb_embed_watch_execute=execute, tofudb_embed_watch_cancel=cancel,
+        tofudb_embed_watch_free=free, tofudb_embed_close=close)
+    cancellation = RequestCancellation()
+    with ThreadPoolExecutor() as pool:
+        first = pool.submit(runtime.commit_watch, 'worker_control.watch', None,
+                            deadline_unix_ms=1, cancellation=cancellation)
+        second = pool.submit(runtime.commit_watch, 'conversation_control.watch', None,
+                             deadline_unix_ms=1)
+        enrolled.wait(5)
+        cancellation.cancel()
+        assert first.result(5)['error_code'] == 'cancelled'
+        assert not second.done()
+        runtime.close()
+        assert second.result(5)['error_code'] == 'cancelled'
+    assert runtime.closed and not runtime._watch_tokens
+    assert runtime._active_calls == 0
+
+
 def test_close_drains_concurrent_calls_and_rejects_new_callers():
     runtime = EmbeddedRuntime.__new__(EmbeddedRuntime)
     runtime._handle = _ffi.cast('void*', 1)
@@ -23,6 +74,7 @@ def test_close_drains_concurrent_calls_and_rejects_new_callers():
 
     runtime._lifecycle = ObservedCondition()
     runtime._active_calls = 0
+    runtime._watch_tokens = set()
     runtime._closing = False
     entered = threading.Barrier(3)
     release = threading.Event()
@@ -70,6 +122,7 @@ def test_decoded_responses_own_values_after_buffer_reuse(monkeypatch, accelerate
     runtime._handle = _ffi.cast('void*', 1)
     runtime._lifecycle = threading.Condition()
     runtime._active_calls = 0
+    runtime._watch_tokens = set()
     runtime._closing = False
     current = {'status': 0, 'payload': {'text': '汉字\\\"\n' + 'x' * size,
                                        'array': [None, True, -1, 1.25, {'nested': 'retained'}]}}
@@ -100,6 +153,7 @@ def test_invalid_native_response_still_raises(monkeypatch, accelerated, encoded)
     runtime._handle = _ffi.cast('void*', 1)
     runtime._lifecycle = threading.Condition()
     runtime._active_calls = 0
+    runtime._watch_tokens = set()
     runtime._closing = False
     def execute(handle, request, request_len, output, capacity):
         _ffi.memmove(output, encoded, len(encoded))
@@ -119,6 +173,7 @@ def test_concurrent_response_reuse_preserves_each_callers_results(monkeypatch, a
     runtime._handle = _ffi.cast('void*', 1)
     runtime._lifecycle = threading.Condition()
     runtime._active_calls = 0
+    runtime._watch_tokens = set()
     runtime._closing = False
     concurrent = threading.Barrier(4)
     def execute(handle, request, request_len, output, capacity):
@@ -229,6 +284,7 @@ def test_teardown_waits_for_last_call_even_after_another_caller_returns(
     runtime._handle = _ffi.cast('void*', 1)
     runtime._lifecycle = ObservedCondition()
     runtime._active_calls = 0
+    runtime._watch_tokens = set()
     runtime._closing = False
 
     def operation(index):

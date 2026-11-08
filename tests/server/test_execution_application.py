@@ -43,6 +43,13 @@ def test_real_application_boot_and_shutdown_preserve_resident_storage(tmp_path):
                 break
             time.sleep(.05)
         assert record.get('state') == 'ready', record
+        from lib.tasks_pkg.command_control_transport import call, CommandControlUnavailable
+        endpoint = record['commandControl']
+        assert endpoint['serviceId'] == record['serviceId']
+        assert call(endpoint, 'interrupt', 'absent-task', user_id=1) is None
+        with pytest.raises(CommandControlUnavailable):
+            call({**endpoint, 'serviceId': 'previous-incarnation'},
+                 'interrupt', 'absent-task', user_id=1)
         assert not (tmp_path / 'data/server.lock').exists()
         storage_pid = storage.record()['pid']
         execution.stop()

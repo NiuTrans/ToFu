@@ -62,7 +62,7 @@ def _slice_fn(src: str, signature: str) -> str:
 
 def _populate_fn() -> str:
     source = runtime_section('main/main_toolbar_ui.js')
-    return Path(native_module_path('.native/picker-layout.js', ROOT / 'frontend/src/application-shell/model-picker/index.ts')).read_text() + '\nvar _modelPickerUi = null;\n' + _slice_fn(source, 'function _getModelPickerUi(') + '\n' + _slice_fn(source, "function _populateModelDropdown(models) {")
+    return Path(native_module_path('.native/picker-layout.js', ROOT / 'frontend/src/application-shell/model-picker/index.ts')).read_text() + '\nvar _modelPickerUi = null;\n' + _slice_fn(source, 'function _getModelPickerUi(') + '\n' + _slice_fn(source, "function _populateModelDropdown(")
 
 
 def _toggle_fn() -> str:

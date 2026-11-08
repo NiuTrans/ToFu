@@ -14,7 +14,7 @@ from pathlib import Path
 import sys
 
 def prepare_plan(project: Path, environment: dict[str, str], *, python: str = sys.executable) -> dict:
-    from lib.runtime.pinned_import_source import _importable_sources
+    from lib.runtime.pinned_import_source import _importable_sources, source_identity
     from serverctl_pkg.runtime_replica import describe_environment, fingerprint
 
     project = project.resolve()
@@ -25,23 +25,20 @@ def prepare_plan(project: Path, environment: dict[str, str], *, python: str = sy
     sources = {Path(path) for root in roots
                for path in _importable_sources(str(root), recurse=True, ignore_errors=False)}
 
-    identity = hashlib.sha256()
-    for path in sorted(sources):
-        before = path.stat()
-        content = path.read_bytes()
-        after = path.stat()
-        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
-                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-            raise RuntimeError(f'Execution source changed during preparation: {path}')
-        name = str(path).encode()
-        identity.update(len(name).to_bytes(8, 'little'))
-        identity.update(name)
-        identity.update(len(content).to_bytes(8, 'little'))
-        identity.update(content)
+    def read_sources():
+        for path in sorted(sources):
+            before = path.stat()
+            content = path.read_bytes()
+            after = path.stat()
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise RuntimeError(f'Execution source changed during preparation: {path}')
+            yield str(path), content
+    identity = source_identity(read_sources())
     configuration = json.dumps(environment, sort_keys=True, separators=(',', ':')).encode()
     # Installed packages are executable source too; None when the layout cannot be described.
     installed = describe_environment(python)
     return {'format': 'tofu.execution-plan/v1', 'python': python,
-            'sourceSha256': identity.hexdigest(), 'sourceFiles': len(sources),
+            **identity,
             'environmentFingerprint': None if installed is None else fingerprint(installed),
             'configurationSha256': hashlib.sha256(configuration).hexdigest()}

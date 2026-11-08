@@ -164,13 +164,52 @@ class CookieBridgeRobolectricTest {
         assertEquals(2, opened.size)
     }
 
+    @Test
+    fun the_local_credential_lands_in_the_jar_for_127_0_0_1_only() {
+        val secret = "tofu_admin_" + "ef".repeat(32)
+        LocalKernelCookie.install(CookieBridge, KernelEndpoint("http://127.0.0.1:43567/", "127.0.0.1"), secret)
+
+        val jar = CookieManager.getInstance()
+        assertTrue(jar.getCookie("http://127.0.0.1:43567/").orEmpty().contains("tofu_session=$secret"))
+        // Cookies ignore the port: why the WebView itself must keep off other ports.
+        assertTrue(jar.getCookie("http://127.0.0.1:9999/").orEmpty().contains("tofu_session=$secret"))
+        for (other in listOf("http://127.0.0.2:41234/", "http://localhost:43567/", origin)) {
+            assertFalse(other, jar.getCookie(other).orEmpty().contains(secret))
+        }
+    }
+
+    @Test
+    fun the_webview_requests_127_0_0_1_only_as_the_front_local_kernel() {
+        val webView = android.webkit.WebView(org.robolectric.RuntimeEnvironment.getApplication())
+        val local = KernelList.THIS_PHONE.boundTo(KernelEndpoint("http://127.0.0.1:43567/", "127.0.0.1"))
+        val localClient = ReauthWebViewClient(local, onReauth = {})
+        assertEquals(null, localClient.shouldInterceptRequest(webView, fakeMainFrameRequest("http://127.0.0.1:43567/static/app.js", main = false)))
+        assertEquals(403, localClient.shouldInterceptRequest(webView, fakeMainFrameRequest("http://127.0.0.1:9999/x.png", main = false))?.statusCode)
+        assertFalse(localClient.shouldOverrideUrlLoading(webView, fakeMainFrameRequest("http://127.0.0.1:43567/c/1")))
+        assertTrue("a redirect to another port never loads", localClient.shouldOverrideUrlLoading(webView, fakeMainFrameRequest("http://127.0.0.1:9999/")))
+
+        val opened = mutableListOf<android.net.Uri>()
+        val urlClient = ReauthWebViewClient(
+            Profile(id = 1, alias = "dc1", baseUrl = "$origin/proxy/15000/", authType = AuthType.CODE_SERVER_PASSWORD),
+            onReauth = {}, onExternalUrl = { opened += it },
+        )
+        assertEquals(403, urlClient.shouldInterceptRequest(webView, fakeMainFrameRequest("http://127.0.0.1:43567/api/v4/meta", main = false))?.statusCode)
+        assertTrue("a URL kernel's redirect to the local kernel never loads", urlClient.shouldOverrideUrlLoading(webView, fakeMainFrameRequest("http://127.0.0.1:43567/")))
+        assertTrue("no request for the local kernel left the WebView", opened.isEmpty())
+        // A tapped link opens in the real browser, which holds no credential.
+        assertTrue(urlClient.shouldOverrideUrlLoading(webView, fakeMainFrameRequest("http://127.0.0.1:8000/", gesture = true)))
+        assertEquals(listOf(android.net.Uri.parse("http://127.0.0.1:8000/")), opened)
+        assertEquals(null, urlClient.shouldInterceptRequest(webView, fakeMainFrameRequest("$origin/proxy/15000/app.js", main = false)))
+    }
+
     private fun fakeMainFrameRequest(
         url: String,
         gesture: Boolean = false,
+        main: Boolean = true,
     ): android.webkit.WebResourceRequest {
         return object : android.webkit.WebResourceRequest {
             override fun getUrl() = android.net.Uri.parse(url)
-            override fun isForMainFrame() = true
+            override fun isForMainFrame() = main
             override fun isRedirect() = !gesture
             override fun hasGesture() = gesture
             override fun getMethod() = "GET"

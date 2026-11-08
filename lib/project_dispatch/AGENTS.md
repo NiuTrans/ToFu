@@ -30,7 +30,9 @@ recipient metadata, current coordinator binding and genuine human source
 projection revision. Caller API identity cannot promote synthetic input.
 Initial execution binding is immutable; a restart-paused or background-completion
 continuation advances only from its exact settled, unreviewed predecessor through
-`continue_execution`, preserving one deterministic workspace task identity.
+`continue_execution`, preserving one deterministic workspace task identity (the
+work id). A durable-worker claim names each attempt's physical task;
+`bind_account` stamps the work id on it, which keys the checkout and the ledger root.
 `revoke(id, expected_revision)` returns
 that association (or `None`) for caller-owned existing cancellation.
 `record_review` fences the grant revision and records an immutable decision
@@ -105,6 +107,10 @@ reject only that call. The root contract lives in PROJECT_COORDINATION.md.
 Authority failures stop the task through `stop_on_authority_failure`, naming
 `dispatch_grant_revoked` or `dispatch_authority_lost`; an earlier Stop keeps its
 cause. Verify `test_project_dispatch_abort_cause.py` and its settlement specs.
+`DispatchContention` is never an authority verdict: every in-task dispatch read
+or ledger write goes through `wait_for_dispatch` or `reread_on_contention`, so a
+lost head CAS or torn snapshot is read and validated again, never stopped or
+returned. Verify `test_project_dispatch_contention.py`.
 `scope.granted_tools` is the one admitted-name set of `admit_tool`, the tool
 ledger and `_check_record`; never test `profile['tools']` directly in a new gate.
 A swarm child's `RunArtifactTools` port is the only `_tool_env` admission

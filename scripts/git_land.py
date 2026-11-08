@@ -18,6 +18,15 @@ tip) without that lock:
    atomically, the index entries of exactly those paths move to the merge,
    and the branch moves by compare-and-swap.
 
+Every merged tree, a fast-forward included, is verified before anything is
+written: the test files it can affect run on it (recorded runs say which, the
+repository's selector covers files without one), and a test that passes on
+the current branch tip but fails on the merged result, and fails again when
+rerun, refuses the landing (lib/project_mod/landing_verification.py). After a
+landing, conversations whose unlanded work changes a landed file receive a
+notice (lib/project_mod/integration_radar.py), and a landed lane's checkout is
+recycled for the next lane (lib/project_mod/lanes.py).
+
 Overlapping lines, a staged change, an untracked file in the way, a file-type
 clash or an operation in progress refuses before anything is written. Then the
 branch's worktree is removed (``git worktree remove``, never forced) and the
@@ -329,63 +338,74 @@ def _all_generated(top: Path, paths: list[str]) -> bool:
     return len(values) == len(paths) and all(value in ('true', 'set') for value in values)
 
 
-def _merge_tree(top: Path, head: str, source: str) -> str:
-    """Merge and regenerate in a private checkout."""
-    if _is_ancestor(top, head, source):
-        return _git(top, 'rev-parse', f'{source}^{{tree}}').stdout.strip()
-    bases = _git(top, 'merge-base', '--all', head, source, check=False)
-    if bases.returncode == 1 and not bases.stdout.strip():
-        raise Refused('the branch shares no history with the current branch')
-    if bases.returncode:
-        raise LandingError(f'git merge-base failed: {bases.stderr.strip()[:800]}')
-    with tempfile.TemporaryDirectory(prefix='git-land-') as parent:
-        scratch = Path(parent) / 'git-land-merge'
-        # Merge and regeneration read a private working tree; never the
-        # canonical checkout's source or index. All Git state stays scratch-local.
-        _git(top, 'worktree', 'add', '--detach', str(scratch), head)
-        try:
-            _git(scratch, 'read-tree', head)
-            _git(scratch, 'reset', '--hard', head)
-            merged = _git(scratch, 'merge-recursive', *bases.stdout.split(), '--',
-                          head, source, check=False)
-            if merged.returncode == 1:
-                unmerged = _git(scratch, 'ls-files', '-u', '-z').stdout
-                paths = sorted({entry.split('\t', 1)[1]
-                                for entry in unmerged.split('\0') if '\t' in entry})
-                if paths:
-                    from lib.project_mod.generated_integration import (
-                        GeneratedOutputError, resolve_generated_conflicts)
-                    def scratch_git(_root, args, env=None, **kwargs):
-                        environment = {'GIT_INDEX_FILE': str(_git_paths(scratch, 'index')[0])}
-                        environment.update(env or {})
-                        return _git(scratch, *args, env=environment, **kwargs)
-                    try:
-                        if resolve_generated_conflicts(
-                                scratch, paths, source, scratch_git, source_root=top) is not None:
-                            tree = _git(scratch, 'write-tree').stdout.strip()
-                            for state in ('AUTO_MERGE', 'MERGE_HEAD', 'MERGE_MODE', 'MERGE_MSG'):
-                                _git_paths(scratch, state)[0].unlink(missing_ok=True)
-                            return tree
-                    except GeneratedOutputError as error:
-                        raise Refused('generated outputs could not be rebuilt', paths, str(error)) from error
-                advice = ('Merge the current branch into the worktree branch, resolve and '
-                          'commit there, then rerun.')
-                if paths and _all_generated(top, paths):
-                    advice = ('Only generated files conflict. Merge the current branch into the '
-                              'worktree branch, regenerate these files from the merged sources '
-                              'with their generators (never hand-merge them), run their checks, '
-                              'commit there, then rerun.')
-                raise Refused(
-                    'the branch conflicts with the current branch',
-                    paths or [line for line in merged.stdout.splitlines()
-                              if line.startswith('CONFLICT')],
-                    advice)
-            if merged.returncode:
-                raise LandingError('git merge-recursive failed: '
-                                   + (merged.stderr or merged.stdout).strip()[:800])
-            return _git(scratch, 'write-tree').stdout.strip()
-        finally:
-            _git(top, 'worktree', 'remove', '--force', str(scratch), check=False)
+def _merge_tree(top: Path, head: str, source: str):
+    """Merge and regenerate in a private checkout, then verify the merged tree there.
+
+    Returns ``(tree, verdict)``. Every merge is verified, a fast-forward
+    included. When the current branch moves during a landing, the next merge
+    is verified again; the records of the run just made keep that to the
+    test files the new commits affect.
+    """
+    from lib.project_mod.landing_verification import merge_checkout, verify_merge
+
+    bases = None
+    if not _is_ancestor(top, head, source):
+        bases = _git(top, 'merge-base', '--all', head, source, check=False)
+        if bases.returncode == 1 and not bases.stdout.strip():
+            raise Refused('the branch shares no history with the current branch')
+        if bases.returncode:
+            raise LandingError(f'git merge-base failed: {bases.stderr.strip()[:800]}')
+    # Merge and regeneration read a private working tree; never the canonical
+    # checkout's source or index. All Git state stays in that checkout.
+    with merge_checkout(top, head) as scratch:
+        tree = (_git(top, 'rev-parse', f'{source}^{{tree}}').stdout.strip() if bases is None
+                else _merge_in(top, scratch, head, source, bases.stdout.split()))
+        # Tests read exactly the merged tree, including regenerated outputs.
+        _git(scratch, 'read-tree', '-u', '--reset', tree)
+        return tree, verify_merge(top, head, source, scratch, tree)
+
+
+def _merge_in(top: Path, scratch: Path, head: str, source: str, bases: list[str]) -> str:
+    """Compute the merged tree in SCRATCH; a real conflict refuses."""
+    _git(scratch, 'read-tree', head)
+    _git(scratch, 'reset', '--hard', head)
+    merged = _git(scratch, 'merge-recursive', *bases, '--', head, source, check=False)
+    if merged.returncode == 1:
+        unmerged = _git(scratch, 'ls-files', '-u', '-z').stdout
+        paths = sorted({entry.split('\t', 1)[1]
+                        for entry in unmerged.split('\0') if '\t' in entry})
+        if paths:
+            from lib.project_mod.generated_integration import (
+                GeneratedOutputError, resolve_generated_conflicts)
+            def scratch_git(_root, args, env=None, **kwargs):
+                environment = {'GIT_INDEX_FILE': str(_git_paths(scratch, 'index')[0])}
+                environment.update(env or {})
+                return _git(scratch, *args, env=environment, **kwargs)
+            try:
+                if resolve_generated_conflicts(
+                        scratch, paths, source, scratch_git, source_root=top) is not None:
+                    tree = _git(scratch, 'write-tree').stdout.strip()
+                    for state in ('AUTO_MERGE', 'MERGE_HEAD', 'MERGE_MODE', 'MERGE_MSG'):
+                        _git_paths(scratch, state)[0].unlink(missing_ok=True)
+                    return tree
+            except GeneratedOutputError as error:
+                raise Refused('generated outputs could not be rebuilt', paths, str(error)) from error
+        advice = ('Merge the current branch into the worktree branch, resolve and '
+                  'commit there, then rerun.')
+        if paths and _all_generated(top, paths):
+            advice = ('Only generated files conflict. Merge the current branch into the '
+                      'worktree branch, regenerate these files from the merged sources '
+                      'with their generators (never hand-merge them), run their checks, '
+                      'commit there, then rerun.')
+        raise Refused(
+            'the branch conflicts with the current branch',
+            paths or [line for line in merged.stdout.splitlines()
+                      if line.startswith('CONFLICT')],
+            advice)
+    if merged.returncode:
+        raise LandingError('git merge-recursive failed: '
+                           + (merged.stderr or merged.stdout).strip()[:800])
+    return _git(scratch, 'write-tree').stdout.strip()
 
 
 def _changes(top: Path, head: str, tree: str) -> list[tuple[str, _Entry | None, _Entry | None]]:
@@ -728,19 +748,32 @@ def _publish(top: Path, branch_ref: str, head: str, commit: str,
             f'{head}: {moved.stderr.strip()[:400]}')
 
 
-def _cleanup(top: Path, source_ref: str) -> list[str]:
+def _cleanup(top: Path, source_ref: str, tip: str) -> list[str]:
+    """Remove the landed branch and its worktree; a lane's clean checkout becomes a spare."""
+    from lib.project_mod import lanes
     notes = []
+    name = source_ref.removeprefix('refs/heads/')
     worktree = _worktree_of(top, source_ref)
     if worktree is not None:
-        removed = _git(top, 'worktree', 'remove', str(worktree), check=False)
-        if removed.returncode:
-            return [f'kept worktree {worktree}: {removed.stderr.strip()}',
-                    f'kept branch {source_ref.removeprefix("refs/heads/")}: its worktree remains']
-        notes.append(f'removed worktree {worktree}')
-    name = source_ref.removeprefix('refs/heads/')
+        repo = lanes.repository(top)
+        if lanes.is_lane(repo, worktree):
+            outcome = lanes.retire_lane(repo, worktree, tip)
+            if outcome == 'kept':
+                return [f'kept lane {worktree}: it has uncommitted or untracked files',
+                        f'kept branch {name}: its lane remains']
+            notes.append(f'recycled lane {worktree} for the next lane' if outcome == 'spare'
+                         else f'removed lane {worktree}')
+        else:
+            removed = _git(top, 'worktree', 'remove', str(worktree), check=False)
+            if removed.returncode:
+                return [f'kept worktree {worktree}: {removed.stderr.strip()}',
+                        f'kept branch {name}: its worktree remains']
+            notes.append(f'removed worktree {worktree}')
     deleted = _git(top, 'branch', '-d', name, check=False)
     notes.append(f'deleted branch {name}' if deleted.returncode == 0
                  else f'kept branch {name}: {deleted.stderr.strip()}')
+    if deleted.returncode == 0:
+        lanes.drop_wip(lanes.repository(top), name)
     return notes
 
 
@@ -778,7 +811,15 @@ def land(branch: str, *, into: str | None = None, keep: bool = False,
             break
         _refuse_task_input_snapshots(top, branch_ref, source)
         if merged_for != head:
-            tree = _merge_tree(top, head, source)
+            tree, verdict = _merge_tree(top, head, source)
+            result['verification'] = verdict
+            if verdict.status == 'regressed':
+                raise Refused(
+                    f'the merged result fails tests that pass on {target} ({verdict.reason})',
+                    list(verdict.regressions),
+                    f'Merge {target} into the worktree branch, run these tests there, fix '
+                    f'the change, commit and rerun. Tests already failing on {target} do not '
+                    'block a landing.\n' + verdict.evidence)
         merged_for = head
         try:
             steps = _plan(top, head, tree, file_mode)
@@ -796,9 +837,48 @@ def land(branch: str, *, into: str | None = None, keep: bool = False,
         break
     if check:
         return result
+    if result['status'] == 'landed':
+        result['notified'] = _notify_concurrent_writers(top, head, result['commit'], label,
+                                                        source_ref if is_branch else '')
     if not keep and is_branch:
-        result['cleanup'] = _cleanup(top, source_ref)
+        result['cleanup'] = _cleanup(top, source_ref, result.get('commit') or head)
     return result
+
+
+def _notify_concurrent_writers(top: Path, head: str, commit: str, label: str,
+                               source_ref: str) -> list[dict]:
+    """Leave integration-radar notices; advice only, so a failure never fails the landing."""
+    try:
+        from lib.project_mod.integration_radar import notify_landing
+        paths = _git(top, 'diff', '--name-only', '--no-renames', '-z', head, commit).stdout
+        subject = _git(top, 'log', '-1', '--no-merges', '--format=%s',
+                       f'{head}..{commit}').stdout.strip()
+        return notify_landing(top, [path for path in paths.split('\0') if path],
+                              commit=commit, subject=subject, branch=label,
+                              landed_root=_worktree_of(top, source_ref) if source_ref else None)
+    except Exception as error:  # noqa: BLE001 - advice must never undo a published landing
+        print(f'Integration radar notices skipped: {error}', file=sys.stderr)
+        return []
+
+
+def _report_verification(verdict, target: str) -> None:
+    if verdict.status == 'skipped':
+        print(f'Integration check skipped: {verdict.reason}.')
+    elif verdict.status == 'passed':
+        print(f'Integration check passed in {verdict.seconds:.0f} s: {verdict.reason} '
+              f'({len(verdict.selected)} test files ran; {verdict.skipped_files} recorded test '
+              f'files skipped because none of the code they executed changed; {target} gained '
+              f'{verdict.trunk_commits} commits since the branch point).')
+    else:
+        print(f'Integration check unavailable: {verdict.reason}. The merged result was not '
+              'verified.')
+        if verdict.evidence:
+            print(verdict.evidence)
+    if verdict.preexisting:
+        print(f'Already failing on {target}, not caused by this branch: '
+              + ', '.join(verdict.preexisting))
+    if verdict.flaky:
+        print('Failed once on the merged result, then passed: ' + ', '.join(verdict.flaky))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -813,8 +893,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--check', action='store_true',
                         help='report what landing would do; change nothing')
     args = parser.parse_args(argv)
+    from contextlib import nullcontext
+    from lib.runtime.protected_steps import protected_step
     try:
-        result = land(args.branch, into=args.into, keep=args.keep, check=args.check)
+        # A restart must not boot from a half-landed checkout (restart protection).
+        with nullcontext() if args.check else protected_step('git_land', detail=args.branch):
+            result = land(args.branch, into=args.into, keep=args.keep, check=args.check)
     except Refused as refusal:
         print(f'Refused: {refusal.reason}. Nothing was changed.')
         for path in refusal.paths:
@@ -836,6 +920,12 @@ def main(argv: list[str] | None = None) -> int:
               f"pre-integration tip {result['preIntegration']}; {result['paths']} paths changed.")
     if result.get('carried'):
         print('Carried forward uncommitted edits in: ' + ', '.join(result['carried']))
+    if result.get('verification') is not None:
+        _report_verification(result['verification'], result['into'])
+    for item in result.get('notified', []):
+        who = f"\"{item['title']}\" ({item['writer']})" if item['title'] else item['writer']
+        print(f"Notified {who}, whose unlanded work in {item['checkout']} also changes: "
+              + ', '.join(item['paths']))
     for note in result.get('cleanup', []):
         print(note)
     return 0

@@ -258,6 +258,62 @@ def _atif_messages(task: dict) -> list[dict]:
     return messages
 
 
+def _message_identity(message: dict) -> tuple:
+    """What makes a message the same one in two transcript views.
+
+    Calls and receipts are identified by call ID, so a retained receipt that
+    L1 clearing has already shortened still matches its original.
+    """
+    role = message.get('role')
+    if role == 'tool':
+        return ('tool', str(message.get('tool_call_id') or ''))
+    calls = [tc for tc in (message.get('tool_calls') or []) if isinstance(tc, dict)]
+    if role == 'assistant' and calls:
+        return ('calls', tuple((str(tc.get('id') or ''), str((tc.get('function') or {}).get('name') or ''))
+                               for tc in calls))
+    return (role, _coerce_text(message.get('content')))
+
+
+def _full_history_messages(task: dict, messages: list[dict]) -> list[dict]:
+    """Restore folded (pre-compaction) rounds into an export's history.
+
+    Compaction replaces the working view with a summary plus a retained tail;
+    the folded rounds are archived, so a compacted run's ATIF export used to
+    contain only the post-compaction rounds (12 of 88 TB2.1 baseline tasks).
+    ``_archive_transcript`` records each fold's FULL pre-compaction transcript
+    on the task. Every view is exported in order, each message once: a view's
+    messages that repeat its predecessor (system prompt, task, retained tail)
+    are skipped, keeping the original, uncleared copy from the older view. A
+    system step marks each compaction boundary.
+
+    Without archive records (a run with no compaction, or an older runtime)
+    the working view is returned unchanged.
+    """
+    from collections import Counter
+
+    archives = task.get('_compaction_archives') or []
+    if not archives:
+        return messages
+    out: list[dict] = []
+    previous: list[dict] = []
+    views = [(record.get('messages') or [], record) for record in archives] + [(messages, None)]
+    for view, record in views:
+        repeated = Counter(_message_identity(m) for m in previous)
+        for message in view:
+            identity = _message_identity(message)
+            if repeated[identity] > 0:
+                repeated[identity] -= 1
+                continue
+            out.append(message)
+        if record is not None:
+            out.append({'role': 'system', '_isMeta': True,
+                        'content': (f"[compaction: {record.get('trigger') or 'unknown'} "
+                                    f"at round {record.get('round_num', 0)}; "
+                                    f"{len(view)} messages before the fold]")})
+        previous = view
+    return out
+
+
 def _atif_steps(messages: list[dict]) -> list[dict]:
     """Map ordered call occurrences and their receipts, never tool text to user."""
     import json
@@ -318,14 +374,136 @@ def _atif_steps(messages: list[dict]) -> list[dict]:
     return steps
 
 
+_GATEWAY_TOOLS = frozenset({'execute_tools', 'execute_program'})
+# ``source`` of a call a gateway ran on the model's behalf (tool_gateway).
+_GATEWAY_CHILD_SOURCES = frozenset({'execute_calls', 'execute_program'})
+
+
+def _is_gateway_child(row: dict) -> bool:
+    return bool(row.get('parentToolCallId')) or row.get('source') in _GATEWAY_CHILD_SOURCES
+
+
+def _receipt_names_call(parent: dict, call_id: str) -> bool:
+    import re
+    receipt = _coerce_text(parent.get('toolContent'))
+    return re.search(r'"call_id"\s*:\s*"%s"' % re.escape(call_id), receipt) is not None
+
+
+def _gateway_parent(child: dict, parents: list[dict]) -> tuple[dict | None, list[dict]]:
+    """The parent row of one child, or ``(None, candidates)`` when unproven.
+
+    A program child carries ``parentToolCallId``; a batch child carries only
+    its ``llmRound``, which names its parent when that response issued one
+    gateway call, or else the parent receipt that lists the child's call ID.
+    """
+    same_round = [p for p in parents if p.get('llmRound') == child.get('llmRound')]
+    named = str(child.get('parentToolCallId') or '')
+    if named:
+        exact = ([p for p in same_round if str(p['toolCallId']) == named]
+                 or [p for p in parents if str(p['toolCallId']) == named])
+        return (exact[-1] if exact else {'toolCallId': named}), []
+    if len(same_round) == 1:
+        return same_round[0], []
+    listed = [p for p in same_round if _receipt_names_call(p, str(child['toolCallId']))]
+    if len(listed) == 1:
+        return listed[0], []
+    return None, same_round
+
+
+def _with_gateway_children(steps: list[dict], rounds) -> list[dict]:
+    """Insert the calls ``execute_tools``/``execute_program`` ran as steps.
+
+    The working transcript holds only a gateway call and its aggregate
+    receipt; each child call it executed is a ``toolRounds`` row. Every child
+    becomes an agent step right after its parent's step, carrying its own
+    arguments and receipt and an explicit ``extra.parent_call_id`` (``None``
+    with the candidates when the parent is not proven). Program presentation
+    rows (``_programSynthetic``) are not calls and are not exported; a child
+    the transcript already holds is not repeated.
+    """
+    import json
+
+    rows = [r for r in (rounds or []) if isinstance(r, dict) and r.get('toolCallId')]
+    if not any(_is_gateway_child(r) for r in rows):
+        return steps
+    present = {(c['tool_call_id'], c['function_name'])
+               for s in steps for c in (s.get('tool_calls') or [])}
+    occurrences: dict[str, list[int]] = {}
+    for index, step in enumerate(steps):
+        for call in step.get('tool_calls') or []:
+            occurrences.setdefault(call['tool_call_id'], []).append(index)
+    # A recycled provider call ID names several occurrences; the k-th row
+    # with that ID is the k-th transcript occurrence.
+    seen: dict[str, int] = {}
+    anchors: dict[int, int | None] = {}
+    parents: list[dict] = []
+    children: list[dict] = []
+    for row in rows:
+        if _is_gateway_child(row):
+            children.append(row)
+            continue
+        call_id = str(row['toolCallId'])
+        ordinal = seen.get(call_id, 0)
+        seen[call_id] = ordinal + 1
+        found = occurrences.get(call_id) or []
+        anchors[id(row)] = found[min(ordinal, len(found) - 1)] if found else None
+        if row.get('toolName') in _GATEWAY_TOOLS:
+            parents.append(row)
+
+    after: dict[int, list[dict]] = {}
+    tail: list[dict] = []
+    for row in children:
+        call_id, name = str(row['toolCallId']), str(row.get('toolName') or '')
+        if (call_id, name) in present:
+            continue
+        parent, candidates = _gateway_parent(row, parents)
+        raw_args = row.get('toolArgs')
+        try:
+            args = json.loads(raw_args or '{}') if isinstance(raw_args, str) else raw_args
+        except (ValueError, TypeError):
+            args = {'_raw': raw_args}
+        extra: dict = {'origin': 'gateway_child',
+                       'parent_call_id': str(parent['toolCallId']) if parent else None,
+                       'call_source': row.get('source'), 'status': row.get('status')}
+        if not parent:
+            extra['candidate_parent_call_ids'] = [str(p['toolCallId']) for p in candidates]
+        step = {
+            'step_id': 0, 'source': 'agent', 'message': '',
+            'tool_calls': [{'tool_call_id': call_id, 'function_name': name,
+                            'arguments': args if isinstance(args, dict) else {'_raw': args}}],
+            'observation': {'results': [{'source_call_id': call_id,
+                                         'content': _coerce_text(row.get('toolContent'))}]},
+            'extra': extra,
+        }
+        anchor_row = parent or (candidates[0] if candidates else None)
+        anchor = None
+        if anchor_row is not None:
+            anchor = anchors.get(id(anchor_row))
+            if anchor is None and occurrences.get(str(anchor_row['toolCallId'])):
+                anchor = occurrences[str(anchor_row['toolCallId'])][-1]
+        (after.setdefault(anchor, []) if anchor is not None else tail).append(step)
+
+    out: list[dict] = []
+    for index, step in enumerate(steps):
+        out.append(step)
+        out.extend(after.get(index, ()))
+    out.extend(tail)
+    for number, step in enumerate(out, 1):
+        step['step_id'] = number
+    return out
+
+
 def _to_atif(task: dict) -> dict:
     """ATIF v1.3 — Agent Trajectory Interchange Format (harbor RFC 0001).
 
     Working transcript roles/order are retained; each tool receipt is attached
     to its matching call occurrence. Native input-only snapshots reuse causal
-    replay. Token usage is task-level, so per-step metrics stay absent.
+    replay. Calls a gateway ran on the model's behalf follow their parent.
+    Token usage is task-level, so per-step metrics stay absent.
     """
-    steps = _atif_steps(_atif_messages(task))
+    steps = _with_gateway_children(
+        _atif_steps(_full_history_messages(task, _atif_messages(task))),
+        task.get('toolRounds'))
 
     try:
         from lib.version import __version__ as _ver

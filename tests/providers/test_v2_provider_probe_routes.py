@@ -369,9 +369,9 @@ def test_retargeted_deployment_rebuilds_cached_detect_plan(
 
     try:
         bundle = compile_provider_template_bundle(
-            'meituan', selected_model_ids=['gpt-6.1-sol'])
+            'yourprovider', selected_model_ids=['gpt-6.1-sol'])
     except ProviderTemplateRecipeError:
-        pytest.skip('meituan provider template is not shipped in this build')
+        pytest.skip('yourprovider provider template is not shipped in this build')
     repository = InMemoryModelRoutingRepository()
     secret = repository.put_secret(BOUNDARY, 'synthetic-probe-key')
     document = empty_document()

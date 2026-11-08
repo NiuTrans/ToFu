@@ -4,6 +4,7 @@ import com.tofu.client.data.AuthType
 import com.tofu.client.data.Profile
 import com.tofu.client.data.ProfileDao
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import okhttp3.Cookie
@@ -80,7 +81,22 @@ class SessionControllerTest {
             rows[id] = row.copy(authType = authType)
             return 1
         }
+        override suspend fun pinSshHostKey(id: Long, host: String, port: Int, sha256: String): Int = 0
     }
+
+    /**
+     * Every profile here is a REMOTE_URL server, whose path predates kernels:
+     * consulting any kernel controller fails the test.
+     */
+    private object NoKernelCalls : KernelController {
+        override suspend fun ensureRunning(profile: Profile): KernelEndpoint =
+            throw AssertionError("a URL profile consulted a kernel controller")
+        override suspend fun stop(profile: Profile) = throw AssertionError("a URL profile stopped a kernel")
+        override fun state(profile: Profile): StateFlow<KernelState> =
+            throw AssertionError("a URL profile read kernel state")
+    }
+
+    private val urlOnly = KernelControllers(NoKernelCalls, NoKernelCalls, NoKernelCalls)
 
     private fun mgr(dao: ProfileDao, vault: SecretVault, sink: FakeCookieSink) =
         // No secret path exercised through the network: login short-circuits on
@@ -96,7 +112,7 @@ class SessionControllerTest {
     @Test
     fun add_stores_secret_before_insert_and_logs_in() = runTest {
         val dao = FakeDao(); val vault = FakeVault(); val sink = FakeCookieSink()
-        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), clock = { 42L }, report = {})
+        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), urlOnly, clock = { 42L }, report = {})
 
         val res = ctl.addProfile("dc1", "https://$oldHost/proxy/15000/",
             AuthType.CODE_SERVER_PASSWORD, "sekret")
@@ -110,7 +126,7 @@ class SessionControllerTest {
     @Test
     fun add_rejects_duplicate_alias() = runTest {
         val dao = FakeDao(profile("dc1", oldHost)); val vault = FakeVault(); val sink = FakeCookieSink()
-        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), report = {})
+        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), urlOnly, report = {})
         val res = ctl.addProfile("dc1", "https://$oldHost/proxy/15000/", AuthType.NONE, "")
         assertTrue(res is SessionController.AddResult.DuplicateAlias)
     }
@@ -119,7 +135,7 @@ class SessionControllerTest {
     fun edit_url_host_change_purges_old_jar() = runTest {
         val seed = profile("dc1", oldHost)
         val dao = FakeDao(seed); val vault = FakeVault(); val sink = FakeCookieSink()
-        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), report = {})
+        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), urlOnly, report = {})
 
         ctl.editProfile(seed, "dc1", "https://$newHost/proxy/15000/", AuthType.NONE, "")
 
@@ -132,7 +148,7 @@ class SessionControllerTest {
     fun edit_same_host_does_not_purge() = runTest {
         val seed = profile("dc1", oldHost)
         val dao = FakeDao(seed); val vault = FakeVault(); val sink = FakeCookieSink()
-        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), report = {})
+        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), urlOnly, report = {})
         ctl.editProfile(seed, "dc1", "https://$oldHost/proxy/16000/", AuthType.NONE, "")
         assertTrue(sink.purged.isEmpty())
     }
@@ -142,7 +158,7 @@ class SessionControllerTest {
         val seed = profile("old", oldHost)
         val dao = FakeDao(seed); val vault = FakeVault(); val sink = FakeCookieSink()
         vault.putSecret("old", "sekret")
-        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), report = {})
+        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), urlOnly, report = {})
 
         ctl.editProfile(seed, "new", seed.baseUrl, AuthType.CODE_SERVER_PASSWORD, "")
 
@@ -159,7 +175,7 @@ class SessionControllerTest {
             baseUrl = "https://$oldHost/proxy/15000/", authType = AuthType.CODE_SERVER_PASSWORD)
         val dao = FakeDao(seed); val vault = FakeVault(); val sink = FakeCookieSink()
         vault.putSecret("port15000", "sharedpw")
-        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), report = {})
+        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), urlOnly, report = {})
 
         // Add a SECOND profile on the SAME host, different port, BLANK password.
         ctl.addProfile("port8080", "https://$oldHost/proxy/8080/",
@@ -174,7 +190,7 @@ class SessionControllerTest {
         val seed = profile("other", oldHost).copy(authType = AuthType.CODE_SERVER_PASSWORD)
         val dao = FakeDao(seed); val vault = FakeVault(); val sink = FakeCookieSink()
         vault.putSecret("other", "sharedpw")
-        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), report = {})
+        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), urlOnly, report = {})
 
         // New profile on a DIFFERENT host, blank password → must NOT borrow.
         ctl.addProfile("newone", "https://$newHost/proxy/15000/",
@@ -189,7 +205,7 @@ class SessionControllerTest {
             baseUrl = "https://$oldHost/proxy/15000/")
         val dao = FakeDao(seed); val vault = FakeVault(); val sink = FakeCookieSink()
         vault.putSecret("p15000", "sharedpw")
-        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), report = {})
+        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), urlOnly, report = {})
 
         assertEquals("sharedpw", ctl.findSharedSecret("https://$oldHost/proxy/9999/"))
         assertNull(ctl.findSharedSecret("https://$newHost/proxy/15000/"))
@@ -217,7 +233,7 @@ class SessionControllerTest {
         // The row as it truly is: a login already stamped cookieHost.
         val seed = profile("dc1", oldHost)
         val dao = FakeDao(seed); val vault = FakeVault(); val sink = FakeCookieSink()
-        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), clock = { 999L }, report = {})
+        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), urlOnly, clock = { 999L }, report = {})
 
         // What the list is still rendering: the pre-stamp row.
         val staleFromFlow = seed.copy(cookieHost = null, lastUsedAt = 1L)
@@ -234,7 +250,7 @@ class SessionControllerTest {
     @Test
     fun activate_falls_back_to_the_given_row_when_it_no_longer_exists() = runTest {
         val dao = FakeDao(); val vault = FakeVault(); val sink = FakeCookieSink()
-        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), report = {})
+        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), urlOnly, report = {})
         val ghost = profile("gone", oldHost, id = 42)
 
         val result = ctl.activate(ghost)
@@ -248,7 +264,7 @@ class SessionControllerTest {
         val seed = profile("dc1", oldHost)
         val dao = FakeDao(seed); val vault = FakeVault(); val sink = FakeCookieSink()
         vault.putSecret("dc1", "sekret")
-        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), report = {})
+        val ctl = SessionController(dao, vault, mgr(dao, vault, sink), urlOnly, report = {})
 
         ctl.deleteProfile(seed)
 
@@ -262,7 +278,7 @@ class SessionControllerTest {
         val original = profile("test", oldHost).copy(authType = AuthType.NONE)
         val dao = FakeDao(original); val vault = FakeVault(); val sink = FakeCookieSink()
         vault.putSecret(original.alias, "previously-saved-password")
-        val controller = SessionController(dao, vault, mgr(dao, vault, sink), report = {})
+        val controller = SessionController(dao, vault, mgr(dao, vault, sink), urlOnly, report = {})
         val activated = controller.activate(original)
         assertTrue(activated.login is LoginResult.Success)
         assertEquals(AuthType.NONE, dao.rows[original.id]!!.authType)

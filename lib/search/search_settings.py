@@ -3,8 +3,11 @@
 Search and fetch limits (results per search, page sizes, timeouts, download
 size) are fixed tofu-search defaults owned by ``tofu_search.config``; there is
 no host tuning layer. The only saved, user-adjustable search behaviour is
-``skip_domains``: hosts the fetcher never visits. Its writers share this module
-so "what counts as the same domain" has one answer:
+``skip_domains``: URLs the assistant's web tools never visit. Entries are
+hosts (``example.com``, including subdomains) or host+path prefixes
+(``example.com/private``); a ``*`` path segment matches one segment. Matching
+is owned by :mod:`lib.search.url_blocklist`. Its writers share this module
+so "what counts as the same entry" has one answer:
 
   * **The ``update_search_settings`` agent tool** blocks/unblocks a domain
     through :func:`apply_updates` — validated, persisted, hot-reloaded and
@@ -33,19 +36,30 @@ ADJUSTABLE_KEYS = ('block_domain', 'unblock_domain')
 
 
 def normalise_domain(domain: str) -> str:
-    """Canonical domain normaliser (scheme/www/path/port stripped, lowercased).
+    """Canonical blocklist-entry normaliser (scheme/www stripped, lowercased).
 
     Shared by the optimizer's block_search_domain action and the
-    update_search_settings tool so "what counts as the same domain" has one
+    update_search_settings tool so "what counts as the same entry" has one
     answer across every writer of ``skip_domains``.
+
+    An entry is either a bare host (``example.com`` — port stripped, since
+    host rules are port-independent) or a host plus URL path
+    (``example.com/private``). The path is PRESERVED: stripping it would
+    silently widen a request to block one repository or directory into
+    blocking the whole host. ``*`` stays intact as a one-segment wildcard
+    (``github.com/*/terminal-bench``). Matching semantics live in
+    :mod:`lib.search.url_blocklist`.
     """
     dom = (domain or '').strip().lower()
     if dom.startswith('http://') or dom.startswith('https://'):
         dom = dom.split('://', 1)[1]
     if dom.startswith('www.'):
         dom = dom[4:]
+    dom = dom.split('?', 1)[0].split('#', 1)[0]
     if '/' in dom:
-        dom = dom.split('/', 1)[0]
+        host, _, path = dom.partition('/')
+        host = host.split(':', 1)[0]
+        return host + '/' + path.strip('/')
     if ':' in dom:
         dom = dom.split(':', 1)[0]
     return dom

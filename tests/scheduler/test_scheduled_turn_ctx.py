@@ -33,7 +33,7 @@ def _full_config() -> dict:
             'autoTranslate': True,
             'projectPath': '/mnt/data/workspace/proj',
         },
-        {'model': 'kimi-k3'},
+        {'model': 'kimi-k3'}, owner=7,
     )
 
 
@@ -62,7 +62,7 @@ def test_snapshot_shape_matches_frontend_contract():
 
 
 def test_search_mode_chip_variants():
-    base = build_task_config({}, {'model': 'm'})
+    base = build_task_config({}, {'model': 'm'}, owner=7)
     single = build_turn_ctx_snapshot({**base, 'searchMode': 'single'})
     assert {'label': 'Search', 'tone': 'search'} in single['tools']
     off = build_turn_ctx_snapshot({**base, 'searchMode': 'off'})

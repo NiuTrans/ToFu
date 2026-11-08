@@ -2,13 +2,16 @@
 <resources>
 
     <!-- 首页 / 服务器列表 -->
-    <string name="list_no_servers">还没有服务器</string>
+    <string name="list_no_servers">还没有内核</string>
     <string name="list_actions_cd">%1$s 的更多操作</string>
     <string name="list_report_cd">反馈问题</string>
-    <string name="list_empty_title">你的服务器都在这里</string>
-    <string name="list_empty_body">添加一次 Tofu 服务器，地址和密码会被记住，之后一键即可打开。</string>
-    <string name="list_empty_cta">添加第一个服务器</string>
-    <string name="list_fab_add">添加服务器</string>
+    <string name="list_empty_title">添加远程内核</string>
+    <string name="list_empty_body">通过地址或 SSH 添加一次 Tofu 服务器，之后一键即可打开。</string>
+    <string name="list_empty_cta">添加内核</string>
+    <string name="list_fab_add">添加内核</string>
+    <string name="list_in_front">当前：%1$s</string>
+    <string name="add_kind_url">服务器地址</string>
+    <string name="add_kind_ssh">SSH 隧道</string>
     <string name="list_menu_edit">编辑</string>
     <string name="list_menu_delete">删除</string>
     <string name="list_signing_in">正在登录 %1$s…</string>
@@ -18,7 +21,7 @@
     <string name="list_download">下载</string>
     <string name="list_footer_version">Tofu v%1$s (%2$d)</string>
     <plurals name="list_server_count">
-        <item quantity="other">%d 个服务器</item>
+        <item quantity="other">%d 个内核</item>
     </plurals>
     <plurals name="list_running_count">
         <item quantity="other">运行中 %d 个</item>
@@ -31,6 +34,42 @@
     <string name="state_working">处理中…</string>
     <string name="state_unreachable">无法连接</string>
     <string name="state_open_only">仅打开</string>
+
+    <!-- 内核（本机 / SSH，状态来自 KernelController） -->
+    <string name="kernel_this_phone">本机</string>
+    <string name="kernel_this_phone_desc">在本设备上运行的 Tofu</string>
+    <string name="kernel_state_ready">就绪</string>
+    <string name="kernel_state_starting">启动中…</string>
+    <string name="kernel_state_stopped">已停止</string>
+    <string name="kernel_state_failed">不可用</string>
+    <string name="kernel_state_safe_mode">安全模式</string>
+
+    <!-- 添加 / 编辑 SSH 内核 -->
+    <string name="ssh_add_title">添加 SSH 内核</string>
+    <string name="ssh_edit_title">编辑 SSH 内核</string>
+    <string name="ssh_subtitle">由手机主动连接；主机上的 Tofu 需已在运行</string>
+    <string name="ssh_section_connection">连接</string>
+    <string name="ssh_field_name_placeholder">开发机</string>
+    <string name="ssh_field_host">主机</string>
+    <string name="ssh_field_host_placeholder">dev.example.com</string>
+    <string name="ssh_field_port">SSH 端口</string>
+    <string name="ssh_field_user">用户名</string>
+    <string name="ssh_field_remote_port">主机上的 Tofu 端口</string>
+    <string name="ssh_field_remote_port_helper">从本机转发到主机的 127.0.0.1。</string>
+    <string name="ssh_pinned_key">已固定主机密钥：%1$s</string>
+    <string name="ssh_unpinned_key">首次连接时会显示主机密钥供你确认，确认后固定。</string>
+    <string name="ssh_section_sign_in">登录</string>
+    <string name="ssh_field_password">账户密码（可选）</string>
+    <string name="ssh_field_password_keep">账户密码（留空保持已保存）</string>
+    <string name="ssh_field_password_helper">留空则只用本机密钥登录。</string>
+    <string name="ssh_public_key_label">本机密钥</string>
+    <string name="ssh_public_key_helper">将它加入主机的 ~/.ssh/authorized_keys，即可免密码登录。</string>
+    <string name="ssh_copy_public_key">复制公钥</string>
+    <string name="ssh_public_key_copied">已复制</string>
+    <string name="ssh_trust_title">信任此主机？</string>
+    <string name="ssh_trust_body">首次连接 %1$s。请核对这是主机的密钥：在主机上运行 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</string>
+    <string name="ssh_trust_action">信任并连接</string>
+    <string name="action_save">保存</string>
 
     <!-- 添加 / 编辑服务器 -->
     <string name="add_title">添加服务器</string>

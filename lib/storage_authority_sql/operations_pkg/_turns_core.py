@@ -728,6 +728,9 @@ def _turn_change_capture(
             user_id,
         ))
 
+    for carrier in committed:
+        session.worker_hints.conversation_changes.add((
+            carrier['userId'], carrier['event']['conversationId']))
     return _committed_events_result(clean_result, committed)
 
 

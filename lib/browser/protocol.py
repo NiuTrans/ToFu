@@ -101,8 +101,12 @@ def normalize_capabilities(values, *, protocol_version: int) -> frozenset[str]:
 
 def client_protocol(client_id: str) -> dict:
     """Return the protocol snapshot for one explicitly addressed client."""
+    from .bridge_relay import selected_relay
     from .queue import _state
 
+    relay = selected_relay()
+    if relay is not None:
+        return relay.call('client_protocol', {'client_id': str(client_id or '')})
     client_id = str(client_id or '').strip()
     if not client_id:
         return {

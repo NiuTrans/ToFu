@@ -14,7 +14,7 @@ GROUP = 'dx:gid:500'
 
 
 @pytest.fixture
-def channel(store, enabled, router, dispatch, mailbox, monkeypatch):
+def channel(store, enabled, router, dispatch, mailbox, monkeypatch, turns):
     enabled(command_chat=COMMAND)
     monkeypatch.setattr('lib.channels.service._require_owned_conversation', lambda owner, conv: None)
     return store
@@ -113,7 +113,7 @@ def test_owner_decisions_require_a_genuine_human_turn(channel, turns, name, args
     with pytest.raises(ChannelError) as refused:
         tools.execute(name, args, _task())
     assert refused.value.code == 'human_turn_required'
-    turns({'content': 'please approve', 'origin': {
+    turns({'content': f'please approve {draft.view()["approvalCode"]}', 'origin': {
         'blockId': 'origin', 'initiator': 'human',
         'channel': {'channel': 'dx', 'thread': COMMAND, 'eventIds': [f'{COMMAND}/1']}}})
     assert tools.execute(name, args, _task())

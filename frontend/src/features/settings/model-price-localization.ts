@@ -149,13 +149,17 @@ export function formatModelPriceForUi(
   const isWholeUnitCurrency = displayCurrency === 'JPY' || displayCurrency === 'KRW';
   const maximumFractionDigits = isWholeUnitCurrency && absolute >= 1
     ? 0 : absolute >= 1 ? 2 : 4;
+  // Sub-cent media rates (per second of audio, per image tier) keep three
+  // significant digits; four fixed decimals would round $0.000225 to $0.0002.
+  const digits = absolute > 0 && absolute < 0.01
+    ? { maximumSignificantDigits: 3 }
+    : { minimumFractionDigits: 0, maximumFractionDigits };
   try {
     return new Intl.NumberFormat(LANGUAGE_LOCALE[root] ?? 'en-US', {
       style: 'currency',
       currency: displayCurrency,
       currencyDisplay: 'narrowSymbol',
-      minimumFractionDigits: 0,
-      maximumFractionDigits,
+      ...digits,
     }).format(displayAmount);
   } catch {
     return `${displayCurrency} ${editableDecimal(displayAmount)}`;

@@ -78,7 +78,14 @@ impl Vfs for CountingVfs {
         Ok(Box::new(CountingFile { inner: file, source, log: Arc::clone(&self.log) }))
     }
     fn open_positioned_reader(&self, path: &Path) -> io::Result<Option<Arc<dyn VfsPositionedReader>>> {
-        self.inner.open_positioned_reader(path)
+        // Segment reads count through whichever handle serves them; loose and
+        // history sources keep their accounting above.
+        Ok(match (self.inner.open_positioned_reader(path)?, segment_of(path)) {
+            (Some(inner), Some(segment)) => {
+                Some(Arc::new(CountingReader { inner, segment, log: Arc::clone(&self.log) }))
+            }
+            (reader, _) => reader,
+        })
     }
     fn create_dir(&self, path: &Path) -> io::Result<()> {
         self.inner.create_dir(path)
@@ -109,6 +116,23 @@ impl Vfs for CountingVfs {
     }
     fn sync_directory(&self, path: &Path) -> io::Result<()> {
         self.inner.sync_directory(path)
+    }
+}
+
+struct CountingReader {
+    inner: Arc<dyn VfsPositionedReader>,
+    segment: Uuid,
+    log: Arc<Mutex<ReadLog>>,
+}
+
+impl VfsPositionedReader for CountingReader {
+    fn len(&self) -> io::Result<u64> {
+        self.inner.len()
+    }
+    fn read_exact_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+        self.inner.read_exact_at(offset, bytes)?;
+        self.log.lock().unwrap().segment_reads.push((self.segment, offset, bytes.len()));
+        Ok(())
     }
 }
 
@@ -361,13 +385,13 @@ fn mark_capture(
     let blocks = Arc::clone(&epoch.capture.blocks);
     blocks.set_cache_capacity_bytes(0).unwrap();
     blocks.set_cache_capacity_bytes(256 * 1024 * 1024).unwrap();
-    crate::block::set_traversal_locations_disabled_for_test(!located);
+    crate::block::set_catalog_locations_disabled_for_test(!located);
     vfs.take();
     read_path_counters::take();
     let built = collector.build_marks(&mut epoch, &AtomicBool::new(false));
     let counters = read_path_counters::take();
     let log = vfs.take();
-    crate::block::set_traversal_locations_disabled_for_test(false);
+    crate::block::set_catalog_locations_disabled_for_test(false);
     built.unwrap();
     let mut marks = epoch.marks.take().unwrap();
     let inserts = marks.finish().unwrap().references;

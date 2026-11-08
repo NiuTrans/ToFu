@@ -20,6 +20,9 @@ ProviderAccess resources, safe egress, charging, and rate limits. Identity lives
 | Request route resolution/lifecycle | `lib/model_routing/routing.py`, `dispatch_adapter.py` |
 | Caller-controlled egress policy | `lib/byo/byo_egress.py` |
 | Subscription OAuth | `lib/oauth/` |
+| Kimi Code device sign-in and refresh | `lib/oauth/kimi.py` |
+| Device-code login loop (Codex, Kimi) | `lib/oauth/manager/_device.py` |
+| Coding-plan key templates (`subscription` category) | `lib/model_info/data/*.json`, `lib/provider/provider_template_recipes.py` |
 | Codex account usage / earned resets | `lib/oauth/codex_usage.py` |
 | Provider-specific outbound identity | `lib/oauth/outbound.py` |
 | Pricing and cost math | `lib/pricing/`, `lib/cost.py` |
@@ -516,6 +519,76 @@ orders, storage restart, concurrent delivery, committed lost ACKs and public HTT
 
 The existing bounded catalog worker doubles stable-poll intervals up to one hour, but wakes at least five minutes before a stored Codex access token's expiry. A near-expiry idle poll uses the same cross-process OAuth singleflight refresh as requests, even when the model catalog is still fresh; transient catalog/provisioning errors retry within 15 minutes. An explicitly revoked or absent refresh token is never replayed and cannot be renewed without the user's authorization. An explicit logout stops the catalog worker and forgets staged rows only after credential deletion succeeds. Last-admitted catalog rows remain available during transient network/auth outages, whereas freshly fetched rows are not published until model-routing admission succeeds. The repair cannot override deliberately disabled provider access or an explicit capability/credential restriction; see `docs/MODEL_REGISTRATION.md`. Browser/code login commits share the refresh/logout transaction boundary, so an old refresh cannot overwrite a completed new login. Failed refresh fallback re-reads current credentials and current time; expiry crossed during a wait, logout, and replacement login never return the pre-refresh bearer. Problem: slow network operations outlive credential snapshots. Decision: reuse the existing transaction lock and revalidate fallback authority; alternatives rejected: a second credential store, recursively locking generic `save_token`, or trusting stale expiry. Specs: `test_oauth_token_store.py` login/refresh and expiry-boundary regressions.
 
+## Domestic coding subscriptions
+
+Settings → 订阅登录 also connects domestic coding plans. Mechanisms and terms
+were checked against each vendor's official documentation on 2026-11-06.
+
+**Kimi Code membership sign-in.** `lib/oauth/kimi.py` runs the RFC 8628 device
+grant of the open-source Kimi Code CLI (MIT, design note KLIP-14) against
+`auth.kimi.com` with that CLI's public client; there is no client secret. The
+manager's one device loop (`lib/oauth/manager/_device.py`) runs each provider's
+protocol, so Kimi shares the Codex status, logout and reconciliation path. The
+login lives in the common token store. Refresh is a cross-process singleflight
+once under five minutes remain, a 401 forces one refresh for that request, and a
+rejected refresh token is cleared and never replayed; an expired login raises
+the typed `oauth_reauth` failure. Provider `oauth_kimi`
+(`https://api.kimi.com/coding/v1`) takes its roster from the `kimi_code`
+template, so sign-in and a pasted Kimi Code console key expose the same supply.
+Requests carry Tofu's own client identity, never the CLI's
+([IDENTITY.md](../IDENTITY.md#kimi-code-sign-in)). Kimi's 5-hour, weekly and
+monthly usage-limit 429s enter the existing subscription-quota channel; an
+exhausted credit balance is billing quota.
+
+**Plan-key templates.** A template of category `subscription` is a vendor's own
+plan-bound coding endpoint reached with a plan API key
+([recipes](../PROVIDER_TEMPLATE_RECIPES.md#coding-plan-subscriptions)). Settings →
+订阅登录 renders one card per such template (`subscription-plans.ts`): key-console
+and plan-details links, a password input, then status and Disconnect. Connect
+compiles the template and stages it with the key through the same Provider add
+command as the 服务商 picker, which lists these templates under 订阅套餐;
+Disconnect is the ordinary Provider removal. The browser keeps no plan list or
+credential.
+
+| Plan | Template | Terms for a tool such as Tofu |
+|---|---|---|
+| Kimi Code (console key) | `kimi_code` | third-party tools allowed; the client identity must stay honest |
+| Alibaba Bailian Coding Plan | `bailian_coding_plan` | interactive use inside coding tools only: no automation scripts, application backends or non-interactive batches; inputs and outputs may be used to improve models |
+| Tencent Cloud Coding Plan | `tencent_coding_plan` | interactive use inside coding tools only, same exclusions |
+| Volcengine Ark Coding Plan | `ark_coding_plan` | personal development; plan quota applies only inside AI coding tools, not to API calls |
+| MiniMax M Plan | `minimax_mplan` | any OpenAI- or Anthropic-compatible tool; interactive personal use |
+
+Never make Bailian, Tencent or Ark models the default for background jobs such
+as titles, translation or evaluations. Plan Offerings carry no price tier, so
+the `cheap` pools that auto titles and language correction request skip them.
+Tofu has no interactive-only Offering policy yet, though: unpinned background
+dispatch is otherwise pool-wide (a capability request with no matching slot
+falls back to any text slot, and owner-wide auxiliary summaries consider every
+enabled text Offering), so a connected plan can still be selected for such work.
+
+Not integrated: Zhipu's GLM Coding Plan, whose terms name the permitted tools
+(Tofu is not one; outside them the plan quota does not apply and the account
+balance is charged); Qwen OAuth (free tier discontinued 2026-04-15) and iFlow
+(closed 2026-04-17); Baidu Qianfan's Coding Plan (model updates stopped; Baidu
+points to its Token Plan); CodeBuddy, Trae and Lingma (closed backends without a
+third-party API); web-chat reversers (cookie scraping, against vendor terms).
+
+Owner steps:
+
+- Kimi Code (membership Plus or above): Settings → 订阅登录 → Kimi Code →
+  设备码登录; open the page shown on any device, sign in and confirm the code;
+  the card then shows the connected model count.
+- Bailian, Tencent, Ark, MiniMax, or a Kimi Code console key: open the card's
+  获取 Key link and create the plan key; paste it into the card and press 连接;
+  pick a plan model in the composer for interactive work.
+
+Specifications: `tests/oauth/test_kimi_oauth.py` (device grant, refresh and
+expiry against a fake `auth.kimi.com`), `tests/oauth/test_kimi_subscription.py`
+(status, logout, routing, identity headers, 401 refresh, quota),
+`tests/providers/test_subscription_plan_templates.py`,
+`tests/providers/test_subscription_settings_cards.py` and the Kimi device
+scenarios of `tests/frontend/test_settings_import_oauth_lifecycle.py`.
+
 ## Failure semantics
 - Missing/invalid credentials: `401`.
 - Authenticated principal without required scope: `403`.
@@ -562,6 +635,7 @@ The existing bounded catalog worker doubles stable-poll intervals up to one hour
 pytest -q tests/identity/test_identity_contract.py tests/api/test_api_keys.py tests/model_routing/test_model_routing_contract.py tests/byo_egress/test_byo_egress.py tests/startup/test_secret_envelope_startup_boundary.py
 pytest -m unit -q tests/oauth/test_oauth_outbound.py tests/oauth/test_oauth_exchange_errors.py tests/oauth/test_codex_usage_reset.py tests/oauth/test_codex_usage_reset_notice.py tests/llm_dispatch/test_key_stats_model_exhaustion.py tests/llm_dispatch/test_key_stats_no_429_auto_disable.py tests/key_stats/test_key_stats_persistence.py
 pytest -q tests/cost/test_cost.py tests/billing/test_billing.py tests/storage_authority_sql/test_rate_limit_store.py
+pytest -m unit -q tests/oauth/test_kimi_oauth.py tests/oauth/test_kimi_subscription.py tests/providers/test_subscription_plan_templates.py tests/providers/test_subscription_settings_cards.py
 ```
 
 Use `rg --files tests | rg '(identity|api_key|model_routing|oauth|billing|cost|rate_limit)'`

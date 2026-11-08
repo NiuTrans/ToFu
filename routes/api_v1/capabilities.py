@@ -11,29 +11,43 @@ hardcoding. Inferred at request time from runtime state:
   * **backends** — agent backends available (builtin, codex, claude_code)
   * **scopes**   — closed enum of API key scopes
   * **config_schema** — JSON-schema-ish description of `cfg` fields
+  * **environment** — this kernel's environment-capability snapshot
+                   (``lib/tools/environment_capabilities.py``): which declared
+                   needs (shell, git, Node.js, a browser, devices, LAN
+                   discovery) this host meets, and local-kernel mode
 """
 
 from __future__ import annotations
+
+import asyncio
 
 from quart import Blueprint
 
 from lib.api_response import api_internal_error, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
+from lib.tools.environment_capabilities import (
+    ENVIRONMENT_SECTION_SCHEMA,
+    environment_snapshot,
+    refresh_environment_snapshot,
+)
 from lib.ttl_cache import TTLCache
+
+from .auth import require_auth
 
 logger = get_logger(__name__)
 
 api_v1_capabilities_bp = Blueprint('api_v1_capabilities', __name__)
 
-# The capabilities payload is a pure function of the persisted server config
-# plus static registries (tools/events/scopes). It's a public, poll-friendly
-# endpoint, so cache the assembled dict for a short window. The cache key is
-# ``id(lib._SAVED_CONFIG)``: ``lib.reload_config()`` rebinds that attribute to
-# a freshly-allocated dict (built while the old one is still referenced, so the
-# new id differs), which invalidates the entry immediately on a settings change.
-# The 30s TTL is a backstop for any config path that doesn't route through
-# reload_config().
+# The capabilities payload is a pure function of the persisted server config,
+# the environment-capability snapshot and static registries (tools/events/
+# scopes). It's a public, poll-friendly endpoint, so cache the assembled dict
+# for a short window. The cache key is ``(id(lib._SAVED_CONFIG), environment
+# revision)``: ``lib.reload_config()`` rebinds that attribute to a
+# freshly-allocated dict (built while the old one is still referenced, so the
+# new id differs), and a changed environment snapshot bumps its revision, so
+# either invalidates the entry immediately. The 30s TTL is a backstop for any
+# config path that doesn't route through reload_config().
 _CAPS_CACHE = TTLCache(ttl=30.0, max_size=8, name='capabilities')
 
 # The built-in system prompt is a pure function of (project, tools) — cwd,
@@ -338,8 +352,14 @@ def _relay_summary() -> dict:
     return out
 
 
-def _build_capabilities() -> dict:
-    """Assemble the full capabilities payload (uncached)."""
+def _build_capabilities(environment=None) -> dict:
+    """Assemble the full capabilities payload (uncached).
+
+    ``environment`` is the snapshot whose revision keyed the cache entry;
+    omitted, the current snapshot is read.
+    """
+    if environment is None:
+        environment = environment_snapshot()
     from lib.api_keys import ALL_SCOPES
     from lib.model_info.capability_taxonomy import taxonomy_payload
     try:
@@ -380,16 +400,61 @@ def _build_capabilities() -> dict:
             'anthropic_messages': '/v1/messages',
         },
         'push_channel': {'ws': '/api/push'},
+        # Booleans and reason codes only (public endpoint: no host paths).
+        # The Android shell reads it from the active kernel; see
+        # docs/ANDROID_KERNELS.md "Capability snapshot".
+        'environment': environment.public_section(),
     }
+
+
+def _environment_response(description: str) -> dict:
+    return {'200': {'description': description, 'content': {'application/json': {
+        'schema': {
+            'type': 'object',
+            'required': ['ok', 'environment'],
+            'properties': {
+                'ok': {'type': 'boolean'},
+                'environment': ENVIRONMENT_SECTION_SCHEMA,
+            },
+            'additionalProperties': True,
+        }}}}}
 
 
 @api_v1_capabilities_bp.route('/api/v1/capabilities', methods=['GET'])
 @api_meta(summary='Capabilities — runtime model/tool/agent registry',
-          description='Public endpoint. Use for client auto-config.',
-          tags=['capabilities'], public=True)
+          description=(
+              'Public endpoint. Use for client auto-config. `environment` is '
+              "this kernel's environment-capability snapshot: per capability "
+              '(shell, git, python, uv, node, browser, devices, '
+              'lan_discovery) whether it is available and why not, plus '
+              'local-kernel mode. Tools needing a missing capability are not '
+              'exposed to the model.'),
+          tags=['capabilities'], public=True,
+          responses=_environment_response('Runtime capabilities'))
 async def capabilities():
-    payload = _CAPS_CACHE.get_or_compute(_caps_cache_key(), _build_capabilities)
+    # A stale snapshot re-probes the filesystem; keep that off the event loop.
+    environment = await asyncio.to_thread(environment_snapshot)
+    payload = _CAPS_CACHE.get_or_compute(
+        (_caps_cache_key(), environment.revision),
+        lambda: _build_capabilities(environment))
     return api_ok(payload)
+
+
+@api_v1_capabilities_bp.route('/api/v1/capabilities/environment/refresh',
+                              methods=['POST'])
+@require_auth
+@api_meta(summary="Re-scan this kernel's environment capabilities",
+          description=(
+              'Re-probes the environment-capability snapshot now (presence '
+              'checks only) and returns the `environment` section. Use after '
+              'installing software outside Tofu. Changed results take effect '
+              'on the tool exposure of the next turn; running turns keep their '
+              'tools.'),
+          tags=['capabilities'], request_body=False,
+          responses=_environment_response('Refreshed environment snapshot'))
+async def refresh_environment_capabilities():
+    snapshot = await asyncio.to_thread(refresh_environment_snapshot, 'user re-scan')
+    return api_ok({'environment': snapshot.public_section()})
 
 
 @api_v1_capabilities_bp.route('/api/v1/system-prompt/default', methods=['GET'])

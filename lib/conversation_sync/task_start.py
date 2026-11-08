@@ -174,6 +174,7 @@ def start_conversation_attempt_executor(
     on_task_registered: Callable[[str], None] | None = None,
     execution_clock=None,
     worker_context=None,
+    application=None,
 ):
     """Build model context, register an executor, and start it.
 
@@ -286,10 +287,8 @@ def start_conversation_attempt_executor(
                     abort_after_ts,
                 )
             )
-            from quart import current_app,has_app_context
-            if has_app_context() and current_app.extensions.get('tofu_native_application') is not None:
-                from lib.tasks_pkg.native_application import bind_application_native_task
-                bind_application_native_task(task,flow=_flow_entry is not None)
+            from lib.tasks_pkg.native_application import bind_application_native_task
+            bind_application_native_task(task, flow=_flow_entry is not None, application=application)
         if on_task_registered is not None:
             with measure_task_startup('binding', identity=timing_identity):
                 on_task_registered(task_id)

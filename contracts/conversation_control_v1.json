@@ -1,0 +1,16 @@
+{
+  "format": "tofu.conversation-control/v1",
+  "operation": "conversation_control.watch",
+  "request": {"cursor": "null or the previous response cursor"},
+  "cursor": {"epoch": "authority process UUID", "change": "u64 generation"},
+  "response": {"format": "tofu.conversation-control/v1", "cursor": "current cursor", "conversations": "distinct {userId, conversationId} scopes committed during this wait, or null when a gap invalidates every subscription"},
+  "semantics": {
+    "authority": "Authenticated application transport control; hints grant no read, execution or ownership authority. Browser delivery rechecks each owned conversation through the canonical replay query.",
+    "commit": "The same commit that appends conversation changes publishes invalidations before delivery acknowledgement. Failed statements publish nothing; an ambiguous COMMIT may harmlessly invalidate.",
+    "subscribe": "One API lifecycle watch, enrolled before accepting streams. Every stream subscribes before its first durable replay. A changed cursor between waits invalidates all subscribed scopes.",
+    "idle": "Waits consume no semantic transaction, receipt or query. The existing conversation heartbeat deadline bounds a transport wait; unchanged responses never trigger replay.",
+    "reconnect": "Lost responses and a new authority epoch invalidate all subscriptions. Existing durable-worker failure backoff governs reconnect, with no new retry setting.",
+    "retention": "Only current generations and distinct scopes of currently waiting connections are retained. No durable rows, notification history or user data are added.",
+    "shutdown": "Authority shutdown wakes all waits. API shutdown interrupts and joins its exact borrowed connection before storage teardown. Cancelled pooled sessions are retired."
+  }
+}

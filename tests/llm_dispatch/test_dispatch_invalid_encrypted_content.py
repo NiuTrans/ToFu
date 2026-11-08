@@ -247,3 +247,45 @@ def test_bad_request_stops_once_without_credential_or_capacity_replay(monkeypatc
     assert all(slot.inflight == 0 for slot in router.slots)
     assert _health(rejected) == rejected_health
     assert key_health == []
+
+
+def test_rejected_reasoning_state_is_retired_and_the_same_model_retried_once(
+        monkeypatch, key_health):
+    from lib.tasks_pkg.llm_fallback import _call
+
+    slots = [_slot('primary'), _slot('fallback', 'fallback-model')]
+    router = _Router(slots)
+    monkeypatch.setattr(api, 'get_dispatcher', lambda: router)
+    monkeypatch.setattr(_fallback_retry, '_get_fallback_model', lambda task: 'fallback-model')
+    failure = _invalid_state_error()
+    sent = []
+
+    def transport(body, **kwargs):
+        sent.append((body['model'], copy.deepcopy(body['messages'])))
+        if len(sent) == 1:
+            raise failure
+        return ({'role': 'assistant', 'content': 'continued'}, 'stop',
+                {'prompt_tokens': 1, 'completion_tokens': 1})
+
+    def stream(task, body, **kwargs):
+        return api.dispatch_stream(body, on_tool_call_ready=kwargs.get('on_tool_call_ready'))
+
+    monkeypatch.setattr('lib.llm.stream_chat', transport)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream)
+    body = _body()
+    body['messages'][1]['_responses_items'] = [
+        {'type': 'reasoning', 'id': 'rs_1', 'encrypted_content': 'opaque-synthetic-state'}]
+    messages = body['messages']
+    task = {'id': 'synthetic-state-recovery-task', 'config': {}, 'events': [],
+            'events_lock': threading.Lock()}
+    result = _call._llm_call_with_fallback(
+        task, body, 'unit-model', 1, 128, True, body['tools'], messages, 'low',
+        False, {}, [])
+    assert result['assistant_msg']['content'] == 'continued'
+    assert result['model'] == 'unit-model'
+    assert [model for model, _ in sent] == ['unit-model', 'unit-model']
+    assert '_responses_items' not in messages[1]
+    assert 'opaque-synthetic-state' not in repr(sent[1][1])
+    assert messages[1]['tool_calls'][0]['id'] == 'done-call'
+    assert not any(key.startswith('_fallback') for key in task)
+    assert all(slot.inflight == 0 and slot.total_errors == 0 for slot in slots)

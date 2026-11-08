@@ -1,0 +1,11 @@
+/* Image composer options the selected Model does not document as supported.
+ * The options stay visible (the bar keeps its geometry) but cannot be
+ * chosen; features/image/composer-constraints.ts decides which. */
+.ig-pill:disabled {
+  opacity: .38;
+  cursor: not-allowed;
+}
+.ig-pill:disabled:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}

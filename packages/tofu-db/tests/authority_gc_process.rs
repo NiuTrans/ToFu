@@ -253,7 +253,7 @@ fn command_removes_an_abandoned_loose_block_temporary_before_other_gc() {
         .path()
         .join("blocks")
         .join(&orphan.to_hex()[..2])
-        .join(format!(".new-{}", Uuid::from_bytes([0x5b; 16]).simple()));
+        .join(format!(".new-{}", Uuid::from_bytes([0x5b; 16]).hyphenated()));
     std::fs::write(&temporary, b"abandoned-block-prefix").unwrap();
 
     let plan = Command::new(common::native_binary())

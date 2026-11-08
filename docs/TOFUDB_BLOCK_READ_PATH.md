@@ -392,6 +392,284 @@ before the build is left out of the table and reported by the exact path.
 `location_candidates_resolve_prefix_collisions_by_the_full_index_id` cover the
 fallbacks and collisions.
 
+## Published catalog location table (2026-11-06)
+
+*Problem:* on 2026-11-06 the live daemon on the dolphinfs FUSE authority
+(4,103 full-range segments of about 56k blocks, 1.07 TB; a 2.7 MB verified index
+per segment, about 11 GB in total, of which the verified-index cache held about
+29%) ran at 20-25 cores on its roughly 1,300 connection threads. A user-space
+profile of every thread (10 s of `perf_event` task-clock samples) put about 16%
+in sorting the per-lookup candidate copy, 15% in the witness walk, 36% in
+reading and verifying whole segment indexes (BLAKE3, CRC32C, decode) and most
+of a further 20% of libc time in copying candidate vectors and index buffers.
+A stack scan found about 615 of 1,375 threads waiting on the segment
+read-handle mutex and about 400 on the verified-index cache's write lock, which
+every cache hit takes to refresh recency. The cause was the foreground read
+path: every cold read of a packed block ran the exact catalog path, copying and
+sorting one candidate per catalogued segment, checking every witness, and
+opening (whole index read, verification, admission) its owner and each witness
+false positive (four probes at 16-18.7 bits per block: 0.14-0.24% per segment,
+about 6-10 per lookup). Commits run the same reads under the authority mutex:
+the console recorded 5,493 `turn.event.record` holds of at least 1 s since
+2026-11-02 (median 1.5 s, p95 6.8 s), dominated by `vfs_read`/`vfs_open`, and
+RPC deadlines elapsed; one task never started because `turn.attempt.start`
+timed out at worker entry. Writers probe dedupe the same way, under the
+authority mutex: one 36 s `turn.event.record` hold was spent entirely in
+`put_deferred` (`stages=put_deferred:36035`, under 5 ms of VFS time), the
+committing thread queued behind the reader threads on the verified-index cache
+lock. Whole-store passes already avoided all this with their own location table
+("Catalog location table for whole-store passes" above), but foreground reads,
+dedupe probes and the online GC's per-loose-block membership probes did not.
+
+*Decision:* `BlockStore` publishes one catalog location table per installed
+catalog publication and shares it. The online GC driver builds the first table
+off the authority mutex as soon as an epoch is due, before that epoch's capture,
+which defers while foreground holds contend for the mutex (after the 2026-11-07
+restart two deferred captures delayed the authority's first table by four
+minutes; after the next restart this rule published it 59 s after engine start,
+the 30 s boot grace plus a 21.9 s build). The search index's store is resolved
+under a non-blocking hold of its own mutex once that index has opened, so its
+first table waits for a due epoch that finds the mutex free: after that restart
+all 21 search epochs of the first 40 minutes deferred and no search table was
+published. Its lookups then fall back to the exact path in 0.1 us, and the
+maintenance writes that make them averaged 5.2 us. A whole-store pass (`traversal_reader`) derives a stale published
+table, reuses a current one, and builds and publishes one only when none exists.
+The maintenance worker's overlay poll derives each later
+publication's table off the authority mutex (`advance_catalog_locations`):
+entries of segments the new catalog still names with an identical reference
+are kept and renumbered, a dropped segment's entries leave, and only segments
+the old table did not index (added ones, or ones whose index failed
+verification) have their index read, exactly as a build reads it. Kept entries
+leave the old table in prefix order and merge with the new ones in one
+sequential pass (median 2.6 s over 97 live derivations of the 229M-block table,
+1.2 s to 82 s on the overloaded host). The poll only
+starts it: the derivation runs on its own `tofu-db-locations` thread, so the
+worker's overlay drain polls never wait for it; one runs at a time, and the
+worker joins it before the next and when it exits. The same poll derives the
+search index's table once that index is open: it is its own authority with its
+own catalog and online GC, whose driver builds its first table.
+
+One resolver (`resolve_in_published_catalog`) answers three consumers, each
+before its exact path: `get_uncached_materialized` (cold reads), the dedupe
+probe `probe_packed_dedupe` (on a packed-filter hit, before any read hint) and
+the membership probe `catalogued_payload_segment` (when the packed filter
+cannot exclude the block):
+
+- A hit costs one candidate and a positioned index-entry read (or the resident
+  index). Reads and dedupe then read the payload, which passes CRC32C and the
+  content hash; membership only confirms that the entry names the full ID, as
+  `PayloadSegment::contains` does. A hit records no read hint; hints serve
+  reads before a table exists.
+- When the table is the installed publication's, every catalogued segment is
+  indexed, every candidate answered and the catalog did not change during the
+  lookup, a miss proves the block absent: a read goes to the loose copy with
+  that publication as its exclusion (`get_loose_after_catalog`, which
+  re-checks a newer catalog after a loose miss, as for packed-filter
+  exclusions), dedupe stages the payload and membership answers none.
+- Anything else (a failed located read, an unindexed segment, a catalog change,
+  a stale table's miss, no table) leaves the verdict to the read hints and the
+  exact path, which keeps every integrity verdict and error type.
+
+A stale table locates blocks only through segments the installed catalog still
+names, and never proves absence. Every install recomputes, inside its catalog
+swap, which of the published table's segments the new catalog names
+(`live_segments`), so a table one publication behind keeps serving the blocks
+of every segment that publication kept while its derivation waits for the
+worker. The payload cache is the dedupe existence proof and drop-scoped
+eviction relies on a dropped segment's blocks not returning to it, so no read
+or dedupe probe resolves through a segment the installed catalog dropped;
+dedupe restages content whose only copy such a segment held.
+The stages `catalog_location_hit`, `catalog_location_absent`,
+`catalog_location_unknown` and `catalog_location_derive` count outcomes in
+`system.metrics.commitStages`, and every publication logs
+`catalog_locations step=published` with its source, publication, located blocks,
+unindexed segments, resident bytes and elapsed time.
+
+*Cost:* 8 bytes per catalogued block, retained for the process (about 1.84 GB
+for the live 230M blocks, at most 2 GiB for a full catalog of full segments);
+a derivation briefly holds the old and the new table. It replaces the table the
+online GC rebuilt for every mark (1.2-1.5 GB and 12-25 s of index streaming per
+epoch on the live volume), which now happens once per process. Nothing is
+sized by a knob: the catalog bounds the table, a derivation runs once per
+installed publication, and the first build runs on the online GC driver, where
+whole-store passes already ran it. Until that build (the first epoch is due
+after a 30 s boot grace; streaming every index took 21.6 s for the live 229M
+blocks) every lookup takes the exact path as before; between an install and its
+derivation, only blocks of the segments it added and absence proofs do.
+
+*Alternatives rejected:* deriving inside `install_payload_manifest`, because
+installs from `Engine::publish_payload_manifest` hold the authority mutex and
+every commit would wait for a full-table pass; deriving on the maintenance
+worker itself (the first version), whose overlay drain then stopped for each
+derivation; merging the table's 256 leading-byte runs on one scoped thread
+each, which `location_table_derivation_measurement` measured 9-12x faster on
+warm memory (186-306 ms against 1.9-2.8 s for 229M entries) but 1-18 s while
+its threads first fault the new table's pages, worse than the single pass
+(4.9-6.7 s), with global allocation stalls unchanged: hundreds of threads
+faulting and mapping stacks at once contend on the address space every
+daemon thread shares; serving stale tables
+unfiltered, which returns dropped segments' blocks to the dedupe cache;
+answering nothing from a stale table (the first version), which sent every
+lookup to the exact path for as long as a long maintenance round delayed the
+derivation; checking each candidate against the installed manifest per lookup
+instead of per install, a manifest scan or a second index on every cold read;
+a base table plus
+per-publication delta runs, whose lookups grow with publications until a merge
+threshold (a knob) folds them; a separate builder thread or an initial build on
+the maintenance thread, which duplicates the index stream the first mark
+already performs; more Bloom bits per segment, which removes only the
+false-positive index reads and keeps the O(segments) walk and sort; sort-free
+candidate lists and hash-free witness arrays, constant-factor savings on the
+same walk; a sharded read-handle mutex, whose shard count is a knob, while
+located reads stop taking that mutex for every false positive anyway.
+
+*Measurement:* `foreground_cold_packed_reads_resolve_through_the_published_location_table`
+(48 full-range segments x 512 blocks, deterministic VFS) reads 48 cold blocks
+with 96 reads, one candidate each and no witness check or index read; the exact
+path needed 201 reads, 2,304 witness checks and 51 whole-index verifications
+(1.25 MB). `derived_catalog_locations_equal_a_fresh_build_of_each_publication`
+shows that a derivation after an adoption-style merge plus an added segment
+reads at most the two added indexes and locates exactly what a fresh build
+locates, and that the dropped segment never answers in between.
+`stale_location_tables_locate_kept_segments_and_never_prove_absence` serves a
+kept segment's read and membership probe through a stale table with no catalog
+walk, refuses the dropped segment, the added segment and absence until the
+derivation, and restages dedupe of content whose only segment was dropped.
+`dedupe_and_membership_probes_resolve_through_the_published_table` (16
+full-range segments x 64 blocks, verified-index cache below the index bytes)
+resolves 16 membership and 16 dedupe probes with 32 candidates, no witness
+check and no whole-index read; the exact path took 512 witness checks and 16
+whole-index verifications.
+`worker_derives_the_published_location_tables_of_the_authority_and_the_search_index`
+runs the derivation of both tables on the live maintenance worker after engine
+publications.
+The ignored `published_location_table_cold_read_measurement` (thin-LTO release
+test binary; 1,024 full-range segments x 8,192 blocks, 402 MB of indexes, index
+cache at the live 29%, payload cache disabled; 200 cold reads of distinct
+segments per pass, disjoint blocks per pass):
+
+| Volume | Path | us/read | bytes, read calls, witness checks per read |
+|---|---|---:|---:|
+| local md RAID | exact catalog path | 1,294 | 721,763, 6.5, 1,018 |
+| local md RAID | located | 194 | 61, 2.0, 0 |
+| local md RAID | located, warm handles | 4.8 | 23, 1.2, 0 |
+| dolphinfs FUSE | exact catalog path | 2,079 | 721,763, 6.5, 1,018 |
+| dolphinfs FUSE | located | 840 | 61, 2.0, 0 |
+| dolphinfs FUSE | located, warm handles | 389 | 23, 1.2, 0 |
+
+The exact pass runs second, so it inherits page-cache warmth of the shared
+indexes; "warm handles" reuses read handles and indexes the exact pass left
+resident. Building that table took 0.6 s locally and 1.4 s on FUSE (67 MB).
+The exact path's per-read witness checks and index bytes grow with the segment
+count and index size (4,103 segments of 2.7 MB indexes live); the located path's
+stay at one candidate and two reads.
+
+Live, on the dolphinfs authority after the 2026-11-07 restart onto this design:
+authority holds of at least 1 s fell from 79.5 per hour (767 in the 9.7 hours
+before; median 1.5 s, p95 6.9 s, max 33.5 s) to 17.3 per hour (38 in the 2.2
+hours after). Foreground lookups the table answered took 200 us on average
+(5,349 in the first hour; 69 us over 13,450 in the first 41 minutes after the
+next restart), where the old engine's foreground uncached reads averaged
+20.2 ms. None of the 38 remaining long holds (median 2.7 s, up to 23 s, while
+the host ran at load average 50-93) was a catalog walk: the four longest spent
+17-23 s in IR execution, command execution, one block read and one engine
+commit, and their cause is not diagnosed. History-payload blocks resolve
+through `get_from_history` before any catalog lookup and are outside the table;
+the online GC still performed 1.45M uncached block reads per hour at 1.3 ms on
+average. `location_table_derivation_measurement` (ignored; a synthetic
+229M-entry table of 4,096 full segments, one dropped) times one derivation at
+1.9-2.8 s on warm memory, matching the live
+`catalog_locations step=published source=derive` lines (median 2.6 s).
+
+## Shared segment read handles (2026-11-07)
+
+*Problem:* the payload-segment read-handle cache leased each idle descriptor
+exclusively: a reader took the segment's handle out of the cache, read, and put
+it back. A second concurrent reader of the same segment found none and opened
+another descriptor; on return all but one were closed, and the cache closed
+every displaced or evicted handle while holding its one global mutex, which
+every read takes twice. On FUSE a close is a release round trip and an open
+about 1-2 ms of metadata work. The 2026-11-06 stack scan of the live daemon
+found about 760 connection threads contending on that mutex and about 90 in
+`openat`, opening duplicate descriptors of segments other threads held.
+
+*Decision:* readers share one handle per segment. `vfs::SharedReadFile` is the
+one shared-reader type: positioned reads on one descriptor where the VFS offers
+them (`pread` for `RealVfs`; the deterministic simulation offers them too),
+otherwise one ordinary handle behind its own mutex for wrapper VFSes whose
+handles keep read state. History sources already used that shape and now use
+the type. A lookup takes the cache's shared lock, clones the cached `Arc` and
+stores a monotonic timestamp into its own entry's recency; the read runs outside
+the lock, so concurrent readers never queue on each other. A miss opens outside
+the lock and admits the handle under the exclusive lock, and a racing open
+shares the first admitted one; an admission beyond the bound evicts the least
+recently used handle by one scan of the cached handles. Every
+handle the cache lets go (a racing loser, LRU eviction, catalog retention,
+segment removal, a failed read) is handed back and dropped after the lock is
+released, so no descriptor closes under it; a descriptor closes when its last
+reader drops it. Failure semantics are unchanged: a failed read or verification
+lets go of the cached handle, so the next reader opens a fresh descriptor
+(`read_through`); a handle opened before its segment's removal is never
+admitted (retired IDs); verification still re-checks the path and re-verifies
+framing. The bound is unchanged (descriptor-derived, 32..4,096) and now counts
+one shared descriptor per segment instead of idle handles plus leased
+duplicates.
+
+*Alternatives rejected:* a sharded lease mutex (a shard-count knob that keeps
+the duplicate opens and the closes under each shard's lock); a pool of idle
+handles per segment (a pool-size knob, still one open per concurrent reader
+beyond it); exact recency in a queue under one mutex (this change's first
+version: every lookup appended to the queue, and at the live bound of 4,096
+handles compacting it stalled every reader; it measured about 0.5 context
+switches per read at 32-64 threads); CLOCK reference bits (an eviction hand over
+a slot ring, more state than one scan per admission, and admissions open a file
+anyway); keeping exclusive leases for VFSes without positioned reads (a second
+cache path; those readers now wait for one read on the segment's handle instead
+of opening a descriptor).
+
+*Measurement:* `concurrent_readers_share_one_segment_handle_and_a_failed_read_releases_it`
+reads 8 threads x 16 rounds x 3 blocks through one warmed handle with no open,
+and a faulted read releases the handle so the next reader opens exactly one;
+`real_segment_files_are_read_through_one_shared_positioned_descriptor` checks
+that a real file is read with `pread` and that one `Arc` serves 8 concurrent
+threads; `a_handle_opened_before_its_segment_retired_is_never_admitted` pins the
+retirement rule. The ignored `concurrent_packed_read_measurement` (thin-LTO
+release test binaries, each pair of the same tree with and without one step,
+run in ABBA order; 256 full-range segments x 4,096 blocks, payload cache
+disabled, verified-index cache at the live 29%, published location table; reads
+of 16 hot segments, `getrusage` CPU and context switches per read). Step one,
+leased handles to shared handles with mutex-guarded exact recency:
+
+| Volume, threads | Leased: reads/s, CPU us, switches per read | Shared, mutex: reads/s, CPU us, switches per read |
+|---|---:|---:|
+| local md RAID, 1 | 353k, 2.8, 0.00 | 450k, 2.2, 0.00 |
+| local md RAID, 8 | 271k, 11.1, 0.67 | 878k, 8.1, 0.13 |
+| local md RAID, 32 | 178k, 13.2, 0.82 | 1,062k, 25.7, 0.51 |
+| local md RAID, 64 | 153k-157k, 15.0-15.5, 0.86-0.87 | 934k-1,026k, 53.9-57.9, 0.53-0.55 |
+| dolphinfs FUSE, 64 | 49k-87k, 17.7-27.7, 0.85-1.43 | 855k-1,011k, 47.5-56.7, 0.51-0.54 |
+
+Step two, the shared-lock lookup with per-entry timestamps (a separate session):
+
+| Volume, threads | Shared, mutex | Shared, read-locked lookups |
+|---|---:|---:|
+| local md RAID, 8 | 858k-905k, 7.7-8.3, 0.11-0.13 | 1,112k-1,204k, 6.4-6.7, 0.00 |
+| local md RAID, 32 | 911k-943k, 28.5-29.8, 0.54-0.56 | 1,115k-1,170k, 26.1-27.6, 0.03-0.05 |
+| local md RAID, 64 | 950k-953k, 57.2-57.4, 0.51-0.53 | 1,171k-1,236k, 37.0-41.2, 0.03-0.04 |
+| dolphinfs FUSE, 64 | 959k-993k, 56.2-58.2, 0.51-0.55 | 1,141k-1,215k, 38.1-48.3, 0.03 |
+
+Leased handles lost throughput as threads were added: the lease mutex convoyed,
+and a contended read opened and later closed a duplicate descriptor (on FUSE
+each a round trip). Shared handles read 27% faster on one thread and scale to
+about 1.06M reads/s; read-locked lookups remove the remaining convoy on this
+cache (context switches fall from about 0.5 to 0.03 per read) and lift the
+ceiling to about 1.2M reads/s, the same on FUSE because hot segments are served
+from the page cache. Past that ceiling the extra CPU is kernel and cache-line
+contention time (88% kernel in the `perf_event` task-clock samples of a
+64-thread pass of step one): the remaining exclusive global locks every
+`BlockStore::get` takes, the payload cache's write lock twice (exact LRU
+recency on every hit) and the pending-block mutex. Those are the next limit on
+concurrent reads.
+
 ## Packed filter across publications (2026-10-31)
 
 *Problem:* the packed union filter's negative answers ("in no catalogued

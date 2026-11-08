@@ -103,12 +103,10 @@ def test_abort_marker_drops_turn_before_create(flask_client, conversation_comman
     assert starts == []
 
 
-def test_no_marker_creates_turn_and_forwards_abort_after_ts(flask_client,
+def test_no_marker_creates_durable_work_and_freezes_abort_watermark(flask_client,
                                                             conversation_command_authority,
                                                             monkeypatch):
-    """Positive control + wiring pin: a clean send creates the pair and the
-    start adapter forwards the request-start ts for the post-registration
-    re-check (NEUTER: drop the kwarg and this goes red)."""
+    """The accepted request watermark crosses the worker boundary unchanged."""
     import lib.conversation_sync.task_start as task_start_runtime
 
     captured = {}
@@ -128,10 +126,13 @@ def test_no_marker_creates_turn_and_forwards_abort_after_ts(flask_client,
     body = resp.get_json()
     assert body.get('aborted') is not True
     assert body['turn']['status'] == 'pending'
-    assert isinstance(captured.get('abort_after_ts'), float)
-    from lib.agent_core.execution_clock import ExecutionClock
-    assert isinstance(captured.get('execution_clock'), ExecutionClock)
-    original_clock = captured['execution_clock']
+    assert captured == {}
+    from lib.turn_lifecycle import get_attempt
+    from lib.conversation_sync.dispatch_contract import ATTEMPT_DISPATCH_REQUEST_STARTED_AT_MS_CONFIG_KEY
+    frozen = get_attempt(body['attempt']['attemptId'], user_id=1,
+                         include_execution_config=True)['config']
+    original_watermark = frozen[ATTEMPT_DISPATCH_REQUEST_STARTED_AT_MS_CONFIG_KEY]
+    assert type(original_watermark) is int and original_watermark > 0
     # Replay must acknowledge the original attempt without starting another
     # executor or replacing its request origin with the retry's clock.
     monkeypatch.setattr(
@@ -143,7 +144,7 @@ def test_no_marker_creates_turn_and_forwards_abort_after_ts(flask_client,
               'config': {'model': 'gpt-4o'}})
     assert replay.status_code == 200
     assert replay.get_json()['attempt']['attemptId'] == body['attempt']['attemptId']
-    assert captured['execution_clock'] is original_clock
+    assert get_attempt(body['attempt']['attemptId'], user_id=1, include_execution_config=True)['config'][ATTEMPT_DISPATCH_REQUEST_STARTED_AT_MS_CONFIG_KEY] == original_watermark
 
 
 def test_stale_marker_never_drops_a_new_send(flask_client, conversation_command_authority,
@@ -490,11 +491,7 @@ def test_abort_entries_signal_same_scoped_resources_once(
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
     from lib.tasks_pkg.tool_runtime import context_for_task
 
-    task_id = f'scoped-abort-{entry}'
-    task = chat_task_runtime.create(user_id=1, task_id=task_id)
-    chat_task_runtime.mark_running(task_id)
-    monkeypatch.setattr(task_start_runtime, 'start_conversation_attempt_executor',
-                        _registered_start(task_id))
+    task_id = None
     try:
         ack = flask_client.post(
             f'/api/v4/conversations/{CONV}/turns',
@@ -502,6 +499,9 @@ def test_abort_entries_signal_same_scoped_resources_once(
                   'inputTurn': {'content': 'run'}, 'config': {'model': 'gpt-4o'}})
         assert ack.status_code == 200
         attempt_id = ack.get_json()['attempt']['attemptId']
+        task_id = ack.get_json()['attempt']['taskId']
+        task = chat_task_runtime.create(user_id=1, task_id=task_id)
+        chat_task_runtime.mark_running(task_id)
         signals = []
         for resource in ('process', 'child', 'tool'):
             ctx = context_for_task(task, round_num=1, tool_call_id=resource,
@@ -518,10 +518,11 @@ def test_abort_entries_signal_same_scoped_resources_once(
         assert task['abort_event'].is_set()
         assert task['status'] == 'running'  # ACK is a signal, not settlement.
     finally:
-        chat_task_runtime.discard(task_id)
+        if task_id is not None:
+            chat_task_runtime.discard(task_id)
 
 
-def test_stop_after_claim_before_binding_returns_cancelled_turn(
+def test_stop_before_durable_binding_returns_cancelled_turn(
     flask_client, conversation_command_authority, monkeypatch,
 ):
     """A durable Stop wins the handshake without a false startup failure."""
@@ -531,16 +532,16 @@ def test_stop_after_claim_before_binding_returns_cancelled_turn(
     spawned = []
     identities = []
 
-    def stop_before_bind(conv_id, config, **kwargs):
-        attempt_id = config['_attemptId']
+    from lib import turn_lifecycle as turns
+    original = turns.dispatch_attempt_to_worker
+    def stop_before_bind(principal, attempt_id, **kwargs):
         identities.append(attempt_id)
-        abort_attempt(attempt_id, user_id=config['_turnOwnerUserId'])
-        kwargs['on_task_registered']('never-started')
-        spawned.append('never-started')
-        return 'never-started', None
+        abort_attempt(attempt_id, user_id=principal.owner_user_id)
+        result = original(principal, attempt_id, **kwargs)
+        spawned.append(result)
+        return result
 
-    monkeypatch.setattr(task_start_runtime, 'start_conversation_attempt_executor',
-                        stop_before_bind)
+    monkeypatch.setattr(turns, 'dispatch_attempt_to_worker', stop_before_bind)
     response = flask_client.post(
         f'/api/v4/conversations/{CONV}/turns',
         json={'commandId': 'stop-before-bind', 'message': {'text': 'run'},

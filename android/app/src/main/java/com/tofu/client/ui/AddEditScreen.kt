@@ -348,7 +348,7 @@ fun AddEditScreen(
 }
 
 @Composable
-private fun FormHeader(title: String, subtitle: String, onCancel: () -> Unit) {
+internal fun FormHeader(title: String, subtitle: String, onCancel: () -> Unit) {
     Column(
         Modifier
             .statusBarsPadding()
@@ -378,7 +378,7 @@ private fun FormHeader(title: String, subtitle: String, onCancel: () -> Unit) {
 }
 
 @Composable
-private fun FormSection(label: String, content: @Composable () -> Unit) {
+internal fun FormSection(label: String, content: @Composable () -> Unit) {
     Column {
         // A ruled section header: label + hairline rule, with generous spacing
         // before the fields, so the form reads as distinct groups rather than
@@ -403,7 +403,7 @@ private fun FormSection(label: String, content: @Composable () -> Unit) {
  * behaviour per field.
  */
 @Composable
-private fun TofuField(
+internal fun TofuField(
     value: String,
     onValueChange: (String) -> Unit,
     label: String,

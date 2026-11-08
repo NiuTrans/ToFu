@@ -243,6 +243,11 @@
     notifyError: notifyRouterError,
     changed: routerIdentityChanged,
   }, { header: watchdogHeaderHost });
+  // "Act for me": the owner's grant of their operations to the main coordinator (docs/ROUTER.md R9).
+  var routerOwnerDelegation = createRouterOwnerDelegation({
+    read: function (signal) { return Api.project.routerOwnerDelegation(signal); },
+    set: function (granted) { return Api.project.setRouterOwnerDelegation(granted); },
+  });
   var globalRouter = createGlobalRouterEntry({
     read: function (signal) { return Api.project.globalRouter(signal); },
     ensure: function () { return Api.project.ensureGlobalRouter(); },
@@ -257,7 +262,8 @@
       resume: function (id) { return Api.project.resumeRouterInstruction(id); },
       cancel: function (id) { return Api.project.cancelRouterInstruction(id); },
     },
-  }, { sidebar: routerEntryHost, header: routerHeaderHost, controls: [routerWatchdog.settings] });
+  }, { sidebar: routerEntryHost, header: routerHeaderHost,
+    controls: [routerOwnerDelegation.settings, routerWatchdog.settings] });
   // Other surfaces (the studio's compute-stall dialog) ensure the Watchdog through its
   // owner, so the header and composer steering adopt the binding they open.
   runtimeScope.ensureRouterWatchdogConversation = function () { return routerWatchdog.ensure(); };
@@ -314,8 +320,8 @@
       for (const item of page.conversations) {
         mergeConversationCatalogRows([{
           id: item.conversationId, title: item.title, msgCount: item.turnCount,
-          createdAt: item.createdAt, updatedAt: item.updatedAt,
-          settings: { _coordinatorSource: item.coordinatorId },
+          createdAt: item.createdAt, updatedAt: item.updatedAt, busy: item.busy === true,
+          settings: { _coordinatorSource: item.coordinatorId, folderId: item.folderId },
         }]);
         var local = conversations.find(function (row) { return row.id === item.conversationId; });
         if (local) local._localOnly = false;
@@ -339,7 +345,8 @@
       if (flags.streaming || flags.waiting || flags.background) return 'running';
       if (flags.errored) return 'failed';
       if (flags.incomplete) return 'cancelled';
-      return 'done';
+      // An unhydrated shell has no Turn evidence; never present it as finished.
+      return (runtimeScope.ConversationTurnRead?.ordered?.(c) || []).length ? 'done' : null;
     },
   });
   runtimeScope.coordinatorConversationGroups = coordinatorConversationGroups;

@@ -52,6 +52,24 @@ def test_http_recipe_builds_isolated_instances_with_identical_routes(tmp_path):
     asyncio.run(exercise())
 
 
+def test_assembly_starts_no_database_panel_maintenance(tmp_path, monkeypatch):
+    from lib.database_panel import maintenance
+
+    started = []
+    monkeypatch.setattr(
+        maintenance, 'start_maintenance', lambda: started.append(True) or True)
+    static_dir = tmp_path / 'static'
+    static_dir.mkdir()
+
+    create_application(
+        'assembly-without-services', static_dir=str(static_dir),
+        logger=logging.getLogger('test.app-assembly'),
+        secret_key='assembly-secret', config={'TESTING': True},
+    )
+
+    assert started == []
+
+
 def test_server_factory_does_not_mutate_or_return_assembled_singleton():
     import server
 

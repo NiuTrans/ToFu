@@ -138,11 +138,17 @@ def _controlled_workspace_roots() -> list[Path]:
 
 def _git(cwd: str | Path, args: list[str], *, env: dict[str, str] | None = None,
          timeout: float = 30.0, check: bool = False, stall_seconds: float | None = None,
-         cancel=None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+         cancel=None, input_text: str | None = None,
+         binary: bool = False) -> subprocess.CompletedProcess:
     """Run Git under a wall-clock ``timeout``, or under a no-progress window.
 
     ``stall_seconds`` is for commands whose duration follows the tree and the
     volume: no total deadline applies, only a stall or ``cancel`` ends them.
+    ``binary`` captures raw bytes: patch/diff output must never pass through
+    text mode, whose universal-newline decoding rewrites ``\\r`` and ``\\r\\n``
+    to ``\\n`` and corrupts the patch (and whose strict UTF-8 decode rejects
+    non-UTF-8 content). ``core.autocrlf=false`` keeps working-tree and index
+    bytes identical regardless of a user's personal Git configuration.
     """
     from lib.project_mod.workspace_lease import workspace_lease_fds
     from lib.project_mod.git_inspection_execution import (
@@ -153,33 +159,36 @@ def _git(cwd: str | Path, args: list[str], *, env: dict[str, str] | None = None,
     try:
         executable = git_executable()
         with prepare_git_index_read(executable, args, str(cwd), environment=merged_env) as (arguments, environment):
-            argv = [executable, '-c', 'core.fsmonitor=false', *arguments]
+            argv = [executable, '-c', 'core.fsmonitor=false', '-c', 'core.autocrlf=false', *arguments]
             if stall_seconds is None:
                 cp = subprocess.run(
-                    argv, cwd=str(cwd), env=environment, text=True, input=input_text,
+                    argv, cwd=str(cwd), env=environment, text=not binary, input=input_text,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
                     check=False, pass_fds=workspace_lease_fds(),
                 )
             else:
                 cp = _run_stall_supervised_git(argv, args[0], cwd, environment,
-                                               stall_seconds, cancel)
+                                               stall_seconds, cancel, binary=binary)
     except (OSError, subprocess.TimeoutExpired, GitInspectionPreparationError) as exc:
         raise IntegrationError(f'git {args[0]} failed: {exc}') from exc
     if check and cp.returncode != 0:
-        detail = (cp.stderr or cp.stdout or '').strip()
-        raise IntegrationError(f'git {args[0]} failed: {detail[:800]}')
+        detail = cp.stderr or cp.stdout or (b'' if binary else '')
+        if binary:
+            detail = detail.decode('utf-8', 'replace')
+        raise IntegrationError(f'git {args[0]} failed: {detail.strip()[:800]}')
     return cp
 
 
 def _run_stall_supervised_git(argv: list[str], command: str, cwd: str | Path,
                               env: dict[str, str], stall_seconds: float,
-                              cancel) -> subprocess.CompletedProcess[str]:
+                              cancel, *, binary: bool = False) -> subprocess.CompletedProcess:
     from lib.project_mod.activity_supervised_process import (
         ProcessCancelled, ProcessRetirementUnproven, ProcessStalled, run_activity_supervised)
     from lib.project_mod.workspace_lease import workspace_lease_fds
     try:
         return run_activity_supervised(argv, cwd=cwd, env=env, stall_seconds=stall_seconds,
-                                       pass_fds=workspace_lease_fds(), cancellation=cancel)
+                                       pass_fds=workspace_lease_fds(), cancellation=cancel,
+                                       binary=binary)
     except ProcessCancelled as exc:
         raise IntegrationError(f'Task cancelled during git {command}') from exc
     except ProcessStalled as exc:
@@ -762,15 +771,20 @@ def _alternate_index_tree(workspace: Path, parent: str, index_path: str, *,
         if parent and not os.path.exists(index_path):
             _borrow_index_stat_cache(workspace, index_path, cancel=cancel)
         git(['read-tree', '-m', '-i', parent] if parent else ['read-tree', '--empty'], env=env)
-    with measure_task_startup('workspace_index_validate'):
-        changed = (git(['diff', '--name-only', '--diff-filter=ACMRT', '-z', parent], env=env).stdout
-                   if parent else '')
-        untracked = git(['ls-files', '--others', '--exclude-standard', '-z'], env=env).stdout
-        forbidden = _forbidden_checkpoint_paths([p for p in (changed + untracked).split('\0') if p])
-        if forbidden:
-            raise IntegrationError('Checkpoint contains forbidden dependency/generated/runtime paths: ' + ', '.join(forbidden))
+    # ``add -A`` is the observation's only working-tree walk. Validation then
+    # reads the private index, which already holds every added, modified and
+    # newly untracked path; repeating diff/ls-files --others would lstat the
+    # whole tree twice more. A refused capture leaves only unreferenced loose
+    # objects, which ordinary Git GC reclaims.
     with measure_task_startup('workspace_index_add'):
         git(['add', '-A', '--', '.'], env=env)
+    with measure_task_startup('workspace_index_validate'):
+        staged = (git(['diff', '--cached', '--name-only', '--diff-filter=ACMRT', '-z', parent],
+                      env=env).stdout
+                  if parent else git(['ls-files', '-z'], env=env).stdout)
+        forbidden = _forbidden_checkpoint_paths([p for p in staged.split('\0') if p])
+        if forbidden:
+            raise IntegrationError('Checkpoint contains forbidden dependency/generated/runtime paths: ' + ', '.join(forbidden))
     with measure_task_startup('workspace_index_tree'):
         return git(['write-tree'], env=env).stdout.strip()
 
@@ -798,19 +812,6 @@ def _alternate_index_checkpoint(workspace: Path, parent: str,
         tree = _alternate_index_tree(workspace, parent, str(Path(directory) / 'index'))
         return _checkpoint_tree(workspace, parent, tree, task_id, reuse_commit=reuse_commit)
 
-
-def _clean_input_tree(root: Path, parent: str, *, cancel) -> str:
-    """Return the selected tree when Git proves no captured input is needed."""
-    if not parent:
-        return ''
-    flags = _git(root, ['ls-files', '-v', '-z'], check=True, cancel=cancel,
-                 stall_seconds=GIT_STALL_SECONDS).stdout
-    if any(entry[:1].islower() or entry[:1] == 'S' for entry in flags.split('\0')):
-        return ''
-    status = _git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
-                  env={'GIT_OPTIONAL_LOCKS': '0'}, check=True, cancel=cancel,
-                  stall_seconds=GIT_STALL_SECONDS).stdout
-    return _rev(root, parent + '^{tree}') if not status else ''
 
 def _task_input_checkpoint(root: Path, parent: str, task_id: str, cancel, *,
                            source_ref: str = '') -> tuple[str, str]:
@@ -844,12 +845,12 @@ def _task_input_checkpoint(root: Path, parent: str, task_id: str, cancel, *,
                 raise IntegrationError('Task cancelled during workspace snapshot')
             return tree
 
+        # A clean source captures exactly HEAD's tree, so cleanliness needs no
+        # separate status walk; later observations reuse the private index's
+        # stat cache and only hash bytes that changed.
         previous_tree = capture()
         for _observation in range(3):
-            head = _rev(root, 'HEAD')
-            tree = (_rev(root, head + '^{tree}')
-                    if _clean_input_tree(root, head, cancel=cancel)
-                    else capture())
+            tree = capture()
             if tree == previous_tree:
                 return checkpoint(tree)
             previous_tree = tree
@@ -1944,7 +1945,7 @@ def _porcelain(path: Path, timeout: float = 12.0) -> dict[str, Any]:
 
 
 def _worktree_inventory(root: Path) -> list[dict[str, Any]]:
-    cp = _git(root, ['worktree', 'list', '--porcelain'])
+    cp = _git(root, ['worktree', 'list', '--porcelain'], stall_seconds=GIT_STALL_SECONDS)
     if cp.returncode != 0:
         return []
     blocks = [block for block in cp.stdout.split('\n\n') if block.strip()]
@@ -2393,3 +2394,8 @@ def record_task_workspace_intent(project_path: str, task_id: str, *, user_id: in
                                   outcome: str) -> dict | None:
     from lib.project_mod.delivery import record_task_workspace_intent as record
     return record(project_path, task_id, user_id=user_id, outcome=outcome)
+
+
+def release_publication_hold(project_path: str, task_id: str, *, user_id: int) -> dict:
+    from lib.project_mod.delivery import release_publication_hold as release
+    return release(project_path, task_id, user_id=user_id)

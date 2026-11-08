@@ -24,8 +24,8 @@ export interface ProviderTemplate {
     request_faces?: Record<string, string>;
   }[];
 }
-type Category = 'official' | 'relay' | 'local' | 'other';
-const categories: Category[] = ['official', 'relay', 'local', 'other'];
+type Category = 'official' | 'subscription' | 'relay' | 'local' | 'other';
+const categories: Category[] = ['official', 'subscription', 'relay', 'local', 'other'];
 export function templateCategory(template: ProviderTemplate): Category {
   return categories.includes(template.category as Category) ? template.category as Category : 'other';
 }

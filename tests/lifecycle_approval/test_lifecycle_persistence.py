@@ -20,6 +20,9 @@ sys.path.insert(0, ROOT)
 import lib.lifecycle_approval as la
 from lib.json_store import JsonStoreReadError, write_json_atomic
 
+HUMAN_UI = {'kind': 'human-ui', 'ownerUserId': 1, 'subject': 'session-key', 'credential': 'session',
+            'browser': 'fetch-metadata', 'userAgent': 'Mozilla/5.0', 'remoteAddr': '127.0.0.1'}
+
 
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
@@ -126,7 +129,7 @@ def test_two_processes_cannot_accept_two_restart_tokens(store, monkeypatch):
     tokens = []
     for _ in range(2):
         record = la.create_request('restart')
-        la.decide(record['id'], True)
+        la.decide(record['id'], True, provenance=HUMAN_UI)
         tokens.append(record['id'])
 
     start = store / 'start'
@@ -193,7 +196,7 @@ def test_unknown_root_fields_survive_every_mutation(store):
     })
 
     record = la.create_request('restart')
-    la.decide(record['id'], True)
+    la.decide(record['id'], True, provenance=HUMAN_UI)
     ok, why, remaining = la.consume_restart(record['id'])
 
     assert (ok, why, remaining) == (True, '', 0)

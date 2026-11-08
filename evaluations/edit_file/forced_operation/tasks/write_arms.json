@@ -1,0 +1,214 @@
+{
+ "Wfull": {
+  "name": "Wfull",
+  "tool": {
+   "type": "function",
+   "function": {
+    "name": "write_file",
+    "description": "Create or replace one whole file. Read an existing file first and supply its complete replacement—omitted lines are deleted. Relative paths use the current project. An absolute path outside registered roots needs allow_outside_workspace=true after the user confirms it (the containing directory then registers as a new root); system paths (/etc, /usr, $HOME itself) are refused outright. Give exactly one source: content (an empty string creates an empty file).",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "description": {
+       "type": "string",
+       "description": "Optional pre-write caption shown before execution. Omit it to use the file-path label."
+      },
+      "path": {
+       "type": "string",
+       "description": "Project-relative or allowed absolute file path."
+      },
+      "content": {
+       "type": "string",
+       "description": "Complete replacement; may be empty."
+      },
+      "allow_outside_workspace": {
+       "type": "boolean",
+       "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused with an error naming this flag."
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "additionalProperties": false
+    }
+   }
+  },
+  "system": "You are a coding agent working in the repository at {root}. You change files only by calling the provided tool. The user has already shown you the current file contents; each line is prefixed with its line number and a tab, and that prefix is not part of the file. Perform exactly the requested edit, with exact text and indentation. When the tool reports that the edit succeeded, reply with the single word DONE. If the tool reports an error, fix the call and try again.\n\nEdit style for this session: call `write_file` with `content` set to the complete file content (every line of the file, including unchanged ones)."
+ },
+ "Wappend": {
+  "name": "Wappend",
+  "tool": {
+   "type": "function",
+   "function": {
+    "name": "write_file",
+    "description": "Create or replace one whole file, or append to its end. For new files/major rewrites; use edit_file for mid-file changes. Set append=true to append to the end (a missing file is created): send only the new bytes, no read or anchor needed. Read an existing file first and supply its complete replacement—omitted lines are deleted. Relative paths use the current project. An absolute path outside registered roots needs allow_outside_workspace=true after the user confirms it (the containing directory then registers as a new root); system paths (/etc, /usr, $HOME itself) are refused outright. Give exactly one source: content (an empty string creates an empty file).",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "description": {
+       "type": "string",
+       "description": "Optional pre-write caption shown before execution. Omit it to use the file-path label."
+      },
+      "path": {
+       "type": "string",
+       "description": "Project-relative or allowed absolute file path."
+      },
+      "content": {
+       "type": "string",
+       "description": "Complete replacement; may be empty."
+      },
+      "append": {
+       "type": "boolean",
+       "description": "Append content to the end of the file instead of replacing it. Default false."
+      },
+      "allow_outside_workspace": {
+       "type": "boolean",
+       "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused with an error naming this flag."
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "additionalProperties": false
+    }
+   }
+  },
+  "system": "You are a coding agent working in the repository at {root}. You change files only by calling the provided tool. The user has already shown you the current file contents; each line is prefixed with its line number and a tab, and that prefix is not part of the file. Perform exactly the requested edit, with exact text and indentation. When the tool reports that the edit succeeded, reply with the single word DONE. If the tool reports an error, fix the call and try again.\n\nEdit style for this session: call `write_file` with `append: true` and `content` set to only the new text to add at the end of the file."
+ },
+ "Wref": {
+  "name": "Wref",
+  "tool": {
+   "type": "function",
+   "function": {
+    "name": "write_file",
+    "description": "Create or replace one whole file. For new files/major rewrites; use edit_file for mid-file changes. Read an existing file first and supply its complete replacement—omitted lines are deleted. Relative paths use the current project. An absolute path outside registered roots needs allow_outside_workspace=true after the user confirms it (the containing directory then registers as a new root); system paths (/etc, /usr, $HOME itself) are refused outright. Give exactly one source: content (an empty string creates an empty file) or content_ref to reuse all/a slice of a previous tool result.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "description": {
+       "type": "string",
+       "description": "Optional pre-write caption shown before execution. Omit it to use the file-path label."
+      },
+      "path": {
+       "type": "string",
+       "description": "Project-relative or allowed absolute file path."
+      },
+      "content": {
+       "type": "string",
+       "description": "Complete replacement; may be empty."
+      },
+      "content_ref": {
+       "type": "object",
+       "description": "Reuse prior tool output without regenerating it.",
+       "properties": {
+        "tool_round": {
+         "type": "integer",
+         "description": "Prior roundNum."
+        },
+        "start": {
+         "type": "integer",
+         "description": "First character; default 0."
+        },
+        "end": {
+         "type": "integer",
+         "description": "Exclusive end; default content end."
+        }
+       },
+       "required": [
+        "tool_round"
+       ]
+      },
+      "allow_outside_workspace": {
+       "type": "boolean",
+       "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused with an error naming this flag."
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "additionalProperties": false
+    }
+   }
+  },
+  "system": "You are a coding agent working in the repository at {root}. You change files only by calling the provided tool. The user has already shown you the current file contents; each line is prefixed with its line number and a tab, and that prefix is not part of the file. Perform exactly the requested edit, with exact text and indentation. When the tool reports that the edit succeeded, reply with the single word DONE. If the tool reports an error, fix the call and try again.\n\nEdit style for this session: call `write_file` with `content_ref` ({tool_round, start, end}) so the earlier tool output is reused instead of retyped."
+ },
+ "Eedit": {
+  "name": "Eedit",
+  "tool": {
+   "type": "function",
+   "function": {
+    "name": "edit_file",
+    "description": "Apply ordered anchored edits; read/write targets in an earlier round. Prefer replace, including additions: content is the complete desired replacement, including retained anchor text and all line breaks. After A: `{\"operation\":\"replace\",\"anchor\":\"A\",\"content\":\"A\\nB\"}`; before A: `{\"operation\":\"replace\",\"anchor\":\"A\",\"content\":\"B\\nA\"}`. Name the batch's file once in `path` and leave each edit's own `path` out; set an edit's `path` only to target a different file. Anchors match exactly once; replace_all permits multiple matches only for replace. Later edits see earlier changes. Atomic preflight defaults true: any validation failure writes nothing. With atomic=false, one failure neither rolls back nor stops the others. I/O failures may leave partial writes.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "description": {
+       "type": "string",
+       "maxLength": 120,
+       "description": "Optional pre-edit caption (max 120 chars). Omit it to use the file-path label."
+      },
+      "path": {
+       "type": "string",
+       "minLength": 1,
+       "description": "File this batch edits. Write it once here for a single-file batch instead of repeating it on every edit; an edit's own `path` overrides it."
+      },
+      "edits": {
+       "type": "array",
+       "minItems": 1,
+       "description": "Shortest-unique-anchor operations, in order.",
+       "items": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "File for this edit, when it differs from the batch `path`. Never inherited from the previous edit; omit it rather than sending an empty string."
+         },
+         "operation": {
+          "type": "string",
+          "enum": [
+           "replace"
+          ],
+          "description": "Prefer replace for complete old-to-new edits, including additions."
+         },
+         "anchor": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact, normally unique existing text. For replace, this is the old text being removed."
+         },
+         "content": {
+          "type": "string",
+          "description": "Replace: complete new text, including anchor parts to keep and all newlines; empty to delete."
+         },
+         "replace_all": {
+          "type": "boolean",
+          "description": "Replace every match."
+         }
+        },
+        "required": [
+         "operation",
+         "anchor",
+         "content"
+        ]
+       }
+      },
+      "atomic": {
+       "type": "boolean",
+       "default": true,
+       "description": "Preflight all edits before writing. False permits partial application."
+      },
+      "allow_outside_workspace": {
+       "type": "boolean",
+       "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused."
+      }
+     },
+     "required": [
+      "edits"
+     ],
+     "additionalProperties": false
+    }
+   }
+  },
+  "system": "You are a coding agent working in the repository at {root}. You change files only by calling the provided tool. The user has already shown you the current file contents; each line is prefixed with its line number and a tab, and that prefix is not part of the file. Perform exactly the requested edit, with exact text and indentation. When the tool reports that the edit succeeded, reply with the single word DONE. If the tool reports an error, fix the call and try again.\n\nEdit style for this session: call `edit_file` and use operation \"replace\" for every edit item, including pure additions (the anchor is the existing text and `content` is that text together with the new lines). Put all edits for a file in one call."
+ }
+}

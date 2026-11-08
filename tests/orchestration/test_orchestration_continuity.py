@@ -440,3 +440,24 @@ def test_budget_release_never_underflows():
     budget.release()
     budget.release()
     assert budget.used() == 0
+
+
+def test_domain_continuity_uses_its_owned_submission_without_generic_runtime(sidecar):
+    from lib.orchestration.continuity import run_boot_continuity_pass
+    client = sidecar.client
+    _create_run(client, 'domain-recovery', owner=1, tenant='', created_by=AUTO_CREATED_BY)
+    runs, definitions = _service_factories(client)
+    submitted = []
+    def resume(service, run_id, *, owner_user_id, tenant_id, before_submit):
+        before_submit()
+        submitted.append((run_id, owner_user_id, tenant_id))
+        return 'accepted-successor'
+    result = run_boot_continuity_pass(
+        candidates=[dict(run_id='domain-recovery', user_id=1, tenant_id='', created_by=AUTO_CREATED_BY)],
+        auto_created_by=frozenset({AUTO_CREATED_BY}),
+        definition_service_for_owner=definitions, run_service_for_owner=runs,
+        resume_for_created_by={AUTO_CREATED_BY: resume},
+        source_cursor_bound_created_by={AUTO_CREATED_BY})
+    assert submitted == [('domain-recovery', 1, '')]
+    assert result['resumed'] == 1
+    assert _run_events(client, 'domain-recovery', owner=1, tenant='')[-1]['reason'] == 'awaiting_successor_journal'

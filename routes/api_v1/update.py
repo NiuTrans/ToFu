@@ -28,7 +28,7 @@ import threading
 import time
 import uuid
 
-from quart import Blueprint, request
+from quart import Blueprint, current_app, request
 
 from lib import lifecycle_approval as _lca
 from lib.server import server_reexec
@@ -60,6 +60,19 @@ UPDATE_CHANNEL = 'update'
 # ``apply_in_progress`` (a live download, re-attachable via its task_id).
 _APPLY_STATE_NAME = 'update_apply_state.json'
 _ACTIVE_APPLIES: dict = {}  # task_id → Thread; in-process liveness truth
+
+
+def _launcher_owned_kernel_refusal():
+    """A local kernel's code and process belong to the app that launched it.
+
+    Its payload is replaced by an app update and its process is restarted by
+    the launcher, so self-update and in-place restart are refused here.
+    """
+    if current_app.extensions.get('tofu_local_kernel') is None:
+        return None
+    return api_conflict(
+        'This local kernel is updated and restarted by the app that launched it.',
+        source='api_v1.update.local_kernel')
 
 
 def _apply_state_path() -> str:
@@ -182,6 +195,9 @@ def _enrich_with_code_pending(payload, *, current_head=None):
     tags=['system'],
 )
 def update_check():
+    refusal = _launcher_owned_kernel_refusal()
+    if refusal is not None:
+        return refusal
     from lib.self_update import check_for_update, observe_repository
     try:
         # One git process answers both "is this a checkout?" and "which HEAD
@@ -233,6 +249,9 @@ def update_apply():
     The route returns a ``taskId`` immediately; the frontend subscribes to
     ``pushSubscribe('update', taskId)`` and renders a live stepper.
     """
+    refusal = _launcher_owned_kernel_refusal()
+    if refusal is not None:
+        return refusal
     task_id = uuid.uuid4().hex
     owner_user_id = request_user_id()
 
@@ -420,6 +439,9 @@ def update_restart():
     # approval (202) and executes nothing; the human approves in the UI; the
     # retried request with the id executes. The approval is consumed ONLY at
     # acceptance, so the running-tasks 409 / force retry keeps its token.
+    refusal = _launcher_owned_kernel_refusal()
+    if refusal is not None:
+        return refusal
     body = parse_body(exact=('approvalId', 'approval_id', 'convId', 'conv_id', 'force',))
     restart_requested_at = time.time()
     force = bool(body.get('force'))
@@ -660,15 +682,21 @@ def lifecycle_approval_get(approval_id):
         'mints a one-time, short-TTL token: the caller retries the gated '
         'endpoint with {"approvalId": "<id>"} and the action executes. The '
         'token is consumed at acceptance, so exactly one action rides on one '
-        'approval.'
+        'approval. Only the owner acting in the Tofu UI can decide: the request '
+        'needs the UI session (or the loopback open-mode UI) and same-origin '
+        'browser Fetch Metadata; API keys, scripts and agents get 403.'
     ),
     tags=['system'],
 )
 def lifecycle_approval_decide(approval_id):
     body = parse_body(exact=('approved',))
     approved = bool(body.get('approved'))
-    rec = _lca.decide(approval_id, approved, decided_by='ui',
-                      decide_ua=(request.headers.get('User-Agent', '') or ''))
+    from .auth import human_ui_provenance
+    try:
+        rec = _lca.decide(approval_id, approved, provenance=human_ui_provenance())
+    except PermissionError as error:
+        return api_typed_error('permission', status=403, detail=str(error),
+                               source='api_v1.update.lifecycle_decide')
     if rec is None:
         return api_not_found(
             'Unknown, expired or already-decided approval id')

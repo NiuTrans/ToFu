@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
-  ChannelThreadPage, GitHubAccountView, OutboxPage,
+  AuditPage, ChannelThreadPage, GitHubAccountView, OutboxPage,
 } from '../../api/channels.generated';
 
 const runtime = vi.hoisted(() => ({ Api: undefined as unknown }));
@@ -31,11 +31,11 @@ const threads: ChannelThreadPage = {
   nextCursor: null,
   items: [
     { key: 'github:octo/repo#12', kind: 'issue', title: 'Fix the poller', mode: 'watch', modeOverride: 'watch',
-      replyPolicy: 'draft', replyPolicyOverride: null, isCommandChat: false, subscribers: [],
-      lastEventAtMs: 1, watermark: null },
+      replyPolicy: 'draft', replyPolicyOverride: 'draft', isCommandChat: false, subscribers: [],
+      lastEventAtMs: 1, watermark: null, note: '' },
     { key: 'github:octo/other#3', kind: 'issue', title: 'Bug', mode: 'mentions', modeOverride: null,
-      replyPolicy: 'draft', replyPolicyOverride: null, isCommandChat: false, subscribers: [],
-      lastEventAtMs: 1, watermark: null },
+      replyPolicy: 'notify', replyPolicyOverride: null, isCommandChat: false, subscribers: [],
+      lastEventAtMs: 1, watermark: null, note: '' },
   ],
 };
 
@@ -43,11 +43,19 @@ const outbox: OutboxPage = {
   items: [
     { id: 'ob1', thread: 'github:octo/repo#12', threadTitle: 'Fix the poller', text: '[Tofu 代发] Plan B is in.',
       replyTo: null, state: 'draft', origin: { kind: 'tool', conversationId: 'router-conv', turnId: 't' },
-      createdAtMs: 1, updatedAtMs: 1, externalId: null, error: null },
+      createdAtMs: 1, updatedAtMs: 1, externalId: null, error: null, attachments: [], approvalCode: '0A1B2C',
+      authority: 'third_party', decision: null },
     { id: 'ob2', thread: 'dx:uid:2002', threadTitle: 'Ann', text: '[Tofu 代发] hello', replyTo: null,
       state: 'draft', origin: { kind: 'tool', conversationId: 'router-conv', turnId: 't' },
-      createdAtMs: 1, updatedAtMs: 1, externalId: null, error: null },
+      createdAtMs: 1, updatedAtMs: 1, externalId: null, error: null, attachments: [], approvalCode: '3D4E5F',
+      authority: 'third_party', decision: null },
   ],
+};
+
+const audit: AuditPage = {
+  nextBefore: null,
+  items: [{ ...outbox.items[0], id: 'ob0', text: '[Tofu 代发] Fixed in #13.', state: 'sent', authority: 'owner',
+            decision: { kind: 'approved', by: 'owner_settings', atMs: 5, turnId: '' } }],
 };
 
 function fakeApi(view = account()) {
@@ -62,6 +70,7 @@ function fakeApi(view = account()) {
       })),
       approveOutbox: vi.fn(async () => outbox.items[0]),
       discardOutbox: vi.fn(async () => outbox.items[0]),
+      audit: vi.fn(async (_channel: string, _before?: string, _signal?: AbortSignal) => audit),
     },
     credentials: {
       list: vi.fn(async () => ({ credentials: [{ name: 'github_token' }, { name: 'skill.u7.x.key' },
@@ -204,6 +213,30 @@ describe('GitHub settings tab', () => {
     button('settings.github.approve').click();
     await settle();
     expect(api.channels.approveOutbox).toHaveBeenCalledWith('ob1');
+  });
+
+  it('offers notify-only first as the default, shows a draft\'s approval code and the GitHub audit', async () => {
+    const api = fakeApi();
+    runtime.Api = api;
+    populateGitHubTab();
+    await settle();
+    const reply = [...root().querySelectorAll('select')]
+      .find((select) => [...select.options].some((option) => option.value === 'notify'))!;
+    expect([...reply.options].map((option) => option.value)).toEqual(['', 'notify', 'draft', 'auto', 'never']);
+    expect(reply.options[0].textContent).toBe('settings.github.default:{"value":"settings.github.reply.notify"}');
+    reply.value = 'notify';
+    reply.dispatchEvent(new Event('change'));
+    await settle();
+    expect(api.channels.updateGitHubThread).toHaveBeenCalledWith('github:octo/repo#12', { replyPolicy: 'notify' });
+    const code = root().querySelector('.channel-outbox-item .channel-outbox-code')!;
+    expect(code.textContent).toBe('settings.channels.approvalCode:{"code":"0A1B2C"}');
+    expect(api.channels.audit).toHaveBeenCalledWith('github', '', expect.anything());
+    const record = root().querySelector('.channel-audit')!;
+    expect(record.querySelector('.channel-card-title')!.textContent).toBe('settings.channels.audit.title');
+    expect(record.textContent).toContain('[Tofu 代发] Fixed in #13.');
+    expect(record.textContent).toContain('settings.channels.audit.authority.owner');
+    expect(record.textContent).toContain('"decision":"settings.channels.audit.kind.approved"');
+    expect(record.querySelector('.channel-outbox-code')).toBeNull();  // the audit decides nothing
   });
 
   it('keeps enabling unavailable without a token and the API base fixed while enabled', async () => {

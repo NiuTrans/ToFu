@@ -346,12 +346,19 @@ def _retained_assignment_proxy(spec: SubTaskSpec, session_parent: dict) -> tuple
         # which child entry refuses rather than treating as a Python parent.
         from lib.tasks_pkg.native_parent import bind_native_parent
         bind_native_parent(spec.retained_assignment_native, parent)
+        from lib.tasks_pkg.worker_binding import share_conversation_worker
+        share_conversation_worker(current, parent)
         if '_tool_env' in current:
             parent['_tool_env'] = current['_tool_env']
         documents = current.get('_toolContractDocumentsByName')
         if isinstance(documents, dict):
             parent['_toolContractDocumentsByName'] = deepcopy(
                 {name: value for name, value in documents.items() if name in names})
+    elif session_parent.get('id') == parent['id']:
+        # Restart binds no caller. A session hosted by this same task's
+        # reclaimed job lends that claim; another task's claim never transfers.
+        from lib.tasks_pkg.worker_binding import share_conversation_worker
+        share_conversation_worker(session_parent, parent)
     from lib.project_dispatch.admission import share_dispatch_root
     share_dispatch_root(current if current is not None else session_parent, parent)
     return parent, context
@@ -782,14 +789,25 @@ class MasterOrchestrator:
             if budget is not None and resolve_native_parent(parent_task)[0] is None:
                 self._promote_proxy_to_budget_root(budget, parent_task)
             share_native_parent(parent_task, self._parent_task_proxy)
+            # Births under a durable spawning attempt require its live claim.
+            from lib.tasks_pkg.worker_binding import share_conversation_worker
+            share_conversation_worker(parent_task, self._parent_task_proxy)
             from lib.tasks_pkg.requirement_source import requirement_source
             source = requirement_source(parent_task)
             if source is not None:
                 self._parent_task_proxy['_turnRequirementSource'] = source.validate(self._parent_task_proxy)
+        worker = self._parent_task_proxy.get('_conversationWorkerContext')
+        if worker is not None:
+            # The spawning attempt's job keeps this claim after its Turn
+            # settles (turn_handoff.hold_detached_swarm). A Stop of that job
+            # reaches workers through the same observer as a caller abort.
+            caller_abort = self.abort_check
+            self.abort_check = lambda: bool(caller_abort() or worker.cancellation_requested)
 
         self._scheduler: StreamingScheduler | None = None
         self._driver_thread: threading.Thread | None = None
         self._terminated = False  # set when driver thread exits
+        self._terminated_event = threading.Event()
         #: Set when the driver loop crashed (``_driver`` except branch). The
         #: terminal ``swarm_phase`` emission carries it so the panel renders
         #: Failed-with-reason instead of a green Complete over crashed work.
@@ -1771,6 +1789,7 @@ class MasterOrchestrator:
                 # wire frames. Callers that see ``is_terminated`` can now rely
                 # on error/complete delivery having been attempted already.
                 self._terminated = True
+                self._terminated_event.set()
                 self._completion_event.set()
 
                 # Mark the durable session row terminated so startup
@@ -2003,6 +2022,7 @@ class MasterOrchestrator:
 
         if self._aborted:
             self._terminated = True
+            self._terminated_event.set()
             return
         self._scheduler = self._build_scheduler()
         # Only safe descendants reach admission. Retained terminal outcomes
@@ -2879,6 +2899,27 @@ class MasterOrchestrator:
     @property
     def is_terminated(self) -> bool:
         return self._terminated
+
+    def holds_parent(self, task_id: str) -> bool:
+        """True while running or future work of this session is born under ``task_id``.
+
+        The session proxy and every wave assignment birth children under their
+        recorded parent task. A durable spawning attempt keeps its claim until
+        no live session holds it (``turn_handoff.hold_detached_swarm``).
+        """
+        with self._lock:
+            if self._terminated or self._driver_thread is None:
+                return False
+            if self._parent_task_proxy.get('id') == task_id:
+                return True
+            return any((spec.retained_execution_context or {}).get('parent_task_id') == task_id
+                       for spec in self.specs)
+
+    def wait_terminated(self) -> None:
+        """Block until the driver finished, including its terminal persistence."""
+        self._terminated_event.wait()
+        if self._driver_thread is not None:
+            self._driver_thread.join()
 
     @property
     def progress_beacon(self) -> ProgressBeacon:

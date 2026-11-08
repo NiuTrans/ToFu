@@ -31,6 +31,23 @@ gate. Use `make suite-health` for collection/quality changes and broad
 `make test-unit`, `make test-api`, `make test-frontend`, or `make test-all` only
 after the worktree is stable.
 
+- Under xdist (`-n`), one nonexistent path in an explicit file list makes the
+  whole session collect 0 items ("no tests ran", exit 5) without an error.
+  That is a broken argument list, not a pass: build changed-test lists with
+  `git diff --name-only --diff-filter=d` and rerun one file serially with
+  `--collect-only` to see the real error.
+- Quart 0.22 test clients answer a view exception with a debug 500 page when
+  `TESTING` is set. A test that expects the exception sets
+  `PROPAGATE_EXCEPTIONS = True` and leaves `TESTING` unset.
+- `tests/meta/test_function_size_ratchet.py` reports grown/shrunk entries
+  before unbudgeted functions; `python3 scripts/check_function_sizes.py`
+  prints the complete failure set.
+- Smoke-boot a scratch server with `TOFU_RUN_SERVER=1`, a scratch
+  `TOFU_DATA_DIR` and a verified free port. Without that flag
+  `python3 server.py` hands startup to the shared manager on 127.0.0.1:15001
+  (`bootstrap_pkg/server_entry.py`). Never run `./supervisor.sh stop` from a
+  worktree: it also stops the shared systemd unit.
+
 ## LLM record/replay
 
 `tests/support/llm_replay/` records real LLM streaming sessions to JSONL

@@ -93,3 +93,40 @@ def test_startup_terminal_outcomes_preserve_owner_and_do_not_authorize_failed_re
     assert calls[0][0]['_userId'] == 7
     assert calls[0][1:] == ('/project', expected)
     assert finishes[0]['status'] == expected
+
+
+@pytest.mark.parametrize('stored,work_status', [
+    ({'status': 'done', 'finishReason': 'aborted',
+      'metadata': {'finishReason': 'aborted', '_abort_reason': 'server_shutdown'}}, 'cancelled'),
+    ({'status': 'interrupted'}, 'failed'),
+])
+def test_startup_recovery_records_a_restart_pause_not_a_stop(monkeypatch, stored, work_status):
+    """The persisted abort cause and restart recovery's interrupted status survive a restart."""
+    from lib.conversations import project_brain_startup as startup
+    outcomes, finishes = [], []
+
+    class Client:
+        def maintenance(self, *args, **kwargs):
+            return {'projects': [{'ownerUserId': 7, 'projectKey': '/project',
+                                  'workItems': [{'id': 'work', 'taskId': 'task', 'status': 'active'}]}],
+                    'capped': False}
+
+        def query(self, operation, payload, **kwargs):
+            return [] if operation == 'record.list' else dict(stored)
+
+        def command(self, operation, payload, command_id):
+            finishes.append(payload)
+
+    monkeypatch.setattr(startup, 'get_storage_client', lambda **kw: Client())
+    monkeypatch.setattr(delivery, 'record_task_workspace_intents',
+                        lambda task, root: outcomes.append(delivery.workspace_outcome(task)))
+    assert startup.recover_active_work_items() == 1
+    assert outcomes == ['interrupted']
+    # Project Brain keeps its own work statuses.
+    assert finishes[0]['status'] == work_status
+
+
+def test_result_metadata_persists_the_abort_cause():
+    from lib.tasks_pkg.manager._persist import build_result_meta
+    assert build_result_meta({'_abort_reason': 'server_shutdown'})['_abort_reason'] == 'server_shutdown'
+    assert '_abort_reason' not in build_result_meta({'finishReason': 'stop'})

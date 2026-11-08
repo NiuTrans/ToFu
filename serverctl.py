@@ -1430,22 +1430,63 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0 if result.get('ok') else 1
 
 
+def _record_operator_pass(action: str, provenance: dict) -> None:
+    """Leave a distinct, audited approval record for an operator-path pass.
+
+    Best effort: a broken approval store must not stop the owner's own
+    terminal restart, so a failure is reported and the action proceeds.
+    """
+    try:
+        from lib.lifecycle_approval import record_operator_pass
+        record_operator_pass(action, provenance)
+    except Exception as exc:  # the operator path stays available
+        print(f'Warning: the {action} approval record could not be written: {exc}',
+              file=sys.stderr)
+
+
+def _operator_provenance(kind: str, **extra) -> dict:
+    try:
+        parent = Path(f'/proc/{os.getppid()}/cmdline').read_bytes().replace(b'\0', b' ')
+        parent_command = parent.decode('utf-8', 'replace').strip()[:300]
+    except OSError:
+        parent_command = ''
+    return {'kind': kind, 'pid': os.getpid(), 'ppid': os.getppid(),
+            'user': os.environ.get('USER') or os.environ.get('LOGNAME') or '',
+            'parentCommand': parent_command, **extra}
+
+
 def _approve_lifecycle_if_needed(
         args: argparse.Namespace, *, action: str, prompt: str) -> bool:
     """Require a human decision before interrupting one live worker."""
-    # Interactive terminal invocation is itself the human action. Automated
-    # callers must present/consume the existing one-time approval mechanism.
-    gate_passed = (
-        os.environ.get('TOFU_LIFECYCLE_GATE_PASSED') == action
-        or (action == 'restart'
-            and os.environ.get('TOFU_RESTART_GATE_PASSED') == '1'))
-    if sys.stdin.isatty() or gate_passed:
-        if args.yes or gate_passed:
-            return True
-        try:
-            return input(prompt).strip().lower() in ('y', 'yes')
-        except EOFError:
-            return False
+    # Interactive terminal invocation is itself the human action. A caller
+    # that already passed this gate hands that over through its variable.
+    # Both remain operator paths, each recorded with its own provenance.
+    # Automated callers must present/consume the existing one-time approval.
+    variable = next((name for name, value in (
+        ('TOFU_LIFECYCLE_GATE_PASSED', action),
+        ('TOFU_RESTART_GATE_PASSED', '1' if action == 'restart' else None),
+    ) if value is not None and os.environ.get(name) == value), '')
+    if variable:
+        _record_operator_pass(action, _operator_provenance(
+            'environment-override', variable=variable, source=args.source))
+        return True
+    if sys.stdin.isatty():
+        if args.yes:
+            confirmed = True
+        else:
+            try:
+                confirmed = input(prompt).strip().lower() in ('y', 'yes')
+            except EOFError:
+                confirmed = False
+        if confirmed:
+            try:
+                terminal = os.ttyname(sys.stdin.fileno())
+            except OSError:
+                terminal = ''
+            _record_operator_pass(action, _operator_provenance(
+                'interactive-terminal', tty=terminal, source=args.source,
+                confirmation='yes-flag' if args.yes else 'typed'))
+        return confirmed
     try:
         from lib.lifecycle_approval import consume_any, create_request, list_records
         ok, why, _ = consume_any(action)

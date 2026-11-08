@@ -48,6 +48,8 @@ Read `docs/RUN_CONTINUITY.md` and `docs/modules/orchestration_dag.md`.
 - Ready-journal publication acknowledges a recovery source before effects;
   unfinished handoff admission proves private accepted config and continuation
   ancestry. Task birth alone never closes election.
+- `worker_recovery.py` re-elects the same continuity pass after a durable root
+  confirms physical exit. Boot waits for that receipt; no new replay or account.
 - `continuation.py` creates an explicit normal conversation command. Control
   markers and browser gestures do not become a second Goal state machine.
 

@@ -187,7 +187,11 @@ def _accept_invocation_evidence(task: dict, event: dict) -> None:
         if not pending['projected']:
             pending['event'] = project_persistent_event(inspector_task_id, pending['event'])
             pending['projected'] = True
-        append_persistent_event(inspector_task_id, sequence, pending['event'])
+        from lib.tasks_pkg.worker_binding import publication_arguments
+        authority = publication_arguments(task)
+        if authority:
+            authority['user_id'] = task['_userId']
+        append_persistent_event(inspector_task_id, sequence, pending['event'], **authority)
 
     # The lane retries transient pressure on this exact append; Stop halts
     # execution, not persistence of already-observed evidence. Sequence -1:

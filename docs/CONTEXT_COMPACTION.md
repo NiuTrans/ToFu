@@ -211,7 +211,13 @@ unknown-usage fences. Missing, swapped or withdrawn accounts, revoked grants and
 unknown authority stop the task with the typed dispatch cause. No new source
 account, tokens, model requests or deadline are issued; original human-task
 summaries reuse their already attached account, and summary receipts/cost
-telemetry remain separate from authorization accounting. **No profile stays
+telemetry remain separate from authorization accounting. A Coordinator Turn whose
+synthetic input (a continuation brief retried by hand, a report relay, a channel
+event) opened no request account summarizes on the canonical task account its
+own model rounds create on first use. A missing account that the task bound at
+start is a typed `ModelAdmissionRefused`, so the Turn fails with that reason;
+a bare `AbortedError` would settle it as a silent user Stop at the compaction
+row. **No profile stays
 prohibited:** consult grants expose no tools, but a summary reads only the task's
 own working messages through the same accounted port, so it adds neither data
 nor tool authority, and their finite ceilings already bound it.
@@ -219,7 +225,9 @@ nor tool authority, and their finite ceilings already bound it.
 **Alternatives rejected:** keeping the Worker/consult prohibition (a long Worker
 aborts at its window); a separate summary allowance (a second ledger beside the
 grant); charging the delegating Coordinator's request (a Worker would spend
-another grant's account).
+another grant's account); refusing summaries for a Coordinator Turn without a
+request account (every such Turn over its window stopped before its first model
+round); opening a request account for synthetic input (it authorizes no work).
 
 Executable specifications: `tests/tasks_pkg/test_coordinator_context_lifecycle.py`
 (real isolated semantic storage, exact source/Attempt/report/grant/budget snapshots)
@@ -412,10 +420,11 @@ snapshot. New writes are bounded to 24 items × 512-character steps plus a
 2,048-character explanation; legacy checkpoint migration may preserve up to
 144 rows. This projection preserves context, not a completion-enforcement gate.
 A complete current recovery carrier or paired direct/gateway accepted todo result (including load/lookup) proves visibility without opaque markers; later incomplete/failed receipts cannot invalidate it.
-Only stale owned recovery sections are withdrawn; dialogue/results/audit history stay intact. New carriers are standalone; mixed legacy cleanup is copy-on-write.
+Only stale owned recovery sections are withdrawn, and only by a projection that rewrites them anyway: L2, reactive, head-truncation and source-plan candidates, plus L1/advanced compaction beyond the previous request's protected sent prefix (all of it when they ignore that prefix). Messages a provider request already carried stay byte-identical; a superseded carrier there remains history, like an older todo receipt, and the newest evidence still decides restoration. Live composition, round appends and dispatch admission only append. Dialogue/results/audit history stay intact. New carriers are standalone; mixed legacy cleanup is copy-on-write.
 L1/advanced/L2/reactive compaction carries state before budget/adoption checks; rejected candidates cannot mutate live messages/task/notes. Truncation counts and protects required state, or leaves overflow for refusal.
 **Problem:** update-driven recovery duplicates visible progress. **Decision:** restore only missing state, at most one current carrier; preserve accepted items verbatim and label the separate explanation field's origin.
 **Rejected:** per-round throttles and append-only recovery still duplicate state; hiding cards hides bad input. Specs: `tests/goals/test_checklist_context.py`.
+**Problem (2026-11-06):** live reconciliation (L1 every round, composition, round appends, dispatch admission) removed a superseded carrier from history the provider had already cached. On the Coordinator (`coordinator-1a39…`, R47 to R48) that rewrote api-form message 613 of 644: the next request read 13,920 tokens and wrote 608,412 ($3.15 instead of about $0.26). **Decision:** withdrawal belongs to prefix rewrites only (above); the protected count is the cache-tracking sent prefix L1 and advanced compaction already honor. **Alternatives rejected:** a tail retraction notice (adds tokens and contradicts nothing the newer receipt does not already supersede); keeping in-place withdrawal for small carriers (any in-place byte inside the cached prefix re-bills everything after it). Specs: `test_todo_update_after_recovery_keeps_every_sent_byte`, `test_prefix_rewrites_still_withdraw_the_stale_carrier`.
 
 **Problem:** repeated composition reparses unchanged gateway receipts, while
 message/list identity cannot prove that a receipt survived clipping or call
@@ -653,6 +662,28 @@ can still fail fidelity, reduction or optional economics checks.
 Preflight and dispatch share output-capacity headroom, separate from priced output.
 Preflight never prices output as input; dispatch revalidates the exact prompt and
 refuses spending if its route changes or its quote exceeds the approved allowance.
+
+**Safe failure facts and joined cleanup.** Problem: a typed 429/5xx/auth failure
+was flattened to `summary_dispatch_failed`, and a caller's already-handled Python
+exception could hide this summary's own teardown failure. Decision: the existing
+failure/attempt owner projects established codes and only explicit typed HTTP or
+dispatch-budget facts; provider messages, arbitrary exception attributes and
+inferred retry counts never enter receipts. Empty/non-text complete output is
+`summary_empty`; partial/unverified completion is `summary_incomplete`. Generic
+diagnostics are display evidence only: credential recovery still requires the
+strict unsent shape, matching whole-attempt ingress and the original issued
+projection. Teardown permits adoption only after joining; an invocation-local
+propagating-error flag preserves genuine fatal/control exits without inheriting
+another frame's `sys.exc_info()`. A failed archive creation that returns no ID
+keeps its owner's single terminal receipt and original unchanged token/message
+counts rather than inventing a zero-sized source. Alternatives rejected: parsing
+provider bodies, treating every failure object as credential authority, adopting
+text before cleanup and fabricating failure snapshots. Specifications:
+`tests/compaction/test_summary_failure_diagnostics.py`,
+`tests/compaction/test_summary_cleanup_exception_context.py`,
+`tests/compaction/test_summary_route_cleanup_owner.py` and
+`tests/compaction/test_compaction_archive_failures.py`. These facts add no summary
+rate-limit ceiling or timeout; the shared dispatch policy below remains unchanged.
 
 Usage is recorded even for rejected/failed attempts. Receipts distinguish generation
 from adoption, show measured route capacity/prompt/reserves/economic target, and identify

@@ -320,7 +320,8 @@ def test_mismatched_registered_workspace_cannot_switch_an_explicit_linked_root(w
     ({'status': 'done', 'aborted': True, '_abort_reason': 'storage_authority_integrity'}, 'failed'),
     ({'status': 'done', 'error': 'failed anyway'}, 'failed'),
     ({'status': 'failed'}, 'failed'),
-    ({'status': 'interrupted'}, 'failed'),
+    # Restart recovery's unsettled result is paused work, never a publication.
+    ({'status': 'interrupted'}, 'interrupted'),
     ({'status': 'done', 'aborted': True}, 'cancelled'),
     ({'status': 'cancelled'}, 'cancelled'),
     ({'status': 'running'}, 'failed'),
@@ -460,7 +461,7 @@ def test_recovery_intent_does_not_require_project_journal(workspace, monkeypatch
 
     assert delivery.persist_terminal_workspace_intent(task) is True
     assert len(workspace['settles']) == 1
-    assert workspace['settles'][0][2]['outcome'] == 'failed'
+    assert workspace['settles'][0][2]['outcome'] == 'interrupted'
     assert task['_workspaceDelivery']['repositories'][0]['deliveryStatus'] == 'preserved'
 
 
@@ -1356,3 +1357,17 @@ def test_direct_admission_does_not_import_optional_integration_control(workspace
     monkeypatch.setattr(builtins, '__import__', guarded_import)
     assert delivery.bind_worker_workspace(task) is None
     assert task['config']['projectPath'] == str(root)
+
+
+@pytest.mark.parametrize('stamp,expected', [
+    ({'aborted': True, '_abort_reason': 'server_shutdown'}, 'interrupted'),
+    ({'aborted': True}, 'cancelled'),
+    ({'aborted': True, '_abort_reason': 'storage_frame_overflow'}, 'failed'),
+    ({}, 'completed'),
+])
+def test_terminal_settlement_reads_the_abort_cause(workspace, stamp, expected):
+    """A restart pause is not a Stop: the resumed attempt settles delivery."""
+    workspace['registered'][workspace['root']] = workspace['selected']
+    delivery.settle_task_workspaces(_task(workspace['root'], **stamp))
+    (_path, task_id, kwargs), = workspace['settles']
+    assert (task_id, kwargs['outcome']) == ('owned-task', expected)

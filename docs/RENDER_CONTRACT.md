@@ -300,6 +300,41 @@ Writer policy and verification boundaries: [Runtime input visibility ownership](
 
 **Problem:** a separate model line, selected-model echo and filled Details triangle made a compact receipt needlessly tall. **Decision:** recorded compression-model attribution sits inline with the status; before → after, reduction and a short localized trigger share the accounting row. The whole receipt summary opens native diagnostics directly, without a separate Details label or triangle. Main-model/provider identity, selection-only evidence, original trigger reason and snapshot access remain in the expanded body; failed/warning reasons stay visible even while closed. A failed or error-severity compaction starts expanded, so an archive-loss warning never depends on opening its diagnostics; successful receipts retain the reader's disclosure state across updates. Unknown execution stays explicit, never inferred from the parent or a selected-only route. Reader disclosure and keyboard focus survive updates; long identities wrap only when space requires it. No new request, timer or receipt mutation is introduced. **Rejected:** deleting diagnostics loses evidence; a model-only extra row repeats information; another click handler duplicates native keyboard behavior. Specs: `activity-block.test.ts` and `tests/visual/test_visual_translation_compaction_attribution.py`.
 
+### Failed-summary diagnostics
+
+**Problem:** failed summary receipts and cold legacy timeline rows exposed
+machine codes and offered snapshot actions for synthetic receipt-join IDs.
+**Decision:** the existing `detailKey` / `detailArgs` translation port presents
+localized, actionable established summary-owner causes, including rate limiting,
+service/route/permission failures, incomplete or empty output, cancellation,
+generic failure and credential-source unavailability. The renderer also resolves
+known legacy machine-code details without rewriting their source rows. Archive
+commit failures retain their own higher-priority warning.
+
+Only validated, recorded facts accompany the cause. HTTP status and physical
+request attempts/dispatcher limit are shown when supplied by typed failure
+metadata; selected routes, route-ledger length, cost rows and repeated progress
+frames never invent a request count. Recorded route outcomes stay in diagnostics,
+separate from OBSERVED summary-model attribution, and missing provider contact
+remains unknown. Selection is not dispatch proof; unknown spend is not free.
+The strict unsent credential variant and generic display variant remain distinct
+in `contracts/compaction_receipt_v1.schema.json`; display never grants recovery,
+fallback or source-deletion authority.
+
+Synthetic `summary-failed:`, `summary-declined:`, other terminal
+`summary-{status}:` bridges and `failed:` IDs are suppressed by backend projection
+and by the cold-row renderer. Only a real archive earns **View snapshot**, inside
+the expanded DIV body, never in the native summary. The native outer disclosure,
+reader-owned open state and summary focus survive repaints. Failure reasons stay
+visible when the reader closes diagnostics; existing wrapping geometry is reused
+on narrow screens, with no separate card, state machine or theme-specific patch.
+
+**Alternatives rejected:** raw machine-code copy is not actionable; guessed
+attempt counts or selected-as-observed model names fabricate execution evidence;
+a failure-specific UI/state machine duplicates the common receipt owner.
+Specs: `frontend/src/conversation/ui/renderers/activity-block.test.ts` and
+`tests/compaction/test_summary_failure_projection.py`.
+
 ## Translation attribution
 
 **Problem:** a completed composer receipt obscured stored translation attribution.

@@ -793,10 +793,9 @@ def dispatch_attempt_to_worker(
 ) -> dict[str, Any] | None:
     """Atomically bind an accepted attempt to one durable worker job.
 
-    This is a storage foundation, not the in-process executor switch.  The job
-    contains durable turn references and the explicit principal only; a
-    production handler must still prove event replay, terminal accounting, and
-    external side-effect fencing before its kind is eligible for claims.
+    The command service uses this boundary for ordinary conversation admission.
+    The job contains durable turn references and the explicit principal only;
+    the registered common worker reconstructs execution from those references.
     """
     if not isinstance(principal, PrincipalContext):
         raise TypeError('worker dispatch requires PrincipalContext')
@@ -1445,7 +1444,7 @@ def _settlement(task: dict[str, Any], raw_event: dict[str, Any],
     outcome = verdict.outcome.value
     cause = verdict.cause
     error = None
-    if status == 'failed':
+    if status == 'failed' or (status == 'interrupted' and raw_error):
         error = normalize_envelope(
             raw_error,
             context='turn-settlement',
@@ -2028,6 +2027,11 @@ def _drain_queue_after_settlement(task: dict[str, Any], conversation_id: str,
             return
         if not conversation_id:
             return
+        # A stopping server starts no successor: it would run unquiesced until
+        # the process exits. Startup recovery resumes restart-paused work and
+        # redispatches queued input in the next process.
+        if task.get('_abort_reason') == 'server_shutdown':
+            return
         # An autopilot/continuation successor already owns the lane — the
         # queued human turn drains when THAT successor settles instead.
         if (task.get('_autopilot_spawned_followup')
@@ -2123,6 +2127,24 @@ def _task_projection_state(
     if task_turn_id and state.get('turnId') != task_turn_id:
         return None
     return state
+
+
+def executor_written_steers(task: Mapping[str, Any]) -> tuple[int, list[Any]] | None:
+    """The Turn revision this executor last wrote and that write's steer records.
+
+    ``lib.tasks_pkg.committed_steers`` compares it with the Turn's metadata
+    revision: equal means no other writer committed a steer since. The state is
+    replaced, never mutated, so a reader needs no projection lock.
+    """
+    state = task.get(_TURN_PROJECTION_STATE_KEY)
+    if not isinstance(state, dict) or state.get('attemptId') != task.get('_attemptId'):
+        return None
+    revision, projection = state.get('projectionRevision'), state.get('projection')
+    if (not isinstance(revision, int) or isinstance(revision, bool)
+            or not isinstance(projection, dict)):
+        return None
+    records = projection.get('_userSteerInjects')
+    return revision, list(records) if isinstance(records, list) else []
 
 
 def _remember_task_projection_state(

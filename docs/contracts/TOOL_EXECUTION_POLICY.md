@@ -11,6 +11,73 @@ paths mint an exact, expiring, single-use gateway receipt before the handler
 can install. Scope, origin verification, bounded attempts, and immediate
 instruction disclosure are owned by [the skills contract](../modules/skills.md).
 
+## Web-source blocklist: `search.skip_domains` (hosts and URL prefixes)
+
+**Problem.** The blocklist only matched a substring of ``netloc``. Two
+consequences: ``x.com`` also refused ``dropbox.com``, and a source that must
+be excluded only at one path on a shared host (a repository owner on GitHub,
+a dataset owner on Hugging Face) could not be expressed at all — either the
+whole host was blocked or nothing was. A fetch-only check also left the same
+URL reachable through search-result listings, browser navigation and
+``run_command`` transfers (``curl``, ``python -c urlopen``, ``git clone``),
+which is how an evaluation arm retrieved hidden tests from a public
+repository mirror while the answer hosts themselves were refused.
+
+**Decision.** One matching rule, owned by `lib/search/url_blocklist.py` and exported
+to the standalone package as `tofu_search/generated_url_blocklist.py` by
+`scripts/gen_packaged_search_runtime.py`:
+
+* ``example.com`` — host rule: exact host and subdomains, any port.
+* ``example.com/private`` — URL-prefix rule: the path must start with this
+  prefix (prefix semantics, not whole-segment equality).
+* ``example.com/*/name`` — ``*`` matches exactly one path segment, so one
+  entry can cover the same repository or directory under every owner.
+* ``example.com/**/name`` — ``**`` matches any number of segments (none
+  included); ``*`` inside a segment (``*mirror*``) matches characters within
+  that segment only. An entry with any ``*`` matches segment by segment and
+  covers everything below its last segment.
+* ``*/<path pattern>`` — a ``*`` host matches every host; a bare ``*`` is
+  ignored rather than refusing every URL.
+* Scheme optional; case-insensitive; query/fragment ignored; a port in the
+  entry pins the port. Non-HTTP(S) URLs never match.
+
+The glob forms exist because a benchmark copy is often nested deep inside an
+unrelated repository or proxied through another host
+(``github.com/<any>/<repo>/tree/main/tasks/.../terminal-bench-2-1/...``,
+``r.jina.ai/https://github.com/...``): a prefix or one-segment rule cannot
+name it, while ``*/**/*terminal-bench*`` refuses it everywhere. Alternative
+rejected: turning every ``*`` entry into an unanchored substring search,
+which would silently change what existing ``github.com/*/name`` entries mean.
+
+The rule is enforced at every place the assistant obtains remote content:
+
+| Surface | Enforcement |
+|---|---|
+| `fetch_url`, search page fetches, one-hop deepening | `tofu_search.fetch.utils._should_fetch` (`reason: skip_domain`) |
+| `web_search` listings (title/snippet/fetched excerpts) | `CandidateAccumulator.add_batch` refuses the row, so its URL and text never reach the model |
+| `browser_navigate` and browser URL tools | `lib/browser/handlers/_tabs.py` and the pre-tool hook |
+| `run_command` (curl/wget/urlopen/git clone) | pre-tool hook `_blocked_url_hook` in `lib/tasks_pkg/tool_hooks.py`, matching absolute http(s) URLs in the command |
+
+Refusals name the matched entry and tell the model not to retry by another
+transport; the refusal is not a request for user approval. Matching is
+configuration, not a new tuning knob: no threshold, count or sampling
+behaviour was added.
+
+**Alternatives rejected.** Keeping host-only matching and adding a second
+`skip_url_prefixes` setting would split one operator intent across two lists
+and require every consumer to learn both; blocking whole hosts would break
+legitimate cloning/downloads on shared hosts; a content filter on fetched
+pages would leak the URL and snippet before filtering and cost a page read.
+
+**Verification.** Package tests `packages/tofu-search/tests/test_url_blocklist.py`
+(grammar, boundary and precedence, run against the generated copy) and
+`test_url_blocklist_surfaces.py`, `tests/tasks_pkg/test_url_blocklist_hook.py`
+(shell and browser refusals), `tests/search/test_search_settings.py` (entry
+normalisation), `tests/evaluations/test_tb_source_guard.py` (the evaluation
+projection refuses exactly the URLs the other arms refuse), and the
+in-container canary in
+`evaluations/terminal_bench/source_guard.py::guard_check_program`.
+
 ## Concurrent tool rounds (owner decision 2026-10-28)
 
 **Problem:** every write-partition call — `run_command`, file writes,
@@ -55,7 +122,11 @@ evidence. Every other call keeps the bounded contract: the pool ceiling and its
 declared timer, measured from handler entry, and the Stop placeholder. A call
 not yet in its handler when Stop arrives settles `aborted` without entering it.
 A round that writes still never caches its write-sensitive reads, and
-approval receipts mutate under the task receipt lock. Several foreground
+approval receipts mutate under the task receipt lock. Managed API controls
+reach these same slots through the private, incarnation-bound transport in
+`contracts/command_control_v1.json`; the authenticated owner, exact tool-call
+identity and existing acknowledgement budget survive the process boundary.
+Delivery never creates a new command or certifies handoff. Several foreground
 commands can now run in one task on every execution path (see "Per-command
 slots on every execution path" below): the task's single-command slots (the
 `_subprocess_pid` mirror read by the interrupt route, abort signal and stall

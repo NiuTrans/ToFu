@@ -20,7 +20,7 @@ import logging
 import os
 from typing import Optional
 
-from quart import redirect, request
+from quart import current_app, redirect, request
 from quart import Response, g
 
 from lib.api_keys import (
@@ -120,7 +120,16 @@ def _is_v4_public(path: str) -> bool:
     return _is_public('/api/v1' + path[len('/api/v4'):])
 
 
+# Device onboarding: the caller is another machine and the one-time code in
+# its payload is the credential. A local kernel listens on loopback only, so no
+# device can dial it; there the exchange keeps the default deny.
+_DEVICE_PAIRING_EXCHANGE = '/api/desktop/pair'
+
+
 def _is_public(path: str) -> bool:
+    if (path == _DEVICE_PAIRING_EXCHANGE
+            and current_app.extensions.get('tofu_local_kernel') is not None):
+        return False
     if path in _PUBLIC_EXACT:
         return True
     if any(path.startswith(p) for p in _PUBLIC_PREFIXES):
@@ -170,6 +179,36 @@ def address_is_loopback(addr) -> bool:
 def open_mode_peer_allowed(addr) -> bool:
     """Whether open mode may synthesize an admin for this socket peer."""
     return _OPEN_MODE_ALLOW_REMOTE or address_is_loopback(addr)
+
+
+def local_kernel_authority_refused(host) -> bool:
+    """Whether a local kernel must refuse this Host (never outside one).
+
+    Every app and web page on the device reaches a local kernel's loopback
+    port; answering only its own authority defeats DNS rebinding.
+    ``local_kernel.py`` publishes that authority before serving.
+    """
+    local_kernel = current_app.extensions.get('tofu_local_kernel')
+    if local_kernel is None:
+        return False
+    return str(host or '').strip().lower() != local_kernel['host']
+
+
+async def local_kernel_host_fence():
+    """Answer a foreign Host with 403 before any other request gate.
+
+    Application assembly registers this right after request correlation, ahead
+    of the API-version, boot and storage gates, so a rebound page gets the same
+    403 while the kernel boots as after.
+    """
+    if not local_kernel_authority_refused(request.host):
+        return None
+    _auth_log.warning('Auth: local kernel refused Host %.120s on %s',
+                      request.host, request.path)
+    return api_typed_error(
+        'permission', status=403,
+        detail='This local kernel answers only its own loopback address.',
+        source='api_v1.auth.local_kernel_host')
 
 
 _SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS'})
@@ -611,6 +650,62 @@ def request_principal() -> PrincipalContext:
         current_auth(), allow_personal_owner=not is_multi_user())
 
 
+def human_ui_provenance() -> dict:
+    """Provenance of an owner acting in the Tofu UI, or PermissionError.
+
+    Decisions only a human may make (lifecycle approvals and the owner's
+    delegation to their Global Router, lib/lifecycle_approval.py) accept a
+    request only when the principal is a user, the credential is the UI
+    session cookie or the loopback open-mode UI (never an API key, bearer
+    header or query token: those are headless clients), and the request
+    carries same-origin browser evidence: Fetch Metadata where the browser
+    sends it (trustworthy origins), otherwise an ``Origin`` naming this host.
+    Headless clients send neither unless they forge them deliberately; the
+    user agent and peer stay on the record. Open mode has no authentication,
+    so there this is a claim (lib.lifecycle_approval.provenance_assurance).
+    """
+    provenance = _ui_provenance()
+    if provenance['kind'] != 'human-ui':
+        audit_log('human_ui_provenance_refused', path=request.path,
+                  credential=provenance['credential'], browser=provenance['browser'] or '-',
+                  ua=provenance['userAgent'][:200], remote=provenance['remoteAddr'])
+        raise PermissionError(
+            'human_approval_required: open the Tofu UI in your browser and decide there; '
+            'API keys, scripts and agents cannot make this decision')
+    return provenance
+
+
+def request_provenance() -> dict:
+    """Who made this request: ``human-ui`` when it qualifies, else ``authenticated-request``."""
+    return _ui_provenance()
+
+
+def _ui_provenance() -> dict:
+    principal = request_principal()
+    context = current_auth()
+    source = presented_credential().source
+    if context is not None and context.via_open_mode:
+        credential = 'open-mode'
+    elif context is not None and source == 'cookie':
+        credential = 'session'
+    else:
+        credential = ''
+    site = str(request.headers.get('Sec-Fetch-Site') or '').strip().lower()
+    origin = str(request.headers.get('Origin') or '').strip()
+    if site:
+        browser = 'fetch-metadata' if site == 'same-origin' else ''
+    else:
+        from urllib.parse import urlparse
+        browser = ('origin' if origin and urlparse(origin).netloc.lower()
+                   == str(request.host or '').strip().lower() else '')
+    human = principal.kind == 'user' and bool(credential) and bool(browser)
+    return {'kind': 'human-ui' if human else 'authenticated-request',
+            'ownerUserId': principal.require_owner(context='request provenance'),
+            'subject': principal.subject_id, 'credential': credential if human else source,
+            'browser': browser, 'userAgent': (request.headers.get('User-Agent') or '')[:300],
+            'remoteAddr': request.remote_addr or ''}
+
+
 def request_user_id() -> int:
     """Return the authenticated owner for the current request.
 
@@ -787,6 +882,8 @@ __all__ = [
     'request_user_id',
     'SESSION_COOKIE',
     'address_is_loopback',
+    'local_kernel_authority_refused',
+    'local_kernel_host_fence',
     'browser_request_is_cross_site',
     'open_mode_peer_allowed',
 ]

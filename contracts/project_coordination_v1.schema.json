@@ -69,14 +69,16 @@
     "conversationEntry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["conversationId", "title", "turnCount", "coordinatorId"],
+      "required": ["conversationId", "title", "turnCount", "coordinatorId", "folderId"],
       "properties": {
         "conversationId": {"type": "string", "minLength": 1, "maxLength": 256},
         "title": {"type": "string", "maxLength": 200},
         "turnCount": {"type": "integer", "minimum": 0},
         "coordinatorId": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 256}, {"type": "null"}]},
+        "folderId": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 512}, {"type": "null"}], "description": "The stored sidebar folder (null when unfiled), read from the same catalog header as sidebar rows. A client that adopts the row as a catalog shell keeps it, otherwise a filed conversation projects as uncategorized."},
         "createdAt": {"type": "integer", "minimum": 0},
-        "updatedAt": {"type": "integer", "minimum": 0}
+        "updatedAt": {"type": "integer", "minimum": 0},
+        "busy": {"const": true, "description": "Present exactly when the owner's task registry holds live work for the conversation (same projection as sidebar catalog rows)."}
       }
     },
     "createRequest": {

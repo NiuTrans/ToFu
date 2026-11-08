@@ -18,7 +18,58 @@ logger = get_logger(__name__)
 # ══════════════════════════════════════════════════════
 
 _EMBEDDING_PAT = re.compile(r'embed', re.I)
-_IMAGE_GEN_PAT = re.compile(r'(dall-?e|[-_]image|image[-_])', re.I)
+_RERANKING_PAT = re.compile(r'rerank', re.I)
+_IMAGE_GEN_PAT = re.compile(
+    r'(dall-?e|[-_]image|image[-_]|imagen|seedream|cogview|kolors'
+    r'|flux[-_.]?\d|stable-diffusion|sdxl|ideogram|recraft'
+    r'|(?:^|[^a-z0-9])t2i(?:$|[^a-z0-9])|text-to-image)',
+    re.I,
+)
+
+# Task families recognized from an unmistakable model-id pattern. Each maps a
+# name pattern to the ONE task capability (lib/model_info/capability_taxonomy
+# MODEL_KINDS) it proves. Order is precedence: video/audio generation run
+# before the broad image pattern because ids such as 'image-to-video' or
+# 'wan2.2-i2v' contain image tokens yet produce video.
+_TRANSCRIPTION_PAT = re.compile(
+    r'(whisper|transcri(?:be|ption)|paraformer|sensevoice|speech-to-text'
+    r'|(?:^|[^a-z0-9])asr(?:$|[^a-z]))',
+    re.I,
+)
+_TTS_PAT = re.compile(
+    r'(tts|text-to-speech|cosyvoice|fish-speech'
+    r'|(?:^|/)speech-\d)',                      # MiniMax speech-02-hd / speech-2.5-*
+    re.I,
+)
+_AUDIO_GEN_PAT = re.compile(
+    r'(lyria|suno|musicgen|stable-audio|audioldm|riffusion|ace-step'
+    r'|text-to-(?:music|sound)|(?:^|[^a-z0-9])music-\d)',
+    re.I,
+)
+_VIDEO_GEN_PAT = re.compile(
+    r'((?:^|[^a-z0-9])sora(?:$|[^a-z])|(?:^|[^a-z0-9])veo-\d|seedance'
+    r'|kling(?!.*image)|hailuo|cogvideo|hunyuan-?video|ltx-?video|vidu'
+    r'|pixverse|(?:^|[^a-z0-9])[ti]2v(?:$|[^a-z0-9])'
+    r'|(?:text|image)-to-video|video-generat)',
+    re.I,
+)
+_TASK_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
+    ('embedding', _EMBEDDING_PAT),
+    ('reranking', _RERANKING_PAT),
+    ('transcription', _TRANSCRIPTION_PAT),
+    ('tts', _TTS_PAT),
+    ('audio_gen', _AUDIO_GEN_PAT),
+    ('video_gen', _VIDEO_GEN_PAT),
+    ('image_gen', _IMAGE_GEN_PAT),
+)
+
+
+def _task_capability(model_id: str) -> str | None:
+    """The non-chat task capability a model id unmistakably names, else None."""
+    for capability, pattern in _TASK_PATTERNS:
+        if pattern.search(model_id):
+            return capability
+    return None
 
 # Thinking / reasoning models. Most cloud families embed "think" or
 # "reason" in the model ID, but a few model families ship as dual-mode
@@ -79,6 +130,9 @@ _CHEAP_HINT_PAT = re.compile(
 #  Capability / RPM / Cost Inference
 # ══════════════════════════════════════════════════════
 
+# Generation slots share the image-generation request-rate and cost defaults.
+_MEDIA_GENERATION_CAPS = frozenset({'image_gen', 'video_gen', 'audio_gen'})
+
 def _infer_capabilities(model_id: str, model_meta: dict = None) -> set:
     """Infer model capabilities from its name and optional API metadata.
 
@@ -103,19 +157,19 @@ def _infer_capabilities(model_id: str, model_meta: dict = None) -> set:
             return {name for name, fact in declared.items()
                     if fact is True or fact == 'supported'
                     or isinstance(fact, dict) and fact.get('supported') is True}
-        # Catalog IDs alone prove no optional inference feature.
-        return {'text'}
+        # Catalog IDs alone prove no optional inference feature. A task
+        # family is not an optional feature: the 'text' placeholder would
+        # itself claim a chat surface, so a whisper/tts/image/video id keeps
+        # its non-chat kind instead of leaking into chat pickers.
+        task = _task_capability(model_id.lower())
+        return {task} if task else {'text'}
 
     mid_lower = model_id.lower()
 
-    # ── Embedding models (not chat models) ──
-    if _EMBEDDING_PAT.search(mid_lower):
-        caps.add('embedding')
-        return caps
-
-    # ── Image generation models (not chat models) ──
-    if _IMAGE_GEN_PAT.search(mid_lower):
-        caps.add('image_gen')
+    # ── Non-chat task families (embedding, rerank, speech, media generation) ──
+    task = _task_capability(mid_lower)
+    if task:
+        caps.add(task)
         return caps
 
     # ── Chat models ──
@@ -147,7 +201,7 @@ def _infer_rpm(model_id: str, capabilities: set) -> int:
     mid = model_id.lower()
     if 'embedding' in capabilities:
         return 60
-    if 'image_gen' in capabilities:
+    if _MEDIA_GENERATION_CAPS.intersection(capabilities):
         return 10
     if any(x in mid for x in ('nano', 'turbo', 'free')):
         return 200
@@ -173,7 +227,7 @@ def _infer_cost(model_id: str, capabilities: set) -> float:
     mid = model_id.lower()
     if 'embedding' in capabilities:
         return 0.001
-    if 'image_gen' in capabilities:
+    if _MEDIA_GENERATION_CAPS.intersection(capabilities):
         return 0.02
     if any(x in mid for x in ('nano', 'free')):
         return 0.001

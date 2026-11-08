@@ -21,7 +21,9 @@ pytestmark = [pytest.mark.api, pytest.mark.slow]
 
 
 def wait_turn(client, path, statuses):
-    expires = time.monotonic() + 45
+    from lib.durable_worker.runtime_policy import runtime_policy
+    # A killed owner retains its lease until the authoritative takeover time.
+    expires = time.monotonic() + runtime_policy()['workerLeaseMilliseconds'] / 1000 + 45
     while True:
         response = client.get(path)
         assert response.status_code == 200, response.text

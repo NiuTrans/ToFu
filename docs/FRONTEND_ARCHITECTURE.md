@@ -1173,13 +1173,22 @@ requesting the application preserves the waterfall. Tests: `main.test.ts`,
   `frontend/src/core/model-capability-taxonomy.ts` controller. It starts from
   the backend-parity fallback, validates and atomically replaces that set from
   server configuration, and returns defensive snapshots. It also projects the
-  server's ordered `known_capabilities` list via `getKnownCapabilities()`; the
-  settings capability-toggle grids (model edit form, key×model matrix editor)
-  render that projection through `_allModelCapabilities()` instead of carrying
-  their own list — the single bare-harness fallback literal lives in
-  `sections/settings.js`, pinned to the backend by the parity test. Retained
-  pickers may fail open when an isolated harness omits the port, but may not
-  carry another exclusion list or mutable taxonomy.
+  server's ordered `known_capabilities` (`getKnownCapabilities()`) and
+  `model_kinds` (`getModelKinds()`, `modelKind()`, `isMediaKind()`); a
+  malformed field rejects the whole payload, and the parity test pins every
+  fallback to the backend. Retained pickers may fail open when an isolated
+  harness omits the port, but may not carry another exclusion list, kind rule
+  or mutable taxonomy.
+- The Settings Models tab (`frontend/src/features/model-catalog/`) groups rows
+  by model kind behind a filter bar; `kinds.ts` owns kind, capability and
+  modality labels and the media price and profile presentation. AA scores, the
+  cost frontier and the context window describe chat Models only, and a media
+  Model shows the reasoning editor only when it declares reasoning support.
+  The Settings composition publishes `modelCapabilityLabel` and
+  `modelMediaPriceSummary` to the retained supply matrix, which keeps no label
+  map of its own. `frontend/src/features/image/composer-constraints.ts`
+  decides which image composer options a routed Model's `media_profile`
+  supports.
 - Vendor grouping for model pickers lives in the pure
   `frontend/src/core/model-group.ts` policy. The ESM composition boundary
   injects the application brand detector and publishes the immutable policy
@@ -2579,6 +2588,12 @@ are unchanged. A device status projected on reopening resumes observation.
 Commands invalidate older status reads so a pre-command response cannot repaint
 over an acknowledged login. The retained OAuth presenter supplies transport and
 render ports; remove those bridges when migrating the remaining presenter.
+Device observation is keyed by subscription provider: Codex and Kimi Code flows
+share the one interval and status read, and a card reaching a terminal state
+retires only its own provider's observation. Problem: with a single observer
+the Codex card, which retires observation on every idle render, stopped a
+pending Kimi flow after its first read. Alternative rejected: an interval per
+provider duplicates the shared status read.
 
 OAuth preparations, confirmations, popup handlers, clipboard feedback and device
 fallback continuations capture their original opening. Accepted exchanges and
@@ -2609,6 +2624,26 @@ gate/exchange/reset/fallback specifications retain their real authorization code
 classic fragment fixtures explicitly mount the real typed presentation scope.
 `test_settings_oauth_lifecycle_browser.py` verifies close/reopen and device resume
 through actual controls with synthetic intercepted responses.
+
+### Domestic subscription cards
+
+Problem: Settings → 订阅登录 needed Kimi Code sign-in and coding-plan keys
+without a second Provider write path, roster or browser credential store.
+Decision: `settings/kimi-code-login.ts` owns the Kimi Code card (device-code
+sign-in, status, expiry, sign-out) over the existing device-login, status and
+logout endpoints; like the retained Codex card, its render resumes or retires
+only Kimi's device observation. `settings/subscription-plans.ts` renders one
+plan-key card per provider template of category `subscription`, the only roster
+source. Connect hands the compiled template and the pasted key to the retained
+Provider add command (`_stageModelRoutingProviderBundle`, the stage the 服务商
+picker uses); Disconnect goes through `prepareProviderRemoval`; status projects
+the committed routing authority, and close retires a pending catalogue read. The
+retained OAuth section keeps only action bridges into both owners. Alternatives
+rejected: a dedicated plan-key endpoint duplicates Provider creation; a browser
+plan list drifts from the templates. Verification:
+`tests/providers/test_subscription_settings_cards.py` (real `oauth.html`
+markup, synthetic transport) and the Kimi device scenarios of
+`tests/frontend/test_settings_import_oauth_lifecycle.py`.
 
 
 ### Settings independent tab activation and MCP reads

@@ -33,6 +33,9 @@ def execute_router_tool(task: dict, scope: dict, name: str, arguments: dict) -> 
     if name == 'get_router_projects':
         from .projects import router_projects
         return router_projects(owner, arguments)
+    if name == 'restart_server':
+        from .owner_delegation import restart_server
+        return restart_server(task, scope, arguments)
     instructions = RouterInstructions(owner)
     if name == 'router_instruction_create':
         arguments = validate(dict(arguments), 'instructionCreate')

@@ -324,18 +324,23 @@ def test_large_payload_history_is_not_retained_in_memory(tmp_path):
         for _ in range(240):
             handle.write(row + '\n')
     probe = '''
-import json, sys, tracemalloc
+import importlib.util, json, sys, tracemalloc
 sys.path.insert(0, sys.argv[1])
 from audit_codex_session import audit_session
 tracemalloc.start()
 result = audit_session(sys.argv[2])
 peak = tracemalloc.get_traced_memory()[1]
-print(json.dumps({'events': result['events'], 'peak_bytes': peak}))
+bytecode = None if sys.dont_write_bytecode else importlib.util.cache_from_source(
+    sys.modules['audit_codex_session'].__file__)
+print(json.dumps({'events': result['events'], 'peak_bytes': peak, 'bytecode': bytecode}))
 '''
-    process = subprocess.run([sys.executable, '-I', '-c', probe,
-                              str(Path(__file__).resolve().parents[2]), str(path)],
+    checkout = Path(__file__).resolve().parents[2]
+    process = subprocess.run([sys.executable, '-I', '-B', '-c', probe, str(checkout), str(path)],
                              text=True, capture_output=True, timeout=30, check=True)
     measured = json.loads(process.stdout)
+    # -I ignores PYTHONPYCACHEPREFIX, so the probe must not write __pycache__/
+    # beside audit_codex_session.py at the checkout root.
+    assert measured['bytecode'] is None or not Path(measured['bytecode']).is_relative_to(checkout)
     assert measured['events'] == 240
     # This bounds retained payload history, not host memory or admitted work.
     # The threshold is generous relative to a single record and independent of

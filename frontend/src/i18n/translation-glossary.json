@@ -1069,14 +1069,14 @@
       }
     },
     {
-      "term": "Display",
-      "note": "settings tab name for appearance",
+      "term": "Model Selection",
+      "note": "settings tab name: which models appear in the model pickers, plus the default and fallback model",
       "translations": {
-        "ko": "표시",
-        "ja": "表示",
-        "de": "Anzeige",
-        "ru": "Отображение",
-        "fr": "Affichage"
+        "ko": "모델 선택",
+        "ja": "モデル選択",
+        "de": "Modellauswahl",
+        "ru": "Выбор моделей",
+        "fr": "Choix des modèles"
       }
     },
     {

@@ -3,6 +3,10 @@
 A finished command's result is never replaced by its group's retirement:
 members left running are stopped and reported, and a group that outlives
 SIGKILL becomes a typed warning while its record stays for the boot sweep.
+
+Stop, timeout and kill also retire the groups a command's still-linked
+descendants created (GNU ``timeout``, ``setsid``), which a signal to the
+command's own group never reaches.
 """
 from contextlib import contextmanager
 import ctypes
@@ -10,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -261,3 +266,192 @@ def test_current_process_group_is_refused():
     with patch('os.killpg') as kill, pytest.raises(ValueError):
         retire_process_group(os.getpgrp())
     kill.assert_not_called()
+
+
+def test_an_escaped_group_cannot_name_the_current_group():
+    from lib.project_mod.process_group import retire_process_group
+    with patch('os.killpg') as kill, pytest.raises(ValueError):
+        retire_process_group(2 ** 22 + 7, escaped_groups=[os.getpgrp()])
+    kill.assert_not_called()
+
+
+ESCAPED = {
+    # GNU timeout moves itself and its child into a new process group.
+    'timeout': ("timeout 300 sh -c 'echo \"inner=$$\"; exec sleep 300' & "
+                'echo "outer=$!"; wait'),
+    # A background setsid starts its own session and group without forking.
+    'setsid': ("setsid sh -c 'echo \"inner=$$\"; exec sleep 300' & "
+               'echo "outer=$!"; wait'),
+    # A TERM-ignoring child keeps timeout waiting; only SIGKILL ends both.
+    'timeout_ignoring_term': (
+        "timeout 300 sh -c 'trap \"\" TERM; echo \"inner=$$\"; "
+        "while :; do sleep 1; done' & echo \"outer=$!\"; wait"),
+}
+
+
+def _require_escape_tools():
+    if shutil.which('timeout') is None or shutil.which('setsid') is None:
+        pytest.skip('GNU timeout and util-linux setsid are required')
+
+
+def _escaped_pids(text):
+    found = [re.search(rf'^{name}=(\d+)$', text, re.M) for name in ('outer', 'inner')]
+    return [int(match.group(1)) for match in found] if all(found) else None
+
+
+def _spawn_escaped(shape):
+    proc = subprocess.Popen(['sh', '-c', ESCAPED[shape]], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            start_new_session=True)
+    proc._tofu_owned_pgid = proc.pid
+    output = b''
+    try:
+        while _escaped_pids(output.decode()) is None:
+            # Readiness, never a host-speed deadline; the hang guard bounds a hang.
+            chunk = os.read(proc.stdout.fileno(), 4096)
+            if not chunk:
+                raise AssertionError('Escaping test command exited before becoming ready')
+            output += chunk
+    except BaseException:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        raise
+    return proc, _escaped_pids(output.decode())
+
+
+def _close_spawned(proc):
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass  # This exact owned process group is already quiescent.
+    proc.wait(timeout=3)
+    proc.stdout.close()
+    proc.stderr.close()
+
+
+@pytest.mark.parametrize('interactive', [False, True])
+@pytest.mark.parametrize('shape', sorted(ESCAPED))
+def test_stop_retires_groups_the_command_created(tmp_path, monkeypatch, shape, interactive):
+    """The kill tool and Stop set ``aborted``; nothing the command started survives."""
+    from lib.project_mod import foreground_command_records as records
+    _require_escape_tools()
+    monkeypatch.setattr(records, '_records_root', lambda: str(tmp_path / 'records'))
+    task = {'id': f'escaped-{shape}', 'aborted': False}
+    seen, pids = [], []
+
+    def on_chunk(_stream, text):
+        seen.append(text)
+        found = _escaped_pids(''.join(seen))
+        if found and not pids:
+            pids.extend(found)
+            task['aborted'] = True
+
+    with _reap_owned_descendants() as children:
+        output = tool_run_command(
+            str(tmp_path), ESCAPED[shape], task=task, on_chunk=on_chunk,
+            stdin_callback=(lambda prompt: None) if interactive else None)
+        children.extend(dict.fromkeys(pids))
+        assert '[Command aborted by user]' in output
+        assert 'warning process-group' not in output
+        assert pids and [pid for pid in pids if _running(pid)] == [], (
+            'a process that left the command group outlived Stop')
+    assert not list((tmp_path / 'records').glob('*.json'))
+
+
+@pytest.mark.parametrize('shape', sorted(ESCAPED))
+def test_cancel_signal_reaches_groups_before_their_parent_exits(shape):
+    """The cancel callback's TERM ends the shell, re-parenting what it started,
+    before retirement inspects the tree: both must still reach those groups."""
+    _require_escape_tools()
+    with _reap_owned_descendants() as children:
+        proc, pids = _spawn_escaped(shape)
+        children.extend(dict.fromkeys(pids))
+        try:
+            _signal_process_tree_termination(proc)
+            _kill_process_tree(proc)
+            assert proc.poll() is not None
+            assert [pid for pid in pids if _running(pid)] == []
+        finally:
+            _close_spawned(proc)
+
+
+@pytest.mark.parametrize('shape', sorted(ESCAPED))
+def test_reattached_retirement_reaches_groups_the_command_created(shape):
+    from lib.tasks_pkg.background_commands import _kill_record_tree, _pid_starttime
+    _require_escape_tools()
+    with _reap_owned_descendants() as children:
+        proc, pids = _spawn_escaped(shape)
+        children.extend(dict.fromkeys(pids))
+        record = {'pid': proc.pid, 'pgid': proc.pid, 'pid_starttime': _pid_starttime(proc.pid)}
+        try:
+            assert _kill_record_tree(record) is True
+            proc.wait(timeout=3)
+            assert [pid for pid in pids if _running(pid)] == []
+        finally:
+            _close_spawned(proc)
+
+
+def test_discovery_finds_created_groups_and_trusts_no_changed_leader(monkeypatch):
+    from lib.project_mod import process_group
+    _require_escape_tools()
+    with _reap_owned_descendants() as children:
+        proc, pids = _spawn_escaped('timeout')
+        children.extend(dict.fromkeys(pids))
+        try:
+            outer, _inner = pids
+            # timeout leads its new group; its child shares it; nothing else is ours.
+            assert process_group.escaped_descendant_groups(proc.pid, proc.pid) == [outer]
+            real = process_group.read_process_fields
+            births = iter([b'1', b'2'])
+
+            def changed_leader(pid):
+                fields = list(real(pid))
+                fields[19] = next(births)
+                return fields
+
+            monkeypatch.setattr(process_group, 'read_process_fields', changed_leader)
+            assert process_group.escaped_descendant_groups(proc.pid, proc.pid) == [], (
+                'a leader whose identity changed during discovery links no subtree')
+        finally:
+            _close_spawned(proc)
+
+
+def test_kill_tool_retires_what_a_background_command_started(monkeypatch, tmp_path):
+    """The ``kill`` tool on a handed-off background command reaches the group
+    that GNU ``timeout`` created, not only the command's own group."""
+    from lib import agent_inbox
+    from lib.tasks_pkg import background_commands
+    from lib.tasks_pkg.handlers import _background_command as background
+    _require_escape_tools()
+    monkeypatch.setattr(background, 'AUTO_BACKGROUND_AFTER_S', 0.05)
+    monkeypatch.setattr(background, '_queue_completion', lambda **_kwargs: True)
+    monkeypatch.setattr(background_commands, '_registry', {})
+    outer_file, inner_file = tmp_path / 'outer', tmp_path / 'inner'
+    command = (f"timeout 300 sh -c 'echo $$ > \"{inner_file}\"; exec sleep 300' & "
+               f'echo $! > "{outer_file}"; wait')
+    task = {'id': 'escaped-kill', 'convId': 'conv-escaped', '_userId': 7,
+            'aborted': False, 'toolRounds': []}
+    agent_inbox.reset_for_test()
+    try:
+        with _reap_owned_descendants() as children:
+            result = background.run_with_steer_handoff(
+                task=task, config={}, command=command,
+                execute=lambda command_task: tool_run_command(
+                    str(tmp_path), command, task=command_task))
+            command_id = result.split(background.BACKGROUND_COMMAND_MARKER, 1)[1]
+            command_id = command_id.split('.', 1)[0].strip()
+            # Readiness, never a host-speed deadline; the hang guard bounds a hang.
+            while not all(path.exists() and path.read_text().strip()
+                          for path in (outer_file, inner_file)):
+                time.sleep(0.02)
+            pids = [int(outer_file.read_text()), int(inner_file.read_text())]
+            children.extend(pids)
+            assert background_commands.kill_background_command(command_id, user_id=7) is True
+            settled = background_commands.check_background_command(
+                command_id, user_id=7, wait_s=30)
+            assert settled['status'] == 'completed'
+            assert '[Command aborted by user]' in settled['result']
+            assert [pid for pid in pids if _running(pid)] == [], (
+                'the kill tool left what the command started running')
+    finally:
+        agent_inbox.reset_for_test()

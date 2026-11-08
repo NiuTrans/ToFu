@@ -614,6 +614,84 @@ fn maximum_search_failure_backoff(states: &[SearchRetryState]) -> u64 {
     states.iter().map(|state| duration_milliseconds(state.delay)).max().unwrap_or(0)
 }
 
+/// Block stores whose published catalog location table the overlay poll has
+/// derived for a newly installed catalog, off the owning mutex
+/// (docs/TOFUDB_BLOCK_READ_PATH.md, "Published catalog location table"): the
+/// authority's and, once opened, the search index's. Weak, so the worker never
+/// extends a store past its engine; a dropped or reopened store is resolved
+/// again with one non-blocking attempt per poll.
+#[derive(Default)]
+struct CatalogLocationStores {
+    authority: std::sync::Weak<crate::block::BlockStore>,
+    search: std::sync::Weak<crate::block::BlockStore>,
+    /// The derivation in flight, on its own thread so overlay drain polls
+    /// never wait for it (seconds for the live 229M-block table). Joined
+    /// before the next one starts and when the worker exits.
+    derivation: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for CatalogLocationStores {
+    fn drop(&mut self) {
+        self.join_derivation();
+    }
+}
+
+impl CatalogLocationStores {
+    fn advance(
+        &mut self,
+        database: &Mutex<AuthorityDatabase>,
+        search_projection: Option<&Arc<Mutex<TurnSearchProjection>>>,
+    ) {
+        if self.authority.strong_count() == 0 {
+            if let Ok(guard) = database.try_lock() {
+                self.authority = Arc::downgrade(&guard.block_store_shared());
+            }
+        }
+        if let Some(projection) = search_projection {
+            if self.search.strong_count() == 0 {
+                if let Some(blocks) = projection.try_lock().ok().and_then(|guard| guard.block_store_shared()) {
+                    self.search = Arc::downgrade(&blocks);
+                }
+            }
+        }
+        if self.derivation.as_ref().is_some_and(|derivation| !derivation.is_finished()) {
+            return;
+        }
+        self.join_derivation();
+        let due: Vec<_> = [self.authority.upgrade(), self.search.upgrade()]
+            .into_iter()
+            .flatten()
+            .filter(|blocks| blocks.catalog_location_derivation_due())
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        // Reads keep the exact catalog path until a derivation succeeds; a
+        // refused spawn or a failed derivation is retried on a later poll.
+        self.derivation = std::thread::Builder::new()
+            .name("tofu-db-locations".to_owned())
+            .spawn(move || {
+                crate::fsync_stats::set_current_component(crate::fsync_stats::COMPONENT_MAINTENANCE);
+                for blocks in due {
+                    let _ = blocks.advance_catalog_locations();
+                }
+            })
+            .ok();
+    }
+
+    /// Joins a finished or running derivation; its panic resumes on this
+    /// worker, as it did when the worker derived inline.
+    fn join_derivation(&mut self) {
+        if let Some(derivation) = self.derivation.take() {
+            if let Err(panic) = derivation.join() {
+                if !std::thread::panicking() {
+                    std::panic::resume_unwind(panic);
+                }
+            }
+        }
+    }
+}
+
 fn run_worker(
     database: &Arc<Mutex<AuthorityDatabase>>,
     search_projection: Option<&Arc<Mutex<TurnSearchProjection>>>,
@@ -627,6 +705,7 @@ fn run_worker(
     // Exactly one bounded entry per admitted scope; dropped with this worker.
     let mut search_retries = vec![SearchRetryState::default(); shared.scopes.len()];
     let mut next_overlay_poll = Instant::now();
+    let mut catalog_location_stores = CatalogLocationStores::default();
     loop {
         enum Wake {
             OverlayPoll,
@@ -697,6 +776,7 @@ fn run_worker(
                         Backoff::Keep,
                     );
                 }
+                catalog_location_stores.advance(database, search_projection);
                 continue;
             }
             Wake::ScopeRound { index, scope } => (index, scope),
@@ -1368,6 +1448,82 @@ mod tests {
         drop(database);
         let reopened = AuthorityDatabase::open(directory.path()).unwrap();
         assert_eq!(reopened.read_block_for_test(id).unwrap(), payload);
+    }
+
+    /// Publishes a one-segment catalog in `database`, lets a whole-store pass
+    /// publish its location table, then installs a second catalog that adds a
+    /// segment holding `second-<seed>`: the published table is one behind.
+    fn stale_catalog_location_table(
+        database: &mut AuthorityDatabase,
+        seed: u128,
+    ) -> Arc<crate::block::BlockStore> {
+        use crate::block::BlockId;
+        use crate::payload_manifest::{PayloadManifest, PayloadSegmentReference};
+        let blocks = database.block_store_shared();
+        let store = blocks.payload_segment_store().unwrap();
+        let segment = |number: u128, payloads: &[Vec<u8>]| {
+            let payloads: std::collections::BTreeMap<BlockId, Vec<u8>> =
+                payloads.iter().map(|payload| (BlockId::for_payload(payload), payload.clone())).collect();
+            let created = store
+                .create(uuid::Uuid::from_u128(number), payloads.keys().copied().collect(), |id| {
+                    Ok(payloads[&id].clone())
+                })
+                .unwrap();
+            PayloadSegmentReference::new(created.metadata(), created.first_block_id(), created.last_block_id())
+                .unwrap()
+        };
+        let first = segment(seed, &[format!("first-a-{seed}").into_bytes(), format!("first-b-{seed}").into_bytes()]);
+        database.engine_mut_for_test()
+            .publish_payload_manifest_for_test(PayloadManifest::new(vec![first]).unwrap()).unwrap();
+        drop(blocks.traversal_reader(|| Ok(())).unwrap());
+        let second = segment(seed + 1, &[format!("second-{seed}").into_bytes()]);
+        database.engine_mut_for_test()
+            .publish_payload_manifest_for_test(PayloadManifest::new(vec![first, second]).unwrap()).unwrap();
+        assert_ne!(
+            blocks.published_catalog_locations_for_test().unwrap().0,
+            blocks.installed_catalog_publication_for_test(),
+            "fixture: the published table is one catalog behind"
+        );
+        blocks
+    }
+
+    /// docs/TOFUDB_BLOCK_READ_PATH.md, "Published catalog location table":
+    /// once a whole-store pass has published a table, the worker derives the
+    /// table of each catalog installed later, off the owning mutex, for the
+    /// authority and for the search index alike.
+    #[test]
+    fn worker_derives_the_published_location_tables_of_the_authority_and_the_search_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let authority_blocks = stale_catalog_location_table(&mut database, 1);
+        let projection_directory = tempfile::tempdir().unwrap();
+        let mut projection = TurnSearchProjection::initialize(projection_directory.path(), 1024 * 1024).unwrap();
+        let search_blocks = stale_catalog_location_table(projection.database_mut_for_test(), 3);
+        let database = Arc::new(Mutex::new(database));
+        let projection = Arc::new(Mutex::new(projection));
+        let scheduler = MaintenanceScheduler::start_with_search(
+            Arc::clone(&database),
+            Some(Arc::clone(&projection)),
+            vec![MaintenanceScope::new(7, 11).unwrap()],
+            MaintenanceSchedulerConfig::for_test(Duration::from_millis(10), 1),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        for blocks in [&authority_blocks, &search_blocks] {
+            while blocks.published_catalog_locations_for_test().unwrap().0
+                != blocks.installed_catalog_publication_for_test()
+            {
+                assert!(std::time::Instant::now() < deadline, "the worker never derived the installed catalog's table");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        scheduler.stop_and_join().unwrap();
+        for (blocks, seed) in [(&authority_blocks, 1), (&search_blocks, 3)] {
+            let (_, table) = blocks.published_catalog_locations_for_test().unwrap();
+            assert_eq!((table.located_blocks(), table.unindexed_segments()), (3, 0));
+            let second = format!("second-{seed}").into_bytes();
+            assert_eq!(blocks.get(crate::block::BlockId::for_payload(&second)).unwrap(), second);
+        }
     }
 
     #[test]

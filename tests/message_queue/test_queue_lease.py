@@ -365,14 +365,12 @@ def test_repeated_dispatch_failures_release_each_new_lease(
         conversation_id, user_id=USER_ID)]
 
 
-def test_already_queued_background_wake_restores_source_roots(conversation_factory, monkeypatch):
+def test_already_queued_background_wake_is_retired_without_a_turn(conversation_factory, monkeypatch):
+    """A stored wake row can name receipts another turn already consumed."""
     conv_id = conversation_factory()
     recorded = _stub_dispatch(monkeypatch)
-    original = {'model': 'test', 'projectPath': '/prior-task',
-                'canonicalProjectPath': '/project', 'readOnlyPaths': ['/prior-task/docs']}
     queue.enqueue_message(conv_id, {'text': 'review results', '_backgroundBatchWake': ['receipt']},
-                          original, kind=queue.KIND_WORKFLOW, user_id=USER_ID)
-    assert queue.dispatch_next_queued(conv_id, user_id=USER_ID)
-    assert recorded['commands'][0]['config'] == {
-        'model': 'test', 'projectPath': '/project', 'readOnlyPaths': ['/project/docs']}
-    assert original['projectPath'] == '/prior-task'
+                          {'model': 'test'}, kind=queue.KIND_WORKFLOW, user_id=USER_ID)
+    assert queue.dispatch_next_queued(conv_id, user_id=USER_ID) is None
+    assert recorded['commands'] == []
+    assert queue.get_queue(conv_id, user_id=USER_ID) == []

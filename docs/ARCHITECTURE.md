@@ -232,7 +232,8 @@ The delivery dependencies and completion evidence are:
    native TofuDB, including standalone replay, Flow phases, task checkpoints,
    cancellation drainage and batch rollback. An omitted proof
    cannot fall back to the legacy path. The common worker composition now
-   registers `conversation-attempt`; ordinary admission cutover remains below.
+   registers `conversation-attempt`; ordinary admission atomically binds and
+   enqueues that same kind.
 2. **Reconstructible invocation and effect authority.** Reconstruct the existing
    executor from accepted configuration and durable references. Carry principal,
    lineage, execution account and cancellation through the same kernel.
@@ -252,6 +253,10 @@ The delivery dependencies and completion evidence are:
    and requires its echoed admission. Lost-ACK retries revalidate Stop before
    granting execution; previously entered observations can still drain while
    the claim remains valid. No second lineage store or journal is added.
+   A detached Swarm keeps its spawning attempt's claim after that Turn settles:
+   the attempt's job releases the claim only when the session ends, and a
+   takeover resumes a session held at shutdown
+   ([task execution modes](TASK_EXECUTION_MODES.md)).
    The shared `ExecutionBudget` model dispatch boundary now revalidates the
    already-entered root through the same transaction after domain observers,
    before either Python or native transport may send. Rejected authority never
@@ -275,7 +280,7 @@ The delivery dependencies and completion evidence are:
 3. **Independent process lifetime and durable control.** Move real admission,
    Stop and execution to that owner. Stop for a durable binding now writes the
    job cancellation authority even without a local carrier; ordinary admission
-   still uses the current composition. API restart must leave executing work
+   now commits its WorkerJob without constructing an HTTP executor. API restart must leave executing work
    intact. Prove cross-process idle wake, cancellation and reconnect, then
    worker death and old-writer refusal. Existing in-process commit callbacks
    alone cannot wake a separate idle process. Startup recovery must respect
@@ -300,7 +305,8 @@ The delivery dependencies and completion evidence are:
    task workers, so API composition does not duplicate them. Manager execution
    composition now prepares and supervises the execution host, preserving it
    across API-only restarts. Host recovery shares the manager failure budget;
-   default admission and whole-system qualification remain the next boundary.
+   default admission now uses the common worker. Item 5 records the first
+   whole-system qualification.
 4. **Execution facts and read projections.** Keep committed execution facts and
    their accounting authoritative while projection/delivery can drain and
    reconstruct independently. Browser observation, reconnect and transcript
@@ -309,8 +315,15 @@ The delivery dependencies and completion evidence are:
    API activity now projects the existing WorkerJob active indexes and merges
    them with legacy local carriers at the existing task visibility owner.
    Restart protection and sidebar busy state therefore survive an absent API
-   carrier; storage read failures do not certify idle. Cross-process command
-   controls and browser wake delivery remain the next cutover dependencies.
+   carrier; storage read failures do not certify idle. Browser wake delivery now
+   uses one commit-owned conversation watch per API lifecycle on all backends,
+   sharing the worker watch's gap detection and cancellation owner. Scoped hints
+   wake canonical replay; gaps invalidate all subscriptions without a second
+   transcript or notification log. Private, incarnation-bound command controls
+   now route interrupt and exact-command background handoff to the existing
+   TaskRuntime owner. Missing acknowledgement cannot become successful handoff
+   or a queued interrupt for a later process. Listener teardown joins entered
+   callbacks before application shutdown; no additional task registry is added.
 5. **Whole-system qualification.** Drive Coordinator → conversation → nested
    invocations with equal requested work and complete outputs. Measure API
    responsiveness, completed work, provider/tool calls, retained bytes, storage
@@ -318,6 +331,18 @@ The delivery dependencies and completion evidence are:
    loss, delayed acknowledgements and slow readers while checking identical
    durable effects and costs. Only then claim capacity or enable distributed
    placement; the existing distributed preview gate remains in force.
+   `tests/server/test_execution_plane_qualification.py` (opt-in `slow`) is the
+   first equal-work run: eight public Goals (writer and reviewer Flow children,
+   one file publication each) through real HTTP, the SQL authority, file tools
+   and a loopback provider, once all-in-one and once with resident storage and
+   execution hosts. The split run kills the API while every Goal is blocked
+   mid-call, kills the execution host during another call and restarts storage.
+   Completed work, provider calls, single file effects, journal-recorded tokens
+   and fees and the empty active WorkerJob index must equal the all-in-one run;
+   the killed call settles interrupted with an unknown outcome and is never
+   replayed. Coordinator fan-out, the native TofuDB lane, delayed
+   acknowledgements, slow readers, replay lag and retained-byte budgets remain
+   unqualified, so capacity claims and distributed placement stay gated.
 
 **Alternatives considered:** continued local hot-path optimization alone cannot
 provide process isolation or restart continuity; immediately sharding Python

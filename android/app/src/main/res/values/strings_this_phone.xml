@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- "This phone": the LOCAL kernel's adapter, its card and the licences screen -->
+    <string name="kernel_state_stopping">Stopping…</string>
+    <string name="this_phone_not_arm64">This phone can\'t run Tofu itself: the local kernel needs a 64-bit ARM (arm64-v8a) device.</string>
+    <string name="this_phone_not_in_build">This build of the app doesn\'t include the local kernel.</string>
+    <string name="this_phone_not_in_foreground">Tofu can start on this phone only while the app is on screen. Open it and try again.</string>
+    <string name="this_phone_stopped_before_ready">Tofu stopped on this phone before it was ready.</string>
+    <string name="this_phone_health_check_failed">Tofu on this phone did not pass its health check (%1$s).</string>
+    <string name="this_phone_keep_running">Keep running in background</string>
+    <string name="this_phone_keep_running_desc">Otherwise it stops when you leave it with no task running and no schedule enabled.</string>
+    <string name="this_phone_stop">Stop</string>
+    <string name="this_phone_notifications_denied">Notifications are off: Tofu still runs on this phone, but its status and Stop won\'t appear in the notification shade. Stop it here instead.</string>
+    <string name="licences_open">Open-source licences</string>
+    <string name="licences_title">Open-source licences</string>
+    <string name="licences_close">Close</string>
+    <string name="licences_intro">This phone\'s kernel runs under proot, which this app includes together with talloc.</string>
+    <string name="licences_proot">proot: GPL-2.0-or-later, conveyed under GPL-3.0-or-later because libproot.so links talloc statically. Copyright STMicroelectronics and the PRoot and Termux contributors.</string>
+    <string name="licences_talloc">talloc, with its lib/replace objects: LGPL-3.0-or-later. Copyright Andrew Tridgell, Stefan Metzmacher, Jelmer Vernooij, Volker Lendecke and the other Samba contributors.</string>
+    <string name="licences_gpl3">The GNU General Public License version 3, which LGPL-3.0 section 4(b) requires next to it.</string>
+    <string name="licences_source_offer">Source offer. The complete corresponding source of libproot.so and libproot-loader.so is the proot and talloc source archives pinned by SHA-256 in android/native/pins.env, together with android/native/ (build-proot.sh, pins.env, talloc-cross-answers.txt and patches/) of the Tofu %1$s source this app was built from. They are published with each release of the app that contains these files.</string>
+</resources>

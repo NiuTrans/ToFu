@@ -32,6 +32,14 @@ OFFLINE_DRIVER_IMPORT_ALLOWLIST = {
 pytestmark = pytest.mark.unit
 
 
+def test_shipped_production_sources_pass_the_startup_boundary(tmp_path, monkeypatch):
+    from lib.storage import storage_boundary
+
+    monkeypatch.setattr(storage_boundary, '_boundary_cache_path',
+                        lambda: tmp_path / 'boundary-cache.json')
+    storage_boundary.require_exclusive_sidecar_boundary(ROOT)
+
+
 @pytest.mark.parametrize('indexed', [False, True])
 @pytest.mark.parametrize('lexical_prefilter', [False, True])
 def test_runtime_boundary_has_same_scope_with_or_without_git_and_rg(
@@ -152,16 +160,27 @@ def test_connect_methods_require_database_evidence(tmp_path, source, blocked):
         assert report['violation_count'] > 0
 
 
-def test_connect_policy_invalidates_cached_legacy_false_positive(tmp_path):
+@pytest.fixture
+def boundary_cache(tmp_path, monkeypatch):
+    """Give the test its own runtime base; return the boundary cache inside it."""
+    import runtime_path_policy
+
+    base = tmp_path / 'runtime'
+    monkeypatch.setattr(runtime_path_policy, '_startup_base', str(base))
+    return base / 'data' / '.tofu-storage-boundary-cache.json'
+
+
+def test_connect_policy_invalidates_cached_legacy_false_positive(
+        tmp_path, boundary_cache):
     from lib.storage.storage_boundary import boundary_report
 
     service = tmp_path / 'lib' / 'service.py'
     service.parent.mkdir(parents=True)
     service.write_text('transport.connect()\n', encoding='utf-8')
     stat = service.stat()
-    cache = tmp_path / 'data' / '.tofu-storage-boundary-cache.json'
-    cache.parent.mkdir()
-    cache.write_text(json.dumps({'version': 22, 'files': {
+    boundary_cache.parent.mkdir(parents=True)
+    boundary_cache.write_text(json.dumps({
+        'version': 22, 'root': str(tmp_path.resolve()), 'files': {
         'lib/service.py': {
             'signature': {'mtime_ns': stat.st_mtime_ns,
                           'ctime_ns': stat.st_ctime_ns, 'size': stat.st_size},
@@ -170,6 +189,40 @@ def test_connect_policy_invalidates_cached_legacy_false_positive(tmp_path):
         },
     }}), encoding='utf-8')
     assert boundary_report(tmp_path)['ready'] is True
+
+
+def test_boundary_cache_is_reused_only_for_the_root_that_wrote_it(
+        tmp_path, boundary_cache):
+    """One runtime data root can serve several source trees."""
+    from lib.storage import storage_boundary
+
+    roots = []
+    for name in ('payload-1', 'payload-2'):
+        service = tmp_path / name / 'lib' / 'service.py'
+        service.parent.mkdir(parents=True)
+        service.write_text('transport.connect()\n', encoding='utf-8')
+        roots.append(service.parents[1])
+    previous, current = roots
+    stat = (current / 'lib' / 'service.py').stat()
+    poisoned = {'lib/service.py': {
+        'signature': {'mtime_ns': stat.st_mtime_ns,
+                      'ctime_ns': stat.st_ctime_ns, 'size': stat.st_size},
+        'violations': [{'path': 'lib/service.py', 'line': 1,
+                        'capability': 'direct_connect'}],
+    }}
+    boundary_cache.parent.mkdir(parents=True)
+
+    def cache_written_for(root):
+        boundary_cache.write_text(json.dumps({
+            'version': storage_boundary._BOUNDARY_CACHE_VERSION,
+            'root': str(root.resolve()), 'files': poisoned,
+        }), encoding='utf-8')
+
+    cache_written_for(current)
+    assert storage_boundary.boundary_report(current)['ready'] is False, (
+        'precondition: a scan trusts the cache its own root wrote')
+    cache_written_for(previous)
+    assert storage_boundary.boundary_report(current)['ready'] is True
 
 
 def test_real_repo_passes_exclusive_sidecar_boundary():

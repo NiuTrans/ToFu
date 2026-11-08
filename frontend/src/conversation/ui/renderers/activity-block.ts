@@ -126,6 +126,119 @@ function compactionTriggerLabel(
   // Unknown historical triggers remain inspectable in the fold, not guessed.
 }
 
+const compactionFailureLabels: Readonly<Record<string, readonly [string, string]>> = {
+  summary_rate_limited: ['activity.compaction.failure.summary_rate_limited',
+    'The summary service is rate limited. Wait, then retry.'],
+  summary_provider_unavailable: ['activity.compaction.failure.summary_provider_unavailable',
+    'The summary service is temporarily unavailable. Try again later.'],
+  summary_permission_denied: ['activity.compaction.failure.summary_permission_denied',
+    'The summary request was not authorized. Check the connection permissions.'],
+  summary_route_unavailable: ['activity.compaction.failure.summary_route_unavailable',
+    'No authorized summary route is available. Check the summary model and Connections settings.'],
+  summary_route_revalidation_failed: ['activity.compaction.failure.summary_route_revalidation_failed',
+    'The summary route or settings changed. Check the summary model and Connections settings, then retry.'],
+  summary_incomplete: ['activity.compaction.failure.summary_incomplete',
+    'The summary response was incomplete and was not used. Retry or choose another summary model.'],
+  summary_empty: ['activity.compaction.failure.summary_empty',
+    'The summary response was empty and was not used. Retry or choose another summary model.'],
+  summary_cancelled: ['activity.compaction.failure.summary_cancelled',
+    'Summary generation was cancelled. Retry when you are ready.'],
+  summary_dispatch_failed: ['activity.compaction.failure.summary_dispatch_failed',
+    'The summary request failed. Check the diagnostics before retrying.'],
+  summary_credentials_unavailable: ['activity.compaction.failure.summary_credentials_unavailable',
+    'Summary credentials are unavailable. Check the selected connection and its login or credential source, then retry.'],
+};
+
+function compactionFailureCode(entry: TurnActivityEntry): string {
+  if (entry.summaryKey === 'activity.compaction.archiveFailed') return '';
+  const prefix = 'activity.compaction.failure.';
+  const candidates = [entry.detailArgs?.code, entry.detailArgs?.reasonKey,
+    entry.detailKey, entry.detail?.trim()];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const code = candidate.startsWith(prefix) ? candidate.slice(prefix.length) : candidate;
+    if (Object.prototype.hasOwnProperty.call(compactionFailureLabels, code)) return code;
+    if (code === 'summary_failed' || code === 'summary_pipeline_exception') {
+      return 'summary_dispatch_failed';
+    }
+  }
+  return entry.detailKey?.startsWith(prefix) ? 'summary_dispatch_failed' : '';
+}
+
+function recordedSummaryCount(value: unknown, minimum = 0): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum
+    ? value : undefined;
+}
+
+function compactionFailureDetail(
+  entry: TurnActivityEntry,
+  code: string,
+  ports: ClassicConversationRendererPorts,
+): string {
+  const [key, fallback] = compactionFailureLabels[code]!;
+  const reason = textFor(ports, key, fallback);
+  // Only an explicit dispatcher count is a request count. Selected routes,
+  // cost.calls and coalesced phase frames never supply one.
+  const attempts = recordedSummaryCount(entry.detailArgs?.attempts);
+  return attempts === undefined ? reason : `${reason} ${textFor(ports,
+    'activity.compaction.failure.attempts', 'Request attempts: {attempts}.', { attempts })}`;
+}
+
+function appendCompactionFailureFacts(
+  document: Document,
+  parent: HTMLElement,
+  entry: TurnActivityEntry,
+  code: string,
+  ports: ClassicConversationRendererPorts,
+): void {
+  if (!code) return;
+  const facts = document.createElement('div');
+  facts.className = 'activity-event__facts';
+  const limit = recordedSummaryCount(entry.detailArgs?.limit, 1);
+  facts.textContent = [
+    textFor(ports, 'activity.compaction.failure.code', 'Failure code: {code}', { code }),
+    limit === undefined ? '' : textFor(ports, 'activity.compaction.failure.limit',
+      'Recorded dispatcher attempt limit: {limit}', { limit }),
+  ].filter(Boolean).join(' · ');
+  parent.appendChild(facts);
+
+  const args = entry.detailArgs;
+  const models = args?.selectedModels;
+  const providers = args?.selectedProviders;
+  const statuses = args?.routeStatuses;
+  const ingress = args?.providerIngress;
+  const strings = (value: unknown): value is string[] => Array.isArray(value)
+    && value.every(item => typeof item === 'string' && item.length > 0);
+  const statusLabels: Readonly<Record<string, readonly [string, string]>> = {
+    failed: ['activity.compaction.failure.routeFailed', 'Failed'],
+    succeeded: ['activity.compaction.failure.routeSucceeded', 'Succeeded'],
+  };
+  const ingressLabels: Readonly<Record<string, readonly [string, string]>> = {
+    reached: ['activity.compaction.failure.providerReached', 'Provider reached'],
+    not_reached: ['activity.compaction.failure.providerNotReached', 'Provider not reached'],
+    unknown: ['activity.compaction.failure.providerUnknown', 'Provider contact not recorded'],
+  };
+  if (!strings(models) || !strings(providers) || !strings(statuses) || !strings(ingress)
+      || !models.length || [providers, statuses, ingress].some(values => values.length !== models.length)
+      || statuses.some(status => !Object.prototype.hasOwnProperty.call(statusLabels, status))
+      || ingress.some(value => !Object.prototype.hasOwnProperty.call(ingressLabels, value))
+      || statuses.some((status, index) => status === 'succeeded' && ingress[index] !== 'reached')) return;
+  models.forEach((model, index) => {
+    const status = statusLabels[statuses[index]!]!;
+    const reached = ingressLabels[ingress[index]!]!;
+    const route = document.createElement('div');
+    route.className = 'activity-event__facts';
+    // These are recorded route outcomes, not the OBSERVED model attribution
+    // above the fold. Even a failed route may never have reached a provider.
+    route.textContent = textFor(ports, 'activity.compaction.failure.route',
+      'Recorded summary route: {model} · {provider} · {status} · {ingress}', {
+        model, provider: providers[index]!, status: textFor(ports, status[0], status[1]),
+        ingress: textFor(ports, reached[0], reached[1]),
+      });
+    parent.appendChild(route);
+  });
+}
+
 function buildActivityEventRow(
   document: Document,
   entry: TurnActivityEntry,
@@ -139,6 +252,7 @@ function buildActivityEventRow(
   previousCompactionFailed?: boolean,
 ): HTMLElement {
   const isCompaction = ['context_compaction', 'compacting'].includes(entry.reasonCode ?? '');
+  const failureCode = isCompaction ? compactionFailureCode(entry) : '';
   const row = document.createElement(terminalError || isCompaction ? 'details' : 'div');
   row.className = `activity-event activity-event--${entry.kind} `
     + `activity-event--${entry.status} activity-event--${entry.severity}`
@@ -202,18 +316,6 @@ function buildActivityEventRow(
     );
     chips.appendChild(repeated);
   }
-  if (isCompaction && entry.archiveId) {
-    const inspect = document.createElement('button');
-    inspect.type = 'button';
-    inspect.className = 'activity-event__compaction-open';
-    inspect.dataset.conversationAction = 'open-compaction';
-    inspect.dataset.operation = entry.archiveId;
-    inspect.textContent = textFor(
-      ports, 'activity.compaction.snapshot', 'View snapshot',
-    );
-    // Inline beside the duration: the snapshot is one click, not a fold.
-    chips.appendChild(inspect);
-  }
   if (terminalError) {
     chips.appendChild(disclosureChevron(document, 'activity-event__chevron'));
   }
@@ -226,7 +328,7 @@ function buildActivityEventRow(
     if (tokenFlow) accounting.appendChild(tokenFlow);
     body.appendChild(accounting);
   }
-  if (entry.detail && !terminalError) {
+  if ((entry.detail || failureCode) && !terminalError) {
     const detail = document.createElement('div');
     detail.className = 'activity-event__detail';
     /* A nested reasonKey (route-switch cause) is itself an i18n key: resolve
@@ -252,11 +354,13 @@ function buildActivityEventRow(
           : {}),
       }
       : rawArgs;
-    detail.textContent = entry.detailKey
-      ? textFor(
-        ports, entry.detailKey, entry.detail,
-        activityInterpolationArgs(resolvedArgs),
-      ) : entry.detail;
+    detail.textContent = failureCode
+      ? compactionFailureDetail(entry, failureCode, ports)
+      : entry.detailKey
+        ? textFor(
+          ports, entry.detailKey, entry.detail ?? '',
+          activityInterpolationArgs(resolvedArgs),
+        ) : entry.detail ?? '';
     (quietCompaction && diagnostics ? diagnostics : body).appendChild(detail);
   }
   // The classified cause leads the raw evidence it was derived from: a gateway
@@ -312,8 +416,12 @@ function buildActivityEventRow(
   const modelFacts = isCompaction
     ? []
     : [modelNamedInSummary ? '' : entry.model, entry.providerId, entry.keyHint];
+  const statusCode = isCompaction
+    ? (Number.isInteger(entry.statusCode) && entry.statusCode! >= 100 && entry.statusCode! <= 599
+      ? entry.statusCode : undefined)
+    : entry.statusCode;
   const facts = [
-    causeFact, ...modelFacts, entry.statusCode ? `HTTP ${entry.statusCode}` : '',
+    causeFact, ...modelFacts, statusCode ? `HTTP ${statusCode}` : '',
     isCompaction ? '' : triggerFact, reasonFact,
   ].filter(Boolean);
   const appendFacts = (parent: HTMLElement): void => {
@@ -334,6 +442,7 @@ function buildActivityEventRow(
     parent.appendChild(factsNode);
   };
   if (diagnostics) {
+    appendCompactionFailureFacts(document, diagnostics, entry, failureCode, ports);
     // The fold is the diagnostic shelf: raw reason, internal trigger id and
     // routing facts. The main model is already visible in the turn header, so
     // repeating "Main model: X" here is noise, not evidence.
@@ -350,6 +459,17 @@ function buildActivityEventRow(
       route.className = 'activity-event__facts';
       route.textContent = routeFacts.join(' · ');
       diagnostics.appendChild(route);
+    }
+    // A real archive action belongs to the expanded body. Synthetic join
+    // identities in cold legacy rows must not become broken snapshot buttons.
+    if (entry.archiveId && !/^(?:summary-(?:failed|declined|aborted|cancelled|rejected):|failed:)/.test(entry.archiveId.trim())) {
+      const inspect = document.createElement('button');
+      inspect.type = 'button';
+      inspect.className = 'activity-event__compaction-open';
+      inspect.dataset.conversationAction = 'open-compaction';
+      inspect.dataset.operation = entry.archiveId;
+      inspect.textContent = textFor(ports, 'activity.compaction.snapshot', 'View snapshot');
+      diagnostics.appendChild(inspect);
     }
   }
   if (terminalError) {
@@ -397,13 +517,6 @@ function buildActivityEventRow(
     disclosure.append(marker, body);
     row.appendChild(disclosure);
     if (diagnostics?.childNodes.length) row.appendChild(diagnostics);
-    /* The snapshot button lives inside the summary's chip column; activating
-     * it must not also toggle the diagnostic fold. */
-    disclosure.addEventListener('click', (event) => {
-      if ((event.target as Element | null)?.closest('.activity-event__compaction-open')) {
-        event.preventDefault();
-      }
-    });
   } else {
     appendFacts(body);
     row.append(marker, body);
@@ -519,6 +632,11 @@ export function renderActivityEventBlock(
   const previousCompactionDetails = node.querySelector<HTMLDetailsElement>(
     '.activity-event__compaction-details',
   );
+  const previousSnapshot = previousCompactionDetails?.querySelector<HTMLButtonElement>(
+    '.activity-event__compaction-open',
+  );
+  const snapshotHadFocus = previousSnapshot === node.ownerDocument.activeElement
+    && previousSnapshot?.dataset.operation === block.value.archiveId;
   const previousEvidence = node.querySelector<HTMLDetailsElement>(
     '.activity-event__error-diagnostics',
   );
@@ -564,5 +682,7 @@ export function renderActivityEventBlock(
   }
   if (detailsHadFocus) {
     node.querySelector<HTMLElement>('.activity-event__compaction-details > summary')?.focus();
+  } else if (snapshotHadFocus) {
+    node.querySelector<HTMLButtonElement>('.activity-event__compaction-open')?.focus();
   }
 }

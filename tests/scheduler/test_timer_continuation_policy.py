@@ -29,6 +29,7 @@ from lib.scheduler._shared import (
 
 pytestmark = pytest.mark.unit
 
+OWNER = 7
 OPUS_REF = {'creator_id': 'anthropic', 'model_id': 'claude-opus-5.5'}
 
 # The stored settings of the reported conversation: the model name and the
@@ -40,8 +41,8 @@ STALE_SETTINGS = {
 
 CREATING_TURN_CONFIG = {
     'model': 'claude-opus-5.5', 'preset': 'claude-opus-5.5', 'modelRef': OPUS_REF,
-    'preferredProviderId': 'sankuai',
-    'routing': {'preferred_provider_id': 'sankuai'},
+    'preferredProviderId': 'example-corp',
+    'routing': {'preferred_provider_id': 'example-corp'},
     'thinkingDepth': 'max', 'thinkingEnabled': True,
     'maxTokens': 64000, 'temperature': 0.2,
     'systemPrompt': 'Answer in Chinese.', 'systemPromptMode': 'append',
@@ -61,7 +62,7 @@ CREATING_TURN_CONFIG = {
 # ── Conversation route and safety (every scheduled turn) ────────────────────
 
 def test_conversation_route_follows_model_ref_over_a_stale_name():
-    config = build_task_config({}, STALE_SETTINGS)
+    config = build_task_config({}, STALE_SETTINGS, owner=OWNER)
     assert config['model'] == config['preset'] == 'claude-opus-5.5'
     assert config['modelRef'] == OPUS_REF
     assert config['thinkingDepth'] == 'max'
@@ -69,7 +70,7 @@ def test_conversation_route_follows_model_ref_over_a_stale_name():
 
 
 def test_conversation_without_a_model_ref_keeps_its_model_name():
-    config = build_task_config({}, {'model': 'kimi-k3'})
+    config = build_task_config({}, {'model': 'kimi-k3'}, owner=OWNER)
     assert config['model'] == config['preset'] == 'kimi-k3'
     assert config['modelRef'] is None
     # No reasoning choice keeps the scheduler's historical thinking-on default.
@@ -77,7 +78,7 @@ def test_conversation_without_a_model_ref_keeps_its_model_name():
 
 
 def test_conversation_reasoning_off_is_respected():
-    config = build_task_config({}, {'model': 'kimi-k3', 'thinkingDepth': 'off'})
+    config = build_task_config({}, {'model': 'kimi-k3', 'thinkingDepth': 'off'}, owner=OWNER)
     assert config['thinkingEnabled'] is False
 
 
@@ -87,7 +88,7 @@ def test_scheduled_turn_keeps_the_conversations_safety_choices():
         'projectPaths': ['/proj', '/shared'], 'readOnlyPaths': ['/shared'],
         'humanGuidanceEnabled': True, 'desktopEnabled': True,
         'autopilotEnabled': True,
-    })
+    }, owner=OWNER)
     assert config['autoApply'] is False
     assert config['projectPaths'] == ['/proj', '/shared']
     assert config['readOnlyPaths'] == ['/shared']
@@ -97,12 +98,27 @@ def test_scheduled_turn_keeps_the_conversations_safety_choices():
         assert config[attended] is False, attended
 
 
-def test_scheduled_definition_never_selects_the_model():
+def test_scheduled_definition_never_selects_the_model(monkeypatch):
     """``schedule_create`` tools_config is model-authored: the agent runs on
     the target conversation's selection, never on a name the model wrote."""
-    assert build_task_config({'model': 'definition-model'}, STALE_SETTINGS)['model'] \
+    import lib
+    monkeypatch.setattr(lib, 'LLM_MODEL', 'owner-default-model')
+    assert build_task_config({'model': 'definition-model'}, STALE_SETTINGS, owner=OWNER)['model'] \
         == 'claude-opus-5.5'
-    assert build_task_config({'model': 'definition-model'}, {})['model'] == ''
+    # Without a conversation choice the owner's default model runs, as from a fresh composer.
+    config = build_task_config({'model': 'definition-model'}, {}, owner=OWNER)
+    assert config['model'] == config['preset'] == 'owner-default-model'
+
+
+def test_a_model_reference_alone_is_the_conversations_choice(monkeypatch):
+    """The owner default never pairs its name with a conversation's own reference;
+    task registration aligns the name to the reference's route."""
+    import lib
+    monkeypatch.setattr(lib, 'LLM_MODEL', 'owner-default-model')
+    reference = {'provider_id': 'provider-a', 'offering_id': 'offering-a'}
+    config = build_task_config({}, {'modelRef': reference}, owner=OWNER)
+    assert config['modelRef'] == reference
+    assert 'owner-default-model' not in (config['model'], config['preset'])
 
 
 def test_schedule_create_schema_does_not_advertise_a_model_key():

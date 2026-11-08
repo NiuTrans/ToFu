@@ -91,6 +91,28 @@ def task_outcome(task: dict) -> str:
     return 'failed'
 
 
+# A server restart pauses an attempt; the resumed attempt of the same workspace
+# task owns the outcome (docs/modules/project_integration.md, "Restart is not a
+# task outcome").
+RESTART_INTERRUPTED = 'interrupted'
+
+
+def workspace_outcome(task: dict) -> str:
+    """The workspace delivery outcome of one attempt, read from its abort cause.
+
+    The abort site stamps ``_abort_reason`` and the canonical verdict reads it:
+    ``server_shutdown`` is a SYSTEM_RECOVERY interruption. Restart recovery
+    marks a task result it found unsettled ``interrupted``. Neither is a Stop or
+    a failure. Project Brain work statuses keep using ``task_outcome``.
+    """
+    from lib.turn_verdict import TurnTerminationEvidence, derive_task_verdict
+
+    if (task.get('status') == 'interrupted'
+            or derive_task_verdict(task).evidence is TurnTerminationEvidence.SYSTEM_RECOVERY):
+        return RESTART_INTERRUPTED
+    return task_outcome(task)
+
+
 def _local_path(value) -> str:
     if not isinstance(value, str) or not value or value.startswith('remote:'):
         return ''
@@ -296,6 +318,20 @@ def _owner(task: dict) -> int:
     return int(task_user_id(task))
 
 
+WORKSPACE_WORK_ID_KEY = '_workspaceWorkId'
+
+
+def workspace_work_id(task: dict) -> str:
+    """The integration work id that keys this task's checkout registration.
+
+    Normally the physical task id. A project-dispatch Worker's checkout belongs
+    to its assignment: admission stamps the assignment's work id on every
+    physical attempt, so a resumed attempt continues the same checkout,
+    checkpoints and delivery receipt instead of creating another.
+    """
+    return str(task.get(WORKSPACE_WORK_ID_KEY) or task['id'])
+
+
 def _emit_workspace_preparing(task: dict) -> None:
     """Present expensive isolation only when it is actually about to happen."""
     if task.get('_workspacePreparing'):
@@ -326,7 +362,8 @@ def _binding(path: str, task: dict, *, create=False, cancel=None) -> dict | None
     # create_workspace registers its clean task-created checkout before tools
     # receive it. Otherwise only explicit existing registration is authority;
     # a linked cwd, even with task-stamped writes, cannot claim a dirty peer.
-    registered = find_workspace(source[1], str(task['id']), user_id=_owner(task))
+    work_id = workspace_work_id(task)
+    registered = find_workspace(source[1], work_id, user_id=_owner(task))
     if registered is None:
         if source[0] != source[1]:
             raise WorkspaceBindingError('Linked workspace was not registered')
@@ -351,10 +388,10 @@ def _binding(path: str, task: dict, *, create=False, cancel=None) -> dict | None
             return None
         from lib.integration_control import create_task_workspace
         _emit_workspace_preparing(task)
-        create_task_workspace(source[1], str(task['id']), user_id=_owner(task),
+        create_task_workspace(source[1], work_id, user_id=_owner(task),
             conversation_id=str(task.get('convId') or ''),
             title=str(task.get('lastUserQuery') or '')[:500], task=task)
-        registered = find_workspace(source[1], str(task['id']), user_id=_owner(task))
+        registered = find_workspace(source[1], work_id, user_id=_owner(task))
         if registered is None:
             raise WorkspaceBindingError('New workspace registration was not acknowledged')
     workspace = _local_path(registered.get('workspace_path'))
@@ -374,7 +411,7 @@ def _binding(path: str, task: dict, *, create=False, cancel=None) -> dict | None
     # through integration's linked-checkout adoption path.
     from lib.integration_control import bind_task_workspace
     result = bind_task_workspace(
-        source[1], str(task['id']), user_id=_owner(task),
+        source[1], work_id, user_id=_owner(task),
         conversation_id=str(task.get('convId') or ''),
         title=str(task.get('lastUserQuery') or '')[:500])
     if result is None:
@@ -410,9 +447,12 @@ def _binding(path: str, task: dict, *, create=False, cancel=None) -> dict | None
 
 def _persist(task: dict, row: dict) -> None:
     from lib.integration_state_repository import set_workspace_meta
+    # executorTaskId names the physical attempt now executing in the checkout;
+    # delivery recovery reads its verdict, never the assignment's work id.
     set_workspace_meta(
         user_id=_owner(task), project_root=row['canonicalRoot'],
-        task_id=str(task['id']), patch={'_workspaceDelivery': row}, now=time.time())
+        task_id=workspace_work_id(task),
+        patch={'_workspaceDelivery': row, 'executorTaskId': str(task['id'])}, now=time.time())
 
 
 def _remember(task: dict, rows: list[dict], *, errors=None) -> dict:
@@ -752,7 +792,7 @@ def _settle_task_workspaces(task: dict, project_path: str = '', project_paths=No
     if (task.get('_transientRuntime') or not task.get('id')
             or task.get('_workspaceDeliveryOwnershipRejected')):
         return None
-    outcome = task_outcome(task)
+    outcome = workspace_outcome(task)
     if task.get(acknowledgement_key) == outcome:
         return task.get('_workspaceDelivery')
     # Intent admission needs roots and explicit owner/task registrations.
@@ -789,7 +829,7 @@ def _settle_task_workspaces(task: dict, project_path: str = '', project_paths=No
             known[root] = row
             row.update(status='pending', outcome=outcome)
             result = settle_workspace(
-                row['canonicalRoot'], str(task['id']), user_id=_owner(task), outcome=outcome)
+                row['canonicalRoot'], workspace_work_id(task), user_id=_owner(task), outcome=outcome)
             if not isinstance(result, dict):
                 raise WorkspaceBindingError('Registered workspace settlement returned no receipt')
             result = result.get('delivery') or result

@@ -257,6 +257,16 @@ OpenCLI's useful browser mechanisms are internalized here, not invoked through a
 
 ## Runtime flow
 
+### Bridge owner across the API/execution split
+
+Problem: the managed personal composition runs an `api` host (terminates extension polls) and a resident `execution` host (runs tools and context composition). The queue/registry in `lib/browser/queue/_state.py` is process-local, so the execution host always saw zero clients: the model was told no extension was connected while Settings showed it connected, and commands would have been queued where no extension polls.
+
+Decision: the API host remains the single bridge owner. At background-service start it publishes a private loopback relay (`lib/browser/bridge_relay.py`, record `<project>/data/browser-bridge-relay.json`, mode 0600, per-incarnation bearer token, removed on stop); the execution host selects it, and the worker-facing verbs in `lib/browser/queue/_owner.py` (`get_connected_clients`, `is_extension_connected`, `client_owner_user_id`, `get_credit_hub_quota`, `wait_for_connected_clients`, `send_browser_command`) plus `protocol.client_protocol` forward to it. Role `all` keeps the in-process owner. One connection per call; caller EOF cancels the owner-side wait, withdrawing the queued command exactly like a local Stop. A missing or unreachable owner yields `browser_extension_status_unknown` evidence and a command error, never a replay.
+
+Alternatives considered: moving the registry into the execution host would require the API to forward every poll and every panel read the other way; a durable shared registry would turn transient liveness into stored state.
+
+Verification: `tests/browser/test_browser_bridge_relay.py` drives a real separate owner process (availability, owner scoping, protocol snapshot, command round trip), token refusal, missing owner, cancellation withdrawal and role selection. The desktop agent bridge (`lib/desktop/bridge.py`) has the same process-local registry and is not yet relayed.
+
 ### Agent connection failures
 
 Problem: an extension may disconnect after tool discovery or environment composition. Plain-text connection errors were then settled as successful `browser_list_tabs` calls, including inside a child agent's `execute_tools` batch.
@@ -349,7 +359,7 @@ Verification: `test_browser_v2_surface.py` pins automation-only seeding, the `li
 
 ### Interactive-element collection
 
-`browser_read_page(mode="elements")`, text= click/fill resolution and `browser_fill_form` all share one collector, the extension's `_getInteractiveElements`. Three bounded passes run per call: (1) semantic interactives (`a/button/input/select/role=…/[onclick]/…`), (2) a cursor:pointer sweep for listener-at-root SPA cards, and (3) a custom-control sweep for component libraries (Meituan MTD, Element-UI, Ant Design) that hide the real `<input>` (`display:none`/0×0) behind a styled wrapper — the sweep surfaces the *visible wrapper* of hidden radio/checkbox inputs (role + label text + checked state + the hidden input as the action target), combobox/select triggers, and any currently-open dropdown options, so CDP trusted clicks and text= resolution can reach controls the first two passes structurally miss. Each pass is independently budgeted; the result carries `pointerSweep`/`customControlSweep` counters.
+`browser_read_page(mode="elements")`, text= click/fill resolution and `browser_fill_form` all share one collector, the extension's `_getInteractiveElements`. Three bounded passes run per call: (1) semantic interactives (`a/button/input/select/role=…/[onclick]/…`), (2) a cursor:pointer sweep for listener-at-root SPA cards, and (3) a custom-control sweep for component libraries (YourProvider MTD, Element-UI, Ant Design) that hide the real `<input>` (`display:none`/0×0) behind a styled wrapper — the sweep surfaces the *visible wrapper* of hidden radio/checkbox inputs (role + label text + checked state + the hidden input as the action target), combobox/select triggers, and any currently-open dropdown options, so CDP trusted clicks and text= resolution can reach controls the first two passes structurally miss. Each pass is independently budgeted; the result carries `pointerSweep`/`customControlSweep` counters.
 
 ## Access policy
 

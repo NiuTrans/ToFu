@@ -369,15 +369,35 @@ capacity cycling could reopen deterministic rejected pairs. Opaque provider
 messages could also obscure the structured code behind clipping/token-limit
 heuristics. **Decision:** exact structured `error.code` selects
 `InvalidEncryptedContentError(RequestScopedError)` before text/status heuristics
-across HTTP, nonstreaming, SSE and WebSocket. The existing public `bad_request`
+across HTTP, nonstreaming, SSE and WebSocket. Gateways that re-wrap provider
+errors (`{"type":"error","error":{"type":"<nil>","message":...}}`) drop
+the code; a code-less `error.message` that starts with OpenAI's fixed sentence
+`The encrypted content for item <id> could not be verified.` is the same
+rejection (`invalid_encrypted_content_error_object`). Before this, that shape
+was an untyped 400 that interrupted sub-agents. The existing public `bad_request`
 envelope remains nonretryable. Retain fixed code, a bounded structural input
 path label and actual failure stage; unrecognized/arbitrary `param` strings are
 omitted rather than clipped. This prevents opaque echoes and misleading
 parameter text from reaching diagnostics or token-limit learning/retry
 heuristics. Do not attach ciphertext/provider-message bodies to that exception.
 The exception stops the dispatch and task fallback with one neutral reservation
-release, unchanged history and completed-tool evidence, and no
-model/key health penalty. Unknown usage retains the existing accounting fence.
+release and no model/key health penalty. Unknown usage retains the existing
+accounting fence.
+
+**Same-model reasoning-state recovery (owner request 2026-11-07).** Binding
+failover to the minting Deployment cannot guarantee decryptability: one
+Deployment can be served by several upstream accounts/regions, and sub-agent
+rounds repeatedly hit the rejection. The round owner
+(`llm_fallback._recovery.recover_rejected_encrypted_state`) therefore retires
+encrypted `reasoning` items from the live messages
+(`responses_replay.retire_rejected_reasoning_state`, which also drops the now
+stale order witness and, once no ciphertext remains, the origin marker),
+rebuilds the same-model request and retries once. Reasoning is optional
+stateless input; the model re-reasons. The rejection proves the request never
+ran, so no completed tool repeats. `compaction` ciphertext is never dropped (it
+stands in for history the transcript no longer holds): a request whose only
+encrypted state is compaction, or a second rejection, still surfaces the typed
+error without model fallback.
 
 Ordinary payload `BadRequestError` releases its reservation without a key-health
 penalty and durably excludes the rejecting provider endpoint plus wire model
@@ -396,13 +416,13 @@ distinct rotation contracts. A new dispatch starts fresh; this is not a
 global blacklist or proof that reminted route handles share cryptographic
 identity.
 
-**Alternatives rejected:** repeated unchanged encrypted requests, automatic
-ciphertext stripping, compaction-item deletion, generic cross-model rescue and
-completed-tool reexecution are not recovery. Matching local digests do not prove
-provider decryptability, account binding or ciphertext lifetime. This fail-stop
-policy assumes an unchanged rejection is deterministic; replace it only with a
-provider-validated, authority/accounting-bound recovery protocol—not an elapsed
-retry window. Specs: `tests/llm/test_invalid_encrypted_content.py`,
+**Alternatives rejected:** repeated unchanged encrypted requests (the rejection
+is deterministic), compaction-item deletion (silent context loss), generic
+cross-model rescue and completed-tool reexecution are not recovery. Fail-stop
+on every rejection was the earlier policy; it turned an account-routing
+accident into an interrupted turn even though dropping optional reasoning is
+lossless for the transcript. Free-text substring matching stays rejected: only
+the anchored provider sentence with no competing code counts. Specs: `tests/llm/test_invalid_encrypted_content.py`,
 `tests/llm_dispatch/test_dispatch_invalid_encrypted_content.py` and first-error,
 usage, cancellation and recorded-root-loop neighbors. The dedicated
 `tests/llm/test_invalid_encrypted_turn.py` drives the real root invocation,
@@ -450,8 +470,8 @@ in-memory, expires and is recorded at pick time, so the failing failover pick
 itself rebinds it. A credential-plus-Deployment binding forbids the credential
 rotation the incident proved safe. Binding by logical model is the behavior
 that failed. A marker records origin; it does not prove the ciphertext is
-still decryptable there, so `invalid_encrypted_content` keeps its fail-stop
-policy. Specs: `tests/llm/test_responses_state_origin.py`,
+still decryptable there, so `invalid_encrypted_content` still runs the
+reasoning-state recovery above. Specs: `tests/llm/test_responses_state_origin.py`,
 `tests/llm_dispatch/test_dispatch_state_binding.py` and
 `tests/llm_errors/test_classifier_vendor_transient.py`.
 
@@ -571,6 +591,59 @@ Python dispatch `generation_options`/canonical-body boundary. Specs:
 
 **Problem:** omitting `strict` in Chat Completions means non-strict function calling, while Responses attempts schema normalization into strict mode. That can change the meaning of optional fields, including mutually exclusive message targets. **Decision:** the Chat-to-Responses adapter emits `strict: false` when the canonical function omits it; explicit booleans and parameter schemas remain unchanged. This is protocol-default preservation, shared by Codex and compatible Responses routes. **Alternatives rejected:** relying on provider defaults changes the contract; making every optional argument nullable would require changing execution semantics across all tools; weakening explicitly strict tools loses authored guarantees. Regressions exercise actual protocol conversion and both message target forms. See the [official function-calling contract](https://developers.openai.com/api/docs/guides/function-calling#strict-mode).
 
+### Tool-call ID wire contracts
+
+**Problem:** persisted history keeps every correlation ID it was given (a
+route's native IDs, the labels a model picks for `execute_tools` children,
+IDs the dispatcher reissues for recycled calls) and replays them to whichever
+provider serves a later round. The adapters forwarded them verbatim, so one
+ID the destination rejects failed every later request of the conversation:
+Anthropic answers HTTP 400 `messages.N.content.K.tool_use.id: String should
+match pattern '^[a-zA-Z0-9_-]+$'`. On 2026-11-05/06 a checkpoint resume
+replayed reissued children such as `c1#r104#44079377`, and a coordinator that
+fell back from gpt-6.1-sol to Claude replayed kimi-k3's own
+`watchdog_snapshot:90`. The other wires have the same class of limit: Chat
+Completions caps `tool_calls[].id` at
+[40 characters](https://community.openai.com/t/what-does-the-openai-id-string-limit-mean/1341548),
+Responses caps `call_id` at
+[64](https://github.com/earendil-works/pi/issues/1022) (the Codex backend
+emits longer ones itself), and Mistral accepts
+[exactly nine `[a-zA-Z0-9]`](https://github.com/karthink/gptel/issues/1203).
+
+**Decision:** `lib/llm/tool_call_ids.py` owns these contracts.
+`tool_call_id_contract(protocol, logical_model)` takes the protocol's
+reference contract (Messages pattern, Chat 40, Responses 64); a Claude model
+behind a Chat or Responses gateway also gets the Messages pattern, since the
+gateway translates to Messages, and the Mistral family gets Mistral's format
+on any protocol. `openai_body_to_anthropic`, `openai_body_to_responses` and
+`openai_body_to_chat` ask `wire_tool_call_ids` for the spelling of exactly
+the IDs that contract rejects and apply that one map to calls, results and
+native Messages `tool_use` blocks. A rejected ID becomes its sanitized,
+length-bounded stem, `_`, and a 9-character base62 SHA-256 digest of the
+original (the digest alone for Mistral; nine is Mistral's fixed width). The
+spelling depends only on the original ID, so a growing conversation keeps its
+wire prefix and a call and its result always agree; a check against every
+other ID of the request, native protocol state included, keeps wire IDs
+unique. Valid IDs reach the wire byte-identical and stored history is never
+rewritten, so an already-poisoned conversation succeeds on its next request.
+The dispatcher reissues IDs through `portable_tool_call_id`
+(`{stem}_r{round}_{hex8}`, within `[a-zA-Z0-9_-]{1,40}`), valid under every
+contract except Mistral's fixed format, which its adapter covers.
+
+**Alternatives rejected:** rewriting persisted IDs (destroys evidence and
+still needs per-destination limits); one portable spelling on every wire
+(renames IDs a destination accepts, such as Kimi's colon IDs on Chat routes,
+and re-bills their prompt-cache prefix for nothing); keying only on the model
+family (an unrecognized Claude alias or a strict Messages-compatible proxy
+stays exposed); stem-only sanitization (`a:1` and `a.1` collide with a real
+`a_1`, and resolving that from request contents moves earlier spellings when
+later IDs arrive); hiding uncovered `execute_tools` children from replay
+(changes model-visible history). Kimi's Messages face accepts its own colon
+IDs, but the Messages contract still respells them there; each affected
+conversation re-bills its prefix once. Spec:
+`tests/llm/test_tool_call_id_contracts.py`, including the 29f784e8 row shapes
+through the real replay projection, `build_body` and the Messages adapter.
+
 ## Request flow
 1. Parse a structured native ModelRef or resolve one compatible string with explicit Creator/Provider hints; ambiguity is an error. 2. Read the owner-scoped v2 aggregate, hard-filter visible access switches, authorization, capability, context, protocol, budget, stale/pending, and health state, then bind the bounded ordered candidates as request-owned slots. 3. Build the provider-neutral request body once; root rounds retain a positive full-prompt admission count as an internal-only sidecar for upstream accounting and cache-settle classification; every provider wire strips it. Final selected-slot hard-window admission always recounts messages/system/tools locally after adaptation, using content-digest tokenizer caches (the bounded shared cache plus, for a task round's body, that task's own `RequestTextCounts` through its provider view) rather than trusting that integer or a same-model reuse hint; tool schemas are re-encoded from content (see *Round token counting* below). The first exact wire-schema digest is reused only while the model and every ordered schema object remain identical. Per-slot adaptation and wire preparation never write the canonical history: each helper returns an adapted copy of only the messages, blocks and tools it changes, so every family reuses the canonical list and caller-byte immutability is the enforced boundary. A VLM-to-text fallback projects only that derived copy: one bounded marker replaces all images in each image-bearing message at their first image position, adjacent captions/references/tool results/prior assistant descriptions remain, pixels are declared unseen, and the durable multimodal history is unchanged. Final transport diagnostics derive semantic, whole-message-byte, and field-byte fingerprints in one shared history traversal; canonical field normalization emits the temporary tool alignment key in the same message scan, takes standard strings/text blocks directly while routing images and unknown shapes through the generic normalizer, and both raw-byte views hash the sealed request's per-message and per-field compact-JSON slices, so the history is not serialized again; a sealed `"cache_control":` key marks the uncommon item that is stripped and serialized (field by field, compact) for those views, as are malformed items and standalone callers. Primitive fields use byte-identical direct encoding, complex fields share a stateless configured stdlib encoder, and tool arguments use sorted orjson canonicalization. Message-sized values use process-local keyed integers, canonical rows retain only their alignment key plus field map, and stable-format hoisted/static/routing digests remain separate while standalone diagnostic APIs retain identical outputs. 4. Provider-boundary translation is followed by `lib/llm/request.py` sealing a request-lifetime immutable `AdmittedRequest`; Claude translated/cloaked text is recounted before sealing. Ingress detaches count-bearing input by rebuilding its containers around shared immutable leaves and computes the semantic identity before counting; sealing encodes each wire field once, the provider-prefix identity hashes those sealed slices, and transport diagnostics read the request-owned projection instead of decoding the payload. Transports consume detached envelopes or sealed bytes; scalar lookups use immutable metadata, complex lookups decode only their field. Fixed-size semantic and provider-prefix identities extend existing diagnostics, not provider cache-key claims. Responses WebSocket reuses the connection but sends full requests with explicit previous-response reset until incremental state equivalence is proven. 5. Execute with bounded connect policy and a 300s default rolling stream-idle window; every SSE/WS event renews it, so it is not a total request wall clock.
 6. Normalize stream events and terminal usage into the internal vocabulary.
@@ -592,7 +665,7 @@ Conversation-to-key affinity across failover and re-mints — Problem: Anthropic
 
 Root invocation route binding — Problem: `execute_invocation` runs every invocation in a copy of its caller's context, and `bind_provider_and_affinity` set the provider pin only when the task carried `_pinned_provider_id`. A root without its own route group therefore dispatched under whatever pin its caller still held: a retired request group confined it to slots that no longer exist (`no_slot`), and a live foreign group would have routed it through another request's credentials. Production pins are scoped, so the defect was latent until a test left a pin on its worker thread. The conversation affinity was already root-owned (`isolated_conv_affinity` plus the unconditional rebind). Decision: a root binds exactly its own route, its `_pinned_provider_id` or no pin; a child without its own group keeps its parent's pin, so it fails closed inside the parent's authority. Alternatives rejected: clearing every inherited pin, children included (a child could leave its parent's group for the configured pool); a second reset in `execute_invocation` (duplicates the binding owner; no dispatch precedes the binding). Specs: `tests/llm/test_upstream_turn_replay.py::test_root_invocation_dispatches_outside_a_route_left_on_its_caller` (the real invocation inside `provider_pin('retired-request-route-group')`; `no_slot` before the fix), `tests/llm_dispatch/test_lib_orchestrator_provider_binding_wire_parity.py`.
 
-Fallback wire-byte stability — Problem: `_llm_call_with_fallback` rebuilt the fallback body via `build_body(...)` and dispatched it without the shared `preflight_wire_tool_body` boundary. `build_body` returns the canonical tool catalog verbatim; the provider-specific projection (Kimi MFJS root-`anyOf`/`oneOf` relaxation, GPT root relaxation) lives only at that boundary, which the normal round path always runs. A refusal opus→kimi emitted raw canonical schemas (e.g. `write_file` root `oneOf`) while every native kimi round emits MFJS, so the fallback round's hoisted `tools` bytes diverged inside the kimi cache namespace and re-billed the whole prefix on the NEXT kimi round (10-25 18:25, conv mvl5wxpj, rids 7f0c4531/52b1c908: `PREFIX MUTATION BREAK` 33024/30976 cache_write tokens, `first_changed_idx=-1`). Decision: a rebuilt configured-fallback or refusal switch-back body attaches the round's request metadata through `llm_fallback/_request_metadata.attach_rebuilt_request_metadata`: the round's stable identity (raw-archive context retargeted to the destination model) plus the task's tool authority/visibility from the ordinary `attach_tool_request_metadata` owner. The shared final projection (`project_tool_wire`, ending in `preflight_wire_tool_body`) then sends exactly the tools of an ordinary round on the destination model; without that metadata it skipped Tool Search, PTC and multi-agent resolution (the raw stable wire list instead of the deferred projection), and a missing `_conv_id` changed the Responses `prompt_cache_key`. Attempt latches and compiled reasoning of the source request never transfer; failover still changes model+key namespace intentionally (a real failover IS a namespace switch). Alternatives rejected: normalizing inside `build_body` (it is model-agnostic and must not assume a wire dialect); reusing the primary's projected tools (the fallback model's dialect differs); a separate preflight of the rebuilt body (it lacks Tool Search/orchestration authority, so it cannot match the ordinary projection); copying the source body's private keys wholesale (carries attempt latches and route state). The same metadata helper covers reactive overflow retries; destination builds retain the original thinking depth and the task-owned, owner-bound image preparation state. Specs: `tests/tasks_pkg/test_model_refusal_fallback.py::test_fallback_wire_tools_match_native_model_round` (the refusal path's dispatched fallback body through the final projection versus an ordinary round on the fallback model), `tests/tasks_pkg/test_fallback_wire_parity.py` and `tests/tasks_pkg/test_fallback_request_metadata.py`. Provider occurrences follow the [execution policy](../contracts/TOOL_EXECUTION_POLICY.md): distinct positions survive equal arguments and recycled IDs; stream-slot retransmission remains assembly-owned. Signature counting/collapse is retired in Python and native providers, so it cannot interrupt terminal usage or remove actions. No new pool/cache replaces the removed per-attempt signature maps. A Python 3.12 local probe (128 distinct calls, 1 KiB text each, 25 warmed samples) measured median accumulation/finalization at 5.73 ms before and 1.26 ms after removal; a separate traced sample retained 234,427 versus 216,267 bytes (peaks 238,562 versus 220,274). This is parser-only evidence, not network/tool execution latency. Specs: `test_tool_call_flood_admission.py`, Responses translation and native `tool_policy`/`tool_assembly`.
+Fallback wire-byte stability — Problem: `_llm_call_with_fallback` rebuilt the fallback body via `build_body(...)` and dispatched it without the shared `preflight_wire_tool_body` boundary. `build_body` returns the canonical tool catalog verbatim; the provider-specific projection (Kimi MFJS root-`anyOf`/`oneOf` relaxation, GPT root relaxation) lives only at that boundary, which the normal round path always runs. A refusal opus→kimi emitted raw canonical schemas (e.g. `write_file` root `oneOf`) while every native kimi round emits MFJS, so the fallback round's hoisted `tools` bytes diverged inside the kimi cache namespace and re-billed the whole prefix on the NEXT kimi round (10-25 18:25, conv mvl5wxpj, rids 7f0c4531/52b1c908: `PREFIX MUTATION BREAK` 33024/30976 cache_write tokens, `first_changed_idx=-1`). Decision: a rebuilt configured-fallback body attaches the round's request metadata through `llm_fallback/_request_metadata.attach_rebuilt_request_metadata`: the round's stable identity (raw-archive context retargeted to the destination model) plus the task's tool authority/visibility from the ordinary `attach_tool_request_metadata` owner. The shared final projection (`project_tool_wire`, ending in `preflight_wire_tool_body`) then sends exactly the tools of an ordinary round on the destination model; without that metadata it skipped Tool Search, PTC and multi-agent resolution (the raw stable wire list instead of the deferred projection), and a missing `_conv_id` changed the Responses `prompt_cache_key`. Attempt latches and compiled reasoning of the source request never transfer; failover still changes model+key namespace intentionally (a real failover IS a namespace switch). Alternatives rejected: normalizing inside `build_body` (it is model-agnostic and must not assume a wire dialect); reusing the primary's projected tools (the fallback model's dialect differs); a separate preflight of the rebuilt body (it lacks Tool Search/orchestration authority, so it cannot match the ordinary projection); copying the source body's private keys wholesale (carries attempt latches and route state). The same metadata helper covers reactive overflow retries; destination builds retain the original thinking depth and the task-owned, owner-bound image preparation state. Specs: `tests/tasks_pkg/test_model_refusal_fallback.py::test_fallback_wire_tools_match_native_model_round` (the refusal path's dispatched fallback body through the final projection versus an ordinary round on the fallback model), `tests/tasks_pkg/test_fallback_wire_parity.py` and `tests/tasks_pkg/test_fallback_request_metadata.py`. Provider occurrences follow the [execution policy](../contracts/TOOL_EXECUTION_POLICY.md): distinct positions survive equal arguments and recycled IDs; stream-slot retransmission remains assembly-owned. Signature counting/collapse is retired in Python and native providers, so it cannot interrupt terminal usage or remove actions. No new pool/cache replaces the removed per-attempt signature maps. A Python 3.12 local probe (128 distinct calls, 1 KiB text each, 25 warmed samples) measured median accumulation/finalization at 5.73 ms before and 1.26 ms after removal; a separate traced sample retained 234,427 versus 216,267 bytes (peaks 238,562 versus 220,274). This is parser-only evidence, not network/tool execution latency. Specs: `test_tool_call_flood_admission.py`, Responses translation and native `tool_policy`/`tool_assembly`.
 
 ## Declared inference profiles
 
@@ -905,7 +978,7 @@ Claude image limits (`lib/llm/body/_images.py`, facts from https://platform.clau
 ```bash
 pytest -q tests/llm/test_reasoning_contract_compiler.py tests/tasks_pkg/test_reasoning_retry_lifecycle.py tests/llm/test_inference_local_dispatch_errors.py
 pytest -q tests/model_routing/test_route_inference_contract.py tests/llm_dispatch/test_discovery_inference_profiles.py tests/model_routing/test_model_reasoning_controls.py
-pytest -q tests/llm/test_protocol_conversion_checked.py tests/llm/test_protocol_conversion_contract.py
+pytest -q tests/llm/test_protocol_conversion_checked.py tests/llm/test_protocol_conversion_contract.py tests/llm/test_tool_call_id_contracts.py
 pytest -q tests/llm/test_reasoning_controls_app_browser.py tests/application_shell_fragments/test_thinking_depth_slider_browser.py
 pytest -q tests/sse/test_sse_framer.py tests/sse/test_sse_core_parity.py tests/sse/test_sse_terminal_boundary.py tests/sse/test_sse_terminal_cleanup.py \
   tests/sse/test_sse_diagnostic_payload.py tests/llm/test_anthropic_reasoning_effort.py

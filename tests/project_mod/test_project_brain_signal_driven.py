@@ -568,44 +568,69 @@ def test_project_context_is_final_user_meta_and_system_bytes_do_not_change():
     assert '<system-reminder>' not in body
 
 
+def _git_checkouts(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A repository whose two linked worktrees play two conversations' checkouts."""
+    import os
+    import subprocess
+
+    def git(cwd, *args):
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith('GIT_')}
+        subprocess.run(['git', '-C', str(cwd), *args], env=env, check=True,
+                       capture_output=True, timeout=60)
+
+    main = tmp_path / 'main'
+    main.mkdir()
+    git(main, 'init', '-q', '-b', 'trunk')
+    git(main, 'config', 'user.name', 'Writer')
+    git(main, 'config', 'user.email', 'writer@example.invalid')
+    (main / 'README.md').write_text('base\n')
+    git(main, 'add', '-A')
+    git(main, 'commit', '-qm', 'base')
+    left, right = tmp_path / 'left', tmp_path / 'right'
+    git(main, 'worktree', 'add', '-q', '-b', 'left', str(left))
+    git(main, 'worktree', 'add', '-q', '-b', 'right', str(right))
+    return main, left, right
+
+
 def test_overlap_advice_is_next_round_only_bounded_and_never_persisted(
-        chat_sidecar, monkeypatch):
+        chat_sidecar, monkeypatch, tmp_path):
     del chat_sidecar
     import lib.agent_inbox as agent_inbox
     import lib.conversations.project_brain as brain
     import lib.swarm.integration as swarm_integration
-    from lib.tasks_pkg.manager.runtime import chat_task_runtime
     from lib.tasks_pkg.orchestrator._swarm_inbox import drain_and_inject_inbox
 
-    project = _project('overlap')
+    _main, left_root, right_root = _git_checkouts(tmp_path)
     left = _task('task-left-' + uuid.uuid4().hex, 'conv-left')
     right = _task('task-right-' + uuid.uuid4().hex, 'conv-right')
-    for task in (left, right):
+    for task, root in ((left, left_root), (right, right_root)):
         task['status'] = 'running'
-        task['config']['projectPath'] = project
-    monkeypatch.setattr(chat_task_runtime, 'snapshot', lambda: [left, right])
+        task['config']['projectPath'] = str(root)
     pushes = []
     monkeypatch.setattr(brain, '_push_project_hint',
                         lambda _path, _owner, payload: pushes.append(payload))
 
+    # Different checkouts, unlanded edits of the same files: the overlap lasts
+    # as long as the edits stay unlanded, not only while both tasks run.
     for index in range(25):
         path = f'src/overlap-{index}.py'
-        brain.note_file_signal(
-            left, project, fn_name='write_file', fn_args={'path': path},
-            tool_content='ok')
-        brain.note_file_signal(
-            right, project, fn_name='write_file', fn_args={'path': path},
-            tool_content='ok')
+        for task, root in ((left, left_root), (right, right_root)):
+            (root / 'src').mkdir(exist_ok=True)
+            (root / path).write_text(f'{task["convId"]} {index}\n')
+            brain.note_file_signal(
+                task, str(root), fn_name='write_file', fn_args={'path': path},
+                tool_content='ok')
 
-    assert len(left['_projectOverlapAdvisories']) == 20
+    assert '_projectOverlapAdvisories' not in left
     assert len(right['_projectOverlapAdvisories']) == 20
-    assert len(left['_projectOverlapKeys']) == 20
+    assert len(right['_projectOverlapKeys']) == 20
     assert any(item['type'] == 'path_overlap' for item in pushes)
-    # Repeating the same task-pair/path signal cannot expand the bounded set.
+    # Repeating the same write cannot expand the bounded set.
     brain.note_file_signal(
-        right, project, fn_name='write_file',
+        right, str(right_root), fn_name='write_file',
         fn_args={'path': 'src/overlap-0.py'}, tool_content='ok')
-    assert len(left['_projectOverlapAdvisories']) == 20
+    assert len(right['_projectOverlapAdvisories']) == 20
 
     monkeypatch.setattr(agent_inbox, 'drain', lambda *_args, **_kwargs: [])
     monkeypatch.setattr(swarm_integration, 'swarm_key_for',
@@ -615,20 +640,28 @@ def test_overlap_advice_is_next_round_only_bounded_and_never_persisted(
         {'role': 'user', 'content': 'request'},
     ]
     drain_and_inject_inbox(
-        task=left, messages=messages, round_num=1, tid='left')
+        task=right, messages=messages, round_num=1, tid='right')
     assert messages[0] == {'role': 'system', 'content': 'stable-prefix'}
     assert messages[-1]['role'] == 'user'
-    assert '[Project overlap advisory]' in messages[-1]['content']
-    assert '_projectOverlapAdvisories' not in left
+    assert ('[Concurrent change] conversation conv-left also has unlanded changes'
+            in str(messages[-1]['content']))
+    assert '_projectOverlapAdvisories' not in right
+    # The earlier writer receives the mirror notice at its own next boundary.
+    left_messages = [{'role': 'system', 'content': 'stable-prefix'},
+                     {'role': 'user', 'content': 'request'}]
+    drain_and_inject_inbox(
+        task=left, messages=left_messages, round_num=1, tid='left')
+    assert ('[Concurrent change] conversation conv-right started changing'
+            in str(left_messages[-1]['content']))
 
     right['content'] = 'done'
-    brain.settle_work_item(right, project)
+    brain.settle_work_item(right, str(right_root))
     assert '_projectOverlapAdvisories' not in right
-    assert brain.feed_projection(project, user_id=1)['events'][0][
+    assert brain.feed_projection(str(right_root), user_id=1)['events'][0][
         'kind'] == 'work_result'
     assert not any(item['kind'] == 'path_overlap'
                    for item in brain.feed_projection(
-                       project, user_id=1)['events'])
+                       str(right_root), user_id=1)['events'])
 
 
 def test_checker_versions_gate_charter_and_failure_only_adds_narrative(

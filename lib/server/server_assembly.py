@@ -17,6 +17,8 @@ _server_log = None
 _DEPLOYMENT_CONFIGURATION = None
 
 _PROJECT_ROOT = None
+# Wall-clock epoch at which this process began booting (server.py _BOOT_T0).
+_BOOT_STARTED_AT = None
 
 # Readiness-critical storage steps must ride out a storage sidecar restart.
 # Observed 2026-09-23: one ~13s liveness recycle window failed boot phase 4
@@ -57,17 +59,18 @@ _start_log_aggregate_runtime_after_recovery = None
 
 
 def inject_runtime(*, boot, server_log, deployment_configuration,
-                   tofu_do_mlock, project_root,
+                   tofu_do_mlock, project_root, boot_started_at,
                    start_log_aggregate_runtime_after_recovery):
     """Bind server-owned globals so the moved steps keep their old behaviour."""
     global _boot, _server_log, _DEPLOYMENT_CONFIGURATION
-    global _tofu_do_mlock, _PROJECT_ROOT
+    global _tofu_do_mlock, _PROJECT_ROOT, _BOOT_STARTED_AT
     global _start_log_aggregate_runtime_after_recovery
     _boot = boot
     _server_log = server_log
     _DEPLOYMENT_CONFIGURATION = deployment_configuration
     _tofu_do_mlock = tofu_do_mlock
     _PROJECT_ROOT = project_root
+    _BOOT_STARTED_AT = boot_started_at
     _start_log_aggregate_runtime_after_recovery = (
         start_log_aggregate_runtime_after_recovery)
 
@@ -385,10 +388,15 @@ def _init_database():
     )
     # Durable settlement is not optional enrichment: do not sleep on a
     # protocol fault or publish readiness after silently abandoning orphans.
+    # Only Attempts created before this process began booting can be left
+    # over: the manager starts this host before the API host it pairs with,
+    # and every later Attempt is live in some process of this generation.
+    restart_scope_ms = int(_BOOT_STARTED_AT * 1000)
     recovery_result = _run_readiness_critical_storage_step(
         'task and turn recovery',
         lambda: recover_stale_tasks_on_startup(
-            prev_shutdown=previous_shutdown),
+            prev_shutdown=previous_shutdown,
+            created_before_ms=restart_scope_ms),
     )
     # Publish the just-settled conversation list as a boot-scoped hint so the
     # browser can offer batch resume. A failed recovery (None) keeps the old

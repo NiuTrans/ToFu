@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import logging
 import os
+import sys
 import time
 import threading
 from collections.abc import Callable
@@ -775,6 +776,11 @@ def register_production_lifecycle(
 
     async def _startup() -> None:
         state['status'] = 'starting'
+        # A previous lifecycle in this process may have closed turn admission
+        # at its shutdown quiesce. An unloaded registry was never closed.
+        task_registry = sys.modules.get('lib.tasks_pkg.manager._registry')
+        if task_registry is not None:
+            task_registry.reopen_task_admission()
         try:
             # Only frontend validation holds the listener. Storage ownership
             # is still proven before acquisition, in the background runner;

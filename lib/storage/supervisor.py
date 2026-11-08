@@ -903,13 +903,13 @@ def _resolve_tofudb_binary() -> str:
     The bundled path is what lets a pre-built release package run tofu-db
     with no toolchain and no extra install step.
     """
-    from serverctl_pkg.native_engine import EnginePreparationError
+    from serverctl_pkg.native_engine import EngineAdmissionRefusedError
     override = os.environ.get('TOFUDB_BIN', '').strip()
     if override:
         resolved = _executable(Path(override).expanduser())
         if resolved:
             return _verify_tofudb_binary(resolved)
-        raise EnginePreparationError('TOFUDB_BIN must name an executable tofu-db binary')
+        raise EngineAdmissionRefusedError('TOFUDB_BIN must name an executable tofu-db binary')
     for bundled in _bundled_tofudb_candidates():
         resolved = _executable(bundled)
         if resolved:
@@ -922,7 +922,7 @@ def _resolve_tofudb_binary() -> str:
     installed = shutil.which(_tofudb_binary_name())
     if installed:
         return _verify_tofudb_binary(installed)
-    raise EnginePreparationError('TOFUDB_BIN must name an executable tofu-db binary')
+    raise EngineAdmissionRefusedError('TOFUDB_BIN must name an executable tofu-db binary')
 
 
 def _tofudb_scope_ids() -> tuple[int, int | None]:
@@ -2812,7 +2812,20 @@ class StorageSupervisor:
                 logger.warning('Storage stop step=child_exit state=timeout pid=%s elapsed_s=%.3f; killing child',
                                process.pid, time.monotonic() - child_started)
                 process.kill()
-                process.wait(timeout=3)
+                try:
+                    process.wait(timeout=_LIVENESS_KILL_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    # SIGKILL is the terminal backstop, not a new exception:
+                    # a child that cannot be reaped (uninterruptible I/O on a
+                    # network volume) leaves the caller with no better action,
+                    # and aborting here would lose the resident host's
+                    # terminal record. The OS still owns the process and the
+                    # storage authority lease keeps the next generation
+                    # fenced until it actually exits.
+                    logger.critical(
+                        'Storage stop step=child_exit state=unreapable pid=%s '
+                        'elapsed_s=%.3f; leaving the unreapable child to the OS',
+                        process.pid, time.monotonic() - child_started)
             logger.info('Storage stop step=child_exit pid=%s exit_code=%s elapsed_s=%.3f',
                         process.pid, process.poll(), time.monotonic() - child_started)
         self._close_owner_channel(process)

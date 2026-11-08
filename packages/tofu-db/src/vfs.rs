@@ -116,6 +116,67 @@ pub trait VfsPositionedReader: Send + Sync {
     fn read_exact_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()>;
 }
 
+/// A read-only file many threads read at once: positioned reads on one shared
+/// descriptor where the VFS offers them (`open_positioned_reader`), otherwise
+/// one ordinary handle behind its own mutex, for VFSes whose handles keep
+/// mutable read state. History sources and payload-segment read handles share
+/// it, so concurrent readers of one file never open a second descriptor.
+pub(crate) enum SharedReadFile {
+    Positioned(Arc<dyn VfsPositionedReader>),
+    Cursor(Mutex<Box<dyn VfsFile>>),
+}
+
+impl SharedReadFile {
+    pub(crate) fn open(vfs: &dyn Vfs, path: &Path) -> io::Result<Self> {
+        Ok(match vfs.open_positioned_reader(path)? {
+            Some(file) => Self::Positioned(file),
+            None => Self::Cursor(Mutex::new(vfs.open(path, OpenRequest { read: true, ..OpenRequest::default() })?)),
+        })
+    }
+
+    pub(crate) fn len(&self) -> io::Result<u64> {
+        match self {
+            Self::Positioned(file) => file.len(),
+            Self::Cursor(file) => Self::cursor(file)?.len(),
+        }
+    }
+
+    pub(crate) fn read_exact_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+        match self {
+            Self::Positioned(file) => file.read_exact_at(offset, bytes),
+            Self::Cursor(file) => Self::cursor(file)?.read_exact_at(offset, bytes),
+        }
+    }
+
+    /// `read_exact_at` timing a cursor handle's lock wait as `wait_stage` and
+    /// the read itself as `read_stage` (diagnostic stage timers).
+    pub(crate) fn read_exact_at_staged(
+        &self,
+        offset: u64,
+        bytes: &mut [u8],
+        wait_stage: usize,
+        read_stage: usize,
+    ) -> io::Result<()> {
+        match self {
+            Self::Positioned(file) => {
+                let _read = crate::fsync_stats::StageTimer::diagnostic(read_stage);
+                file.read_exact_at(offset, bytes)
+            }
+            Self::Cursor(file) => {
+                let waiting = crate::fsync_stats::StageTimer::diagnostic(wait_stage);
+                let mut file = Self::cursor(file)?;
+                drop(waiting);
+                let _read = crate::fsync_stats::StageTimer::diagnostic(read_stage);
+                file.read_exact_at(offset, bytes)
+            }
+        }
+    }
+
+    fn cursor(file: &Mutex<Box<dyn VfsFile>>) -> io::Result<MutexGuard<'_, Box<dyn VfsFile>>> {
+        file.lock().map_err(|_| io::Error::other("shared read file lock poisoned"))
+    }
+}
+
 /// Persists file data across one sync call that reports success without
 /// reaching stable storage. Explicit sync errors still fail immediately.
 pub(crate) fn sync_data_barrier(file: &mut dyn VfsFile) -> io::Result<()> {

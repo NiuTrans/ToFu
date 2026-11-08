@@ -81,7 +81,8 @@ function closeSettings(): void {
   for (const name of [
     '_destroyPrivateHosts', '_destroyBrowserAccess',
     '_destroyDevicesTab',
-    '_destroySpeechTab', '_destroyCatpawSettings', '_destroyCredentialsVault', '_destroyAuthSources',
+    '_destroySpeechTab', '_destroyCatpawSettings', '_destroySubscriptionPlans',
+    '_destroyCredentialsVault', '_destroyAuthSources',
     '_destroyKnowledgeTab',
     '_destroyModelCatalogPanel',
 

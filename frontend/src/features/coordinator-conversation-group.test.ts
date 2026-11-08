@@ -9,7 +9,7 @@ function fixture() {
   const host = document.createElement('div');
   document.body.replaceChildren(host);
   const readPage = vi.fn(async (cursor?: string) => ({
-    conversations: [{ conversationId: 'worker-old', title: 'Older work', turnCount: 1, coordinatorId: 'coordinator-1', createdAt: 1, updatedAt: 5 }],
+    conversations: [{ conversationId: 'worker-old', title: 'Older work', turnCount: 1, coordinatorId: 'coordinator-1', folderId: null, createdAt: 1, updatedAt: 5 }],
     nextCursor: null, coverage: 'complete' as const,
   }));
   const rows: CoordinatorConversationRow[] = [
@@ -83,7 +83,7 @@ it('shows no group or count until it has a member to list', async () => {
   const root = host.querySelector<HTMLElement>('.coordinator-conversations')!;
   expect(readPage).toHaveBeenCalledOnce();
   expect(root.hidden).toBe(true);
-  settle({ conversations: [{ conversationId: 'worker-1', title: 'Work', turnCount: 1, coordinatorId: 'coordinator-1' }],
+  settle({ conversations: [{ conversationId: 'worker-1', title: 'Work', turnCount: 1, coordinatorId: 'coordinator-1', folderId: null }],
     nextCursor: null, coverage: 'complete' });
   await vi.waitFor(() => expect(root.hidden).toBe(false));
   expect(root.querySelector('.coordinator-conversations-count')?.textContent).toBe('1');
@@ -121,7 +121,7 @@ it('discovers legacy members from the roster when the catalog has no provenance 
   const rows: CoordinatorConversationRow[] = [];
   const readPage = vi.fn(async () => ({
     conversations: [{ conversationId: 'legacy-worker', title: 'Legacy work', turnCount: 1,
-      coordinatorId: 'coordinator-1', createdAt: 1, updatedAt: 2 }],
+      coordinatorId: 'coordinator-1', folderId: null, createdAt: 1, updatedAt: 2 }],
     nextCursor: null, coverage: 'complete' as const,
   }));
   const groups = createCoordinatorConversationGroups({
@@ -152,7 +152,7 @@ it('retries a failed roster discovery on the next catalog refresh', async () => 
     .mockRejectedValueOnce(new Error('temporary history contention'))
     .mockResolvedValue({
       conversations: [{ conversationId: 'legacy-worker', title: 'Legacy work', turnCount: 1,
-        coordinatorId: 'coordinator-1', createdAt: 1, updatedAt: 2 }],
+        coordinatorId: 'coordinator-1', folderId: null, createdAt: 1, updatedAt: 2 }],
       nextCursor: null, coverage: 'complete' as const,
     });
   const groups = createCoordinatorConversationGroups({
@@ -184,7 +184,7 @@ it('loads a known Coordinator group before any Worker is in the local catalog', 
     pinned: () => [{ id: 'coordinator-1', path: '/project', host }], historySettled: () => true, projectPath: () => '',
     listHost: document.createElement('div'),
     rows: () => rows,
-    readPage: vi.fn(async () => ({ conversations: [{ conversationId: 'worker-cold', title: 'Cold worker', turnCount: 1, coordinatorId: 'coordinator-1' }], nextCursor: null, coverage: 'complete' as const })),
+    readPage: vi.fn(async () => ({ conversations: [{ conversationId: 'worker-cold', title: 'Cold worker', turnCount: 1, coordinatorId: 'coordinator-1', folderId: null }], nextCursor: null, coverage: 'complete' as const })),
     adoptPage: page => { for (const row of page.conversations) rows.push({ id: row.conversationId, title: row.title, _coordinatorSource: row.coordinatorId }); },
     open: vi.fn(), renderRow: row => `<div class="conv-item" data-conv-id="${row.id}">${row.title}</div>`, activeConversationId: () => '',
   });

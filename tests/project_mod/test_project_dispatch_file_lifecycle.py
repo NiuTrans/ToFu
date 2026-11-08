@@ -289,3 +289,108 @@ def test_file_worker_in_a_repository_subdirectory_fails_binding_before_any_model
     assert state.find_workspace(str(plain), 'automatic', user_id=owner) is None
     assert f.repository.read(row['id'])['modelAttempts'] == []
     assert not (plain / '.git').exists() and not (plain / 'AGENTS.md').exists()
+
+
+@pytest.mark.parametrize('predecessor', ['interrupted_by_restart', 'failed_before_entry'])
+def test_successor_continues_the_assignment_checkout_as_its_own_task(context, repo, monkeypatch, predecessor):
+    """Every durable-worker attempt is its own task; the assignment's checkout and ledger continue."""
+    from lib.project_mod import delivery
+    from lib.tasks_pkg.workspace_delivery import bind_worker_workspace, settle_task_workspaces
+    from lib.tasks_pkg.executor._execute import _execute_tool_one
+    from lib.agent_core.execution_budget import model_budget_admission
+    f = file_context(context, repo, monkeypatch)
+    # A restart restores ordinals into uncapped tool accounts only (a finite cap refuses).
+    f.request['profile'].pop('maxToolCalls')
+    row = f.repository.authorize(f.request, f.principal, 'resumed-file-command')
+    trusted = admission.TrustedDispatch(f.repository.admission(row['id']))
+    trusted.bind_execution('worker-turn', 'worker-attempt')
+    work_id = 'project-worker:' + row['id']
+    attempts = {'worker-attempt': {**f.attempt, 'taskId': 'conversation-attempt:worker-attempt'}}
+    f.repository.attempt_get = lambda attempt_id, **kw: deepcopy(attempts.get(attempt_id))
+    monkeypatch.setattr('lib.tasks_pkg.manager.append_event', lambda _task, _event: True)
+
+    def carrier(attempt_id, resume=None, operation='continue'):
+        cfg = trusted.capture({}, f.owner, trusted.principal, 'recipient')
+        cfg.update(_turnOwnerUserId=f.owner, _turnId='worker-turn', _attemptId=attempt_id)
+        if resume is not None:
+            cfg.update(_turnOperation=operation, _resumeSource=resume)
+        task = {'id': attempts[attempt_id]['taskId'], 'convId': 'recipient', 'config': cfg,
+            'status': 'running', 'messages': [], 'usage': {}, 'toolRounds': [], 'events': [],
+            '_userId': f.owner, '_principalContext': trusted.principal.to_payload(), '_attended': False,
+            '_turnId': 'worker-turn', '_attemptId': attempt_id, 'abort_event': threading.Event()}
+        admission.bind_account(task)
+        bind_worker_workspace(task)
+        lease = model_budget_admission(task)(input_tokens=4, max_output_tokens=6)
+        lease.mark_dispatched(); lease.settle({'prompt_tokens': 4, 'completion_tokens': 6})
+        return task, lease.ordinal
+
+    def write(task, call_id, content):
+        arguments = {'path': 'allowed/result.txt', 'content': content}
+        entry = {'name': 'write_file', 'query': 'Write the authorized result', 'arguments': arguments}
+        result = _execute_tool_one(task, {}, 'write_file', call_id, arguments, 0, entry,
+                                   task['config'], task['config']['projectPath'], True)
+        assert 'Error:' not in str(result[1]), result
+
+    first_task = attempts['worker-attempt']['taskId']
+    if predecessor == 'interrupted_by_restart':
+        first, first_ordinal = carrier('worker-attempt')
+        work = Path(first['config']['projectPath'])
+        assert work != f.root and admission.owned_workspace(first)['task_id'] == work_id
+        write(first, 'before-restart', 'draft from the first attempt\n')
+        # A restart interrupts the first attempt; its checkout waits for the resumed one.
+        first['status'] = 'interrupted'
+        attempts['worker-attempt']['status'] = 'interrupted'
+        settle_task_workspaces(first)
+        resume = {'attemptId': 'worker-attempt', 'taskId': first_task, 'status': 'interrupted',
+                  'cause': 'server_restart'}
+    else:
+        # The registration failure of 2026-11-07: the attempt settled failed before entry.
+        attempts['worker-attempt']['status'] = 'failed'
+        resume = {'attemptId': 'worker-attempt', 'taskId': first_task, 'status': 'failed',
+                  'cause': 'task_start_failed'}
+
+    attempts['resumed-attempt'] = {**attempts['worker-attempt'], 'attemptId': 'resumed-attempt',
+                                   'taskId': '', 'status': 'pending'}
+    f.repository.continue_execution(row['id'], f.repository.read(row['id'])['execution'],
+                                    'worker-turn', 'resumed-attempt')
+    attempts['resumed-attempt'].update(taskId='conversation-attempt:resumed-attempt', status='running')
+    second, second_ordinal = carrier('resumed-attempt', resume=resume,
+        operation='continue' if predecessor == 'interrupted_by_restart' else 'regenerate')
+    assert second['id'] != first_task and admission.owned_workspace(second)['task_id'] == work_id
+    ledger_before = f.repository.read(row['id'])
+    if predecessor == 'interrupted_by_restart':
+        assert Path(second['config']['projectPath']) == work
+        assert (work/'allowed/result.txt').read_text() == 'draft from the first attempt\n'
+        expected_models, expected_tools = [1, 2], [(1, 'before-restart'), (2, 'after-restart')]
+    else:
+        assert ledger_before.get('toolAttempts', []) == []
+        expected_models, expected_tools = [1], [(1, 'after-restart')]
+    write(second, 'after-restart', 'finished by the resumed attempt\n')
+    ledger = f.repository.read(row['id'])
+    assert second_ordinal == expected_models[-1]
+    assert [(item['root_task_id'], item['attempt_ordinal']) for item in ledger['modelAttempts']] == [
+        (work_id, ordinal) for ordinal in expected_models]
+    assert [(item['root_task_id'], item['tool_ordinal'], item['tool_call_id'])
+            for item in ledger['toolAttempts']] == [(work_id, *tool) for tool in expected_tools]
+
+    attempts['resumed-attempt']['status'] = 'completed'
+    f.output.update(projectionRevision=2, projection={'content': 'Files ready for review'})
+    second.update(status='done', finishReason='stop')
+    settle_task_workspaces(second)
+    delivery.resume_pending_workspace_deliveries()
+    registered = state.get_workspace(str(f.root), work_id, user_id=f.owner)
+    held = registered['origin']['delivery']
+    assert held['state'] == 'blocked' and registered['origin']['executorTaskId'] == second['id']
+    assert state.find_workspace(str(f.root), second['id'], user_id=f.owner) is None
+    service = ProjectDispatchService(f.repository, commands=SimpleNamespace(), turn_get=f.turns,
+        attempt_get=f.repository.attempt_get, workspace_get=state.find_workspace,
+        publication_lock=lambda root: nullcontext(), publication_wake=lambda: None)
+    service.review(row['id'], principal=f.principal, decision='accept', note='Checked bytes',
+                   result_revision=2, expected_revision=1)
+    service.publish(row['id'], principal=f.principal, expected_revision=1,
+                    result_revision=2, expected_checkpoint_sha=held['checkpointSha'])
+    delivery.resume_pending_workspace_deliveries()
+    final = service.view(row['id'], principal=f.principal)
+    assert final['canonicalDelivery'] is True and final['delivery']['taskId'] == work_id
+    assert final['execution']['taskId'] == second['id']
+    assert (f.root/'allowed/result.txt').read_text() == 'finished by the resumed attempt\n'

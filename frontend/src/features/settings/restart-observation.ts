@@ -26,6 +26,18 @@ export function projectRestartHealth(payload: unknown, previousBootId: string | 
   return { kind: 'ready', info };
 }
 
+export type RestartWaitNotice = 'unreachable' | 'slow' | null;
+
+/** Elapsed time only warns; it never settles a restart. Unreachability counts
+ * from the last answer of any process, so a long preparation while the old
+ * server keeps answering is not reported as an outage. Nothing can relay a
+ * failure once no process answers, so that notice names the host check. */
+export function restartWaitNotice(waitingForS: number, unreachableForS: number, slowAfterS: number): RestartWaitNotice {
+  if (unreachableForS > slowAfterS) return 'unreachable';
+  if (waitingForS > slowAfterS) return 'slow';
+  return null;
+}
+
 /** A running phase advances only through completed predecessors. */
 export function restartPhaseProgress(boot: RestartBoot): { pct: number; key: string } | null {
   const phase = boot.currentPhase;

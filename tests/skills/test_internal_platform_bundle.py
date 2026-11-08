@@ -10,7 +10,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
-BUNDLE = ROOT / 'bundles/meituan/skills'
+BUNDLE = ROOT / 'bundles/yourprovider/skills'
 
 
 def test_internal_source_manifest_is_complete_and_non_executable_by_default():
@@ -42,7 +42,7 @@ def test_internal_source_is_scanned_but_never_exported_publicly():
     assert str(BUNDLE) in scanned
     for relative in json.loads((BUNDLE / 'manifest.json').read_text())['files']:
         name = Path(relative).name
-        path = 'bundles/meituan/skills/' + relative
+        path = 'bundles/yourprovider/skills/' + relative
         assert _should_exclude(path, name, 'opensource') is not None
         assert _should_exclude(path, name, 'internal') is None
         assert _should_exclude(path, name, 'personal') is None

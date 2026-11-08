@@ -813,16 +813,23 @@ async def _conversation_change_frames(
     catch_up: list[str] | None = [] if catch_up_budget else None
     catch_up_bytes = 0
     catch_up_head: int | None = None
+    needs_read = True
     while not subscription.closed:
         try:
-            page = await asyncio.to_thread(
-                _service.changes,
-                conversation_id,
-                user_id,
-                after_sequence=sequence,
-                limit=500,
-                **diagnostic_options,
-            )
+            if needs_read:
+                page = await asyncio.to_thread(
+                    _service.changes,
+                    conversation_id,
+                    user_id,
+                    after_sequence=sequence,
+                    limit=500,
+                    **diagnostic_options,
+                )
+            else:
+                # The authority watch owns commit/gap detection. A heartbeat
+                # timeout carries liveness only; it cannot require another
+                # identical replay read for every connected observer.
+                page = {}
         except StorageError as exc:
             if (not exc.retryable
                     and exc.code not in _DEGRADABLE_READ_FAILURES):
@@ -933,7 +940,7 @@ async def _conversation_change_frames(
             yield encoded
             heartbeat_at = time.monotonic() + heartbeat_interval
 
-        await subscription.wait(
+        needs_read = await subscription.wait(
             max(0.0, heartbeat_at - time.monotonic())
         )
 

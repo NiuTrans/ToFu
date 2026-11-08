@@ -73,6 +73,11 @@ keeps working byte-identically. The import path is unchanged.
   * :mod:`._build`   — the 15 built-in ``_build_*`` builders + ``_register_builtins``.
   * :mod:`._plugins` — entry-point discovery + allow-list resolution.
 
+``assemble_tool_list`` also gates every ``ToolSpec.environment_requirements_by_name``
+declaration against :mod:`lib.tools.environment_capabilities`, the
+environment-capability snapshot (git, Node.js, a browser, device reachability)
+that owns the actionable refusals for withheld tools.
+
 **Import-time side-effect (single-home + populate-on-import):** at the bottom
 of this module ``_register_builtins()`` then ``discover_plugin_specs()`` run
 exactly once — the same behaviour the monolith had — so ``all_specs()`` /

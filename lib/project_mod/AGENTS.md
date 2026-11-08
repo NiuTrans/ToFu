@@ -79,7 +79,11 @@ kernel child lists and scans `/proc` only on a kernel without them, so never add
 a per-caller whole-host scan ("Command stdin sensor discovery" in
 `docs/RESOURCE_CONTROL.md`; verify `tests/tasks_pkg/test_run_command_stdin_probe.py`).
 Leader exit is not group quiescence; cancellation must
-await inherited descriptor closure. Retirement never replaces a command's
+await inherited descriptor closure. Stop, deadlines, the `kill` tool and the
+cancel callback also retire groups that still-linked descendants created
+(`timeout`, `setsid`): `escaped_descendant_groups` finds them before any signal
+("Groups a command's descendants created retire with it" in
+`docs/runbooks/GIT_WORKSPACE_GUARD.md`). Retirement never replaces a command's
 decided result: `run_command` stops what a finished command left in its group
 and turns an unconfirmed retirement into a typed warning that keeps the record
 ("A finished command's result survives its group's retirement" in
@@ -184,11 +188,40 @@ intercepted by the tool pipeline. Classification stays pure in
 presence and probe subprocesses are only read. Read
 `docs/modules/project_integration.md` for the coordination contract.
 
+`integration_radar.py` records each conversation's written paths per Git checkout
+under `<git-common-dir>/tofu-radar/` and turns them into notify-only advice and
+notices ("Integration radar" in `docs/modules/conversations_project_brain.md`).
+Keep the ordinary write path free of Git processes and whole-tree walks: Git runs
+only for a candidate overlap, a first touch or a landing. It never waits, locks or
+refuses. `landing_verification.py` verifies every merged tree: only the test files
+the merge can affect run (recorded runs decide), a record at the current tip
+answers its outcome without rerunning, and only a reproduced regression may
+refuse. `impact_recorder.py` (pytest plugin, `sys.monitoring` plus an audit
+hook) and `impact_selection.py` own the observations and selection policy;
+`lib/storage_authority_sql/impact_cache.py` owns their reconstructible cache
+next to the warm merge checkout, keyed by the project interpreter's
+environment. No records means the static selector answers, and an unrecorded or
+partially executed file is never trusted. `lanes.py` owns a branch plus a
+recycled local checkout per unit of work, its saved uncommitted state
+(`refs/tofu/lanes/<branch>`, written during settlement by
+`commit_round/_commit.py`) and its placement (`PURPOSE_LANES` in
+`serverctl_pkg/local_placement.py`). Contracts: "Landing verification" and
+"Lanes" in `docs/modules/project_integration.md`. Verify
+`test_integration_radar.py`, `test_landing_verification.py`,
+`test_impact_selection.py`, `test_lanes.py` and both `test_git_land_*` suites.
+
 `task_delta_delivery.py` owns automatic task-only three-way workspace merging/publication and proven-recoverable clone
 reclamation; `workspace_runtime.py` owns lazy reconstructible dependency bridges. Durable intent,
 revocation and recovery stay in `delivery.py`; gates/snapshots stay in `integration_control.py`.
 `delivery_retry.py` owns condition fingerprints, bounded conflict evidence and immutable scoped
 repair proposals under the workspace delivery retry/repair schemas. Verify `test_continuous_delivery.py`.
+Triage a `task_delta_conflict` from the receipt's
+`origin.delivery.retry.conflictPaths`/`conflictPathCount`
+(`GET /api/v4/project/integration/status?path=`), not from feed narratives:
+those are capped at 720 bytes and lead with raw `git apply` stderr, in which
+`does not exist in index` lines for files the task creates are `--3way` noise.
+A reason starting `task and canonical both created different content at:` is
+an add/add conflict, checked before the three-way apply.
 The resume pass reads only `integration.workspace.delivery_action_page` rows (complete rows
 whose receipt asks for action) and runs only when due: start/error recovery, a committed
 `DELIVERY_STATE_OPERATIONS` hint, or rows left by the last pass. Never reintroduce a

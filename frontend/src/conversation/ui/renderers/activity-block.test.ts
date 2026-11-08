@@ -6,6 +6,11 @@ import { renderActivityEventBlock } from './activity-block';
 import type { ClassicConversationRendererPorts } from './ports';
 import en from '../../../i18n/locales/en.json';
 import zh from '../../../i18n/locales/zh.json';
+import ja from '../../../i18n/locales/ja.json';
+import ko from '../../../i18n/locales/ko.json';
+import de from '../../../i18n/locales/de.json';
+import fr from '../../../i18n/locales/fr.json';
+import ru from '../../../i18n/locales/ru.json';
 
 const { JSDOM } = await vi.importActual<{
   JSDOM: new (markup: string) => { window: Pick<Window, 'document' | 'close'> };
@@ -34,7 +39,7 @@ function render(
     });
   };
   update();
-  return { dom, node, update };
+  return { dom, node, entry, update };
 }
 
 describe('clickable compact compression receipts', () => {
@@ -75,11 +80,14 @@ describe('clickable compact compression receipts', () => {
       expect(summary.textContent).not.toContain('Details');
       expect(summary.textContent).not.toContain('chosen-Luna');
       expect(model.parentElement).toBe(summary.querySelector('.activity-event__line'));
-      // The snapshot action is inline in the header, not behind the fold.
-      const open = summary.querySelector('[data-conversation-action="open-compaction"]')!;
+      // The native outer disclosure owns one DIV body and the real snapshot action.
+      expect(summary.querySelector('[data-conversation-action="open-compaction"]')).toBeNull();
+      const content = details.querySelector(':scope > .activity-event__compaction-content')!;
+      expect(content.tagName).toBe('DIV');
+      const open = content.querySelector('[data-conversation-action="open-compaction"]')!;
       expect(open.getAttribute('data-operation')).toBe('archive');
-      expect(details.querySelector('.activity-event__compaction-content')?.textContent)
-        .toContain('Selected summary model: chosen-Luna');
+      expect(content.textContent).toContain('Selected summary model: chosen-Luna');
+      expect(details.querySelector('details')).toBeNull();
     } finally { dom.window.close(); }
   });
 });
@@ -365,7 +373,7 @@ describe('activity fact line is not a second copy of the summary', () => {
 
   it('names the model once on a failed request, keeping provider and key', () => {
     const { dom, node } = row({
-      model: 'claude-opus-5.5', providerId: 'sankuai', keyHint: '2031****4861',
+      model: 'claude-opus-5.5', providerId: 'example-corp', keyHint: '2031****4861',
       summaryKey: 'activity.model.requestFailed',
       summaryArgs: { model: 'claude-opus-5.5' }, reasonCode: 'ModelRefusalError',
     });
@@ -373,21 +381,21 @@ describe('activity fact line is not a second copy of the summary', () => {
       expect(node.querySelector('.activity-event__summary')!.textContent)
         .toBe('claude-opus-5.5 请求失败');
       expect(node.querySelector('.activity-event__facts')!.textContent)
-        .toBe('sankuai · 2031****4861 · ModelRefusalError');
+        .toBe('example-corp · 2031****4861 · ModelRefusalError');
       expect(node.textContent!.split('claude-opus-5.5')).toHaveLength(2);
     } finally { dom.window.close(); }
   });
 
   it('leads with the classified cause, keeping the raw class in the tooltip', () => {
     const { dom, node } = row({
-      model: 'claude-opus-5.5', providerId: 'sankuai', statusCode: 503,
+      model: 'claude-opus-5.5', providerId: 'example-corp', statusCode: 503,
       summaryKey: 'activity.model.requestFailed',
       summaryArgs: { model: 'claude-opus-5.5' },
       reasonCode: 'RateLimitError', envelopeKind: 'upstream_error',
     });
     try {
       const facts = node.querySelector('.activity-event__facts')!;
-      expect(facts.textContent).toBe('上游故障 · sankuai · HTTP 503');
+      expect(facts.textContent).toBe('上游故障 · example-corp · HTTP 503');
       expect(facts.textContent).not.toContain('RateLimitError');
       // The routing class stays reachable without contradicting the cause.
       expect(facts.querySelector<HTMLElement>('.activity-event__cause')!.title)
@@ -400,7 +408,7 @@ describe('activity fact line is not a second copy of the summary', () => {
     // as reported for kunlunbedrock.claude-opus-5.5-m17.
     const { dom, node } = row({
       requestLevel: 'provider_attempt', attempt: 1, attemptScope: 'dispatcher',
-      model: 'kunlunbedrock.claude-opus-5.5-m17', providerId: 'sankuai',
+      model: 'kunlunbedrock.claude-opus-5.5-m17', providerId: 'example-corp',
       keyHint: '2080********6672', statusCode: 503,
       summaryKey: 'activity.model.requestFailed',
       summaryArgs: { model: 'kunlunbedrock.claude-opus-5.5-m17' },
@@ -409,7 +417,7 @@ describe('activity fact line is not a second copy of the summary', () => {
     try {
       const facts = node.querySelector('.activity-event__facts')!;
       expect(facts.textContent)
-        .toBe('上游故障 · sankuai · 2080********6672 · HTTP 503');
+        .toBe('上游故障 · example-corp · 2080********6672 · HTTP 503');
       expect(node.textContent).not.toContain('RateLimitError');
       expect(facts.querySelector<HTMLElement>('.activity-event__cause')!.title)
         .toBe('RateLimitError');
@@ -418,7 +426,7 @@ describe('activity fact line is not a second copy of the summary', () => {
 
   it('keeps a wire model that the summary does not name', () => {
     const { dom, node } = row({
-      model: 'kunlunbedrock.claude-opus-5.5-m17', providerId: 'sankuai',
+      model: 'kunlunbedrock.claude-opus-5.5-m17', providerId: 'example-corp',
       summaryKey: 'activity.model.requestFailed',
       summaryArgs: { model: 'claude-opus-5.5' },
     });
@@ -463,6 +471,166 @@ describe('activity fact line is not a second copy of the summary', () => {
       const facts = node.querySelector('.activity-event__facts')!.textContent!;
       expect(facts).toContain('HTTP 429');
       expect(facts).toContain('请求被限流 (429)');
+    } finally { dom.window.close(); }
+  });
+});
+
+
+describe('actionable failed-summary diagnostics', () => {
+  const codes = [
+    'summary_rate_limited', 'summary_provider_unavailable', 'summary_permission_denied',
+    'summary_route_unavailable', 'summary_route_revalidation_failed', 'summary_incomplete',
+    'summary_empty', 'summary_cancelled', 'summary_dispatch_failed', 'summary_credentials_unavailable',
+  ];
+  const locales = [['en', en], ['zh', zh], ['ja', ja], ['ko', ko],
+    ['de', de], ['fr', fr], ['ru', ru]] as const;
+  const translate = (catalog: Readonly<Record<string, string>>): ClassicConversationRendererPorts['localizedText'] => (
+    (key, fallback, values) => (catalog[key] ?? fallback).replace(/\{(\w+)\}/g,
+      (match, name: string) => String(values?.[name] ?? match))
+  );
+
+  it.each(locales)('localizes cold legacy codes in %s without mutating the row', (_language, catalog) => {
+    for (const code of codes) {
+      const { dom, node, entry, update } = render({ status: 'failed', severity: 'warning',
+        detail: code, archiveId: 'summary-failed:legacy:3' }, translate(catalog));
+      try {
+        const expected = (catalog as Readonly<Record<string, string>>)[`activity.compaction.failure.${code}`];
+        expect(expected).toBeTruthy();
+        expect(node.querySelector('.activity-event__body > .activity-event__detail')?.textContent)
+          .toBe(expected);
+        expect(node.querySelector('[data-conversation-action="open-compaction"]')).toBeNull();
+        const original = JSON.stringify(entry);
+        Object.freeze(entry);
+        update();
+        expect(JSON.stringify(entry)).toBe(original);
+        expect(entry.detail).toBe(code);
+        expect(entry.detailKey).toBeUndefined();
+      } finally { dom.window.close(); }
+    }
+  });
+
+  it('resolves the existing nested reason port and retains reader disclosure/focus', () => {
+    const { dom, node, update } = render({ status: 'failed', detail: 'summary_rate_limited',
+      detailKey: 'activity.compaction.failure.detail', detailArgs: {
+        reasonKey: 'activity.compaction.failure.summary_rate_limited', reason: 'wire fallback', attempts: 2,
+      } }, translate(zh));
+    try {
+      const details = node.querySelector<HTMLDetailsElement>('details')!;
+      expect(details.open).toBe(true);
+      expect(node.querySelector('.activity-event__body > .activity-event__detail')?.textContent)
+        .toBe(`${zh['activity.compaction.failure.summary_rate_limited']} 请求尝试次数：2。`);
+      details.open = false;
+      details.querySelector('summary')!.focus();
+      update({ durationMs: 2500 });
+      expect(node.querySelector<HTMLDetailsElement>('details')!.open).toBe(false);
+      expect(dom.window.document.activeElement).toBe(node.querySelector('details > summary'));
+    } finally { dom.window.close(); }
+  });
+
+  it.each([0, 1, 4, Number.MAX_SAFE_INTEGER])('shows the recorded request count %s, not a route count or policy guess', attempts => {
+    const { dom, node } = render({ status: 'failed', detail: 'safe fallback', statusCode: 429,
+      detailKey: 'activity.compaction.failure.summary_rate_limited',
+      detailArgs: { code: 'summary_rate_limited', attempts, limit: 8 } }, translate(en));
+    try {
+      expect(node.querySelector('.activity-event__body > .activity-event__detail')?.textContent)
+        .toBe(`${en['activity.compaction.failure.summary_rate_limited']} Request attempts: ${attempts}.`);
+      expect(node.querySelector('.activity-event__compaction-accounting')?.textContent).toContain('HTTP 429');
+      expect(node.querySelector('.activity-event__compaction-content')?.textContent)
+        .toContain('Recorded dispatcher attempt limit: 8');
+    } finally { dom.window.close(); }
+  });
+
+  it.each([undefined, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '4', true])(
+    'does not invent a request count from invalid/missing evidence %s', attempts => {
+      const { dom, node } = render({ status: 'failed', detail: 'summary_dispatch_failed',
+        detailArgs: { attempts, limit: 0, selectedModels: ['selected-only'] } }, translate(en));
+      try {
+        expect(node.querySelector('.activity-event__body > .activity-event__detail')?.textContent)
+          .toBe(en['activity.compaction.failure.summary_dispatch_failed']);
+        expect(node.textContent).not.toContain('Request attempts:');
+        expect(node.textContent).not.toContain('attempt limit:');
+        expect(node.textContent).not.toContain('selected-only');
+      } finally { dom.window.close(); }
+    },
+  );
+
+  it('keeps recorded route outcomes diagnostic, never selected-as-observed or unknown-as-free', () => {
+    const { dom, node } = render({ status: 'failed', detail: 'summary_dispatch_failed',
+      summarySelectedModel: 'selected-summary', summaryCalls: [{ known: false, costUsd: null, status: 'failed' }],
+      detailArgs: { selectedModels: ['<img src=x>', 'another-model', 'completed-pass'],
+        selectedProviders: ['first-provider', 'second-provider', 'third-provider'],
+        routeStatuses: ['failed', 'failed', 'succeeded'], providerIngress: ['not_reached', 'unknown', 'reached'] },
+    }, translate(en));
+    try {
+      const header = node.querySelector('.activity-event__compaction-summary')!;
+      expect(header.textContent).not.toContain('selected-summary');
+      expect(header.textContent).not.toContain('another-model');
+      expect(header.textContent).not.toContain('completed-pass');
+      expect(header.querySelector('.activity-event__compaction-model')?.getAttribute('title'))
+        .toContain(en['activity.compaction.summaryModelUnknown']);
+      const evidence = node.querySelector('.activity-event__compaction-content')!;
+      expect(evidence.textContent).toContain('Selected summary model: selected-summary');
+      expect(evidence.textContent).toContain('Recorded summary route: <img src=x> · first-provider · Failed · Provider not reached');
+      expect(evidence.textContent).toContain('another-model · second-provider · Failed · Provider contact not recorded');
+      expect(evidence.textContent).toContain('completed-pass · third-provider · Succeeded · Provider reached');
+      expect(node.querySelector('img')).toBeNull();
+      expect(node.textContent).not.toMatch(/\$0|free|Request attempts:/);
+    } finally { dom.window.close(); }
+  });
+
+  it.each([
+    { selectedModels: ['route'], selectedProviders: ['provider'], routeStatuses: ['failed'] },
+    { selectedModels: ['route'], selectedProviders: ['provider', 'extra'], routeStatuses: ['failed'], providerIngress: ['unknown'] },
+    { selectedModels: ['route'], selectedProviders: ['provider'], routeStatuses: ['future_status'], providerIngress: ['unknown'] },
+    { selectedModels: ['route'], selectedProviders: ['provider'], routeStatuses: ['succeeded'], providerIngress: ['not_reached'] },
+  ])('omits incomplete or contradictory route evidence rather than guessing $routeStatuses', detailArgs => {
+    const { dom, node } = render({ status: 'failed', detail: 'summary_dispatch_failed', detailArgs });
+    try {
+      expect(node.querySelector('.activity-event__compaction-content')?.textContent)
+        .not.toContain('Recorded summary route:');
+      expect(node.querySelector('.activity-event__body > .activity-event__detail')?.textContent)
+        .toBe(en['activity.compaction.failure.summary_dispatch_failed']);
+    } finally { dom.window.close(); }
+  });
+
+  it('uses actionable English fallback when the translation port lacks the new key', () => {
+    const { dom, node } = render({ status: 'failed', detail: 'summary_provider_unavailable' },
+      (_key, fallback) => fallback);
+    try {
+      expect(node.querySelector('.activity-event__body > .activity-event__detail')?.textContent)
+        .toBe(en['activity.compaction.failure.summary_provider_unavailable']);
+    } finally { dom.window.close(); }
+  });
+
+  it.each([
+    'summary-failed:legacy:3', 'summary-declined:legacy:3', 'summary-aborted:legacy:3',
+    'summary-cancelled:legacy:3', 'summary-rejected:legacy:3', 'failed:3', '  summary-failed:legacy:3  ',
+  ])('never turns the synthetic bridge %s into a snapshot action', archiveId => {
+    const { dom, node, entry } = render({ status: 'failed', archiveId, detail: 'summary_empty' });
+    try {
+      expect(node.querySelector('[data-conversation-action="open-compaction"]')).toBeNull();
+      expect(entry.archiveId).toBe(archiveId);
+      expect(node.querySelector<HTMLDetailsElement>('details')?.open).toBe(true);
+    } finally { dom.window.close(); }
+  });
+
+  it.each(['succeeded', 'failed'] as const)('retains a real %s snapshot action only in the expanded DIV', status => {
+    const { dom, node, update } = render({ status, archiveId: 'real-archive', detail: status === 'failed' ? 'summary_empty' : undefined });
+    try {
+      const details = node.querySelector<HTMLDetailsElement>('details')!;
+      expect(details.querySelector(':scope > summary [data-conversation-action="open-compaction"]')).toBeNull();
+      const content = details.querySelector(':scope > .activity-event__compaction-content')!;
+      expect(content.tagName).toBe('DIV');
+      const action = content.querySelector<HTMLButtonElement>('[data-conversation-action="open-compaction"]')!;
+      expect(action.dataset.operation).toBe('real-archive');
+      details.open = true;
+      action.click();
+      expect(details.open).toBe(true);
+      expect(details.querySelector('details')).toBeNull();
+      action.focus();
+      update({ durationMs: 4100 });
+      expect(dom.window.document.activeElement).toBe(node.querySelector('.activity-event__compaction-open'));
+      expect(node.querySelector<HTMLDetailsElement>('details')!.open).toBe(true);
     } finally { dom.window.close(); }
   });
 });

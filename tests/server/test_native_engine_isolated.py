@@ -120,7 +120,7 @@ def test_pytest_explicit_candidate_serves_differential_fixtures_without_building
     _configure_explicit_test_engine(explicit)
     assert explicit['TOFUDB_DIFFERENTIAL_BIN'] == '/supplied/tofu-db'
 def _refuse_inherited_engine():
-    raise engines.EnginePreparationError(
+    raise engines.EngineAdmissionRefusedError(
         'Storage engine does not match this application.')
 
 
@@ -153,7 +153,7 @@ def test_native_refusal_in_any_fixture_or_test_body_skips_with_the_remedy(phase,
     hook = getattr(conftest, phase)(item=None)
     next(hook)
     with pytest.raises(pytest.skip.Exception) as skipped:
-        hook.throw(engines.EnginePreparationError(
+        hook.throw(engines.EngineAdmissionRefusedError(
             'Storage engine does not match this application.'))
     reason = str(skipped.value)
     assert 'does not match this application' in reason
@@ -168,7 +168,7 @@ def test_native_refusal_stays_fatal_in_an_explicit_engine_lane(phase, tmp_path, 
     hook = getattr(conftest, phase)(item=None)
     next(hook)
     with pytest.raises(engines.EnginePreparationError):
-        hook.throw(engines.EnginePreparationError('stale'))
+        hook.throw(engines.EngineAdmissionRefusedError('stale'))
 
 
 def test_only_the_typed_engine_refusal_becomes_a_skip(monkeypatch):
@@ -178,6 +178,38 @@ def test_only_the_typed_engine_refusal_becomes_a_skip(monkeypatch):
     next(hook)
     with pytest.raises(RuntimeError, match='authority defect'):
         hook.throw(RuntimeError('authority defect'))
+
+
+@pytest.mark.parametrize('phase', ['pytest_runtest_setup', 'pytest_runtest_call'])
+def test_other_preparation_failures_are_not_reported_as_engine_refusals(phase, monkeypatch):
+    # The execution service shares the preparation runner; its timeout is a
+    # failure of the code under test, never a missing engine prerequisite.
+    import tests.conftest as conftest
+    monkeypatch.delenv('TOFU_TEST_TOFUDB_BIN', raising=False)
+    hook = getattr(conftest, phase)(item=None)
+    next(hook)
+    with pytest.raises(engines.EnginePreparationError, match='timed out'):
+        try:
+            hook.throw(engines.EnginePreparationError(
+                'Execution service preparation timed out after 120.0s (time budget exhausted).'))
+        except pytest.skip.Exception as skipped:
+            pytest.fail(f'a preparation failure was reported as a skip: {skipped}')
+
+
+def test_engine_identity_mismatch_is_the_typed_admission_refusal(tmp_path, monkeypatch):
+    monkeypatch.setattr(engines, 'source_fingerprint', lambda root: '1' * 64)
+    monkeypatch.setattr(engines, 'build_identity', lambda binary: {'source_sha256': '0' * 64})
+    with pytest.raises(engines.EngineAdmissionRefusedError, match='does not match'):
+        engines.verify_current(tmp_path / 'tofu-db', tmp_path)
+
+
+def test_unanswered_identity_probe_refuses_admission_with_its_cause(tmp_path, monkeypatch):
+    def timeout(*args, **kwargs):
+        raise engines.EnginePreparationError('Storage engine preparation timed out after 10.0s')
+    monkeypatch.setattr(engines, '_run', timeout)
+    with pytest.raises(engines.EngineAdmissionRefusedError, match='timed out') as refused:
+        engines.build_identity(tmp_path / 'tofu-db')
+    assert type(refused.value.__cause__) is engines.EnginePreparationError
 
 
 def test_child_process_prerequisite_refuses_like_the_application(monkeypatch):

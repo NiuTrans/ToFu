@@ -8,7 +8,7 @@ from tests.project_mod.test_coordinator_request_budget import bind
 from tests.project_mod.test_coordinator_continuation import run as run, ready, activate
 from tests.tasks_pkg.test_live_summary_budget import summary_env as summary_env, result
 from lib.tasks_pkg.compaction._layer2 import _summary as summary
-from lib.llm.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError, ModelAdmissionRefused
 
 pytestmark = pytest.mark.unit
 
@@ -123,6 +123,54 @@ def test_original_request_summary_uses_already_registered_source_account(runtime
     assert pool['modelAttempts'][0]['account_nonce'] == pool['accounts'][0]['nonce']
     assert pool['modelAttempts'][0]['reported_tokens'] == 60
     assert r.task['_executionBudget'] is account
+
+
+def test_coordinator_turn_without_request_account_summarizes_on_its_task_account(
+        runtime, summary_env, monkeypatch):
+    """Regression for coordinator-1a390889: a retried continuation Turn died at compaction.
+
+    Synthetic input (a continuation brief, report relay or channel event) opens
+    no request account, and the summary refusal then settled the Turn as a
+    silent user Stop before any model round. Its summaries charge the canonical
+    task account its model rounds use, and still open no request account.
+    """
+    from lib.agent_core.execution_budget import ExecutionBudget
+    r = runtime
+    r.c.turn['actor'] = 'virtual_user'
+    assert bind(r) is None
+    assert r.task.get('_coordinatorDispatchScope') and r.task.get('_executionBudget') is None
+    dispatch, _, calls, _, _ = summary_env
+    monkeypatch.setattr('lib.tasks_pkg.compaction._summary_routing.select_summary_route',
+                        lambda task, **kw: {'modelId': 'model-a'})
+    r.task['model'] = 'model-a'
+
+    def stream(messages, **kwargs):
+        lease = kwargs['model_budget_admit'](input_tokens=40, max_output_tokens=100)
+        lease.mark_dispatched()
+        lease.settle({'prompt_tokens': 40, 'completion_tokens': 20})
+        calls.append(kwargs)
+        response = result('### Summary\nContinue the original project request.')
+        response.usage.update(prompt_tokens=40, completion_tokens=20)
+        return response
+
+    monkeypatch.setattr(dispatch, 'dispatch_stream', stream)
+    assert summary._generate_query_aware_summary([], 'continue', task=r.task)
+    account = r.task['_executionBudget']
+    assert isinstance(account, ExecutionBudget) and account.consumption()[0] == 60
+    assert len(calls) == 1 and not r.task.get('aborted')
+    assert r.task.get('_coordinatorRequestBudget') is None
+    assert not r.c.repo._load()[0].get('requestBudgets')
+
+
+def test_missing_bound_request_account_is_a_stated_refusal_not_a_stop(runtime):
+    """A bare AbortedError settles the Turn as a silent user Stop at its compaction row."""
+    from lib.tasks_pkg.compaction._summary_accounting import summary_model_admission
+    r = runtime
+    assert bind(r)
+    r.task.pop('_executionBudget')
+    with pytest.raises(ModelAdmissionRefused, match='execution account'):
+        summary_model_admission(r.task)
+    assert not r.task.get('aborted')
 
 
 def test_repeated_summaries_record_on_the_unchanged_ceiling_free_grant(summary_runtime):

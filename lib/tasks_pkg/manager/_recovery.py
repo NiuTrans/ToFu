@@ -4,16 +4,32 @@ Conversation projections belong exclusively to the turn lifecycle. Task
 results are a separate inspection/replay read model. Recovery settles both
 authorities without copying task snapshots back into a transcript and never
 starts billable work.
+
+The restart-settlement scope is the creation cutoff of the Attempts a previous
+server generation can have left behind: this process's boot epoch. Every later
+Attempt belongs to the current generation even when another role's process
+(the personal API host) runs its executor, so neither boot recovery nor the
+post-serving backstop (``restart_settlement_scope_ms``) may settle it.
 """
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from lib.log import get_logger
 
 
 logger = get_logger(__name__)
+
+# Written by boot recovery (the same value on a retried step), read by the
+# post-serving backstop; None means this process began no restart settlement.
+_restart_settlement_scope_ms: int | None = None
+
+
+def restart_settlement_scope_ms() -> int | None:
+    """The Attempt creation cutoff this process's boot recovery settled."""
+    return _restart_settlement_scope_ms
 
 
 def _interruption_reason(previous_shutdown: Any) -> str:
@@ -49,11 +65,22 @@ def _has_orphaned_recovery_work(client: Any) -> bool:
     return bool((row or {}).get("pending"))
 
 
-def recover_stale_tasks_on_startup(prev_shutdown: Any = None) -> dict[str, Any]:
-    """Settle orphaned turns and task snapshots; never redispatch work."""
+def recover_stale_tasks_on_startup(
+        prev_shutdown: Any = None, *,
+        created_before_ms: int | None = None) -> dict[str, Any]:
+    """Settle orphaned turns and task snapshots; never redispatch work.
+
+    ``created_before_ms`` is the restart-settlement scope (the boot epoch);
+    without one the scope freezes now. It is recorded before any storage read
+    so the backstop re-runs exactly this scope even when the probe skips it.
+    """
+    global _restart_settlement_scope_ms
     from lib.storage import get_storage_client
     from lib.turn_lifecycle import recover_running_attempts
 
+    scope_ms = (int(time.time() * 1000) if created_before_ms is None
+                else int(created_before_ms))
+    _restart_settlement_scope_ms = scope_ms
     client = get_storage_client(write=True)
     if not _has_orphaned_recovery_work(client):
         return {
@@ -62,7 +89,7 @@ def recover_stale_tasks_on_startup(prev_shutdown: Any = None) -> dict[str, Any]:
             "conversationIds": [],
             "interruptedReason": _interruption_reason(prev_shutdown),
         }
-    recovered_attempts = recover_running_attempts()
+    recovered_attempts = recover_running_attempts(created_before_ms=scope_ms)
     reason = _interruption_reason(prev_shutdown)
     recovered_tasks = 0
     conversation_ids: list[str] = []
@@ -111,4 +138,4 @@ def recover_stale_tasks_on_startup(prev_shutdown: Any = None) -> dict[str, Any]:
     }
 
 
-__all__ = ["recover_stale_tasks_on_startup"]
+__all__ = ["recover_stale_tasks_on_startup", "restart_settlement_scope_ms"]

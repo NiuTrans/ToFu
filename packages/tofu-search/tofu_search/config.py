@@ -115,7 +115,8 @@ class SearchConfig:
     # naming a host here. Empty (default) = every private target stays blocked.
     allow_private_hosts: set = field(default_factory=set)
 
-    # ── Domains to skip (media, social, etc.) ──
+    # ── URL blocklist: hosts, or host+path prefixes (* = one path segment) ──
+    # Matching: tofu_search.generated_url_blocklist (authority lib/url_blocklist.py).
     skip_domains: set = field(default_factory=lambda: {
         'youtube.com', 'youtu.be', 'twitter.com', 'x.com',
         'facebook.com', 'instagram.com', 'tiktok.com',

@@ -70,6 +70,14 @@ global.activeStreams = new Map();
 
 let renderCount = 0;
 let folderQueryArgs = null;   // records the folderId the query was called with
+// Busy catalog rows must hydrate on every merge path, folder pages included.
+const woken = [];
+// The composed sections bind runtimeScope to the global object itself.
+global.runtimeScope = global;
+global.ConversationTurnStore = { wakeConversation: async (conv) => { woken.push(conv.id); } };
+global.DEFAULT_ASYNC_POOL_CONCURRENCY = 4;
+global.runWithConcurrency = (items, fn) => Promise.all(items.map(fn));
+global.debugLog = () => {};
 global.renderConversationList = () => { renderCount++; };
 
 // _applySettingsToConv: minimal real-shape stand-in — adopts folderId/pinned.
@@ -89,7 +97,7 @@ global.Api = {
             // shape uses messageCount; the shared catalog normalizer reads it.
             { id: 'fmem-old-1', title: 'old member 1', messageCount: 5,
               createdAt: 100, updatedAt: 200, settings: { folderId: 'FLD' } },
-            { id: 'fmem-old-2', title: 'old member 2', messageCount: 2,
+            { id: 'fmem-old-2', title: 'old member 2', messageCount: 2, busy: true,
               createdAt: 110, updatedAt: 210, settings: { folderId: 'FLD' } },
             // The live member is ALSO returned by the server query (it's a real
             // member) — merge must NOT clobber its local heavy/live fields.
@@ -172,6 +180,7 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
   // The folder view now has all 3 members available to filter.
   const inFolder = conversations.filter(c => c.folderId === 'FLD');
   check('all_three_members_visible', inFolder.length === 3);
+  check('only_busy_member_woken', JSON.stringify(woken) === '["fmem-old-2"]');
 
   // (4) Star folder behaves identically.
   setActiveFolderId('STAR');
@@ -215,6 +224,7 @@ def test_folder_members_load_and_merge():
                  'PASS live_member_sentinel_untouched',
                  'PASS live_member_serverRev_untouched',
                  'PASS all_three_members_visible',
+                 'PASS only_busy_member_woken',
                  'PASS star_member_merged'):
         assert must in output, f'missing assertion {must!r}:\n{output}'
 

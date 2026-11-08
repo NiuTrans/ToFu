@@ -56,6 +56,31 @@ class DispatchContention(ProjectDispatchError):
     """
 
 
+def transient_dispatch_failure(error):
+    """Whether ``error`` is contention or transient storage, never an authority verdict.
+
+    Every dispatch write commits through one head per owner/project and every
+    snapshot read is fenced by it, so any Worker or Coordinator write can make
+    another lose its bounded CAS attempts. The nearest dispatch verdict in the
+    cause chain decides: ``DispatchContention`` is resolved by reading and
+    validating again; any other ``ProjectDispatchError`` (revocation, a changed
+    source or binding, malformed evidence) is final. Without one, the transient
+    storage codes decide, as for every other persistence wait.
+    """
+    from lib.agent_core.storage_errors import is_transient_storage_error
+    seen = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, DispatchContention):
+            return True
+        if isinstance(current, ProjectDispatchError):
+            return False
+        seen.add(id(current))
+        current = current.__cause__ if current.__cause__ is not None else (
+            None if current.__suppress_context__ else current.__context__)
+    return is_transient_storage_error(error)
+
+
 @lru_cache(maxsize=16)
 def _validator(definition):
     # Ordinary tool admission imports this authority without validating a grant.
@@ -994,6 +1019,12 @@ class ProjectDispatchRepository:
                 raise ProjectDispatchError('Execution continuation source changed')
             predecessor = self.get_attempt(previous['attemptId'])
             successor = self.get_attempt(attempt_id)
+            successor_task = successor.get('taskId') if isinstance(successor, Mapping) else None
+            # Recovery claims this exact successor's start before it advances; the
+            # claim reserves dispatch without binding any executor.
+            start_claim = '@dispatching:' + attempt_id
+            claimed = isinstance(successor_task, str) and (
+                successor_task == start_claim or successor_task.startswith(start_claim + ':'))
             if (not isinstance(predecessor, Mapping)
                     or predecessor.get('attemptId') != previous['attemptId']
                     or predecessor.get('turnId') != previous['turnId']
@@ -1003,7 +1034,7 @@ class ProjectDispatchRepository:
                     or successor.get('attemptId') != attempt_id
                     or successor.get('turnId') != turn_id
                     or successor.get('conversationId') != assignment['request']['recipientId']
-                    or successor.get('taskId') not in ('', task_id, predecessor.get('taskId'))
+                    or (successor_task not in ('', task_id, predecessor.get('taskId')) and not claimed)
                     or (previous.get('taskId') or task_id) != task_id):
                 raise ProjectDispatchError('Execution continuation requires exact predecessor/successor evidence')
             self.validate(self._admission(assignment))
@@ -1141,7 +1172,7 @@ class ProjectDispatchRepository:
                 or attempt.get('attemptId') != execution['attemptId']
                 or attempt.get('turnId') != execution['turnId']
                 or attempt.get('conversationId') != row['request']['recipientId']
-                or attempt.get('taskId') != task_id or attempt.get('status') != 'completed'
+                or self.workspace_task_id(row) != task_id or attempt.get('status') != 'completed'
                 or turn.get('turnId') != execution['turnId']
 
                 or turn.get('actor') != 'assistant'

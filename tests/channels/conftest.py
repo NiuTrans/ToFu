@@ -120,6 +120,21 @@ def dispatch(monkeypatch):
     return recorder
 
 
+@pytest.fixture
+def turns(monkeypatch):
+    """Durable Turn reads (``lib.turn_lifecycle.get_turn``): rows by (conversation, turn); none by default.
+
+    Channel tools judge the authority of the calling Turn (C11), so tests that
+    call them read Turns from here instead of the storage authority.
+    """
+    rows = {}
+
+    def get_turn(conversation_id, turn_id, *, user_id, include_projection=True):
+        return rows.get((conversation_id, turn_id))
+    monkeypatch.setattr('lib.turn_lifecycle.get_turn', get_turn)
+    return rows
+
+
 class Mailbox:
     submitted: list = []
 

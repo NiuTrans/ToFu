@@ -6,6 +6,9 @@ observers fence the dispatch grant and original human request atomically.
 Every project-dispatch profile (consult, files, project, coordinator) binds its
 own grant's account at task start, so its summaries charge that same account
 under that grant's recorded ceilings; no profile gains a second account.
+A Coordinator Turn whose synthetic input opened no request account summarizes
+on the canonical task account its own model rounds use. Refusals are typed
+ModelAdmissionRefused: a bare AbortedError settles as a silent user Stop.
 """
 from __future__ import annotations
 
@@ -25,11 +28,11 @@ def _bound_dispatch_grant(task):
 
 
 def summary_model_admission(task):
-    """Return the existing model-admission port, or refuse unaccounted control work."""
+    """Return the task's model-admission port, or refuse unaccounted control work."""
     if not isinstance(task, dict):
         return None
     from lib.agent_core.execution_budget import ExecutionBudget, model_budget_admission
-    from lib.llm.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError, ModelAdmissionRefused
     from lib.project_dispatch.admission import is_dispatch_task, stop_on_authority_failure
 
     dispatch = is_dispatch_task(task)
@@ -37,12 +40,17 @@ def summary_model_admission(task):
     grant = _bound_dispatch_grant(task) if dispatch else None
     budget = task.get('_executionBudget')
     if budget is None:
-        if dispatch or task.get('_coordinatorRequestBudget') or task.get('_coordinatorDispatchScope'):
-            raise AbortedError('Coordinator summary requires its existing execution account')
-        return None  # Standalone utility/manual callers have no task account.
-    if not isinstance(budget, ExecutionBudget):
-        raise AbortedError('Summary requires the canonical execution account')
+        if dispatch or task.get('_coordinatorRequestBudget'):
+            # These tasks bind their account at task start; its loss is a broken carrier.
+            raise ModelAdmissionRefused('Coordinator summary requires its existing execution account')
+        if not task.get('_coordinatorDispatchScope'):
+            return None  # Standalone utility/manual callers have no task account.
+        # Synthetic Coordinator input opened no request account; the Turn's model
+        # rounds create the canonical task account on first use, and so does this.
+    elif not isinstance(budget, ExecutionBudget):
+        raise ModelAdmissionRefused('Summary requires the canonical execution account')
     admission = model_budget_admission(task)
+    budget = task['_executionBudget']
 
     def admit(**counts):
         if task.get('_executionBudget') is not budget:

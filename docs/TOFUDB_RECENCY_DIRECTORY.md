@@ -27,9 +27,9 @@ same transaction** as every recency-affecting mutation.
   project / title / time bounds), the directory state is `Complete`, its
   recorded live count equals the count key, and `limit ≤ 128`. The page's
   headers are then point-hydrated and every hydrated `updated_at` must
-  equal the directory's claim — any disagreement returns the exact legacy
-  answer via the read-all+sort path. The directory is a derived index,
-  never an authority.
+  equal the directory's claim — any disagreement returns the exact answer
+  from the stable-catalog selection (`STORAGE_TOFUDB.md`, "Stable recency
+  selection"). The directory is a derived index, never an authority.
 * **Bounded inline value.** Entries are `(u64 timestamp)(u8 len)(id bytes)`
   ≈24 B each; 128 entries + 15 B header ≈ 3.1 KB — under the 8 KiB entity
   inline bound, so maintenance rides the write overlay's per-commit delta
@@ -90,7 +90,9 @@ cursor page is resolved by binary search over the directory order; when the
 directory is truncated, every conversation outside it is older than all of its
 entries, so a cursor that some entry follows determines `has_more` exactly. A
 cursor beyond the last entry of a truncated directory, a page extending past the
-window, a folder filter or any gate disagreement uses the unchanged legacy plan.
+window, a folder filter or any gate disagreement uses the stable-catalog
+selection (`STORAGE_TOFUDB.md`, "Stable recency selection"), which since
+2026-11-06 never reads the updated index at any owner size.
 
 Restore now increments the owner count before its header funnel maintains the
 directory. Previously the directory recorded the pre-restore count, so every

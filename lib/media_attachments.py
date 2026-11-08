@@ -161,6 +161,62 @@ def ingest_document(
     return attachment_ref(document)
 
 
+_IMAGE_MIME_BY_KIND = {
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+}
+
+
+def ingest_received_file(
+    path: str, filename: str, mime_type: str, *, user_id: int,
+    origin: dict,
+) -> dict:
+    """Store one file received over a channel as a retained attachment.
+
+    Documents and images the knowledge parser reads are indexed exactly like a
+    chat upload, so model projection, ``read_files`` and ``inspect_image``
+    open them; any other format, or one the parser rejects, keeps its verbatim
+    original. Identical bytes reuse the owner's record. The file is never
+    executed or opened. ``origin`` (``channel``, ``eventId``) is recorded on
+    a new attachment; ``filename`` is the already-sanitized original name.
+    """
+    from lib.knowledge import (
+        add_document, create_media_source, patch_media_metadata,
+    )
+    from lib.knowledge.ingest import KnowledgeIngestError, SUPPORTED_EXTENSIONS
+
+    owner_user_id = require_user_id(user_id, context='received file owner')
+    declared = str(mime_type or '').split(';', 1)[0].strip().lower()
+    if '/' not in declared:
+        declared = mimetypes.guess_type(filename)[0] or ''
+    provenance = {
+        'media_kind': 'document', 'status': 'ready', 'origin': 'channel',
+        'channel': str(origin.get('channel') or ''),
+        'channel_event': str(origin.get('eventId') or ''),
+    }
+    document = None
+    if Path(filename).suffix.lower() in SUPPORTED_EXTENSIONS:
+        try:
+            document = add_document(
+                Path(path).read_bytes(), filename, user_id=owner_user_id,
+                scope='attachment', defer_image_ocr=True)
+        except KnowledgeIngestError as exc:
+            logger.info('[Media] received file kept verbatim: %s', exc)
+    if document is None:
+        document = create_media_source(
+            path, filename, user_id=owner_user_id, scope='attachment',
+            media_metadata={
+                **provenance,
+                'mime_type': declared or 'application/octet-stream'})
+    elif not document.get('duplicate'):
+        actual = (_IMAGE_MIME_BY_KIND.get(str(document.get('kind') or '').lower())
+                  or declared)
+        document = patch_media_metadata(
+            str(document.get('id') or ''), {**provenance, 'mime_type': actual},
+            user_id=owner_user_id) or document
+    return attachment_ref(document)
+
+
 
 def ingest_mcp_image(
     raw: bytes,
@@ -209,10 +265,7 @@ def ingest_mcp_image(
         command_id=command_id,
         defer_image_ocr=True,
     )
-    actual_mime = {
-        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-        '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
-    }.get(str(document.get('kind') or '').lower())
+    actual_mime = _IMAGE_MIME_BY_KIND.get(str(document.get('kind') or '').lower())
     if actual_mime is None:
         raise ValueError('MCP image bytes did not decode as a supported image')
     attachment_id = str(document.get('id') or '')
@@ -645,6 +698,7 @@ __all__ = [
     'attachment_source_url', 'complete_video', 'create_video',
     'delete_attachment', 'discard_draft',
     'document_text_budget', 'document_text_request_cap', 'get_attachment',
-    'ingest_document', 'mark_failed', 'project_for_model',
+    'ingest_document', 'ingest_received_file', 'mark_failed',
+    'project_for_model',
     'resolve_client_refs', 'set_phase',
 ]

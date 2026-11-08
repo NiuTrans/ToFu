@@ -95,7 +95,7 @@ _RULES: tuple[tuple[str, str], ...] = (
     ('glm-5-1', '2026-04'),
     ('glm-5v-turbo', '2026-05'),
     # ── Moonshot Kimi ────────────────────────────────────────────
-    # kimi-k3 was live on the sankuai gateway by 2026-07-17
+    # kimi-k3 was live on the example-corp gateway by 2026-07-17
     # (lib/model_info/_max_output.py).
     ('kimi-k2-7-code', '2026-06'),
     # kimi-k3.1-pro (+ -highspeed) launched 2026-10-23 US time (10-24 Beijing):
@@ -141,8 +141,12 @@ _RULES: tuple[tuple[str, str], ...] = (
     # needle is a substring of hy4-preview, so it must follow the preview's.
     ('hy4', '2026-11-04'),
     ('hy3-preview', '2026-04'),
-    # ── Meituan LongCat ──────────────────────────────────────────
+    # ── YourProvider LongCat ──────────────────────────────────────────
     # 2601/2603 in the flash ids are the vendor iteration stamps.
+    # LongCat API change log: 2.5-Preview 2026-09-25, 2.5 GA 2026-11-02;
+    # the preview needle must precede its substring.
+    ('longcat-2-5-preview', '2026-09-25'),
+    ('longcat-2-5', '2026-11-02'),
     ('longcat-2-0', '2026-06'),
     ('longcat-flash-omni-2603', '2026-03'),
     ('longcat-flash-thinking-2601', '2026-01'),

@@ -86,10 +86,19 @@ class TestBlocklistWrites:
     def test_block_domain_normalises_persists_reloads_and_dedupes(self, cfg_file):
         res = ss.apply_updates({'block_domain': 'https://www.Spam.com:8080/x'})
         assert res['ok'] is True
-        assert res['applied']['block_domain'] == ['spam.com']
-        assert 'spam.com' in _saved(cfg_file['path'])['search']['skip_domains']
+        # A path in the entry is a URL-PREFIX rule and is preserved: stripping
+        # it would silently widen "block one repository/directory" into
+        # "block the whole host". Host-only entries still drop scheme/www/port.
+        assert res['applied']['block_domain'] == ['spam.com/x']
+        assert 'spam.com/x' in _saved(cfg_file['path'])['search']['skip_domains']
         cfg_file['reload'].assert_called_once()
         assert cfg_file['audit'].call_args[0][0] == 'search_settings_update'
+        ss.apply_updates({'block_domain': 'spam.com/x'})
+        assert _saved(cfg_file['path'])['search']['skip_domains'].count('spam.com/x') == 1
+
+    def test_block_host_entry_still_strips_scheme_www_and_port(self, cfg_file):
+        res = ss.apply_updates({'block_domain': 'https://www.Spam.com:8080'})
+        assert res['applied']['block_domain'] == ['spam.com']
         ss.apply_updates({'block_domain': 'spam.com'})
         assert _saved(cfg_file['path'])['search']['skip_domains'].count('spam.com') == 1
 

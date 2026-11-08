@@ -73,7 +73,8 @@ def test_group_projection_preserves_tenant_boundary_and_live_token_health(routin
         logged_out = _flow.get_all_oauth_status(owner_user_id=41)
     assert all(not status['authenticated'] for status in logged_out.values())
     assert all(status['provider_ready'] for status in logged_out.values())
-    assert tokens.call_args_list == [mock.call('claude'), mock.call('codex')]
+    assert tokens.call_args_list == [
+        mock.call(provider) for provider in outbound.OAUTH_PROVIDERS]
 
 
 def test_unknown_provider_does_not_read_an_owner_snapshot(routing):

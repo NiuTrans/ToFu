@@ -79,8 +79,10 @@ The same declared profile follows pooled and request-owned slots across Chat Com
 ## Categories and inventory evidence
 
 The recipe schema owns `category`: `official` is a model developer's own API,
-`relay` is an independent inference host, aggregator or gateway, and `local`
-is a local endpoint. This classifies the endpoint operator, not the creator
+`relay` is an independent inference host, aggregator or gateway, `local`
+is a local endpoint, and `subscription` is a vendor's own plan-bound coding
+endpoint reached with a plan API key ([Coding-plan
+subscriptions](#coding-plan-subscriptions)). This classifies the endpoint operator, not the creator
 of every model it hosts or an endorsement. Deployment overrides retain the
 same semantics. Defaulting an unclassified import to `relay` is conservative.
 
@@ -454,6 +456,40 @@ $0.80/$1.28 per million; seeding the proposed community fine-tunes, because
 catalog identity attributes `Ateron/Gemma-4-…` and `dphn/Dolphin…` to
 Google and Meta as creators and leaves `TheDrummer/Anubis-70B-v1` a pending
 identity.
+
+## Coding-plan subscriptions
+
+A `subscription` template must declare `subscription.key_console_url`, the
+HTTPS console page where the subscriber creates the plan key, and nothing else
+in that object; Settings → 订阅登录 renders one card per such template and the
+服务商 picker lists them under 订阅套餐. Plan quotas and terms belong to the
+plan: declared context and output limits stay Offering limits, never Model
+facts, and compilation strips managed price tiers (`cheap`) from these
+Offerings, because a flat plan has no per-token price and the tier would enrol
+plan models in unpinned background pools. Plan keys and endpoints are not
+interchangeable with the same vendor's pay-as-you-go keys and base URLs.
+
+| Template | OpenAI-compatible endpoint | Source |
+|---|---|---|
+| `kimi_code` | `https://api.kimi.com/coding/v1` | [Kimi Code models](https://www.kimi.com/code/docs/en/kimi-code/models.html) |
+| `bailian_coding_plan` | `https://coding.dashscope.aliyuncs.com/v1` | [Bailian Coding Plan](https://help.aliyun.com/zh/model-studio/coding-plan) |
+| `tencent_coding_plan` | `https://api.lkeap.cloud.tencent.com/coding/v3` | [Tencent Cloud Coding Plan](https://cloud.tencent.com.cn/document/product/1823/130092) |
+| `ark_coding_plan` | `https://ark.cn-beijing.volces.com/api/coding/v3` | [Ark Coding Plan](https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-plan-overview) |
+| `minimax_mplan` | `https://api.minimax.cn/v1` | [MiniMax M Plan](https://platform.minimax.cn/docs/m-plan/faq) |
+
+`kimi_code` maps Kimi's plan wire names onto the maintained Moonshot
+identities (`k3.1-pro` → `kimi-k3.1-pro`, `k3-256k` and `k3` → `kimi-k3`,
+`kimi-for-coding` → `kimi-k2.8-preview`) and is also the roster of the
+`oauth_kimi` sign-in provider. Plan models without maintained facts compile as
+fact-less Model rows, which shared admission keeps as non-callable drafts until
+sourced facts are registered ([MODEL_REGISTRATION.md](MODEL_REGISTRATION.md)).
+On 2026-11-06 the maintained catalogue lacked `deepseek-v4.1-flash`,
+`deepseek-v4.1-flash-economy`, `doubao-seed-2.0-mini`, `doubao-seed-2.1-lite`,
+`doubao-seed-2.1-pro`, `doubao-seed-evolving`, `kimi-k2.5`, `kimi-k2.8-preview`,
+`kimi-k3.1-pro-highspeed`, `MiniMax-M3.1-Flash`, `qwen3.5-plus` and
+`qwen3.6-plus`. Terms per plan and the owner's steps live in
+[auth_providers_billing.md](modules/auth_providers_billing.md#domestic-coding-subscriptions);
+the specification is `tests/providers/test_subscription_plan_templates.py`.
 
 ## Migration guardrails
 

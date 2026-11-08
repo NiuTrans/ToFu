@@ -449,7 +449,7 @@ def continuation_policy(tools_config: Mapping[str, Any]) -> dict:
     return policy
 
 
-def build_task_config(tools_config: dict, conv_settings: dict) -> dict:
+def build_task_config(tools_config: dict, conv_settings: dict, *, owner: int) -> dict:
     """Build an agentic task config by merging tools_config with conversation settings.
 
     ``tools_config`` (from the timer / proactive task definition) takes
@@ -458,18 +458,27 @@ def build_task_config(tools_config: dict, conv_settings: dict) -> dict:
     workspace roots and write-approval mode follow the conversation, resolved
     by its config owner as for a human turn; a timer replays its creating
     turn's policy on top (:func:`continuation_policy`). A definition's
-    model-authored ``tools_config`` never selects the model.
+    model-authored ``tools_config`` never selects the model. A conversation
+    without a model choice (a Project Router the owner never sent to from the
+    composer) runs on ``owner``'s default model, as a fresh composer would,
+    never with an empty model that any free route answers.
 
     Args:
         tools_config: Tool settings stored on the timer or scheduled task.
         conv_settings: Settings dict from the target conversation row.
+        owner: The conversation owner, whose default model fills a missing choice.
 
     Returns:
         Config dict suitable for ``create_task()``.
     """
     from lib.conv_config import resolve_conv_config
 
-    conversation = resolve_conv_config(conv_settings, is_active=False)
+    defaults = None
+    # The same "model choice" rule as resolve_conv_settings: a name or a reference.
+    if not (conv_settings.get('model') or conv_settings.get('modelRef')):
+        from lib.project_dispatch.delegation import owner_default_model
+        defaults = {'serverModel': owner_default_model(owner)}
+    conversation = resolve_conv_config(conv_settings, server_defaults=defaults, is_active=False)
     # ``modelRef`` is the routing authority (task registration aligns
     # ``config['model']`` to it), so the name follows the reference.
     model = (conversation['modelRef'] or {}).get('model_id') or conversation['model']

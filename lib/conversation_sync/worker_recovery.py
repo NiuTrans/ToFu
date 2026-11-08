@@ -116,7 +116,7 @@ def record_joined_exit(context, attempt, turn, task):
     _save_exit(context, attempt, turn, proof='joined', unknown=False)
 
 
-def retain_preparation_exit(context, attempt, turn):
+def retain_preparation_exit(context, attempt, turn, *, error=None, config=None):
     """Retain an unwound preparer on the existing task owner until its receipt commits.
 
     This is called only from the entered synchronous start exception boundary.
@@ -136,6 +136,10 @@ def retain_preparation_exit(context, attempt, turn):
         _turnId=attempt['turnId'], config=dict(attempt.get('config') or {}),
         _conversationWorkerContext=context)
     task['_conversationPreparationExit'] = _receipt(attempt, 'joined', unknown=True)
+    if error is not None:
+        from lib.conversation_sync.command_service import executor_start_error_envelope
+        task['_conversationPreparationError'] = executor_start_error_envelope(
+            error, config or attempt.get('config') or {})
     task['_terminalPersistencePending'] = True
     task['status'] = 'error'
 
@@ -180,6 +184,15 @@ def recover_exited_attempt(context, attempt, turn, *, task=None):
             hint='Inspect saved tool and provider receipts before continuing / 请先核对已保存的工具与服务回执',
             extensions={'code': 'worker_effect_outcome_unknown',
                         'retryPolicy': {'mode': 'manual', 'automatic': False}})
+        if preparation_exited and isinstance(task.get('_conversationPreparationError'), dict):
+            # Preserve the observed startup cause. It does not prove that
+            # earlier preparation/translation had no external effects.
+            error = dict(task['_conversationPreparationError'],
+                         retryable=False, code='worker_effect_outcome_unknown',
+                         retryPolicy={'mode': 'manual', 'automatic': False})
+            error['hint'] = str(error.get('hint') or '') + (
+                '\nInspect saved preparation/provider receipts before retrying / '
+                '重试前请核对已保存的准备阶段与服务商回执')
         carrier = dict(turn.get('projection') or {})
         carrier.update(id=context.claim.task_id, convId=attempt['conversationId'],
             _attemptId=attempt['attemptId'], _turnId=attempt['turnId'],
@@ -187,7 +200,15 @@ def recover_exited_attempt(context, attempt, turn, *, task=None):
             _principalContext=context.principal.to_payload(), _conversationWorkerContext=context,
             config=dict(attempt.get('config') or {}), status='error', error=error,
             finishReason='error', _executionActualsComplete=False)
-        turns.record_task_event(carrier, {'type': 'error', 'error': error})
+        event_type = 'error'
+        if proof == 'process_dead' and not context.cancellation_requested:
+            # A dead execution owner is an interruption, not a human Stop or
+            # a failed invocation. Domain checkpoint recovery may continue in
+            # a new accepted Attempt; this receipt never authorizes replay.
+            carrier.update(status='aborted', finishReason='interrupted',
+                           _abort_reason='server_shutdown')
+            event_type = 'aborted'
+        turns.record_task_event(carrier, {'type': event_type, 'error': error})
         attempt = turns.get_attempt(attempt['attemptId'], user_id=context.principal.owner_user_id,
                                     include_execution_config=True)
         turn = turns.get_turn(attempt['conversationId'], attempt['turnId'],

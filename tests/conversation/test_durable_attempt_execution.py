@@ -16,7 +16,7 @@ pytestmark = pytest.mark.api
 
 
 @pytest.fixture
-def claimed(semantic_authority, monkeypatch):
+def claimed(semantic_authority, monkeypatch, request):
     from lib import storage, turn_lifecycle as turns
     from lib.conversation_sync.execution_identity import capture_execution_identity
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
@@ -26,6 +26,7 @@ def claimed(semantic_authority, monkeypatch):
     identity = uuid.uuid4().hex
     principal = PrincipalContext.user(subject_id=f'user:{owner}', owner_user_id=owner)
     config = capture_execution_identity({'model': 'controlled'}, owner, principal)
+    config.update(getattr(request, 'param', {}))
     pair = turns.create_turn_pair(identity, command_id=identity,
         input_projection={'content': 'accepted input'}, config=config, user_id=owner,
         conversation_defaults={'allowCreate': True, 'title': 'Claimed', 'settings': {}})
@@ -90,6 +91,35 @@ def test_claim_rebuilds_and_joins_common_chat_before_returning_outcome(
     assert entered == [context.claim.task_id]
 
 
+@pytest.mark.parametrize('claimed', [{'_projectDispatchWorkspaceTaskId': 'project-worker:assignment'}],
+                         indirect=True)
+def test_accepted_workspace_task_id_never_renames_the_claimed_task(claimed, monkeypatch):
+    """A project grant's captured workspace task id cannot replace the worker claim."""
+    from lib import turn_lifecycle as turns
+    from lib.conversation_sync import task_start
+    from lib.conversation_sync.worker_execution import execute_claimed_attempt
+    from lib.tasks_pkg.manager import append_event, persist_task_result, stamp_chat_task_terminal
+    context, pair, _factory, owner = claimed
+    monkeypatch.setattr(task_start, '_throttled_cleanup_old_tasks', lambda: None)
+    monkeypatch.setattr(turns, 'build_api_messages',
+                        lambda *a, **kw: [{'role': 'user', 'content': 'accepted input'}])
+    entered = []
+
+    def run(task):
+        entered.append(task['id'])
+        task['content'] = 'completed as the claimed task'
+        append_event(task, {'type': 'delta', 'content': task['content']})
+        stamp_chat_task_terminal(task, status='done', finish_reason='stop')
+        append_event(task, {'type': 'done', 'finishReason': 'stop'})
+        assert persist_task_result(task)
+
+    monkeypatch.setattr('lib.tasks_pkg.orchestrator.api.run_task', run)
+    assert execute_claimed_attempt(context, context.claim.payload).status == 'succeeded'
+    assert entered == [context.claim.task_id]
+    assert turns.get_turn(pair['turn']['conversationId'], pair['turn']['turnId'],
+                          user_id=owner)['status'] == 'completed'
+
+
 def test_entered_attempt_is_never_replayed_from_lease_ownership_alone(claimed, monkeypatch):
     from lib import turn_lifecycle as turns
     from lib.conversation_sync.worker_execution import execute_claimed_attempt
@@ -100,6 +130,69 @@ def test_entered_attempt_is_never_replayed_from_lease_ownership_alone(claimed, m
                         lambda *a, **kw: pytest.fail('entered effects were replayed'))
     with pytest.raises(WorkerDomainSettlementUnknown, match='recovery'):
         execute_claimed_attempt(context, context.claim.payload)
+
+
+def test_unentered_configuration_failure_settles_without_unknown_effects(claimed, monkeypatch):
+    from lib import turn_lifecycle as turns
+    from lib.conversation_sync.worker_execution import execute_claimed_attempt, settle_claimed_failure
+    context, pair, factory, owner = claimed
+    def refused(*args, **kwargs):
+        raise PermissionError('Accepted execution grant was revoked')
+    monkeypatch.setattr('lib.conversation_sync.command_service.restore_accepted_attempt_config', refused)
+    with pytest.raises(PermissionError) as failure:
+        execute_claimed_attempt(context, context.claim.payload)
+    outcome = settle_claimed_failure(context, context.claim.payload, failure.value)
+    assert outcome.status == 'failed'
+    assert outcome.error['code'] == 'task_start_failed'
+    attempt = turns.get_attempt(pair['attempt']['attemptId'], user_id=owner)
+    assert attempt['status'] == 'failed'
+    assert attempt['startedAt'] is None
+    assert factory().query('task_results.replay_get', {
+        'key': context.claim.task_id, 'user_id': owner, 'include_metadata': True}) is None
+    assert execute_claimed_attempt(context, context.claim.payload).status == 'failed'
+
+
+def test_unentered_stop_does_not_require_a_still_live_execution_grant(claimed, monkeypatch):
+    from lib import turn_lifecycle as turns
+    from lib.conversation_sync.worker_execution import cancel_claimed_attempt
+    from lib.conversation_sync.worker_control import encode_cancellation
+    context, pair, factory, owner = claimed
+    factory(write=True).command('worker_job.request_cancel', {
+        'task_id': context.claim.task_id, 'user_id': owner, 'now_ms': 1,
+        'reason': encode_cancellation('', ''),
+    }, uuid.uuid4().hex)
+    from lib.durable_worker import StorageWorkerJobStore
+    context.observe_claim_state(StorageWorkerJobStore().claim_state(context.claim, now_ms=1))
+    monkeypatch.setattr('lib.conversation_sync.execution_identity.restore_execution_identity',
+                        lambda *args, **kwargs: pytest.fail('Stop tried to regrant execution'))
+    assert cancel_claimed_attempt(context, context.claim.payload).status == 'cancelled'
+    assert turns.get_attempt(pair['attempt']['attemptId'], user_id=owner)['status'] == 'interrupted'
+
+
+def test_preparation_failure_keeps_actionable_model_cause_and_unknown_effects(claimed, monkeypatch):
+    from lib import turn_lifecycle as turns
+    from lib.conversation_sync.worker_execution import execute_claimed_attempt, settle_claimed_failure
+    from lib.model_routing.domain import ModelRoutingError
+    context, pair, _, owner = claimed
+    calls = []
+    def refused(*args, **kwargs):
+        calls.append('preparation')
+        raise ModelRoutingError('private diagnostic must not leak', kind='model_route_unavailable')
+    monkeypatch.setattr('lib.conversation_sync.task_start.start_conversation_attempt_executor', refused)
+    with pytest.raises(ModelRoutingError) as failure:
+        execute_claimed_attempt(context, context.claim.payload)
+    outcome = settle_claimed_failure(context, context.claim.payload, failure.value)
+    assert outcome.status == 'failed'
+    assert outcome.error['code'] == 'worker_effect_outcome_unknown'
+    error = turns.get_turn(pair['turn']['conversationId'], pair['turn']['turnId'],
+                           user_id=owner)['settlement']['error']
+    assert error['kind'] == 'task_start_failed'
+    assert error['model'] == 'controlled'
+    assert 'model_route_unavailable' in error['detail']
+    assert error['retryable'] is False
+    assert error['retryPolicy']['automatic'] is False
+    assert 'private diagnostic' not in str(error)
+    assert calls == ['preparation']
 
 
 def test_old_storage_peer_cannot_silently_omit_process_entry(claimed, monkeypatch):
@@ -284,3 +377,26 @@ def test_stop_without_local_task_is_durable_and_cancel_handler_never_starts_work
     assert settled['status'] == ('failed' if internal else 'interrupted')
     assert settled['startedAt'] is None
     assert cancel_claimed_attempt(context, context.claim.payload) == outcome
+
+
+def test_child_inspector_evidence_borrows_current_root_worker_claim(claimed):
+    from lib import turn_lifecycle as turns
+    from lib.process_owner import process_owner
+    from lib.tasks_pkg.invocation import deliver_invocation_event, settle_invocation_evidence
+    context, pair, factory, owner = claimed
+    turns.mark_task_started(pair['attempt']['attemptId'], context.claim.task_id,
+        user_id=owner, worker_claim=context.publication_claim(), worker_process=process_owner())
+    observed = []
+    factory(write=True).command('invocation.register_child', {
+        'user_id': owner, 'conversation_id': pair['turn']['conversationId'],
+        'parent_task_id': context.claim.task_id, 'child_task_id': 'inspector-child',
+        'worker_claim': context.publication_claim()}, uuid.uuid4().hex)
+    child = dict(id='inspector-child', _inspectorTaskId=context.claim.task_id + '#agent:inspector-child',
+        _userId=owner, convId=pair['turn']['conversationId'], abort_event=threading.Event(),
+        _conversationWorkerContext=context, _invocationEventSink=observed.append)
+    event = dict(type='messages_snapshot', seq=0, messages=[{'role': 'user', 'content': 'accepted evidence'}])
+    deliver_invocation_event(child, event)
+    settle_invocation_evidence(child)
+    assert observed == [event]
+    assert child.get('_invocationDeliveryError') is None
+    assert not child['abort_event'].is_set()

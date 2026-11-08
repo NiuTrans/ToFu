@@ -182,3 +182,44 @@ def test_watchdog_read_is_passive_ensure_is_idempotent_and_review_is_owner_contr
     off = flask_client.post(review, json={'enabled': False}, headers={'Idempotency-Key': 'review-4'})
     assert off.get_json()['review'] == {**custom, 'enabled': False}
     assert flask_client.get(endpoint).get_json() == off.get_json()
+
+
+def test_owner_delegation_is_granted_only_from_the_owners_browser_and_revoked_at_once(
+        flask_client, chat_sidecar, home_root, tmp_path, monkeypatch):
+    """docs/ROUTER.md R9: a script, API key or agent cannot grant the main coordinator
+    the owner's delegation; the owner's same-origin UI request can; any owner request
+    revokes it. Open mode has no authentication, so its grant is recorded as advisory."""
+    from lib import lifecycle_approval as gate
+    monkeypatch.setattr(gate, '_APPROVALS_FILE', str(tmp_path / 'lifecycle_approvals.json'))
+    monkeypatch.setattr(gate, '_STATE_FILE', str(tmp_path / 'lifecycle_state.json'))
+    endpoint = '/api/v4/router/owner-delegation'
+    before = flask_client.get(endpoint)
+    assert before.status_code == 200, before.get_json()
+    assert before.get_json()['grant']['state'] == 'revoked' and before.get_json()['active'] is False
+    assert before.get_json()['actions'] == []
+    unbound = flask_client.post(endpoint, json={'granted': True},
+                                headers={'Idempotency-Key': 'g0', 'Sec-Fetch-Site': 'same-origin'})
+    assert unbound.status_code == 403
+    router = flask_client.post('/api/v4/router', json={}, headers={'Idempotency-Key': 'ensure'}).get_json()
+    for headers in ({'Idempotency-Key': 'g1'},
+                    {'Idempotency-Key': 'g2', 'Sec-Fetch-Site': 'cross-site'},
+                    {'Idempotency-Key': 'g3', 'Origin': 'http://evil.example'}):
+        refused = flask_client.post(endpoint, json={'granted': True}, headers=headers)
+        assert refused.status_code in (401, 403), (headers, refused.get_json())
+    assert flask_client.get(endpoint).get_json()['grant']['state'] == 'revoked'
+    granted = flask_client.post(endpoint, json={'granted': True},
+                                headers={'Idempotency-Key': 'g4', 'Sec-Fetch-Site': 'same-origin',
+                                         'User-Agent': 'Mozilla/5.0 (owner)'})
+    assert granted.status_code == 200, granted.get_json()
+    state = granted.get_json()
+    assert state['active'] is True and state['grant']['state'] == 'granted'
+    assert state['grant']['grantee']['conversationId'] == router['conversationId']
+    assert state['grant']['assurance'] == 'advisory'
+    assert state['grant']['grantedBy']['kind'] == 'human-ui'
+    assert state['grant']['grantedBy']['userAgent'] == 'Mozilla/5.0 (owner)'
+    revoked = flask_client.post(endpoint, json={'granted': False}, headers={'Idempotency-Key': 'r1'})
+    assert revoked.status_code == 200, revoked.get_json()
+    assert revoked.get_json()['grant']['state'] == 'revoked' and revoked.get_json()['active'] is False
+    assert revoked.get_json()['grant']['revokedBy']['kind'] == 'authenticated-request'
+    assert flask_client.post(endpoint, json={'granted': 'yes'},
+                             headers={'Idempotency-Key': 'bad'}).status_code == 400

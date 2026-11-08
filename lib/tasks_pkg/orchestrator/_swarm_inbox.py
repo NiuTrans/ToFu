@@ -101,7 +101,11 @@ def drain_and_inject_inbox(
             # own running turn). Keyed on the same conversation swarm key
             # the send route enqueues under. Delivered exactly once via
             # the deferred-confirm flush after the LLM call (mirrors peer).
-            _steer_items = _drain_inbox(_swarm_key, modes=['user-steer'])
+            # Steers another server process committed to this Turn join
+            # them in commit order; an already taken block never repeats.
+            from lib.tasks_pkg.committed_steers import take_steers
+            _steer_items = take_steers(
+                task, _drain_inbox(_swarm_key, modes=['user-steer']))
             if _steer_items:
                 # A real human steer redirects the turn: the breaker's
                 # consecutive-identical chain measured an UNATTENDED loop and
@@ -126,6 +130,13 @@ def drain_and_inject_inbox(
                 from lib.tasks_pkg.background_commands import take_run_completions
                 _bgcmd_items = list(_bgcmd_items) + take_run_completions(
                     task_id=str(task.get('id') or ''), user_id=task.get('_userId'))
+            # Notices other writers and landings left for this conversation join
+            # the same task-local advice (integration radar).
+            try:
+                from lib.conversations.project_brain import queue_radar_notices
+                queue_radar_notices(task)
+            except Exception as _radar_exc:
+                logger.debug('[SwarmInbox] radar notices skipped: %s', _radar_exc)
             # Project path-overlap advice is task-local, never durable inbox/feed
             # state. Once appended, the ordinary note projection records what
             # entered context; it does not turn advice into a delivery/ACK lane.

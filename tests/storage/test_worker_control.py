@@ -98,7 +98,8 @@ def test_worker_control_generation_is_current():
 def test_authority_restart_refreshes_claims_even_without_cancel_history():
     from lib.storage.worker_wake import StorageWorkerWakeSource
 
-    source = StorageWorkerWakeSource(None, {})
+    from lib.durable_worker.runtime_policy import runtime_policy
+    source = StorageWorkerWakeSource(None, runtime_policy())
     active = threading.Event()
     unsubscribe = source.signals.subscribe('active', active)
     before = {'epoch': 'old', 'queue': 0, 'cancel': 0}

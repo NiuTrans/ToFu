@@ -71,9 +71,37 @@ echo "== TIER 1: pure-JVM =="
   "$SRC/main/java/com/tofu/client/session/UpdateCheck.kt" \
   "$SRC/main/java/com/tofu/client/session/UpdateChecker.kt" \
   "$SRC/main/java/com/tofu/client/session/DeepLink.kt" \
+  "$SRC/main/java/com/tofu/client/session/KernelController.kt" \
+  "$SRC/main/java/com/tofu/client/session/LocalKernelController.kt" \
+  "$SRC/main/java/com/tofu/client/session/LocalKernelCookie.kt" \
+  "$SRC/main/java/com/tofu/client/session/LocalKernelLifecycle.kt" \
   "$SRC/main/java/com/tofu/client/api/ApiV4Generated.kt" \
   "$SRC/main/java/com/tofu/client/data/Profile.kt" \
+  "$SRC/main/java/com/tofu/client/runtime/KernelLayout.kt" \
+  "$SRC/main/java/com/tofu/client/runtime/KernelSecret.kt" \
+  "$SRC/main/java/com/tofu/client/runtime/KernelProcess.kt" \
+  "$SRC/main/java/com/tofu/client/runtime/LocalKernelState.kt" \
+  "$SRC/main/java/com/tofu/client/runtime/LocalKernelSupervisor.kt" \
+  "$SRC/main/java/com/tofu/client/selfcheck/SelfCheckJson.kt" \
+  "$SRC/main/java/com/tofu/client/selfcheck/SelfCheckRedactor.kt" \
+  "$SRC/main/java/com/tofu/client/selfcheck/SelfCheckReport.kt" \
+  "$SRC/main/java/com/tofu/client/selfcheck/ReportJson.kt" \
+  "$SRC/main/java/com/tofu/client/selfcheck/ExecChecks.kt" \
+  "$SRC/main/java/com/tofu/client/selfcheck/KernelCheck.kt" \
+  "$SRC/main/java/com/tofu/client/selfcheck/ChildStress.kt" \
+  "$SRC/main/java/com/tofu/client/selfcheck/SelfCheckRun.kt" \
+  "$SRC/main/java/com/tofu/client/selfcheck/SelfCheckSummary.kt" \
   "$OUT/stub/CookieBridgeStub.kt" \
+  "$SRC/test/java/com/tofu/client/runtime/RuntimeFakes.kt" \
+  "$SRC/test/java/com/tofu/client/runtime/LocalKernelSupervisorTest.kt" \
+  "$SRC/test/java/com/tofu/client/runtime/KernelProcessTest.kt" \
+  "$SRC/test/java/com/tofu/client/runtime/KernelSecretTest.kt" \
+  "$SRC/test/java/com/tofu/client/selfcheck/SelfCheckFakes.kt" \
+  "$SRC/test/java/com/tofu/client/selfcheck/SelfCheckReportSchemaTest.kt" \
+  "$SRC/test/java/com/tofu/client/selfcheck/SelfCheckRedactionTest.kt" \
+  "$SRC/test/java/com/tofu/client/selfcheck/ChildStressTest.kt" \
+  "$SRC/test/java/com/tofu/client/selfcheck/SelfCheckRunTest.kt" \
+  "$SRC/test/java/com/tofu/client/selfcheck/SelfCheckExampleReport.kt" \
   "$SRC/test/java/com/tofu/client/session/SessionManagerGatewayTest.kt" \
   "$SRC/test/java/com/tofu/client/session/ServerUrlTest.kt" \
   "$SRC/test/java/com/tofu/client/session/LoginFormTest.kt" \
@@ -97,9 +125,21 @@ echo "== TIER 1: pure-JVM =="
   "$SRC/test/java/com/tofu/client/session/SessionManagerSubmitReportTest.kt" \
   "$SRC/test/java/com/tofu/client/session/UpdateCheckTest.kt" \
   "$SRC/test/java/com/tofu/client/session/UpdateCheckerTest.kt" \
-  "$SRC/test/java/com/tofu/client/session/DeepLinkTest.kt"
+  "$SRC/test/java/com/tofu/client/session/DeepLinkTest.kt" \
+  "$SRC/test/java/com/tofu/client/session/KernelControllerTest.kt" \
+  "$SRC/test/java/com/tofu/client/session/SessionControllerKernelTest.kt" \
+  "$SRC/test/java/com/tofu/client/session/LocalKernelControllerTest.kt" \
+  "$SRC/test/java/com/tofu/client/session/LocalKernelCookieTest.kt" \
+  "$SRC/test/java/com/tofu/client/session/LocalKernelLifecycleTest.kt"
 
 "$JAVA_HOME/bin/java" -cp "$CP:$KRT:$OUT" org.junit.runner.JUnitCore \
+  com.tofu.client.runtime.LocalKernelSupervisorTest \
+  com.tofu.client.runtime.KernelProcessTest \
+  com.tofu.client.runtime.KernelSecretTest \
+  com.tofu.client.selfcheck.SelfCheckReportSchemaTest \
+  com.tofu.client.selfcheck.SelfCheckRedactionTest \
+  com.tofu.client.selfcheck.ChildStressTest \
+  com.tofu.client.selfcheck.SelfCheckRunTest \
   com.tofu.client.session.SessionManagerGatewayTest \
   com.tofu.client.session.ServerUrlTest \
   com.tofu.client.session.LoginFormTest \
@@ -123,7 +163,12 @@ echo "== TIER 1: pure-JVM =="
   com.tofu.client.session.SessionManagerSubmitReportTest \
   com.tofu.client.session.UpdateCheckTest \
   com.tofu.client.session.UpdateCheckerTest \
-  com.tofu.client.session.DeepLinkTest
+  com.tofu.client.session.DeepLinkTest \
+  com.tofu.client.session.KernelControllerTest \
+  com.tofu.client.session.SessionControllerKernelTest \
+  com.tofu.client.session.LocalKernelControllerTest \
+  com.tofu.client.session.LocalKernelCookieTest \
+  com.tofu.client.session.LocalKernelLifecycleTest
 
 # ── TIER 2: Robolectric (optional — needs the instrumented android-all jar) ──
 INSTRUMENTED="$(ls "$LIBS"/android-all-instrumented-*.jar 2>/dev/null | head -1 || true)"
@@ -142,6 +187,10 @@ ROBO_CP="$(ls "$LIBS"/*.jar | grep -vE 'kotlin-compiler|kotlin-daemon|kotlin-scr
   "$SRC/main/java/com/tofu/client/session/CookieHeaders.kt" \
   "$SRC/main/java/com/tofu/client/session/CookieBridge.kt" \
   "$SRC/main/java/com/tofu/client/session/ReauthWebViewClient.kt" \
+  "$SRC/main/java/com/tofu/client/session/LocalKernelCookie.kt" \
+  "$SRC/main/java/com/tofu/client/session/KernelController.kt" \
+  "$SRC/main/java/com/tofu/client/runtime/KernelProcess.kt" \
+  "$SRC/main/java/com/tofu/client/api/ApiV4Generated.kt" \
   "$SRC/main/java/com/tofu/client/session/TofuProbe.kt" \
   "$SRC/main/java/com/tofu/client/session/ServerUrl.kt" \
   "$SRC/main/java/com/tofu/client/session/HealthProbe.kt" \
@@ -150,7 +199,13 @@ ROBO_CP="$(ls "$LIBS"/*.jar | grep -vE 'kotlin-compiler|kotlin-daemon|kotlin-scr
   "$SRC/main/java/com/tofu/client/session/DiagnosticJournal.kt" \
   "$SRC/main/java/com/tofu/client/session/DiagnosticHttp.kt" \
   "$SRC/main/java/com/tofu/client/data/Profile.kt" \
-  "$SRC/test/java/com/tofu/client/session/CookieBridgeRobolectricTest.kt"
+  "$SRC/main/java/com/tofu/client/runtime/KernelLayout.kt" \
+  "$SRC/main/java/com/tofu/client/runtime/RuntimeIndex.kt" \
+  "$SRC/main/java/com/tofu/client/runtime/TarReader.kt" \
+  "$SRC/main/java/com/tofu/client/runtime/RuntimeInstaller.kt" \
+  "$SRC/test/java/com/tofu/client/session/CookieBridgeRobolectricTest.kt" \
+  "$SRC/test/java/com/tofu/client/runtime/TarFixture.kt" \
+  "$SRC/test/java/com/tofu/client/runtime/RuntimeInstallerTest.kt"
 
 "$JAVA_HOME/bin/java" -Drobolectric.offline=true -Drobolectric.dependency.dir="$LIBS" \
   --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.util=ALL-UNNAMED \
@@ -158,4 +213,5 @@ ROBO_CP="$(ls "$LIBS"/*.jar | grep -vE 'kotlin-compiler|kotlin-daemon|kotlin-scr
   --add-opens java.base/java.net=ALL-UNNAMED --add-opens java.base/java.security=ALL-UNNAMED \
   --add-opens java.base/java.text=ALL-UNNAMED \
   -cp "$RO:$ROBO_CP:$KRT" org.junit.runner.JUnitCore \
-  com.tofu.client.session.CookieBridgeRobolectricTest
+  com.tofu.client.session.CookieBridgeRobolectricTest \
+  com.tofu.client.runtime.RuntimeInstallerTest

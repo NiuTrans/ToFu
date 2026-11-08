@@ -357,3 +357,19 @@ def test_mcp_preserves_installed_runtime_before_interpreter_siblings(tmp_path, m
     monkeypatch.setattr(sys, 'executable', str(interpreter_bin / 'python'))
     environment = build_stdio_environment({}, prepare_directories=False)
     assert resolve_executable('node', environment) == str(local_node)
+
+
+def test_tool_cache_root_override_is_an_inventoried_process_knob(tmp_path, monkeypatch):
+    """scripts/check_config_knobs.py inventories process-environment reads,
+    not keys read from a caller's mapping. Read through a mapping, the
+    override stays honoured while the gate reports it gone, and the gate's
+    --rescan advice would drop it from contracts/config_knobs_v1.json."""
+    import ast
+    from lib.tools import process_environment
+    from scripts.check_config_knobs import _env_reads, load_registry
+
+    source = Path(process_environment.__file__).read_text(encoding='utf-8')
+    assert 'TOFU_MCP_CACHE_DIR' in _env_reads(ast.parse(source))
+    assert 'TOFU_MCP_CACHE_DIR' in load_registry()['knobs']
+    monkeypatch.setenv('TOFU_MCP_CACHE_DIR', str(tmp_path / 'operator-cache'))
+    assert process_environment.tool_cache_root() == str(tmp_path / 'operator-cache')

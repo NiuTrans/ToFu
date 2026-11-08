@@ -763,7 +763,7 @@ and pack adoption park what they replace. Crash recovery never needed the
 victims: the unlink followed `publish_payload_manifest`, which returns only
 after both CONTROL slots name the new catalog, and a failed stabilizing write
 returns before any unlink. Readers off the authority mutex did need them:
-`remove_segment` evicts the idle read handles, so a reader holding a victim's
+`remove_segment` evicts the cached read handle, so a reader holding a victim's
 segment index re-opens the unlinked path and fails with `NotFound`, and
 `has_catalogued_payload_block` (the online backup's presence check) has no
 changed-view retry and reports "CONTROL payload manifest references a missing
@@ -813,9 +813,11 @@ blocks, unindexed segments, resident bytes and elapsed time). Backup-prune
 marks use the same reader. Blocks the table does not hold go to the loose
 file and then the exact catalog path, which alone can report a block missing,
 so a mark never skips a reachable block and every integrity failure still
-aborts the attempt with its original type. The table
-is dropped with the mark: about 949 MB for the live 118.6M catalogued blocks,
-at most 2 GiB for a full catalog of full segments.
+aborts the attempt with its original type. Since 2026-11-06 the table is
+shared: a mark reuses the published catalog location table while it describes
+the installed catalog and otherwise publishes the one it builds
+(docs/TOFUDB_BLOCK_READ_PATH.md, "Published catalog location table"). It costs
+8 bytes per catalogued block, at most 2 GiB for a full catalog of full segments.
 
 Alternatives rejected. Breadth-first waves that read each index once per wave
 avoid the table's memory but re-read about 5.5 GB per tree level and
@@ -1235,9 +1237,9 @@ accumulates depends on how long it runs:
 - History segments are named by block ID, and only this lane deletes blocks.
   A payload segment retired during the mark makes its located reads fall back
   to the loose file and the exact catalog path.
-- The location table, the walked-page map and the spill are per mark,
-  bounded by the captured catalog, the distinct pages and the mark's inserts,
-  and dropped with the mark.
+- The walked-page map and the spill are per mark, bounded by the distinct
+  pages and the mark's inserts, and dropped with the mark. The location table
+  is the published one, bounded by the catalog it describes.
 - Deletion safety never depended on mark duration: confirmation needs two
   consecutive marks, publication windows and the relink fence cover what
   happens between a capture and its deletion hold, and both CONTROL slots are
@@ -1768,7 +1770,10 @@ Decision. Every completed scan runs one exact membership probe per live loose
 block while copy removal or compaction is open:
 `BlockStore::catalogued_payload_segment`, the existing filter, routing and
 validated-index probe, now returning the segment that holds the block
-(`has_catalogued_payload_block` wraps it). A block the installed catalog holds
+(`has_catalogued_payload_block` wraps it). Since 2026-11-07 a filter hit first
+asks the published catalog location table, which confirms a held block with
+one candidate and one index-entry read and walks no witness
+([read path](TOFUDB_BLOCK_READ_PATH.md#published-catalog-location-table-2026-11-06)). A block the installed catalog holds
 is a redundant copy. Once its shard is scanned, each such copy goes through the
 hold that removes compaction copies (`remove_loose_copies`,
 `AuthorityDatabase::online_gc_remove_redundant_copy`,

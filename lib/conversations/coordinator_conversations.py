@@ -35,7 +35,7 @@ def project_catalog_origins(owner: int, project: str, *, repository_factory=None
 
 
 PAGE_SIZE = 64
-_SETTINGS = ('projectPath', '_coordinatorSource', 'archived', 'readOnly')
+_SETTINGS = ('projectPath', '_coordinatorSource', 'archived', 'readOnly', 'folderId')
 
 
 def _scope_key(owner: int, project: str) -> str:
@@ -60,7 +60,10 @@ def _decode_cursor(cursor: str | None, scope: str) -> tuple[int | None, str]:
 
 
 def conversation_page(owner: int, project: str, cursor: str | None = None, *, repository=None, origins=None,
-                      recipient_origins=None) -> dict:
+                      recipient_origins=None, busy_conversation_ids=frozenset()) -> dict:
+    """``busy_conversation_ids`` is the owner's live task projection; matching rows
+    carry ``busy: true`` exactly like sidebar catalog rows, so the browser can
+    hydrate running workers instead of presenting an unloaded shell as finished."""
     if type(owner) is not int or owner < 1:
         raise ValueError('A positive owner is required')
     project = normalize_project_path(project)
@@ -83,11 +86,14 @@ def conversation_page(owner: int, project: str, cursor: str | None = None, *, re
             if origins is None:
                 origins = project_catalog_origins(owner, project, recipient_origins=recipient_origins)
             source = origins.get(row['id'])
+        folder = settings.get('folderId')
         result.append({'conversationId': row['id'], 'title': str(row.get('title') or row['id'])[:200],
             'turnCount': max(0, int(row.get('msg_count') or 0)),
             'createdAt': max(0, int(row.get('created_at') or 0)),
             'updatedAt': max(0, int(row.get('updated_at') or 0)),
-            'coordinatorId': source if isinstance(source, str) and 0 < len(source) <= 256 else None})
+            'coordinatorId': source if isinstance(source, str) and 0 < len(source) <= 256 else None,
+            'folderId': folder if isinstance(folder, str) and 0 < len(folder) <= 512 else None,
+            **({'busy': True} if row['id'] in busy_conversation_ids else {})})
     next_cursor = None
     if page.has_more:
         if not page.items:

@@ -34,6 +34,7 @@ def _service():
 def lane(semantic_authority, monkeypatch):
     from lib import agent_inbox
     from lib.turn_lifecycle import bind_task, create_turn_pair
+    from tests.support.chat_tasks import chat_task_registry, register_local_executor
     client, owner, _engine = semantic_authority
     monkeypatch.setattr('lib.storage.get_storage_client', client)
     conversation = 'coordinator-steer-live'
@@ -41,7 +42,12 @@ def lane(semantic_authority, monkeypatch):
                             input_projection={'content': 'Review the recent work'}, config={},
                             user_id=owner, conversation_defaults={'allowCreate': True})
     bind_task(pair['attempt']['attemptId'], 'coordinator-task', user_id=owner)
+    # The bound executor is live in this process, not in the other server process.
+    register_local_executor('coordinator-task', conv_id=conversation,
+                            attempt_id=pair['attempt']['attemptId'],
+                            turn_id=pair['turn']['turnId'], user_id=owner)
     yield owner, conversation, pair['turn']['turnId']
+    chat_task_registry.pop('coordinator-task', None)
     agent_inbox.reset_for_test(conversation)
 
 

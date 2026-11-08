@@ -201,3 +201,30 @@ def test_child_intent_ack_requires_one_exact_entered_occurrence(execution):
                 guard_contract=TASK_RESULT_CHECKPOINT_GUARD_CONTRACT, require_parent=True)
         assert error.value.code == 'database_protocol_error'
         assert record(execution, 'child') == before
+
+
+@pytest.mark.parametrize('nested', [False, True])
+def test_inspector_stream_requires_its_exact_birth_and_current_root_claim(execution, nested):
+    job = active(execution)
+    parent = job['taskId']
+    if nested:
+        birth(execution, parent, 'middle', worker_claim=root.proof(job))
+        parent = 'middle'
+    birth(execution, parent, 'inspected-child', worker_claim=root.proof(job))
+    stream = parent + '#agent:inspected-child'
+    for proof in (None, {'worker_id': 'stale', 'fencing_token': 1}):
+        row = dict(task_id=stream, sequence=0, event={'type': 'messages_snapshot', 'messages': []})
+        result = root.command(execution, 'event.append', **row,
+                              **({'worker_claim': proof} if proof else {}))
+        assert result['inserted'] is False
+    assert root.command(execution, 'event.append', task_id=stream, sequence=0,
+        event={'type': 'messages_snapshot', 'messages': []}, worker_claim=root.proof(job))['inserted'] is True
+    for forged in (parent + '#agent:unregistered', job['taskId'] + '#agent:middle' if not nested
+                   else 'different-parent#agent:inspected-child'):
+        with pytest.raises(StorageError):
+            root.command(execution, 'event.append', task_id=forged, sequence=0,
+                event={'type': 'messages_snapshot'}, worker_claim=root.proof(job))
+    root.command(execution, 'worker_job.request_cancel', task_id=job['taskId'],
+                 now_ms=wall_ms(), reason='Stop')
+    assert root.command(execution, 'event.append', task_id=stream, sequence=1,
+        event={'type': 'messages_snapshot', 'messages': []}, worker_claim=root.proof(job))['inserted'] is True

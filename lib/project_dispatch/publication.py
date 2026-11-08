@@ -30,10 +30,15 @@ def _same_project(left, right) -> bool:
     return bool(left and right) and Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
 
 
-def _path_allowed(path: str, scopes, root: Path) -> bool:
-    """The descriptor-I/O policy also fences external checkpoint mutations."""
+def _path_allowed(path: str, scopes, root: Path, *, project_grant: bool = False) -> bool:
+    """The descriptor-I/O policy also fences external checkpoint mutations.
+
+    A project grant writes with ordinary tools in its isolated worktree, so its
+    checkpoint may change a nested source package named like a root runtime tree
+    or a tracked tree named like build output (``docs/report/build/``).
+    """
     from .scope import relative_path_allowed
-    return relative_path_allowed(path, scopes)
+    return relative_path_allowed(path, scopes, project_grant=project_grant)
 
 
 def publication_reason(row: Mapping, receipt: Mapping) -> str:
@@ -71,8 +76,7 @@ def publication_reason(row: Mapping, receipt: Mapping) -> str:
         # revision for the same checkpoint; the receiver retries each tick.
         return 'project_publication_result_changed'
     except Exception as diagnostic_error:
-        logger.debug('publication_reason failure handled: %s', type(diagnostic_error).__name__)
-        return 'project_publication_authority_missing'
+        return _held('project_publication_authority_missing', row, receipt, diagnostic_error)
 
     profile = assignment['request'].get('profile') or {}
     if profile.get('mode') not in ('files', 'project') or not isinstance(profile.get('writePaths'), list):
@@ -96,12 +100,25 @@ def publication_reason(row: Mapping, receipt: Mapping) -> str:
             # Disable rename detection so BOTH old/deleted and new paths fence.
             paths = ic._git(root, ['diff', '--no-renames', '--name-only', '-z',
                                    before, after], check=True).stdout.split('\0')
-            if any(path and not _path_allowed(path, profile['writePaths'], root) for path in paths):
-                return 'project_publication_write_scope_exceeded'
+            refused = next((path for path in paths if path and not _path_allowed(
+                path, profile['writePaths'], root, project_grant=profile['mode'] == 'project')), None)
+            if refused is not None:
+                return _held('project_publication_write_scope_exceeded', row, receipt,
+                             PermissionError(f'refused path {refused!r}'))
     except Exception as diagnostic_error:
-        logger.debug('publication_reason failure handled: %s', type(diagnostic_error).__name__)
-        return 'project_publication_checkpoint_unavailable'
+        return _held('project_publication_checkpoint_unavailable', row, receipt, diagnostic_error)
     return ''
+
+
+def _held(reason: str, row: Mapping, receipt: Mapping, error: Exception) -> str:
+    """Name the hidden cause once, when a hold starts or changes reason.
+
+    The receiver retries a held receipt on every pass; an unchanged hold logs nothing.
+    """
+    if receipt.get('state') != 'delivered' and receipt.get('reason') != reason:
+        logger.warning('[ProjectPublication] %s task=%s: %s: %s', reason, row.get('task_id'),
+                       type(error).__name__, str(error)[:500])
+    return reason
 
 
 def delivery_view(assignment: Mapping, attempt: Mapping | None, workspace_get) -> dict | None:
@@ -119,7 +136,9 @@ def delivery_view(assignment: Mapping, attempt: Mapping | None, workspace_get) -
             or attempt.get('turnId') != execution.get('turnId')
             or attempt.get('conversationId') != request['recipientId']):
         return None
-    task_id = attempt['taskId']
+    # The checkout is registered under the association's work id; each physical
+    # attempt of the assignment runs as its own task inside it.
+    task_id = execution.get('taskId') or attempt['taskId']
     try:
         project_root = str(Path(request['projectPath']).expanduser().resolve())
         row = workspace_get(project_root, task_id, user_id=grant['owner'])

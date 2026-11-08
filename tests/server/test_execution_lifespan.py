@@ -8,6 +8,28 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+def test_control_shutdown_failure_still_closes_application():
+    from serverctl_pkg.execution_lifespan import run_execution_lifespan
+    async def exercise():
+        stopped = asyncio.Event()
+        calls = []
+        async def startup():
+            pass
+        async def close_controls():
+            calls.append('controls')
+            raise RuntimeError('control-close-failed')
+        async def close_application():
+            calls.append('application')
+        app = SimpleNamespace(startup=startup, shutdown=close_application, extensions={
+            'tofu_boot_runner': SimpleNamespace(status='ready', task=None),
+            'tofu_shutdown_requested': threading.Event()})
+        with pytest.raises(RuntimeError, match='control-close-failed'):
+            await run_execution_lifespan(app, stopped, stopped.set,
+                                          before_shutdown=close_controls)
+        assert calls == ['controls', 'application']
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize('boot_fails', [False, True])
 def test_execution_host_awaits_common_boot_and_physical_shutdown(boot_fails):
     from serverctl_pkg.execution_lifespan import run_execution_lifespan

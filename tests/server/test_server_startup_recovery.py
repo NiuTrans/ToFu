@@ -58,7 +58,8 @@ def test_init_database_runs_complete_recovery_sequence(monkeypatch):
         lambda: calls.append('shutdown-marker') or previous_shutdown)
     monkeypatch.setattr(
         task_manager, 'recover_stale_tasks_on_startup',
-        lambda *, prev_shutdown: calls.append(('task-recovery', prev_shutdown)))
+        lambda *, prev_shutdown, created_before_ms: calls.append(
+            ('task-recovery', prev_shutdown, created_before_ms)))
     monkeypatch.setattr(
         turns, 'cleanup_superseded_attempts',
         lambda: calls.append('attempt-cleanup'))
@@ -90,10 +91,11 @@ def test_init_database_runs_complete_recovery_sequence(monkeypatch):
     # Readiness-critical recovery stays in the boot phase; reconstructible
     # best-effort work moved behind the readiness gate
     # (_run_post_ready_deferred).
+    # Restart settlement is scoped to Attempts older than this process's boot.
     assert calls == [
         'brain-cutover',
         'shutdown-marker',
-        ('task-recovery', previous_shutdown),
+        ('task-recovery', previous_shutdown, int(server._BOOT_T0 * 1000)),
         'brain-recovery',
         ('orchestration-recovery', 'worker_lost'),
         'log-aggregate-flusher',
@@ -359,6 +361,7 @@ def test_task_recovery_failure_blocks_readiness_without_retry_sleep(monkeypatch,
     monkeypatch.setattr(assembly, '_DEPLOYMENT_CONFIGURATION', SimpleNamespace(
         process_role='all', distributed_preview_read_only=False))
     monkeypatch.setattr(assembly, '_boot', lambda *_a: None)
+    monkeypatch.setattr(assembly, '_BOOT_STARTED_AT', 1.0)
     monkeypatch.setattr(brain, 'ensure_project_brain_cutover', lambda: None)
     monkeypatch.setattr(marker, 'report_and_arm', lambda: {'verdict': 'clean'})
     calls, sleeps = [], []

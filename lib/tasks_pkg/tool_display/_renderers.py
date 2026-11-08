@@ -1073,6 +1073,7 @@ _WORKFLOW_TOOL_LABELS = {
     'router_instruction_create': 'Record a standing instruction',
     'router_instruction_list': 'List standing instructions',
     'router_instruction_cancel': 'Cancel a standing instruction',
+    'restart_server': 'Restart Tofu for the owner',
     'watchdog_snapshot': 'Read router health',
     'watchdog_resolve_signals': 'Close fault signals',
     'watchdog_schedule_recheck': 'Schedule a Watchdog re-check',
