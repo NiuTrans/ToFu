@@ -1,5 +1,0 @@
-Metadata-Version: 2.4
-Name: tofu-mtsso-auth
-Version: 0.3.0
-Summary: Bounded official MTSSO adapter with shared SDK-owned user sessions
-Requires-Python: >=3.10

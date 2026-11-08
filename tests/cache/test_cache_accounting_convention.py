@@ -75,7 +75,7 @@ pytestmark = pytest.mark.unit
 # ── Real payload shapes, copied verbatim from persisted task_events ──
 
 def _openai_wire(prompt_tokens: int, cached: int) -> dict:
-    """The example-corp AIGC gateway's OpenAI-compat usage shape.
+    """The sankuai AIGC gateway's OpenAI-compat usage shape.
 
     ``prompt_tokens`` is the TOTAL (cache included); the hit is reported in the
     nested ``prompt_tokens_details.cached_tokens``. ``cache_write_tokens`` is
@@ -205,7 +205,7 @@ def test_no_cache_activity_passes_input_through_unchanged():
 def test_cache_only_payload_without_prompt_field_has_nonzero_total():
     """A provider reporting cache tokens but NO prompt field must not total 0.
 
-    The Kimi/example-corp gateway reports the auto-cache hit in ``cached_tokens``
+    The Kimi/sankuai gateway reports the auto-cache hit in ``cached_tokens``
     while leaving ``prompt_tokens`` / ``input_tokens`` absent (or pinned to 0).
     Pre-fix, ``split_input_tokens`` returned ``(0, 0)`` there, so the frontend
     rendered the contradictory "总输入 0 · 缓存读 39.2k" and ``compute_cost``
@@ -368,7 +368,7 @@ def test_hybrid_payload_with_impossible_cache_reads_as_residual():
 #   Neither `_openai_wire()` nor `_anthropic_wire()` above can express the
 #   shape that actually broke. `_anthropic_wire()` deliberately omits
 #   `prompt_tokens` entirely, so every Anthropic-side assertion in this file
-#   runs against a PURE payload. The example_corp_anthropic gateway is not pure: it
+#   runs against a PURE payload. The sankuai_anthropic gateway is not pure: it
 #   emits `prompt_tokens` (cache-INCLUSIVE total) *beside* the Anthropic
 #   `cache_*_input_tokens` residual keys. That real shape had therefore never
 #   entered the scan surface of ANY guard, which is why a 72% fleet-wide
@@ -382,7 +382,7 @@ def test_hybrid_payload_with_impossible_cache_reads_as_residual():
 #   that is precisely the omission that made this class of payload invisible.
 
 def _hybrid_gateway_wire(uncached: int, cache_read: int, cache_write: int) -> dict:
-    """The REAL example_corp_anthropic shape: BOTH conventions spelled at once.
+    """The REAL sankuai_anthropic shape: BOTH conventions spelled at once.
 
     Verbatim key set from conversation ms5i5ydigs9j9w. The defining property,
     verified on 28/28 rounds of that turn, is the identity
@@ -471,7 +471,7 @@ def test_the_two_cost_surfaces_agree_on_the_hybrid_wire():
     u = _hybrid_gateway_wire(_LIVE_UNCACHED, _LIVE_READ, _LIVE_WRITE)
     model = 'claude-opus-5'
 
-    cc = compute_cost(u, model_id=model, provider_id='example_corp_anthropic')
+    cc = compute_cost(u, model_id=model, provider_id='sankuai_anthropic')
     displayed = round((cc['inputCostUsd'] + cc['outputCostUsd']
                        + cc['cacheWriteCostUsd'] + cc['cacheReadCostUsd'])
                       * MICRO_PER_USD)
@@ -484,7 +484,7 @@ def test_the_two_cost_surfaces_agree_on_the_hybrid_wire():
         model, input_tokens=_uncached, output_tokens=_n['output'],
         cache_read_tokens=_n['cache_read'],
         cache_write_tokens=_n['cache_write'],
-        provider_id='example_corp_anthropic', margin=0.0)
+        provider_id='sankuai_anthropic', margin=0.0)
 
     assert billed.base_micro == displayed, (
         'wallet %s != displayed %s (%.3fx) — the two cost surfaces drifted on '
@@ -498,7 +498,7 @@ def test_the_two_cost_surfaces_agree_on_the_hybrid_wire():
          'completion_tokens': 39645,
          'cache_read_input_tokens': _LIVE_READ,
          'cache_creation_input_tokens': _LIVE_WRITE},
-        model_id=model, provider_id='example_corp_anthropic')
+        model_id=model, provider_id='sankuai_anthropic')
     assert abs(cc['costUsd'] - truth['costUsd']) < 0.01, (
         'display $%.4f != pure-Anthropic truth $%.4f — agreement alone is not '
         'enough, both surfaces could be wrong together'
@@ -514,7 +514,7 @@ def test_hybrid_round_is_not_overcharged_against_its_own_residual():
     """
     u = _hybrid_gateway_wire(_LIVE_UNCACHED, _LIVE_READ, _LIVE_WRITE)
     cc = compute_cost(u, model_id='claude-opus-5',
-                      provider_id='example_corp_anthropic')
+                      provider_id='sankuai_anthropic')
     assert cc['inputTokens'] == _LIVE_UNCACHED
     assert cc['costCny'] < 200.0, (
         'the flagged turn still prices at ¥%.2f — it was ¥351.60 pre-fix and '

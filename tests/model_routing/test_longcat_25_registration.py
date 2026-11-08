@@ -1,4 +1,4 @@
-"""LongCat-2.5 knowledge and the YourProvider gateway's LongCat-2.5 / Hy4 recipes.
+"""LongCat-2.5 knowledge and the Meituan gateway's LongCat-2.5 / Hy4 recipes.
 
 Facts checked 2026-11-06 (docs/MODEL_REGISTRATION.md, "LongCat-2.5"): the
 LongCat API change log makes 2.5 available 2026-11-02 (2.5-Preview
@@ -13,18 +13,18 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-LONGCAT = {'creator_id': 'yourprovider', 'model_id': 'LongCat-2.5'}
+LONGCAT = {'creator_id': 'meituan', 'model_id': 'LongCat-2.5'}
 HY4 = {'creator_id': 'tencent', 'model_id': 'hy4'}
 
 
-def _yourprovider_bundle():
+def _meituan_bundle():
     from lib.model_routing.model_defaults import official_model_directory
     from lib.provider.provider_template_recipes import (
         compile_provider_template_bundle, load_provider_templates,
     )
     templates = load_provider_templates()
     return compile_provider_template_bundle(
-        'yourprovider', official_directory=official_model_directory(templates),
+        'meituan', official_directory=official_model_directory(templates),
         _templates=templates)
 
 
@@ -35,8 +35,8 @@ def _wire_ids(bundle, model):
             if d['offering_id'] in offerings]
 
 
-def test_yourprovider_gateway_offers_both_public_wire_ids():
-    bundle = _yourprovider_bundle()
+def test_meituan_gateway_offers_both_public_wire_ids():
+    bundle = _meituan_bundle()
     assert _wire_ids(bundle, LONGCAT) == ['LongCat-2.5']
     assert _wire_ids(bundle, HY4) == ['hy4']
 
@@ -45,9 +45,9 @@ def test_longcat_25_model_carries_the_documented_facts():
     from lib.model_info._context import context_profile
     from lib.model_info._release import release_date
 
-    row = next(m for m in _yourprovider_bundle()['models']
+    row = next(m for m in _meituan_bundle()['models']
                if m['model_id'] == 'LongCat-2.5')
-    assert row['creator_id'] == 'yourprovider'
+    assert row['creator_id'] == 'meituan'
     assert row['context_window'] == 1_048_576
     assert {'text', 'vision', 'thinking'} <= set(row['capabilities'])
     assert release_date('LongCat-2.5') == '2026-11-02'
@@ -80,7 +80,7 @@ def test_world_catalogue_sync_publishes_the_model_ready_with_its_list_price():
     repository, boundary = InMemoryModelRoutingRepository(), OwnerBoundary.create(1)
     sync_world_model_catalog(boundary=boundary, repository=repository)
     row = next(m for m in repository.get(boundary).document['models']
-               if (m['creator_id'], m['model_id']) == ('yourprovider', 'LongCat-2.5'))
+               if (m['creator_id'], m['model_id']) == ('meituan', 'LongCat-2.5'))
     assert row['registration_state'] == 'ready'
     assert row['list_pricing'] == {'input': 0.276, 'output': 1.105,
                                    'currency': 'USD', 'unit': 'per_million_tokens'}

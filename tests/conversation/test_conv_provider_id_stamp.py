@@ -57,7 +57,7 @@ def spy_gate(monkeypatch):
 
 def _task(**over):
     t = {'id': 'task-12345678', 'convId': 'conv-abc',
-         'provider_id': 'example-corp', 'model': 'kimi-k3', '_userId': 1}
+         'provider_id': 'sankuai', 'model': 'kimi-k3', '_userId': 1}
     t.update(over)
     return t
 
@@ -69,7 +69,7 @@ def test_stamp_writes_provider_id(spy_gate):
     assert calls[0]['conv_id'] == 'conv-abc'
     # Invisible metadata — must NOT emit the cross-device conv_changed push.
     assert calls[0]['kwargs'].get('notify') is False
-    assert stored['provider_id'] == 'example-corp'
+    assert stored['provider_id'] == 'sankuai'
     # Pre-existing keys survive the merge.
     assert stored['model'] == 'kimi-k3'
 
@@ -77,7 +77,7 @@ def test_stamp_writes_provider_id(spy_gate):
 def test_stamp_is_value_only(spy_gate):
     """An unchanged provider short-circuits the write (mutate → False)."""
     calls, stored = spy_gate
-    stored['provider_id'] = 'example-corp'
+    stored['provider_id'] = 'sankuai'
     _persist._stamp_conv_provider_id(_task())
     assert len(calls) == 1, 'gate is consulted (it owns freshness)'
     # The mutate must signal "nothing changed" so the REAL gate skips the
@@ -89,7 +89,7 @@ def test_stamp_is_value_only(spy_gate):
 
 def test_stamp_updates_on_provider_change(spy_gate):
     calls, stored = spy_gate
-    stored['provider_id'] = 'example-corp'
+    stored['provider_id'] = 'sankuai'
     _persist._stamp_conv_provider_id(_task(provider_id='oauth_codex'))
     assert stored['provider_id'] == 'oauth_codex'
 

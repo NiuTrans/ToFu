@@ -3,7 +3,7 @@ and valid compact final answers must be delivered unchanged.
 
 WHY
 ---
-2026-07-28 09:51–10:45 incident: the example-corp gateway intermittently returned a
+2026-07-28 09:51–10:45 incident: the sankuai gateway intermittently returned a
 29-char canned greeting ("Hi! How can I help you today?") with
 ``finish_reason=stop`` for every Opus 5 request, 68 times, each with a real
 M-TraceId. Tasks that had just spent N rounds doing real tool work (e.g.

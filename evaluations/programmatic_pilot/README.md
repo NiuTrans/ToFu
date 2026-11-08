@@ -152,7 +152,7 @@ using another provider hop that changes the agent loop, or treating a mixed
 module failure as evidence about the redesigned mechanism.
 
 On 2026-10-03, an existing ready DeepSeek V4 Flash route accepted the native
-probe on provider `example-corp`, advertised exactly the two client tools plus the
+probe on provider `sankuai`, advertised exactly the two client tools plus the
 gateway, and completed normally. Its gateway returned `ImportError` for
 `ProgramExecutionError` from a cached old module. The corrected transport
 retained the terminal trace, rejected the capability gate (`programCount=0`),

@@ -1,4 +1,4 @@
-"""收分器（yourprovider_sandbox.score）的离线单元测试。
+"""收分器（meituan_sandbox.score）的离线单元测试。
 
 场景覆盖 871428 真实轨迹实证到的全部形态：
 
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from evaluations.swebench.yourprovider_sandbox.score import (
+from evaluations.swebench.meituan_sandbox.score import (
     REWARD_EMPTY,
     REWARD_RUNNING,
     collect_scores,

@@ -74,7 +74,7 @@ def _benchmark_record(*, decisions: list[dict]) -> dict:
         family="integrated_multi_tool", task_id="task-1",
         agent={"name": "tofu", "version": "test",
                "commitSha256": "a" * 64},
-        provider_face="yourprovider-chat", provider_slot_id="kimi-slot-fixture",
+        provider_face="meituan-chat", provider_slot_id="kimi-slot-fixture",
         thinking="high",
         experiment_arm="orchestration_v2",
         oracle={"passed": True, "type": "exact"},

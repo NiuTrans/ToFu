@@ -28,12 +28,12 @@ function refusalIncident(): TurnActivityEntry[] {
     entry({
       id: 'attempt', spanId: 'model:ephemeral:1', parentSpanId: 'model:attempt-a:1',
       requestLevel: 'provider_attempt', attemptScope: 'dispatcher',
-      model: 'kunlunbedrock.claude-opus-5.5-m17', providerId: 'example-corp',
+      model: 'kunlunbedrock.claude-opus-5.5-m17', providerId: 'sankuai',
       keyHint: '2031********4861', reasonCode: 'ModelRefusalError', durationMs: 3200,
     }),
     entry({
       id: 'logical', spanId: 'model:attempt-a:1', model: 'claude-opus-5.5',
-      providerId: 'example-corp', keyHint: '2031********4861',
+      providerId: 'sankuai', keyHint: '2031********4861',
       summaryKey: 'activity.model.requestFailed',
       summaryArgs: { model: 'claude-opus-5.5' },
       reasonCode: 'ModelRefusalError', detail: REFUSAL, durationMs: 6700,
@@ -73,7 +73,7 @@ describe('recovered failure chain presentation', () => {
     expect(recovered.summaryKey).toBe('activity.model.switched');
     // Routing facts survive the fold; the logical request's duration wins
     // because the nested attempt's span is contained inside it.
-    expect(recovered.providerId).toBe('example-corp');
+    expect(recovered.providerId).toBe('sankuai');
     expect(recovered.keyHint).toBe('2031********4861');
     // The wire deployment stays visible even though the summary names the
     // selected model.
@@ -97,7 +97,7 @@ describe('recovered failure chain presentation', () => {
     expect(rows[0].id).toBe('logical');
     expect(rows[0].status).toBe('failed');
     expect(rows[0].model).toBe('kunlunbedrock.claude-opus-5.5-m17');
-    expect(rows[0].providerId).toBe('example-corp');
+    expect(rows[0].providerId).toBe('sankuai');
     expect(rows[0].keyHint).toBe('2031********4861');
     expect(rows[0].detail).toBe(REFUSAL);
   });

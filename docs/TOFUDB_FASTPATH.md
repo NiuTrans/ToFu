@@ -218,7 +218,7 @@ backup and restore republish every reachable block as one file, so first
 activation plans ~68M block publications, roughly 185 h at the measured 5.5 ms
 FUSE and 4.3 ms overlay publication costs, against a 450 s budget. The
 container overlay also holds 16.5M free inodes against that corpus, and
-`/opt/yourprovider/hadoop` (4.9 TB, 169M inodes) is mounted read-only. Automatic
+`/opt/meituan/hadoop` (4.9 TB, 169M inodes) is mounted read-only. Automatic
 selection therefore reports `activation-too-costly`, `inode-capacity` or
 `placement-insufficient-space` and serves the classic authority. Relocating
 this corpus needs its loose blocks packed first, so the reachable set shrinks,

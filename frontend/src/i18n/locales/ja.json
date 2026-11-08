@@ -781,7 +781,7 @@
   "context.edit": "編集",
   "context.identityAdd": "事実を追加",
   "context.identityDesc": "所属組織、役割、専門分野、変わらない環境の情報です。",
-  "context.identityEmpty": "例：YourProviderに勤務しています",
+  "context.identityEmpty": "例：Meituanに勤務しています",
   "context.identityTitle": "自分について",
   "context.intro": "明示的に伝えられた長期的な背景、ルール、回答の好みだけが保存されます。ここでいつでも編集または削除できます。一時的な依頼は保存されません。",
   "context.loadFailed": "読み込みに失敗しました",

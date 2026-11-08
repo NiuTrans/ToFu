@@ -781,7 +781,7 @@
   "context.edit": "편집",
   "context.identityAdd": "사실 추가",
   "context.identityDesc": "소속 조직, 역할, 분야 및 변하지 않는 환경 정보입니다.",
-  "context.identityEmpty": "예: YourProvider에서 근무합니다",
+  "context.identityEmpty": "예: Meituan에서 근무합니다",
   "context.identityTitle": "내 정보",
   "context.intro": "명시적으로 밝힌 장기적인 배경, 규칙, 응답 선호 사항만 저장되며 언제든지 편집하거나 삭제할 수 있습니다. 일회성 요청은 저장되지 않습니다.",
   "context.loadFailed": "불러오기 실패",

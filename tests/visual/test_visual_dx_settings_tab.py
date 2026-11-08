@@ -112,7 +112,7 @@ class _ConnectedDx:
         self.status = dict(_CONNECTED)
         self.writes = []
         self.threads = threads if threads is not None else [
-            _thread('dx:gid:70565831967', 'CMU-YourProvider AutoResearch', 'gid'), _thread('dx:uid:2002', 'Ann', 'uid')]
+            _thread('dx:gid:70565831967', 'CMU-Meituan AutoResearch', 'gid'), _thread('dx:uid:2002', 'Ann', 'uid')]
         page.route(re.compile(r'/api/v4/channels/dx(\?.*)?$'), self._account)
         page.route(re.compile(r'/api/v4/channels/dx/threads(\?.*)?$'), self._threads)
         page.route(re.compile(r'/api/v4/channels/dx/threads/[^/?]+$'), self._thread_update)

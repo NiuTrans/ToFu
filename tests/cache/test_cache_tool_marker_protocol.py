@@ -2,7 +2,7 @@
 """tests/cache/test_cache_tool_marker_protocol.py — tool-message cache marker protocol guard.
 
 Production incident 2026-07-25 (``yuju-claude-opus-5-evaDaily`` via the
-example-corp toio gateway, OPENAI protocol, conv task R7): ``add_cache_breakpoints``
+sankuai toio gateway, OPENAI protocol, conv task R7): ``add_cache_breakpoints``
 stamps the rolling tail breakpoint on a ``tool`` message's content block.
 The OpenAI wire serialises the body verbatim (``session.post(json=body)``),
 so the gateway's OpenAI→Anthropic translation carries the marker INTO

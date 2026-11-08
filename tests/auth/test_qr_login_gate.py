@@ -35,13 +35,13 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       os.pardir, os.pardir, 'bundles', 'yourprovider', 'tests',
+                       os.pardir, os.pardir, 'bundles', 'meituan', 'tests',
                        '_qr_login_capture.py')
 
 if not os.path.isfile(_SCRIPT):
     # bundles/ (company site packs + intranet acceptance tests) ships only in
     # internal builds; the public tree must skip, not FileNotFoundError.
-    pytest.skip('bundles/yourprovider capture script is not shipped in this build',
+    pytest.skip('bundles/meituan capture script is not shipped in this build',
                 allow_module_level=True)
 
 

@@ -24,8 +24,8 @@ production implementation.
   import evaluation adapters from `lib/`, `routes/`, or `tofu_agent/`.
 - Owner directive 2026-11-05: our benchmark runs (Terminal-Bench, SWE-bench)
   use this repository's launchers (`terminal_bench/`, `swebench/`) with the
-  project's own API keys, never the YourProvider canvas (画布/TerminalBenchPipeline).
-  `swebench/yourprovider_sandbox/` is the legacy canvas submitter, and canvas
+  project's own API keys, never the Meituan canvas (画布/TerminalBenchPipeline).
+  `swebench/meituan_sandbox/` is the legacy canvas submitter, and canvas
   results are excluded from reported numbers. Driving the EnvSandbox gateway
   from our own runners is not canvas use.
 

@@ -6,9 +6,9 @@ corrupt-source / merge-conflict class guarded by
 tests/static_serving/test_bundle_corruption_guard.py):
 
   export.py's opensource sanitizer did a blind
-  ``content.replace('yourprovider', 'your-provider')`` on every non-brand-asset
-  file. Historical retained brand registries carried ``yourprovider`` as an
-  UNQUOTED object key (``yourprovider: '<svg…>'`` / ``yourprovider:'YourProvider'``). The
+  ``content.replace('meituan', 'your-provider')`` on every non-brand-asset
+  file. Historical retained brand registries carried ``meituan`` as an
+  UNQUOTED object key (``meituan: '<svg…>'`` / ``meituan:'Meituan'``). The
   rewrite turned it into ``your-provider:`` which JS parses as subtraction
   (``your - provider``) → "Uncaught SyntaxError: Unexpected token '-'",
   white-screening the whole exported app at
@@ -20,7 +20,7 @@ tests/static_serving/test_bundle_corruption_guard.py):
 
 Fix (two layers, both exercised here):
   1. Class fix — the replacement token is now a valid JS identifier
-     (``yourprovider``), so it's a safe bareword key wherever ``yourprovider``
+     (``yourprovider``), so it's a safe bareword key wherever ``meituan``
      was, file-agnostically.
   2. Safety net — export.py::_verify_exported_js_syntax runs ``node --check``
      over every exported .js and FAILS the export loudly on invalid JS.
@@ -48,11 +48,11 @@ pytest.importorskip('export', reason='export.py is not shipped in opensource bui
 _NODE = shutil.which('node')
 
 # ── The instrument itself, hoisted to module scope so it can be ASSERTED ON ──
-# Matches an UNQUOTED `yourprovider:` object key anywhere — deliberately NOT anchored
+# Matches an UNQUOTED `meituan:` object key anywhere — deliberately NOT anchored
 # to a line start. `test_the_key_pattern_sees_a_midline_key` pins its capability
 # directly, because a scan pattern is the one thing a sweep cannot validate by
 # using itself.
-_UNQUOTED_KEY_RE = re.compile(r"(?<!['\"])\byourprovider\s*:")
+_UNQUOTED_KEY_RE = re.compile(r"(?<!['\"])\bmeituan\s*:")
 
 
 def _node_check(source: str, tmp_path, name: str):
@@ -80,9 +80,9 @@ def test_no_hyphenated_bareword_key_after_sanitize(tmp_path):
     identifier, so no ``<token>:`` bareword key can be hyphenated. Directly
     encodes the fix (independent of node) AND node-checks the output."""
     from export import _sanitize_source_opensource
-    # A minimal object literal with yourprovider as an unquoted key — the exact
+    # A minimal object literal with meituan as an unquoted key — the exact
     # shape the former retained brand registries used.
-    src = "const M = {\n  yourprovider: '<svg></svg>',\n  yourprovider_alt:'YourProvider',\n};\n"
+    src = "const M = {\n  meituan: '<svg></svg>',\n  meituan_alt:'Meituan',\n};\n"
     out = _sanitize_source_opensource(
         src, 'frontend/src/runtime/sections/core.js')
     assert 'your-provider' not in out, (
@@ -93,19 +93,19 @@ def test_no_hyphenated_bareword_key_after_sanitize(tmp_path):
 
 
 @pytest.mark.skipif(_NODE is None, reason='node not installed')
-def test_any_remaining_js_with_yourprovider_key_sanitizes_clean(tmp_path):
-    """Tree-wide sweep: EVERY static/js file containing an unquoted ``yourprovider``
+def test_any_remaining_js_with_meituan_key_sanitizes_clean(tmp_path):
+    """Tree-wide sweep: EVERY static/js file containing an unquoted ``meituan``
     key must sanitize to valid JS. Catches a file the settings.js split (or a
     future refactor) newly orphaned from any exclusion.
 
     TWO THINGS THIS USED TO GET WRONG (both fixed 2026-07-31, pt_715f5283):
 
-    1. **The pattern was anchored to the start of a line** (``^\\s*yourprovider\\s*:``
+    1. **The pattern was anchored to the start of a line** (``^\\s*meituan\\s*:``
        with re.MULTILINE), so it could only see a key that opens its own line.
        It therefore could NOT see the former retained model-group owner, which
        packs the brand map several keys to a line::
 
-           mistral: 'Mistral', glm: 'GLM', yourprovider: 'YourProvider', kimi: 'Kimi',
+           mistral: 'Mistral', glm: 'GLM', meituan: 'Meituan', kimi: 'Kimi',
 
        That is the exact shape this guard exists to catch — an unquoted bareword
        key the sanitizer rewrites — and formatting decided whether the guard
@@ -159,10 +159,10 @@ def test_the_key_pattern_sees_a_midline_key():
     itself with files that were never at risk).
     """
     must_match = {
-        'own line':      "const M = {\n  yourprovider: 'x',\n};\n",
-        'packed midline': "const M = { glm: 'GLM', yourprovider: 'YourProvider', kimi: 'K' };\n",
-        'no space':      "const M = {yourprovider:'x'};\n",
-        'space before':  "const M = { yourprovider : 'x' };\n",
+        'own line':      "const M = {\n  meituan: 'x',\n};\n",
+        'packed midline': "const M = { glm: 'GLM', meituan: 'Meituan', kimi: 'K' };\n",
+        'no space':      "const M = {meituan:'x'};\n",
+        'space before':  "const M = { meituan : 'x' };\n",
     }
     for label, src in must_match.items():
         assert _UNQUOTED_KEY_RE.search(src), (
@@ -171,8 +171,8 @@ def test_the_key_pattern_sees_a_midline_key():
             'must be swept regardless of how the source is formatted')
 
     must_not_match = {
-        'single-quoted': "const M = { 'yourprovider': 'x' };\n",
-        'double-quoted': 'const M = { "yourprovider": "x" };\n',
+        'single-quoted': "const M = { 'meituan': 'x' };\n",
+        'double-quoted': 'const M = { "meituan": "x" };\n',
     }
     for label, src in must_not_match.items():
         assert not _UNQUOTED_KEY_RE.search(src), (
@@ -181,15 +181,15 @@ def test_the_key_pattern_sees_a_midline_key():
             'that were never in this failure class')
 
     # WHY a quoted key is excluded, stated accurately because I first got this
-    # wrong: it is NOT the lookbehind doing the work. In `'yourprovider':` the
-    # CLOSING quote sits between the name and the colon, so `yourprovider\s*:` cannot
+    # wrong: it is NOT the lookbehind doing the work. In `'meituan':` the
+    # CLOSING quote sits between the name and the colon, so `meituan\s*:` cannot
     # match at all — the two cases above are excluded by the shape of the text,
     # and would be excluded even with the lookbehind removed. The lookbehind
     # only changes the verdict on a leading quote with no closing one (malformed
     # JS). It is kept as cheap belt-and-braces, and this comment exists so the
     # next reader does not mistake it for the load-bearing part; the assertions
     # above are about the PROPERTY (quoted keys stay out), not its mechanism.
-    assert not _UNQUOTED_KEY_RE.search("{ 'yourprovider: 1 }"), (
+    assert not _UNQUOTED_KEY_RE.search("{ 'meituan: 1 }"), (
         'a leading quote should suppress the match')
 
 

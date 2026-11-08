@@ -4,7 +4,7 @@
 errors) must be accounted SEPARATELY from key health (epic
 pt_473805ad518b4ac4).
 
-The incident (2026-08-03): the example-corp AIGC gateway had a ~2-hour 502 storm
+The incident (2026-08-03): the sankuai AIGC gateway had a ~2-hour 502 storm
 (813 bare ``<html>`` error pages) that hit ALL ~20 models on ALL THREE keys
 uniformly. Every failed attempt landed in ``record_outcome(failure)``,
 crushing the daily success-rate column to 40% / 77% / 10% — and, worse,
@@ -271,12 +271,12 @@ class TestProjections:
     def test_model_health_fold_carries_gateway_errors(self):
         from lib.dispatch_stats import aggregate_model_health
         out = aggregate_model_health([
-            {'provider_id': 'example-corp', 'model': 'kimi-k3',
+            {'provider_id': 'sankuai', 'model': 'kimi-k3',
              'total_requests': 2, 'total_errors': 1, 'gateway_errors': 30},
-            {'provider_id': 'example-corp', 'model': 'kimi-k3',
+            {'provider_id': 'sankuai', 'model': 'kimi-k3',
              'total_requests': 3, 'total_errors': 0, 'gateway_errors': 12},
         ])
-        row = out['providers']['example-corp']['kimi-k3']
+        row = out['providers']['sankuai']['kimi-k3']
         assert row['gateway_errors'] == 42
         assert row['total_errors'] == 1
         assert row['success_rate'] == 0.8
