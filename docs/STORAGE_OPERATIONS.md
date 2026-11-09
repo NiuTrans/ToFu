@@ -1872,7 +1872,7 @@ the first failure:
 1. Persistence. The volume must keep its contents across application and
    container restarts, CodeLab pause/restart (which moves the pod to another
    node) and image re-pulls. The system temporary directory is emptied at
-   boot, and node-local mounts such as `/opt/yourprovider/appdatas` do not follow a
+   boot, and node-local mounts such as `/opt/meituan/appdatas` do not follow a
    rescheduled pod even though the mount table reports a local block
    filesystem.
 2. Medium. From a shell that carries the production `LD_PRELOAD` and

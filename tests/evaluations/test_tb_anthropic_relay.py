@@ -60,7 +60,7 @@ def test_opus_tofu_connection_uses_the_friday_anthropic_face_and_provider():
     assert deployment["wire_model_id"] == "kunlunbedrock.claude-opus-5.5-m17"
     # FRIDAY's provider id selects its Claude cache multipliers (reads 0.1x),
     # which is what the run's compaction economics must use.
-    assert doc["providers"][0]["provider_id"] == "example-corp"
+    assert doc["providers"][0]["provider_id"] == "sankuai"
     assert "vision" in doc["offerings"][0]["capabilities"]
     # No hand-written reasoning profile: the catalog's official one is used.
     assert "inference_profile" not in deployment

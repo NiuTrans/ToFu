@@ -72,7 +72,7 @@ def test_identical_merged_events_keep_distinct_positions_through_provider_projec
 def test_gateway_rewrite_preserves_exact_event_range_and_names_its_stage():
     messages = [{'role': 'user', 'content': 'request'}]
     append_injection(messages, 'tool_progress', 'FLG 中文 event')
-    body = prepare(messages, 'example_corp_test')
+    body = prepare(messages, 'sankuai_test')
     row, = body['_context_lineage']['sources']
     assert row['status'] == 'located'
     assert text_at(body, row['output']) == 'F\u200bLG 中文 event'

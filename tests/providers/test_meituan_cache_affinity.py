@@ -1,4 +1,4 @@
-"""Fresh YourProvider connections declare affinity on native chat as well as other faces."""
+"""Fresh Meituan connections declare affinity on native chat as well as other faces."""
 import json
 from pathlib import Path
 
@@ -13,13 +13,13 @@ from lib.provider.provider_template_recipes import (
 pytestmark = pytest.mark.unit
 
 
-def test_fresh_yourprovider_connections_carry_lineage_header_on_every_face():
-    path = Path(__file__).resolve().parents[2] / "bundles/yourprovider/provider_templates/yourprovider.json"
+def test_fresh_meituan_connections_carry_lineage_header_on_every_face():
+    path = Path(__file__).resolve().parents[2] / "bundles/meituan/provider_templates/meituan.json"
     if not path.is_file():
-        pytest.skip("YourProvider bundle is absent in public builds")
+        pytest.skip("Meituan bundle is absent in public builds")
     template = normalize_provider_template(json.loads(path.read_text()))
     bundle = compile_provider_template_bundle(
-        "yourprovider", selected_model_ids=["glm-5.3-flash", "claude-opus-5.5", "gpt-6.1-sol"],
+        "meituan", selected_model_ids=["glm-5.3-flash", "claude-opus-5.5", "gpt-6.1-sol"],
         _templates=[template])
     connections = bundle["connections"]
     assert any(row["base_url"] == template["base_url"] for row in connections)

@@ -92,10 +92,10 @@ def test_recovered_refusal_renders_one_row_per_decision(
         {"id": "attempt", "spanId": "model:ephemeral:1",
          "parentSpanId": "model:attempt-a:1", "requestLevel": "provider_attempt",
          "attemptScope": "dispatcher", "model": "kunlunbedrock.claude-opus-5.5-m17",
-         "providerId": "example-corp", "keyHint": "2031********4861",
+         "providerId": "sankuai", "keyHint": "2031********4861",
          "reasonCode": "ModelRefusalError", "durationMs": 3200},
         {"id": "logical", "spanId": "model:attempt-a:1", "model": "claude-opus-5.5",
-         "providerId": "example-corp", "keyHint": "2031********4861",
+         "providerId": "sankuai", "keyHint": "2031********4861",
          "summaryKey": "activity.model.requestFailed",
          "summaryArgs": {"model": "claude-opus-5.5"},
          "reasonCode": "ModelRefusalError", "detail": REFUSAL, "durationMs": 6700},
@@ -133,7 +133,7 @@ def test_recovered_refusal_renders_one_row_per_decision(
     assert '3.2s' not in text
     assert '6.7s' in text
     # Provider/key routing evidence survives the fold.
-    assert 'example-corp' in text
+    assert 'sankuai' in text
     assert '2031********4861' in text
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
 

@@ -79,7 +79,7 @@ def test_relay_prefix_stays_on_the_provider_wire(relay):
                for row in bundle['models'])
 
 
-# Live-verified on the example-corp gateway, both faces, 2026-10-27.
+# Live-verified on the sankuai gateway, both faces, 2026-10-27.
 @pytest.mark.parametrize(('depth', 'effort'), [
     ('off', 'low'), ('low', 'low'), ('medium', 'high'), ('high', 'high'),
     ('xhigh', 'max'), ('max', 'max'), ('default', 'max'),

@@ -295,7 +295,7 @@ def inspect_pdf(scene, pdf_path, output):
     actual_text = page.get_text()
     # Extraction may normalize typographic ligatures; compare stable text anchors.
     for anchor in ["A White-Box, Token-Efficient", "Northeastern University",
-                   "NiuTrans Research", "YourProvider LongCat RSI", "3 header checks",
+                   "NiuTrans Research", "Meituan LongCat RSI", "3 header checks",
                    "github.com/NiuTrans/ToFu"]:
         if anchor not in actual_text:
             failures.append(f"Missing PDF text: {anchor}")

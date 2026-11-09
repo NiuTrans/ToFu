@@ -79,13 +79,13 @@ test('inspector sections render only their own facts, escape content and never t
  assert.match(host.querySelector('details.evo-technical').textContent,/budget_exceeded/);
  assert.match(host.querySelector('[data-task-id]').textContent,/Failed/);
  const parked=run({compute_wait:{operation_id:'job-7',task_id:'task-a',parked:true,next_poll_at:0,last_error:"ModuleNotFoundError: No module named 'tofu_mtsso_auth'",
-  last_error_origin:'tofu_yourprovider_environments/__init__.py:23 in __call__',failed_since:1700000000},
+  last_error_origin:'tofu_meituan_environments/__init__.py:23 in __call__',failed_since:1700000000},
   result:'Compute dependency pending; no completion or scientific acceptance.',receipts:[{task_id:'task-a',stage:'executing',terminal_verdict:'completed'}]});
  work.update({...state,run:parked});
  assert.match(host.textContent,/job-7/);assert.match(host.textContent,/ModuleNotFoundError/);assert.match(host.textContent,new RegExp(copy('computeStalled')));
  const status=host.querySelector('[data-inspection-section=status]');
  assert.equal(status.querySelector('[data-fact=at] dd').textContent,`${copy('stallReadingStatus')} · job-7`);
- assert.equal(status.querySelector('[data-fact=origin] dd').textContent,'tofu_yourprovider_environments/__init__.py:23 in __call__');
+ assert.equal(status.querySelector('[data-fact=origin] dd').textContent,'tofu_meituan_environments/__init__.py:23 in __call__');
  assert.ok(status.querySelector('[data-fact=since] dd').textContent,'the status section says since when the read fails');
  const parkedRow=host.querySelector('[data-task-id="task-a"][data-inspector-action=task]').textContent;
  assert.match(parkedRow,new RegExp(copy('computeStalled')));

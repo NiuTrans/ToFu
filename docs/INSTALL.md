@@ -295,7 +295,7 @@ part to the shared internal servers (below). `export.py --mode internal` and
 | Credential vault + its key | `data/config/` | same paths, mode 0600 |
 | All installed skill packages, vendored engines included | `.tofu/skills`, `data/skills` | same paths |
 | Shareable platform config | `features.json`, `pricing.json`, `private_hosts.json`, `site_packs/` | same paths |
-| YourProvider-tagged platform lessons | `data/memories`, `.tofu/memories` | same paths |
+| Meituan-tagged platform lessons | `data/memories`, `.tofu/memories` | same paths |
 | Internal MCP sources | sibling repos, `tools/github-batch-mcp` | `vendor/` |
 
 Deliberately NOT carried, each for a functional reason rather than a secrecy
@@ -350,7 +350,7 @@ because a repository can be public or change visibility.
 
 `install.sh` additionally provisions the runtime those capabilities need —
 Node ≥22, `@datafe/llm-cli` + `@mtfe/mtsso-auth-official` + `@mtfe/mtskills`,
-and `mt-paas-sandbox-python-sdk` from YourProvider's own index — and then reports
+and `mt-paas-sandbox-python-sdk` from Meituan's own index — and then reports
 what is ready and what still needs a one-time sign-in.
 
 ### Carried skills and MCP registrations (verification)

@@ -41,7 +41,7 @@ function gone(pid) {
 export class WebChannelMutex {
   constructor(options = {}) {
     this.lockDir = options.lockDir ?? process.env.DX_BROWSERLESS_WEB_LOCK_DIR
-      ?? join(homedir(), '.yourprovider_local', 'dx-browserless-web.lock.d');
+      ?? join(homedir(), '.meituan_local', 'dx-browserless-web.lock.d');
     const raw = process.env.DX_BROWSERLESS_WEB_LOCK_TIMEOUT_MS?.trim();
     this.timeoutMs = options.timeoutMs ?? (raw && Number(raw) >= 0 ? Number(raw) : 120000);
   }

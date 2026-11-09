@@ -19,8 +19,8 @@
     },
     {
       "file": "longcat.svg",
-      "organization": "YourProvider LongCat",
-      "source": "https://s3.yourprovider.net/static-prod01/com.example-corp.friday.longcat.next2/assets/longcat_logo-X5K_hpNA.svg",
+      "organization": "Meituan LongCat",
+      "source": "https://s3.meituan.net/static-prod01/com.sankuai.friday.longcat.next2/assets/longcat_logo-X5K_hpNA.svg",
       "source_page": "https://longcat.ai/",
       "use": "Unmodified official vector logo",
       "sha256": "b4a23318b68108dc953eb3ed87d52b2a987b73abd3ab6708d5e088ab9146af6b"

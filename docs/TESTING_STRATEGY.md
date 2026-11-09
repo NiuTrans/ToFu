@@ -1306,7 +1306,7 @@ starts workers, so the controller, its workers and everything tests start
 (TofuDB, SQL Sidecar and PostgreSQL engines, Node, browsers, Git, cargo)
 inherit it. Direct pytest, the Make targets, `scripts/verify.py` and
 `landing_verification record`/`check` all load this conftest,
-so no launcher wraps it; `bundles/yourprovider/tests/conftest.py`, outside the
+so no launcher wraps it; `bundles/meituan/tests/conftest.py`, outside the
 testpaths, calls the same owner for `make test-bundles`. Package suites with
 their own pytest configuration (`packages/*`, `plugins/*`, run by CI) do not
 load either. It addresses only the calling process's own thread IDs

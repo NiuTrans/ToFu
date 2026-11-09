@@ -41,7 +41,7 @@ def test_finish_tag_shows_complete_request_name(frontend_visual_page, theme, wid
       document.documentElement.setAttribute('data-theme', theme);
       const message = name => ({role:'assistant', content:'Answer', finishReason:'stop',
         _turnStatus:'completed', model:'claude-opus-5.5', thinkingDepth:'medium', toolRounds:[],
-        lastRoundUsage:{resolvedModel:name, providerId:'example-corp', keyTail:'4861',
+        lastRoundUsage:{resolvedModel:name, providerId:'sankuai', keyTail:'4861',
           reasoningResolution:{requested:'preset', requestedValue:'medium',
             actualMode:'exact', actualValue:'max'}}});
       // Same unwrap as ConversationTurnStore.renderTurnFooterHtml.

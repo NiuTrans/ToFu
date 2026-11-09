@@ -43,7 +43,7 @@ logger = get_logger(__name__)
 #   (see ``_zero_byte_backoff_seconds``) so we don't hammer a poisoned
 #   upstream pool that is overwhelmingly likely to zero-byte the next
 #   request milliseconds later.  Recurring trigger: ``aws.claude-opus-4.7``
-#   via example-corp gateway.  Retries go through append_event 'phase:retrying'
+#   via sankuai gateway.  Retries go through append_event 'phase:retrying'
 #   so the UI shows a spinner with attempt count.
 #
 #   ── Stalled zero-byte stream ─────────────────────────────────────
@@ -51,7 +51,7 @@ logger = get_logger(__name__)
 #   of the rolling transport-idle window (default 300s) instead of
 #   closing fast.  The model produced no output, yet every retry burns
 #   that whole window in wall-clock time plus prompt-cache traffic.  The
-#   2026-10-23 claude-opus-5.5/example-corp incident replayed 16 attempts
+#   2026-10-23 claude-opus-5.5/sankuai incident replayed 16 attempts
 #   whose client-observed elapsed time was already at the idle window,
 #   adding ~90 minutes before abnormal_stop.  A zero-byte close after
 #   that long is not the fast gateway close this budget was sized for,
@@ -86,7 +86,7 @@ _CANNED_GREETING_RETRY_MAX = 2
 
 # Tool-calls-finish-without-payload retry budget (the gateway reports
 # finish_reason=tool_calls but the stream carried ZERO tool_call deltas —
-# the model's tool calls were lost upstream; 2026-08-06 kimi-k3/example-corp
+# the model's tool calls were lost upstream; 2026-08-06 kimi-k3/sankuai
 # incident, conv msh3qeplzneph5 R3). Ending the turn there delivers a
 # preamble as if it were the conclusion. The poisoned round DID bill
 # prompt + completion tokens (unlike zero-byte), and the failure is

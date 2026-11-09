@@ -27,7 +27,7 @@ from lib.pricing import MODEL_PRICING, lookup_pricing
 pytestmark = pytest.mark.unit
 
 _FRIDAY = {'cacheWriteMul': 1.25, 'cacheWrite1hMul': 2.0, 'cacheReadMul': 0.10}
-_FRIDAY_PROVIDER = 'example-corp'
+_FRIDAY_PROVIDER = 'sankuai'
 
 # A recorded FRIDAY round (conversation worker-26744725b5250a5eb7bcea90 R111,
 # trace 97d399fe34354616823efb58c6fc9f92): billing counters and dispatch
@@ -43,7 +43,7 @@ RECORDED_FRIDAY_ROUND = {
         'completion_tokens': 1365,
         'cache_creation': {'ephemeral_1h_input_tokens': 0,
                            'ephemeral_5m_input_tokens': 1324},
-        '_dispatch': {'provider_id': 'example-corp',
+        '_dispatch': {'provider_id': 'sankuai',
                       'logical_model': 'claude-opus-5.5',
                       'model': 'kunlunbedrock.claude-opus-5.5-m17',
                       'protocol': 'anthropic'},
@@ -120,9 +120,9 @@ def test_friday_rows_leave_non_claude_models_on_their_table_rows():
 
 
 def test_a_fresh_install_of_the_friday_template_gets_the_friday_rows():
-    """Installing the YourProvider template creates the provider named by its key."""
-    template = json.loads((Path(__file__).resolve().parents[2] / 'bundles' / 'yourprovider'
-                           / 'provider_templates' / 'yourprovider.json').read_text('utf-8'))
+    """Installing the Meituan template creates the provider named by its key."""
+    template = json.loads((Path(__file__).resolve().parents[2] / 'bundles' / 'meituan'
+                           / 'provider_templates' / 'meituan.json').read_text('utf-8'))
     row = lookup_pricing('claude-opus-5.5', template['key'], prompt_tokens=0)
     assert row['_pricingSource'] == 'provider_override'
     assert row['cacheReadMul'] == 0.10

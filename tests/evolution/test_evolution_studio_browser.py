@@ -506,7 +506,7 @@ def test_compute_stall_dialogue_says_where_and_hands_off_to_the_watchdog(page, l
     page.set_viewport_size({'width': width, 'height': 1024})
     page.emulate_media(reduced_motion='reduce')
     error = "ModuleNotFoundError: No module named 'tofu_environments.capacity'"
-    origin = 'tofu_yourprovider_environments/hope_catalog.py:3 in <module>'
+    origin = 'tofu_meituan_environments/hope_catalog.py:3 in <module>'
     usage = {'tokens': 156059, 'tool_calls': 9, 'wall_clock_seconds': 66}
     run = {'run_id': 'compute-stall', 'objective': 'Finish the case-study training, then collect, analyze and verify the results',
            'status': 'executing', 'task_id': 'stall-task', 'attempt': 1, 'created_at': 1, 'updated_at': 1,

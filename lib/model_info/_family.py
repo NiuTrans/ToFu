@@ -171,7 +171,7 @@ def is_kimi_k3(model: str) -> bool:
     K3 speaks a DIFFERENT thinking contract from the K2 line: top-level
     ``reasoning_effort`` (low/high/max, default max) and a fixed
     temperature=1.0 that rejects any other value with HTTP 400 (verified
-    live against the example-corp gateway 2026-07-24). The K2-style
+    live against the sankuai gateway 2026-07-24). The K2-style
     ``thinking:{type:...}`` + temperature shape must NOT be sent to K3.
     """
     return 'kimi-k3' in model.lower()
@@ -249,7 +249,7 @@ def deepseek_line_version(model: str) -> tuple[int, int] | None:
       deepseek-v4.1-flash    → (4, 1)   catalogue identity ('.')
       deepseek-v4-1-flash    → (4, 1)   same model, dashed wire spelling
       deepseek-v41-flash     → (4, 1)   unseparated run reads as major.minor
-      deepseek-v31-yourprovider   → (3, 1)   YourProvider's spelling of V3.1
+      deepseek-v31-meituan   → (3, 1)   Meituan's spelling of V3.1
       deepseek-v3-0324       → (3, 0)   snapshot stamp ≠ minor version
       deepseek-flash         → None     canonical id, generation implied
       deepseek-chat          → None     versionless legacy alias

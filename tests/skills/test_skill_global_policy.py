@@ -169,7 +169,7 @@ def test_scan_reports_every_declared_root_and_applies_only_on_request(isolated, 
     from lib.skills.promote import main
     project = isolated / 'project'
     for subdir, name in (('.tofu/skills', 'a-tofu'), ('.agents/skills', 'b-agents'),
-                         ('.codex/skills', 'c-codex'), ('bundles/yourprovider/skills', 'd-bundle')):
+                         ('.codex/skills', 'c-codex'), ('bundles/meituan/skills', 'd-bundle')):
         _pkg(project / subdir, name, f'{name} body')
     (project / '.agents' / 'skills' / 'broken').mkdir()
     (project / '.agents' / 'skills' / 'broken' / 'SKILL.md').write_text('no frontmatter\n', encoding='utf-8')

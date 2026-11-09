@@ -782,7 +782,7 @@
   "context.edit": "Modifier",
   "context.identityAdd": "Ajouter un fait",
   "context.identityDesc": "Votre organisation, votre rôle, votre domaine et votre environnement habituel.",
-  "context.identityEmpty": "Par exemple : je travaille chez YourProvider",
+  "context.identityEmpty": "Par exemple : je travaille chez Meituan",
   "context.identityTitle": "À propos de moi",
   "context.intro": "Seuls le contexte durable, les règles et les préférences de réponse que vous exprimez explicitement sont enregistrés. Vous pouvez les modifier ou les supprimer ici ; les demandes ponctuelles ne sont pas enregistrées.",
   "context.loadFailed": "Échec du chargement",

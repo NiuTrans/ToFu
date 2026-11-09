@@ -45,7 +45,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 # The full cache-channel alias universe known to lib/cost.py
 # (_USAGE_KEY_ALIASES + _USAGE_NESTED_ALIASES): canonical OpenAI/Anthropic
 # spellings plus every probed vendor variant (Kimi/Moonshot, DeepSeek,
-# Gemini, example-corp-gateway camelCase).
+# Gemini, sankuai-gateway camelCase).
 _FORBIDDEN_KEYS = frozenset({
     'cache_read_tokens', 'cache_read_input_tokens',
     'cache_write_tokens', 'cache_creation_input_tokens',
